@@ -308,6 +308,57 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(super) proof fn typed_signature_sites(
+        &self, file: usize, entry: usize, max_width: u64, typed: TypedRoutineSignature,
+    )
+        requires self.typed_signature_evidence(file, entry, max_width, Ok(Some(typed))),
+        ensures ({
+            let project = self.targets.project_model();
+            let forms = project.circuits_model()[file as int].syntax.forms@;
+            &&& typed.output_inputs@.len() == typed.outputs@.len()
+            &&& forall|i: int| 0 <= i < typed.output_inputs@.len()
+                ==> ((#[trigger] typed.output_inputs@[i]) matches Some(input) ==> input < typed.inputs@.len())
+            &&& typed_name_sites(forms, typed.inputs@) && typed_name_sites(forms, typed.outputs@)
+        }),
+    {
+        let project = &self.targets.project_model();
+        let (context, signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
+            && self.typed_after_signature(&context, &signature, Ok(Some(typed)));
+        checked_signature_ports(project, file as int, entry as int, max_width, signature);
+        checked_width_sites(project, file as int, entry as int, max_width, signature.ports);
+        self.typed_names_follow_declared(&context, signature.ports.inputs@, typed.inputs@);
+        self.typed_names_follow_declared(&context, signature.ports.outputs@, typed.outputs@);
+    }
+
+    pub(super) proof fn typed_signature_skips_non_routines(&self, file: usize, entry: usize, max_width: u64)
+        requires self.typed_signature_evidence(file, entry, max_width, Ok(None)),
+        ensures ({
+            let circuits = self.targets.project_model().circuits_model();
+            file < circuits.len() && entry < circuits[file as int].syntax.entries@.len()
+                ==> !(circuits[file as int].syntax.entries@[entry as int].head is Func)
+                    && !(circuits[file as int].syntax.entries@[entry as int].head is Module)
+        }),
+    {
+        crate::project::signatures::signature_check_skips_non_routines(
+            &self.targets.project_model(), file as int, entry as int, max_width);
+    }
+
+    proof fn typed_names_follow_declared(&self, context: &PortContext, ports: Seq<CheckedPort>, typed: Seq<TypedPort>)
+        requires
+            checked_name_sites(context.forms@, ports),
+            self.typed_ports_before(context, ports, typed),
+        ensures typed_name_sites(context.forms@, typed),
+    {
+        assert forall|i: int| 0 <= i < typed.len() implies {
+            let name = (#[trigger] typed[i]).declared.site.name;
+            name < context.forms@.len() && context.forms@[name as int] is Atom
+        } by {
+            assert(typed[i].declared == ports[i]);
+        };
+    }
+
     spec fn typed_after_signature(
         &self, context: &PortContext, signature: &CheckedRoutineSignature,
         result: Result<Option<TypedRoutineSignature>, TypedSignatureError>,
@@ -391,6 +442,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(self.typed_ports_before(&context, signature.ports.outputs@, output_model));
         };
         result
+    }
+}
+
+pub(super) open spec fn typed_name_sites(forms: Seq<Form>, typed: Seq<TypedPort>) -> bool {
+    forall|i: int| 0 <= i < typed.len() ==> {
+        let name = (#[trigger] typed[i]).declared.site.name;
+        name < forms.len() && forms[name as int] is Atom
     }
 }
 

@@ -6,7 +6,7 @@ use super::circuits::{parsed_circuit_matches, parsed_index_evidence};
 use super::{CircuitProject, ProjectSource};
 use crate::syntax::circuit::{CircuitForms, PortSite, PortTypeSite, RoutinePorts, routine_ports};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{port_site_evidence, routine_ports_match};
+use crate::syntax::circuit::{port_site_evidence, routine_ports_availability, routine_ports_match};
 #[cfg(verus_only)]
 use crate::syntax::{
     AtomKind, bare_atom_kind, decimal_natural_value, form_span, form_spans_valid,
@@ -182,6 +182,21 @@ pub(super) proof fn checked_width_entry_exists(
         0 <= file < project.circuits_model().len(),
         0 <= entry < project.circuits_model()[file].syntax.entries@.len(),
 {
+}
+
+pub(super) proof fn width_check_skips_non_routines(
+    project: &CircuitProject, file: int, entry: int, max_width: u64,
+)
+    requires routine_port_widths_evidence(project, file, entry, max_width, Ok(None)),
+    ensures 0 <= file < project.circuits_model().len()
+        && 0 <= entry < project.circuits_model()[file].syntax.entries@.len()
+        ==> !(project.circuits_model()[file].syntax.entries@[entry].head is Func)
+            && !(project.circuits_model()[file].syntax.entries@[entry].head is Module),
+{
+    if 0 <= file < project.circuits_model().len() {
+        routine_ports_availability(project.sources_model()[file].text,
+            &project.circuits_model()[file].syntax, entry, None);
+    }
 }
 
 pub(super) proof fn checked_width_sites(

@@ -22,13 +22,19 @@ mod ports;
 mod structure;
 mod test_items;
 mod test_values;
-pub use body::DefinitionReferences;
+#[cfg(verus_only)]
+pub use body::routine_expansion_evidence;
 use body::validate_routine_arguments;
+pub use body::{DefinitionReferences, first_routine_expansion};
 use build::BuildRows;
-pub use build::{BuildCircuitIndex, BuildDefinition, BuildEntryRanges, index_build_forms};
+pub use build::{
+    BuildCircuitIndex, BuildDefinition, BuildEntryRanges, definition_target_atoms,
+    index_build_forms,
+};
 #[cfg(verus_only)]
 pub use build::{
     build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
+    definition_target_range, definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
@@ -67,7 +73,7 @@ pub use ports::{
     routine_signature_error_evidence, routine_signature_matches,
 };
 #[cfg(verus_only)]
-pub use ports::{port_site_evidence, routine_ports_match};
+pub use ports::{port_site_evidence, routine_ports_availability, routine_ports_match};
 use structure::validate_structure_arguments;
 #[cfg(verus_only)]
 pub use structure::{

@@ -2,12 +2,16 @@
 
 mod batch;
 mod definitions;
+mod function_drivers;
 mod port_types;
 mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use definitions::{
     DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
     DefinitionReferenceSite, ResolvedDefinitionReference,
+};
+pub use function_drivers::{
+    DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };
 #[cfg(verus_only)]
 pub use port_types::port_types_equal;

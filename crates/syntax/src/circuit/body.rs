@@ -11,7 +11,9 @@ use super::expression_forest::{inspect_expressions, inspect_expressions_into};
 #[cfg(verus_only)]
 use super::expressions::{after_form, argument_error, argument_matches};
 use super::expressions::{check_argument, read_expression_form};
-use super::ports::read_routine_signature;
+#[cfg(verus_only)]
+use super::ports::{RoutineLayout, routine_layout_matches};
+use super::ports::{read_routine_signature, routine_layout};
 use super::*;
 
 verus! {
@@ -366,6 +368,100 @@ pub(super) open spec fn body_items_before(
         ==> body_item_matches(source, forms, index, end)
 }
 
+spec fn expansion_at(source: &str, forms: Seq<Form>, start: int, end: int, item: int) -> bool {
+    &&& direct_form_in_range(forms, start, end, item)
+    &&& forms[item] is List
+    &&& body_head_at(source, forms, item + 1, forms[item]->List_end as int, BodyHead::Expand)
+}
+
+/// 展開待ちの範囲が、指定された本体の最初の展開フォームに対応することを表す。
+pub closed spec fn routine_expansion_evidence(source: &str, syntax: &CircuitForms, entry: int, span: Option<Range<usize>>) -> bool {
+    let forms = syntax.forms@;
+    (routine_layout_matches(source, syntax, entry, None) && span.is_none())
+        || exists|layout: RoutineLayout| #[trigger] routine_layout_matches(source, syntax, entry, Some(layout)) && {
+            let start = layout.body as int;
+            let end = layout.end as int;
+            match span {
+                Some(span) => exists|item: int| #[trigger] expansion_at(source, forms, start, end, item)
+                    && span == form_span(forms[item])
+                    && forall|prior: int| prior < item ==> !#[trigger] expansion_at(source, forms, start, end, prior),
+                None => forall|item: int| !#[trigger] expansion_at(source, forms, start, end, item),
+            }
+        }
+}
+
+/// `func` または `module` の本体から、最初の `expand` の元ソース範囲を返す。
+///
+/// `syntax` には同じ `source` から得た厳格索引を渡す。他の種別や範囲外の項目では `None`。
+/// 本体項目だけをたどる。定義の右辺やマクロの引数は走査しない。
+///
+/// # Panics
+///
+/// 手動で組み立てた構文木と索引の添字が互いに対応しない場合はパニックすることがある。
+pub fn first_routine_expansion(source: &str, syntax: &CircuitForms, entry: usize) -> (span: Option<Range<usize>>)
+    requires
+        circuit_index_matches(source, syntax.forms@, syntax.entries@),
+        complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
+        form_spans_valid(source, syntax.forms@, source.spec_bytes().len() as int),
+    ensures routine_expansion_evidence(source, syntax, entry as int, span),
+        span matches Some(span) ==> span.start < span.end <= source.spec_bytes().len()
+            && is_char_boundary(source.spec_bytes(), span.start as int)
+            && is_char_boundary(source.spec_bytes(), span.end as int),
+{
+    let Some(layout) = routine_layout(source, syntax, entry) else { return None; };
+    let forms = syntax.forms.as_slice();
+    let start = layout.body;
+    let stop = layout.end;
+    let mut at = start;
+    proof {
+        reveal(direct_form_in_range);
+        assert(at < stop ==> direct_form_in_range(forms@, start as int, stop as int, at as int));
+    }
+    while at < stop
+        invariant
+            routine_layout_matches(source, syntax, entry as int, Some(layout)),
+            start == layout.body, stop == layout.end,
+            forms@ == syntax.forms@, start <= at <= stop <= forms@.len(),
+            at < stop ==> direct_form_in_range(forms@, start as int, stop as int, at as int),
+            complete_list_indices(forms@), nested_list_indices(forms@),
+            form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+            forall|prior: int| prior < at ==> !#[trigger] expansion_at(source, forms@, start as int, stop as int, prior),
+        decreases stop - at,
+    {
+        proof {
+            reveal(body_items_before);
+            assert(body_item_matches(source, forms@, at as int, stop as int));
+        }
+        let Form::List { span: item_span, end: next } = &forms[at] else {
+            proof { assert(false); }
+            unreachable!();
+        };
+        proof { reveal(form_spans_valid); }
+        let Ok(kind) = read_body_item_head(source, forms, at + 1, *next, item_span.end - 1) else {
+            proof { assert(false); }
+            unreachable!();
+        };
+        if matches!(kind, BodyHead::Expand) {
+            let span = item_span.start..item_span.end;
+            assert(expansion_at(source, forms@, start as int, stop as int, at as int));
+            return Some(span);
+        }
+        proof {
+            node_end_is_following_direct_form(forms@, at as int, *next as int);
+            reveal(following_direct_form);
+            assert(form_region_ends_at(forms@, start as int, stop as int));
+            assert forall|prior: int| prior < *next implies
+                !#[trigger] expansion_at(source, forms@, start as int, stop as int, prior) by {
+                if prior == at {
+                    assert(!body_head_at(source, forms@, at + 1, *next as int, BodyHead::Expand));
+                }
+            };
+        }
+        at = *next;
+    }
+    None
+}
+
 /// 本体項目列のうち最初に失敗した項目の診断と、それより前の項目の妥当性を表す。
 pub(super) open spec fn body_error(
     source: &str, forms: Seq<Form>, start: int, end: int, error: (HeaderError, Range<usize>),
@@ -451,6 +547,8 @@ pub(super) proof fn flat_body_row_evidence(
         0 <= index < definitions.len(),
     ensures
         first <= definitions[index].references.start <= definitions[index].references.end <= stop,
+        targets_match(forms, definitions[index].form + 2, definitions[index].expression.end as int,
+            definitions[index].expression.start as int),
         forall|i: int| definitions[index].references.start <= i < definitions[index].references.end
             ==> expression_reference_in_source(source, forms, #[trigger] references[i]),
 {

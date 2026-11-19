@@ -494,6 +494,14 @@ pub closed spec fn routine_ports_match(
     }
 }
 
+/// 署名の有無が、厳格索引の項目の種別に対応することを示す。
+pub proof fn routine_ports_availability(source: &str, syntax: &CircuitForms, entry: int, ports: Option<RoutinePorts>)
+    requires routine_ports_match(source, syntax, entry, ports),
+    ensures ports.is_some() <==> (0 <= entry < syntax.entries@.len()
+        && (syntax.entries@[entry].head is Func || syntax.entries@[entry].head is Module)),
+{
+}
+
 /// 厳格索引の一項目から `func` または `module` の署名を取り出す。
 ///
 /// `syntax` には同じ `source` を厳格に解析して得た索引を渡す。
@@ -508,29 +516,61 @@ pub fn routine_ports(source: &str, syntax: &CircuitForms, entry: usize) -> (port
     ensures routine_ports_match(source, syntax, entry as int, ports),
         ports.is_some() ==> entry < syntax.entries@.len(),
 {
+    let layout = routine_layout(source, syntax, entry)?;
+    let forms = syntax.forms.as_slice();
+    let inputs = collect_port_sites(source, forms, layout.input, layout.output, layout.end, Clause::In);
+    let outputs = collect_port_sites(source, forms, layout.output, layout.body, layout.end, Clause::Out);
+    Some(RoutinePorts { inputs, outputs })
+}
+
+pub(super) struct RoutineLayout {
+    pub(super) input: usize,
+    pub(super) output: usize,
+    pub(super) body: usize,
+    pub(super) end: usize,
+}
+
+pub(super) open spec fn routine_layout_matches(source: &str, syntax: &CircuitForms, entry: int, layout: Option<RoutineLayout>) -> bool {
+    let entries = syntax.entries@;
+    let forms = syntax.forms@;
+    if 0 <= entry < entries.len() && (entries[entry].head is Func || entries[entry].head is Module) {
+        let form = entries[entry].form as int;
+        layout matches Some(layout) && 0 <= form < forms.len() && forms[form] is List
+            && layout.end == forms[form]->List_end && layout.input == form + 3
+            && ports_clause_matches(source, forms, layout.input as int, layout.end as int, layout.output as int, Clause::In)
+            && ports_clause_matches(source, forms, layout.output as int, layout.end as int, layout.body as int, Clause::Out)
+            && super::body::body_items_before(source, forms, layout.body as int, layout.end as int, layout.end as int)
+    } else {
+        layout.is_none()
+    }
+}
+
+pub(super) fn routine_layout(_source: &str, syntax: &CircuitForms, entry: usize) -> (layout: Option<RoutineLayout>)
+    requires circuit_index_matches(_source, syntax.forms@, syntax.entries@),
+        complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
+    ensures routine_layout_matches(_source, syntax, entry as int, layout),
+{
     if entry >= syntax.entries.len() { return None; }
     let item = &syntax.entries[entry];
     if !matches!(item.head, Head::Func | Head::Module) { return None; }
     let forms = syntax.forms.as_slice();
     proof {
-        indexed_entry_evidence(source, forms@, syntax.entries@, entry as int);
+        indexed_entry_evidence(_source, forms@, syntax.entries@, entry as int);
         reveal(super::form_has_head);
         reveal(header_arguments_match);
     }
     let Form::List { end: last, .. } = &forms[item.form] else { proof { assert(false); } return None; };
     let first = item.form + 3;
     proof {
-        let body = choose|body: int| #[trigger] routine_signature_matches(source, forms@, item.form + 2, *last as int, item.head, body)
-            && super::body::body_items_before(source, forms@, body, *last as int, *last as int);
-        let out = choose|out: int| #[trigger] ports_clause_matches(source, forms@, first as int, *last as int, out, Clause::In)
-            && ports_clause_matches(source, forms@, out, *last as int, body, Clause::Out);
+        let body = choose|body: int| #[trigger] routine_signature_matches(_source, forms@, item.form + 2, *last as int, item.head, body)
+            && super::body::body_items_before(_source, forms@, body, *last as int, *last as int);
+        let out = choose|out: int| #[trigger] ports_clause_matches(_source, forms@, first as int, *last as int, out, Clause::In)
+            && ports_clause_matches(_source, forms@, out, *last as int, body, Clause::Out);
         assert(forms@[first as int] is List && forms@[out] is List);
     }
     let Form::List { end: out, .. } = &forms[first] else { proof { assert(false); } return None; };
     let Form::List { end: output_end, .. } = &forms[*out] else { proof { assert(false); } return None; };
-    let inputs = collect_port_sites(source, forms, first, *out, *last, Clause::In);
-    let outputs = collect_port_sites(source, forms, *out, *output_end, *last, Clause::Out);
-    Some(RoutinePorts { inputs, outputs })
+    Some(RoutineLayout { input: first, output: *out, body: *output_end, end: *last })
 }
 
 } // verus!

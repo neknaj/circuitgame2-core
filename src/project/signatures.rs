@@ -135,7 +135,7 @@ fn read_port_names<'a>(source: &'a str, forms: &[Form], ports: &[CheckedPort]) -
     names
 }
 
-fn first_matching_name(names: &[NameSite], count: usize, name: &str) -> (result: Option<usize>)
+pub(super) fn first_matching_name(names: &[NameSite], count: usize, name: &str) -> (result: Option<usize>)
     requires count <= names@.len(),
     ensures
         result matches Some(i) ==> i < count && names@[i as int].word.spec_bytes() == name.spec_bytes(),
@@ -393,6 +393,16 @@ pub(super) proof fn checked_signature_ports(
         routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
         && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(signature)));
     super::widths::checked_width_entry_exists(project, file, entry, max_width, widths);
+}
+
+pub(super) proof fn signature_check_skips_non_routines(project: &CircuitProject, file: int, entry: int, max_width: u64)
+    requires routine_signature_evidence(project, file, entry, max_width, Ok(None)),
+    ensures 0 <= file < project.circuits_model().len()
+        && 0 <= entry < project.circuits_model()[file].syntax.entries@.len()
+        ==> !(project.circuits_model()[file].syntax.entries@[entry].head is Func)
+            && !(project.circuits_model()[file].syntax.entries@[entry].head is Module),
+{
+    super::widths::width_check_skips_non_routines(project, file, entry, max_width);
 }
 
 /// 回路のポート幅と名前を検査し、同名の入力を公開する出力を対応付ける。

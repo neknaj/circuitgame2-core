@@ -1,7 +1,7 @@
 //! ビルドで使う定義と参照をファイル単位の配列に格納する。
 
 #[cfg(verus_only)]
-use super::body::{flat_body_matches, flat_body_row_evidence};
+use super::body::{flat_body_matches, flat_body_row_evidence, targets_match};
 use super::index::index_parsed_headers_into;
 #[cfg(verus_only)]
 use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_syntax};
@@ -124,6 +124,7 @@ pub proof fn build_definition_scope_evidence(
             &&& indexed_location(source, index.syntax.forms@, item.form as int, item.namespace)
             &&& index.entry_ranges@[entry].references.start <= row.references.start
                 <= row.references.end <= index.entry_ranges@[entry].references.end <= index.references@.len()
+            &&& definition_targets_match(index.syntax.forms@, row)
             &&& forall|i: int| row.references.start <= i < row.references.end
                 ==> expression_reference_in_source(source, index.syntax.forms@, #[trigger] index.references@[i])
         }),
@@ -151,6 +152,49 @@ pub proof fn build_definition_scope_evidence(
         implies expression_reference_in_source(source, forms, #[trigger] index.references@[i]) by {
         assert(refs[i] == index.references@[i]);
     };
+}
+
+/// 平坦な定義行の左辺が、元の構文木にある名前または名前のリストに対応することを表す。
+pub closed spec fn definition_targets_match(forms: Seq<Form>, row: BuildDefinition) -> bool {
+    targets_match(forms, row.form + 2, row.expression.end as int, row.expression.start as int)
+}
+
+/// 左辺の名前が並ぶ構文木の半開区間を定める。
+pub open spec fn definition_target_range(forms: Seq<Form>, row: BuildDefinition) -> (int, int) {
+    let start = row.form + 2;
+    if forms[start] is List { (start + 1, row.expression.start as int) }
+    else { (start, row.expression.start as int) }
+}
+
+/// ビルド用索引の一行から、左辺の名前が並ぶ構文木の範囲を返す。
+///
+/// `forms` と `row` には、同じ厳格解析で得た構文木と定義行を渡す。
+///
+/// # Panics
+///
+/// 定義行の添字を手動で組み立て、その添字が構文木の範囲を外れるとパニックすることがある。
+pub fn definition_target_atoms(forms: &[Form], row: &BuildDefinition) -> (range: Range<usize>)
+    requires definition_targets_match(forms@, *row),
+    ensures
+        range.start < range.end <= forms@.len(),
+        (range.start as int, range.end as int) == definition_target_range(forms@, *row),
+        forall|i: int| range.start <= i < range.end ==> (#[trigger] forms@[i]) is Atom
+            && forms@[i]->Atom_kind is Name,
+{
+    let first = row.form + 2;
+    let start = if matches!(forms[first], Form::List { .. }) { first + 1 } else { first };
+    let end = row.expression.start;
+    proof {
+        assert forall|i: int| start <= i < end implies (#[trigger] forms@[i]) is Atom
+            && forms@[i]->Atom_kind is Name by {
+            if forms@[first as int] is List {
+                assert(super::expressions::argument_matches(forms@, i, end as int, HeaderError::ExpectedName));
+            } else {
+                assert(i == first);
+            }
+        };
+    }
+    start..end
 }
 
 /// 回路ソースを検査しながら、ビルドに必要な定義と参照を索引に載せる。
