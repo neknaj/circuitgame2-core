@@ -23,3 +23,10 @@ license.workspace = true
 
 [dependencies]
 circuitgame2-syntax = { path = "crates/syntax", version = "0.1.0" }
+vstd.workspace = true
+
+[package.metadata.verus]
+verify = true
+
+[lints]
+workspace = true

@@ -4,4 +4,7 @@
 
 #![no_std]
 
+extern crate alloc;
+
+pub mod project;
 pub use circuitgame2_syntax as syntax;
