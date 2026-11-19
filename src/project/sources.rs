@@ -30,7 +30,7 @@ pub struct ProjectSource<'a> {
     pub revision: u64,
     /// 指定された文書バージョンの UTF-8 テキスト。
     pub text: &'a str,
-    first_input: usize,
+    pub(super) first_input: usize,
 }
 
 /// ソースをファイル識別子で整理できなかった理由。
@@ -57,7 +57,7 @@ pub enum SourceSetError {
     },
 }
 
-spec fn snapshot_matches(input: SourceSnapshot, source: ProjectSource) -> bool {
+pub(super) open spec fn snapshot_matches(input: SourceSnapshot, source: ProjectSource) -> bool {
     &&& normalized_path(input.path) == Ok(source.id.components_model())
     &&& source_kind_of(source.id.components_model()) == Some(source.kind)
     &&& input.revision == source.revision && input.text@ == source.text@
@@ -67,11 +67,17 @@ spec fn input_is_represented(input: SourceSnapshot, sources: Seq<ProjectSource>)
     exists|at: int| 0 <= at < sources.len() && #[trigger] snapshot_matches(input, sources[at])
 }
 
+pub open spec fn first_source_input(inputs: Seq<SourceSnapshot>, index: int) -> bool {
+    &&& 0 <= index < inputs.len()
+    &&& forall|previous: int| 0 <= previous < index ==>
+        normalized_path((#[trigger] inputs[previous]).path) != normalized_path(inputs[index].path)
+}
+
 spec fn source_origin(inputs: Seq<SourceSnapshot>, source: ProjectSource, count: int) -> bool {
     &&& source.first_input < count <= inputs.len()
     &&& snapshot_matches(inputs[source.first_input as int], source)
-    &&& forall|previous: int| 0 <= previous < source.first_input
-        ==> normalized_path((#[trigger] inputs[previous]).path) != Ok(source.id.components_model())
+    &&& inputs[source.first_input as int].text == source.text
+    &&& first_source_input(inputs, source.first_input as int)
 }
 
 #[verifier::opaque]
@@ -89,6 +95,56 @@ spec fn source_prefix_matches(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectS
 /// 各仮想ファイル識別子がちょうど一件あり、バージョン、本文、言語が入力に対応することを表す。
 pub closed spec fn project_sources_match(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>) -> bool {
     source_prefix_matches(inputs, sources, inputs.len() as int)
+}
+
+pub(super) proof fn collected_source_origin(
+    inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, index: int,
+)
+    requires
+        project_sources_match(inputs, sources),
+        0 <= index < sources.len(),
+    ensures
+        sources[index].first_input < inputs.len(),
+        snapshot_matches(inputs[sources[index].first_input as int], sources[index]),
+        inputs[sources[index].first_input as int].text == sources[index].text,
+        first_source_input(inputs, sources[index].first_input as int),
+{
+    reveal(source_prefix_matches);
+    assert(source_origin(inputs, sources[index], inputs.len() as int));
+}
+
+pub(super) proof fn collected_source_for_input(
+    inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, index: int,
+)
+    requires
+        project_sources_match(inputs, sources),
+        first_source_input(inputs, index),
+    ensures exists|file: int| 0 <= file < sources.len()
+        && #[trigger] snapshot_matches(inputs[index], sources[file])
+        && sources[file].first_input == index && sources[file].text == inputs[index].text,
+{
+    reveal(source_prefix_matches);
+    assert(input_is_represented(inputs[index], sources));
+    let file = choose|file: int| 0 <= file < sources.len() && #[trigger] snapshot_matches(inputs[index], sources[file]);
+    let source = sources[file];
+    assert(source_origin(inputs, source, inputs.len() as int));
+    assert(source.first_input == index);
+}
+
+pub(super) proof fn collected_sources_follow_input_order(
+    inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, earlier: int, later: int,
+)
+    requires
+        project_sources_match(inputs, sources),
+        0 <= earlier < sources.len(),
+        0 <= later < sources.len(),
+        sources[earlier].first_input < sources[later].first_input,
+    ensures earlier < later,
+{
+    reveal(source_prefix_matches);
+    if later < earlier {
+        assert(sources[later].first_input < sources[earlier].first_input);
+    }
 }
 
 /// 全入力が対応するソースを指し、同じ識別子の入力は同じバージョンと本文を持つことを表す。
@@ -174,6 +230,7 @@ proof fn append_source(
         0 <= count < inputs.len(),
         source.first_input == count,
         snapshot_matches(inputs[count], source),
+        inputs[count].text == source.text,
         forall|i: int| 0 <= i < sources.len() ==>
             (#[trigger] sources[i]).id.components_model() != source.id.components_model(),
     ensures source_prefix_matches(inputs, sources.push(source), count + 1),

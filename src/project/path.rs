@@ -204,6 +204,26 @@ impl<'a> VirtualPath<'a> {
         self.components.as_slice()
     }
 
+    pub(super) fn copy_for_diagnostic(&self) -> (copied: VirtualPath<'a>)
+        ensures copied.components_model() == self.components_model(),
+    {
+        let parts = self.components();
+        let mut components = Vec::new();
+        let mut index = 0;
+        while index < parts.len()
+            invariant
+                index <= parts@.len(),
+                components@ == parts@.take(index as int),
+            decreases parts.len() - index,
+        {
+            components.push(parts[index]);
+            index += 1;
+            assert(components@ =~= parts@.take(index as int));
+        }
+        assert(components@ =~= parts@);
+        VirtualPath { components }
+    }
+
     /// 同じプロジェクト内のファイルを指すか、正規化後の成分を照合する。
     pub fn same_file(&self, other: &VirtualPath) -> (same: bool)
         ensures same == (self.components_model() == other.components_model()),

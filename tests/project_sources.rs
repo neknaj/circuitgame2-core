@@ -103,3 +103,105 @@ fn reports_both_snapshots_when_a_normalized_id_conflicts() {
         SourceSetError::UnsupportedExtension { input: 0 }
     );
 }
+
+#[test]
+fn parses_each_circuit_snapshot_once_and_preserves_its_names() {
+    use circuitgame2_core::project::parse_circuit_project;
+    use circuitgame2_core::syntax::circuit::Head;
+
+    let left = "(namespace app::logic (module worker (in) (out y)))";
+    let same_text = left.to_string();
+    let right = "(namespace app::logic (module-part worker (def y 0)))";
+    let project = parse_circuit_project(&[
+        snapshot("lib/worker.ncg2", 2, left),
+        snapshot("./lib/tmp/../worker.ncg2", 2, &same_text),
+        snapshot("part.ncg2", 4, right),
+    ])
+    .unwrap();
+
+    assert_eq!(project.sources().len(), 2);
+    assert_eq!(project.circuits().len(), 2);
+    for (i, (kind, text, revision)) in [(Head::Module, left, 2), (Head::ModulePart, right, 4)]
+        .into_iter()
+        .enumerate()
+    {
+        let file = &project.sources()[i];
+        let names = &project.circuits()[i].names;
+        assert_eq!(file.text, text);
+        assert_eq!(file.revision, revision);
+        assert_eq!(names[1].head, kind);
+        assert_eq!(names[1].name.word, "worker");
+        assert_eq!(names[1].namespace.as_ref().unwrap().word, "app::logic");
+        assert_eq!(names[1].block, Some(names[0].form));
+    }
+}
+
+#[test]
+fn attaches_the_file_identity_and_revision_to_circuit_diagnostics() {
+    use circuitgame2_core::project::{CircuitProjectError, parse_circuit_project};
+    use circuitgame2_core::syntax::circuit::{CircuitFormError, HeaderError};
+
+    let invalid = "; 診断位置\n(test demo (reset) (case))";
+    let error = parse_circuit_project(&[
+        snapshot("valid.ncg2", 3, "(using nor)"),
+        snapshot("./lib/temp/../bad.ncg2", 12, invalid),
+    ])
+    .unwrap_err();
+    let CircuitProjectError::Syntax {
+        id,
+        revision,
+        error,
+    } = error
+    else {
+        panic!("expected a circuit syntax error: {error:?}");
+    };
+    assert_eq!(id.components(), ["lib", "bad.ncg2"]);
+    assert_eq!(revision, 12);
+    let CircuitFormError::Header {
+        kind: HeaderError::MixedTestItems {
+            first_head: (start, end),
+        },
+        span,
+    } = error
+    else {
+        panic!("expected a mixed test item error: {error:?}");
+    };
+    assert_eq!(&invalid[start..end], "reset");
+    assert_eq!(&invalid[span], "case");
+}
+
+#[test]
+fn identifies_functional_sources_in_the_circuit_only_entry_point() {
+    use circuitgame2_core::project::{CircuitProjectError, parse_circuit_project};
+
+    let error = parse_circuit_project(&[snapshot("./lib//macros.ncg2m", 9, "")]).unwrap_err();
+    let CircuitProjectError::UnsupportedLanguage { id, revision, kind } = error else {
+        panic!("expected an unsupported language error: {error:?}");
+    };
+    assert_eq!(id.components(), ["lib", "macros.ncg2m"]);
+    assert_eq!(revision, 9);
+    assert_eq!(kind, SourceKind::Functional);
+}
+
+#[test]
+fn validates_collection_before_parsing_and_parses_in_first_occurrence_order() {
+    use circuitgame2_core::project::{CircuitProjectError, parse_circuit_project};
+
+    let malformed = snapshot("bad.ncg2", 1, ")");
+    let bad_id = snapshot("../escaping.ncg2", 2, "");
+    let error = parse_circuit_project(&[malformed, bad_id]).unwrap_err();
+    assert!(matches!(
+        error,
+        CircuitProjectError::Sources(SourceSetError::Path {
+            input: 1,
+            error: PathError::EscapesRoot,
+        })
+    ));
+
+    let malformed = snapshot("bad.ncg2", 1, ")");
+    let functional = snapshot("macros.ncg2m", 2, "");
+    let error = parse_circuit_project(&[malformed, functional]).unwrap_err();
+    assert!(
+        matches!(error, CircuitProjectError::Syntax { id, .. } if id.components() == ["bad.ncg2"])
+    );
+}
