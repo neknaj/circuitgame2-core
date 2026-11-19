@@ -284,10 +284,38 @@ pub open spec fn form_span(form: Form) -> Range<usize> {
     }
 }
 
+pub open spec fn bare_atom_delimiter(byte: u8) -> bool {
+    byte == 32 || byte == 9 || byte == 10 || byte == 13 || byte == 59
+        || byte == 40 || byte == 41 || byte == 34
+}
+
+#[verifier::opaque]
+pub open spec fn bare_atom_extent(bytes: Seq<u8>, start: int, end: int) -> bool {
+    &&& 0 <= start < end <= bytes.len()
+    &&& forall|i: int| start <= i < end ==> !bare_atom_delimiter(#[trigger] bytes[i])
+    &&& (end < bytes.len() ==> bare_atom_delimiter(bytes[end]))
+}
+
+proof fn lift_bare_extent(bytes: Seq<u8>, suffix: Seq<u8>, start: int, end: int)
+    requires
+        0 <= start < end <= bytes.len(),
+        suffix == bytes[start..],
+        bare_atom_extent(suffix, 0, end - start),
+    ensures bare_atom_extent(bytes, start, end),
+{
+    reveal(bare_atom_extent);
+    assert forall|i: int| start <= i < end implies !bare_atom_delimiter(#[trigger] bytes[i]) by {
+        assert(bytes[i] == suffix[i - start]);
+    };
+    if end < bytes.len() {
+        assert(bytes[end] == suffix[end - start]);
+    }
+}
+
 pub open spec fn bare_form_matches(source: &str, form: Form) -> bool {
     match form {
         Form::Atom { kind, span } => kind != AtomKind::String ==> (
-            span.start < span.end <= source.spec_bytes().len()
+            bare_atom_extent(source.spec_bytes(), span.start as int, span.end as int)
             && bare_atom_kind(source.spec_bytes()[span.start as int..span.end as int]) == Some(kind)
         ),
         Form::List { .. } => true,
@@ -668,7 +696,7 @@ pub open spec fn atom_and_close_error_evidence(source: &str, error: Error) -> bo
     let bytes = source.spec_bytes();
     match error.kind {
         ErrorKind::InvalidAtom => {
-            &&& error.span.start < error.span.end <= bytes.len()
+            &&& bare_atom_extent(bytes, error.span.start as int, error.span.end as int)
             &&& bare_atom_kind(bytes[error.span.start as int..error.span.end as int]).is_none()
         },
         ErrorKind::UnexpectedClose => {
@@ -1156,7 +1184,8 @@ impl<'a> SourceCursor<'a> {
                     &&& (kind is Quoted && kind->Quoted_0 is Some
                         ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0))
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
-                        =~= self.source.spec_bytes()[span.start as int..span.end as int])
+                        =~= self.source.spec_bytes()[span.start as int..span.end as int]
+                        && bare_atom_extent(self.source.spec_bytes(), span.start as int, span.end as int))
                     &&& (kind is Open ==> span.end == span.start + 1
                         && self.source.spec_bytes()[span.start as int] == 40)
                     &&& (kind is Close ==> span.end == span.start + 1
@@ -1196,6 +1225,7 @@ impl<'a> SourceCursor<'a> {
             if kind is Bare {
                 assert(kind->Bare_0.spec_bytes() =~= self.remaining.spec_bytes()[..(end - start)]);
                 assert(kind->Bare_0.spec_bytes() =~= self.source.spec_bytes()[start as int..end as int]);
+                lift_bare_extent(self.source.spec_bytes(), self.remaining.spec_bytes(), start as int, end as int);
             }
         }
         Some((kind, start..end, Self { source: self.source, remaining }))
@@ -1222,7 +1252,8 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         is_char_boundary(input.spec_bytes(), input.spec_bytes().len() - result.1.spec_bytes().len()),
         match result.0 {
             RawSegment::Bare(atom) =>
-                atom.spec_bytes() + result.1.spec_bytes() =~= input.spec_bytes(),
+                atom.spec_bytes() + result.1.spec_bytes() =~= input.spec_bytes()
+                && bare_atom_extent(input.spec_bytes(), 0, atom.spec_bytes().len() as int),
             RawSegment::Open => input.spec_bytes()[0] == 40
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
             RawSegment::Close => input.spec_bytes()[0] == 41
@@ -1248,6 +1279,19 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         }
         _ => {
             let (atom, remaining) = split_at_boundary(input, Boundary::AtomEnd);
+            proof {
+                reveal(bare_atom_extent);
+                let bytes = input.spec_bytes();
+                let end = atom.spec_bytes().len() as int;
+                assert(end > 0);
+                assert forall|i: int| 0 <= i < end implies !bare_atom_delimiter(#[trigger] bytes[i]) by {
+                    assert(bytes[i] == atom.spec_bytes()[i]);
+                };
+                if end < bytes.len() {
+                    assert(bytes[end] == remaining.spec_bytes()[0]);
+                }
+                assert(bare_atom_extent(bytes, 0, end));
+            }
             (RawSegment::Bare(atom), remaining)
         }
     };
