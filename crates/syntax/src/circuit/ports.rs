@@ -506,6 +506,7 @@ pub fn routine_ports(source: &str, syntax: &CircuitForms, entry: usize) -> (port
     requires circuit_index_matches(source, syntax.forms@, syntax.entries@),
         complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
     ensures routine_ports_match(source, syntax, entry as int, ports),
+        ports.is_some() ==> entry < syntax.entries@.len(),
 {
     if entry >= syntax.entries.len() { return None; }
     let item = &syntax.entries[entry];

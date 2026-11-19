@@ -155,7 +155,8 @@ pub closed spec fn routine_port_widths_evidence(
         let source = &sources[file];
         match result {
             Ok(None) => routine_ports_match(source.text, syntax, entry, None),
-            _ => exists|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
+            _ => 0 <= entry < syntax.entries@.len()
+                && exists|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
                 && match result {
                     Ok(Some(widths)) =>
                         widths.inputs@.len() == ports.inputs@.len()
@@ -171,6 +172,16 @@ pub closed spec fn routine_port_widths_evidence(
     } else {
         result == Ok(None)
     }
+}
+
+pub(super) proof fn checked_width_entry_exists(
+    project: &CircuitProject, file: int, entry: int, max_width: u64, widths: RoutinePortWidths,
+)
+    requires routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths))),
+    ensures
+        0 <= file < project.circuits_model().len(),
+        0 <= entry < project.circuits_model()[file].syntax.entries@.len(),
+{
 }
 
 pub(super) proof fn checked_width_sites(
@@ -209,9 +220,20 @@ proof fn sites_for_direction(
         &&& syntax.forms@[site.name as int] is Atom
         &&& site.ty matches PortTypeSite::Bits { width } ==>
             width < syntax.forms@.len() && syntax.forms@[width as int] is Atom
+        &&& site.ty matches PortTypeSite::Named { form } ==>
+            form < syntax.forms@.len() && syntax.forms@[form as int] is Atom
+                && reference_kind(syntax.forms@[form as int]->Atom_kind)
+        &&& match site.ty {
+            PortTypeSite::Named { form } => selected[i].ty == DeclaredPortType::Named { form },
+            _ => selected[i].ty is Bits,
+        }
     } by {
         port_site_evidence(source, syntax, entry, ports, input, i);
     };
+}
+
+pub(super) open spec fn reference_kind(kind: AtomKind) -> bool {
+    kind is Name || kind is RelativePath || kind is AbsolutePath
 }
 
 pub(super) open spec fn checked_name_sites(forms: Seq<crate::syntax::Form>, ports: Seq<CheckedPort>) -> bool {
@@ -220,6 +242,13 @@ pub(super) open spec fn checked_name_sites(forms: Seq<crate::syntax::Form>, port
         &&& site.name < forms.len() && forms[site.name as int] is Atom
         &&& site.ty matches PortTypeSite::Bits { width } ==>
             width < forms.len() && forms[width as int] is Atom
+        &&& site.ty matches PortTypeSite::Named { form } ==>
+            form < forms.len() && forms[form as int] is Atom
+                && reference_kind(forms[form as int]->Atom_kind)
+        &&& match site.ty {
+            PortTypeSite::Named { form } => ports[i].ty == DeclaredPortType::Named { form },
+            _ => ports[i].ty is Bits,
+        }
     }
 }
 

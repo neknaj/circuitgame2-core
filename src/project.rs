@@ -66,6 +66,8 @@ pub use resolution::{
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
+#[cfg(verus_only)]
+pub use use_aliases::port_types_equal;
 pub use use_aliases::{
     AliasConflict, AliasDisposition, DefinitionBatchError, DefinitionBinding, DefinitionPosition,
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,
@@ -73,6 +75,7 @@ pub use use_aliases::{
     RelativeTarget, ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
     check_use_aliases,
 };
+pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, use_aliases_acceptable, use_aliases_match};
 pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};

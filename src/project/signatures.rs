@@ -373,6 +373,28 @@ pub closed spec fn routine_signature_evidence(
     }
 }
 
+pub(super) proof fn checked_signature_ports(
+    project: &CircuitProject, file: int, entry: int, max_width: u64, signature: CheckedRoutineSignature,
+)
+    requires routine_signature_evidence(project, file, entry, max_width, Ok(Some(signature))),
+    ensures
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(signature.ports))),
+        0 <= file < project.circuits_model().len(),
+        0 <= entry < project.circuits_model()[file].syntax.entries@.len(),
+        signature.output_sources@.len() == signature.ports.outputs@.len(),
+        forall|i: int| 0 <= i < signature.output_sources@.len() ==> match #[trigger] signature.output_sources@[i] {
+            OutputSource::Input { port, .. } => port < signature.ports.inputs@.len(),
+            _ => true,
+        },
+{
+    let source = &project.sources_model()[file];
+    let forms = project.circuits_model()[file].syntax.forms@;
+    let (widths, inputs, outputs) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
+        && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(signature)));
+    super::widths::checked_width_entry_exists(project, file, entry, max_width, widths);
+}
+
 /// 回路のポート幅と名前を検査し、同名の入力を公開する出力を対応付ける。
 ///
 /// `file` と `entry` は構文解析済みのファイルと回路フォームの添字。

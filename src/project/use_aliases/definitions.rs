@@ -77,7 +77,7 @@ pub struct ResolvedDefinitionReference<'p, 'a> {
     pub binding: DefinitionBinding<'p, 'a>,
 }
 
-/// 定義の右辺で使われた名前を解決できなかった理由。
+/// 回路名または構造体型の参照を解決できなかった理由。
 #[derive(Debug)]
 pub enum DefinitionReferenceReason<'p, 'a> {
     /// 指定した名前の対象が見つからない。
@@ -118,28 +118,63 @@ pub enum DefinitionReferenceError<'p, 'a> {
     },
 }
 
-spec fn accepts_declaration(role: ExpressionReferenceKind, owner: Head, target: Head) -> bool {
+#[derive(Clone, Copy)]
+pub(super) enum ReferenceUse {
+    StructType,
+    Callee(Head),
+}
+
+pub(super) struct ReferenceRequest<'a> {
+    pub(super) block: Option<usize>,
+    pub(super) word: &'a str,
+    pub(super) role: ReferenceUse,
+}
+
+impl<'p, 'a> DefinitionReferenceSite<'p, 'a> {
+    spec fn request_model(&self) -> ReferenceRequest<'a> {
+        ReferenceRequest {
+            block: self.block,
+            word: self.name.word,
+            role: match self.role {
+                ExpressionReferenceKind::CastType => ReferenceUse::StructType,
+                ExpressionReferenceKind::Callee => ReferenceUse::Callee(self.owner),
+            },
+        }
+    }
+
+    fn request(&self) -> (request: ReferenceRequest<'a>)
+        ensures request == self.request_model(),
+    {
+        let role = match self.role {
+            ExpressionReferenceKind::CastType => ReferenceUse::StructType,
+            ExpressionReferenceKind::Callee => ReferenceUse::Callee(self.owner),
+        };
+        ReferenceRequest { block: self.block, word: self.name.word, role }
+    }
+}
+
+spec fn accepts_declaration(role: ReferenceUse, target: Head) -> bool {
     match role {
-        ExpressionReferenceKind::CastType => target is Struct,
-        ExpressionReferenceKind::Callee => target is Func
+        ReferenceUse::StructType => target is Struct,
+        ReferenceUse::Callee(owner) => target is Func
             || (!(owner is Func) && (target is Module || target is Latch || target is Memory)),
     }
 }
 
-fn declaration_allowed(role: ExpressionReferenceKind, owner: Head, target: Head) -> (allowed: bool)
-    ensures allowed == accepts_declaration(role, owner, target),
+fn declaration_allowed(role: ReferenceUse, target: Head) -> (allowed: bool)
+    ensures allowed == accepts_declaration(role, target),
 {
     match role {
-        ExpressionReferenceKind::CastType => matches!(target, Head::Struct),
-        ExpressionReferenceKind::Callee => matches!(target, Head::Func)
+        ReferenceUse::StructType => matches!(target, Head::Struct),
+        ReferenceUse::Callee(owner) => matches!(target, Head::Func)
             || (!matches!(owner, Head::Func) && matches!(target, Head::Module | Head::Latch | Head::Memory)),
     }
 }
 
 spec fn declaration_binding<'p, 'a>(
-    site: DefinitionReferenceSite, source: &'p ProjectSource<'a>, form: &'p NamedForm<'a>,
+    site: ReferenceRequest, source: &'p ProjectSource<'a>, form: &'p NamedForm<'a>,
 ) -> Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>> {
-    if accepts_declaration(site.role, site.owner, form.head) {
+    if accepts_declaration(site.role, form.head) {
         Ok(DefinitionBinding::Declaration { source, form })
     } else {
         Err(DefinitionReferenceReason::WrongDeclaration { source, form })
@@ -147,11 +182,11 @@ spec fn declaration_binding<'p, 'a>(
 }
 
 fn check_declaration<'p, 'a>(
-    site: &DefinitionReferenceSite, source: &'p ProjectSource<'a>, form: &'p NamedForm<'a>,
+    site: &ReferenceRequest, source: &'p ProjectSource<'a>, form: &'p NamedForm<'a>,
 ) -> (result: Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>>)
     ensures result == declaration_binding(*site, source, form),
 {
-    if declaration_allowed(site.role, site.owner, form.head) {
+    if declaration_allowed(site.role, form.head) {
         Ok(DefinitionBinding::Declaration { source, form })
     } else {
         Err(DefinitionReferenceReason::WrongDeclaration { source, form })
@@ -159,7 +194,7 @@ fn check_declaration<'p, 'a>(
 }
 
 spec fn absolute_binding<'p, 'a>(
-    site: DefinitionReferenceSite, target: AbsoluteTarget<'p, 'a, '_>,
+    site: ReferenceRequest, target: AbsoluteTarget<'p, 'a, '_>,
 ) -> Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>> {
     match target {
         AbsoluteTarget::Declaration { source, form } => declaration_binding(site, source, form),
@@ -168,7 +203,7 @@ spec fn absolute_binding<'p, 'a>(
 }
 
 fn check_absolute<'p, 'a>(
-    site: &DefinitionReferenceSite, target: &AbsoluteTarget<'p, 'a, '_>,
+    site: &ReferenceRequest, target: &AbsoluteTarget<'p, 'a, '_>,
 ) -> (result: Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>>)
     ensures result == absolute_binding(*site, *target),
 {
@@ -182,12 +217,12 @@ fn check_absolute<'p, 'a>(
 }
 
 spec fn unqualified_binding<'p, 'a>(
-    site: DefinitionReferenceSite, found: Option<UnqualifiedTarget<'_, 'p, 'a, '_>>,
+    site: ReferenceRequest, found: Option<UnqualifiedTarget<'_, 'p, 'a, '_>>,
 ) -> Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>> {
     match found {
         Some(UnqualifiedTarget::Alias(directive)) => absolute_binding(site, directive.target),
         Some(UnqualifiedTarget::Direct(target)) => absolute_binding(site, target),
-        None => if site.role is Callee && site.name.word@ == "nor"@ {
+        None => if site.role is Callee && site.word@ == "nor"@ {
             Ok(DefinitionBinding::Nor)
         } else {
             Err(DefinitionReferenceReason::Missing)
@@ -196,7 +231,7 @@ spec fn unqualified_binding<'p, 'a>(
 }
 
 spec fn relative_binding(
-    site: DefinitionReferenceSite, found: Result<RelativeTarget, RelativeResolutionError>,
+    site: ReferenceRequest, found: Result<RelativeTarget, RelativeResolutionError>,
     binding: Result<DefinitionBinding, DefinitionReferenceReason>,
 ) -> bool {
     match found {
@@ -216,7 +251,7 @@ spec fn relative_binding(
 }
 
 spec fn absolute_outcome(
-    site: DefinitionReferenceSite, found: Result<AbsoluteTarget, AbsoluteResolutionError>,
+    site: ReferenceRequest, found: Result<AbsoluteTarget, AbsoluteResolutionError>,
     binding: Result<DefinitionBinding, DefinitionReferenceReason>,
 ) -> bool {
     match found {
@@ -228,42 +263,53 @@ spec fn absolute_outcome(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn binding_evidence(
-        &self, file: usize, site: DefinitionReferenceSite, from: Option<&str>, kind: AtomKind,
+    pub(super) proof fn struct_binding_is_struct(
+        &self, file: usize, request: ReferenceRequest, from: Option<&str>, kind: AtomKind,
+        binding: DefinitionBinding,
+    )
+        requires
+            request.role is StructType,
+            self.binding_evidence(file, request, from, kind, Ok(binding)),
+        ensures binding matches DefinitionBinding::Declaration { form, .. } && form.head is Struct,
+    {
+    }
+
+    pub(super) closed spec fn binding_evidence(
+        &self, file: usize, site: ReferenceRequest, from: Option<&str>, kind: AtomKind,
         binding: Result<DefinitionBinding, DefinitionReferenceReason>,
     ) -> bool {
         match kind {
             AtomKind::Name => exists|found: Option<UnqualifiedTarget>|
-                #[trigger] self.unqualified_binding_matches(file, site.block, site.name.word, from, found)
+                #[trigger] self.unqualified_binding_matches(file, site.block, site.word, from, found)
                 && binding == unqualified_binding(site, found),
             AtomKind::RelativePath => exists|found: Result<RelativeTarget, RelativeResolutionError>|
-                #[trigger] self.relative_resolution_matches(file, site.block, site.name.word, found)
+                #[trigger] self.relative_resolution_matches(file, site.block, site.word, found)
                 && relative_binding(site, found, binding),
             AtomKind::AbsolutePath => exists|found: Result<AbsoluteTarget, AbsoluteResolutionError>|
-                #[trigger] absolute_resolution_evidence(&self.targets.exports_model(), site.name.word, from, found)
+                #[trigger] absolute_resolution_evidence(&self.targets.exports_model(), site.word, from, found)
                 && absolute_outcome(site, found, binding),
             _ => false,
         }
     }
 
-    fn resolve_definition_binding(
-        &self, file: usize, site: &DefinitionReferenceSite<'p, 'a>, from: Option<&str>, kind: AtomKind,
+    pub(super) fn resolve_scoped_binding(
+        &self, file: usize, site: &ReferenceRequest, from: Option<&str>, kind: AtomKind,
     ) -> (binding: Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>>)
         requires
             self.can_resolve(),
             self.scope_matches(file, site.block, Ok(from)),
-            bare_atom_kind(site.name.word.spec_bytes()) == Some(kind),
+            bare_atom_kind(site.word.spec_bytes()) == Some(kind),
             kind is Name || kind is RelativePath || kind is AbsolutePath,
         ensures self.binding_evidence(file, *site, from, kind, binding),
     {
-        let word = site.name.word;
+        let word = site.word;
         match kind {
             AtomKind::Name => {
                 let found = self.lookup_in_scope(file, site.block, from, word);
                 match found {
                     Some(UnqualifiedTarget::Alias(directive)) => check_absolute(site, &directive.target),
                     Some(UnqualifiedTarget::Direct(target)) => check_absolute(site, &target),
-                    None if matches!(site.role, ExpressionReferenceKind::Callee) && word == "nor" => Ok(DefinitionBinding::Nor),
+                    None if matches!(site.role, ReferenceUse::Callee(_)) && word == "nor" => Ok(DefinitionBinding::Nor),
                     None => Err(DefinitionReferenceReason::Missing),
                 }
             },
@@ -342,7 +388,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& site.name.span == reference.span
             &&& site.name.word.spec_bytes() == site.source.text.spec_bytes()[reference.span.start as int..reference.span.end as int]
             &&& exists|from: Option<&str>| #[trigger] self.scope_matches(file, site.block, Ok(from))
-                && self.binding_evidence(file, site, from, parsed.syntax.forms@[reference.form as int]->Atom_kind, binding)
+                && self.binding_evidence(file, site.request_model(), from, parsed.syntax.forms@[reference.form as int]->Atom_kind, binding)
         }
     }
 
@@ -439,7 +485,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             proof { assert(false); }
             unreachable!();
         };
-        match self.resolve_definition_binding(file, &site, from, *atom_kind) {
+        match self.resolve_scoped_binding(file, &site.request(), from, *atom_kind) {
             Ok(binding) => Ok(ResolvedDefinitionReference { site, binding }),
             Err(reason) => Err(DefinitionReferenceError::Rejected { site, reason }),
         }

@@ -134,7 +134,7 @@ pub closed spec fn circuit_index_matches(source: &str, forms: Seq<Form>, entries
 }
 
 /// 検証済みの索引項目の位置と種別を、回路文法の認識関係に結び付ける。
-pub(super) proof fn indexed_entry_evidence(
+pub proof fn indexed_entry_evidence(
     source: &str, forms: Seq<Form>, entries: Seq<Entry>, index: int,
 )
     requires
