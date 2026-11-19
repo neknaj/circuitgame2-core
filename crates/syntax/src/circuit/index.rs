@@ -115,12 +115,14 @@ pub(super) proof fn reject_circuit_syntax(source: &str, error: Error)
 {
 }
 
-/// 余分な閉じ括弧、区切りの欠落、不正な裸のアトムを報告したとき、厳格な回路索引のエラー値が一致する。
+/// 余分な閉じ括弧、区切りの欠落、不正な裸のアトム、未閉鎖リストを報告したとき、
+/// 厳格な回路索引のエラー値が一致する。
 pub proof fn circuit_token_errors_agree(source: &str, left: CircuitFormError, right: CircuitFormError)
     requires
         circuit_source_error(source, left), circuit_source_error(source, right),
         left matches CircuitFormError::Syntax(error)
-            && (error.kind is UnexpectedClose || error.kind is MissingSeparator || error.kind is InvalidAtom),
+            && (error.kind is UnexpectedClose || error.kind is MissingSeparator || error.kind is InvalidAtom
+                || error.kind is UnclosedList),
     ensures left == right,
 {
     let a = left->Syntax_0;

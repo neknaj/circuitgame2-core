@@ -83,6 +83,37 @@ pub(super) proof fn model_advances(
     reveal(form_model_prefix);
 }
 
+proof fn model_prefix_preserved(lexemes: Seq<Lexeme>, next: Seq<Lexeme>, count: int)
+    requires
+        0 <= count <= lexemes.len() <= next.len(),
+        next.take(lexemes.len() as int) == lexemes,
+    ensures form_model_prefix(lexemes, count) == form_model_prefix(next, count),
+    decreases count,
+{
+    reveal(form_model_prefix);
+    if count > 0 {
+        model_prefix_preserved(lexemes, next, count - 1);
+        assert(next[count - 1] == lexemes[count - 1]);
+    }
+}
+
+/// 構文モデルの末尾に字句を一つ追加して、その字句を処理した状態を得る。
+pub(super) proof fn model_appends(
+    lexemes: Seq<Lexeme>, lexeme: Lexeme, before: Seq<Form>, before_open: Seq<usize>,
+    forms: Seq<Form>, open: Seq<usize>,
+)
+    requires
+        model_matches(lexemes, lexemes.len() as int, before, before_open),
+        apply_lexeme(before, before_open, lexeme) == (forms, open),
+    ensures model_matches(lexemes.push(lexeme), lexemes.len() as int + 1, forms, open),
+{
+    let next = lexemes.push(lexeme);
+    assert(next.take(lexemes.len() as int) =~= lexemes);
+    model_prefix_preserved(lexemes, next, lexemes.len() as int);
+    reveal(model_matches);
+    model_advances(next, lexemes.len() as int, before, before_open, forms, open);
+}
+
 pub(super) proof fn model_finishes(
     source: &str, witness: InputDerivation, forms: Seq<Form>, open: Seq<usize>,
 )

@@ -1765,7 +1765,11 @@ proof fn record_input_segment(
         next_needs_separator == segment.kind.is_atom(),
         new_depth == old_depth + segment_parenthesis_delta(segment.kind),
         new_depth >= 0,
-    ensures lexical::scanned_input_prefix(bytes, next, segment.span.end as int, next_needs_separator, new_depth),
+    ensures
+        lexical::scanned_input_prefix(bytes, next, segment.span.end as int, next_needs_separator, new_depth),
+        next.lexemes == prefix.lexemes.push(Lexeme {
+            start: segment.span.start as int, end: segment.span.end as int, kind: segment_lexeme(segment.kind)->Some_0,
+        }),
 {
     reveal(lexical_step_agrees);
     let observed = segment_lexeme(segment.kind);
@@ -1919,6 +1923,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     let ghost mut input_prefix;
     proof {
         input_prefix = lexical::empty_scanned_input(source.spec_bytes());
+        form_model::model_starts(input_prefix.lexemes, forms@, open@);
         derivation = lexical::choose_input_derivation(source);
         if derivation is Some {
             lexical::input_starts(source.spec_bytes(), derivation->Some_0);
@@ -1947,6 +1952,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 lexer.cursor.position(), lexer.needs_separator),
             !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
                 lexer.cursor.position(), lexer.needs_separator, open@.len() as int),
+            !recovering ==> form_model::model_matches(input_prefix.lexemes, input_prefix.lexemes.len() as int, forms@, open@),
             no_inserted_closes(repairs@),
             repair_input_spans_valid(source, repairs@, lexer.cursor.position()),
             form_spans_valid(source, forms@, lexer.cursor.position()),
@@ -1971,6 +1977,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             !recovering ==> strict_source_covered(source, forms@),
             !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
                 length as int, lexer.needs_separator, open@.len() as int),
+            !recovering ==> form_model::model_matches(input_prefix.lexemes, input_prefix.lexemes.len() as int, forms@, open@),
             well_formed_sexpr(source) ==> open@.len() == 0 && repairs@.len() == 0
                 && sexpr_form_model(source) == Some(forms@),
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
@@ -2001,6 +2008,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 Some(follow_input_derivation(source.spec_bytes(), derivation->Some_0, spans.len() as int,
                     lexer.cursor.position(), lexer.needs_separator, open@.len() as int,
                     segment, next.needs_separator))
+            } else if !recovering {
+                match segment_lexeme(segment.kind) {
+                    Some(kind) => Some(Lexeme { start: segment.span.start as int, end: segment.span.end as int, kind }),
+                    None => None,
+                }
             } else {
                 None
             };
@@ -2225,6 +2237,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 assert(open@.len() == previous_open + segment_parenthesis_delta(scanned_segment.kind));
             }
             if !recovering {
+                assert(expected is Some);
+                form_model::model_appends(input_prefix.lexemes, expected->Some_0, old_forms, old_open, forms@, open@);
                 input_prefix = record_input_segment(source.spec_bytes(), input_prefix, scanned_segment,
                     previous_needs_separator, previous_open as int, lexer.needs_separator, open@.len() as int);
             }
@@ -2241,10 +2255,12 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             !recovering ==> strict_source_covered(source, forms@),
             !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
                 length as int, lexer.needs_separator, open@.len() as int),
+            !recovering ==> form_model::model_matches(input_prefix.lexemes, input_prefix.lexemes.len() as int, forms@, open@),
             well_formed_sexpr(source) ==> open@.len() == 0 && repairs@.len() == 0
                 && sexpr_form_model(source) == Some(forms@),
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
             length == source.spec_bytes().len(),
+            valid_utf8(source.spec_bytes()),
             is_char_boundary(source.spec_bytes(), length as int),
             form_spans_valid(source, forms@, length as int),
             inserted_closes_match(source, forms@, repairs@),
@@ -2294,7 +2310,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     assert(list_delimited(source.spec_bytes(), forms@[index as int], recovering));
                 };
                 parser_error_evidence(source, error);
-                strict_error::record_unclosed_list(source, error, input_prefix, lexer.needs_separator, previous.len() as int);
+                assert(index == previous.last());
+                strict_error::record_unclosed_list(source, error, input_prefix, lexer.needs_separator, forms@, previous);
             }
             return Err(error);
         }

@@ -316,7 +316,7 @@ pub(super) open spec fn scanned_input_prefix(
 }
 
 pub(super) proof fn empty_scanned_input(bytes: Seq<u8>) -> (prefix: InputDerivation)
-    ensures scanned_input_prefix(bytes, prefix, 0, false, 0),
+    ensures scanned_input_prefix(bytes, prefix, 0, false, 0), prefix.lexemes.len() == 0,
 {
     reveal(scanned_input_prefix);
     InputDerivation { lexemes: Seq::empty(), depths: seq![0int] }
@@ -333,6 +333,7 @@ pub(super) proof fn record_scanned_input(
     ensures
         scanned_input_prefix(bytes, next, lexeme.end, lexeme.kind is Atom,
             old_depth + parenthesis_delta(lexeme.kind)),
+        next.lexemes == prefix.lexemes.push(lexeme),
 {
     reveal(scanned_input_prefix);
     let count = prefix.lexemes.len() as int;

@@ -1,10 +1,12 @@
 //! 厳格解析が最初に入力を拒否する位置を定める。
 
 use super::lexical::{input_lexeme_valid, lexeme_at, lexemes_agree, scanned_input_prefix};
-use super::{Error, ErrorKind, InputDerivation, Lexeme, LexemeKind, bare_atom_delimiter,
-    bare_atom_extent, structural_error_location};
+use super::form_model::{form_model_prefix, model_matches};
+use super::{Error, ErrorKind, Form, InputDerivation, Lexeme, LexemeKind, bare_atom_delimiter,
+    bare_atom_extent, form_span, structural_error_location};
 use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
+use core::ops::Range;
 
 verus! {
 
@@ -16,12 +18,22 @@ pub(super) open spec fn malformed_atom_extent(bytes: Seq<u8>, at: int, error: Er
     }
 }
 
-spec fn rejection_at(bytes: Seq<u8>, at: int, needs_separator: bool, depth: int, error: Error) -> bool {
+spec fn unclosed_opening(lexemes: Seq<Lexeme>) -> Option<Range<usize>> {
+    let (forms, open) = form_model_prefix(lexemes, lexemes.len() as int);
+    if open.len() > 0 && open.last() < forms.len() && forms[open.last() as int] is List {
+        Some(form_span(forms[open.last() as int]))
+    } else {
+        None
+    }
+}
+
+spec fn rejection_at(bytes: Seq<u8>, prefix: InputDerivation, at: int, needs_separator: bool, depth: int, error: Error) -> bool {
     let no_lexeme = forall|end: int, kind: LexemeKind| !#[trigger] lexeme_at(bytes, at, end, kind);
     match error.kind {
         ErrorKind::UnexpectedClose => depth == 0 && error.span.start == at
             && lexeme_at(bytes, at, error.span.end as int, LexemeKind::Close),
-        ErrorKind::UnclosedList { eof } => at == bytes.len() == eof && depth > 0,
+        ErrorKind::UnclosedList { eof } => at == bytes.len() == eof && depth > 0
+            && unclosed_opening(prefix.lexemes) == Some(error.span),
         ErrorKind::MissingSeparator => 0 <= at < bytes.len() && needs_separator && error.span.start == at
             && (forall|end: int, kind: LexemeKind| #[trigger] lexeme_at(bytes, at, end, kind) ==> kind is Atom),
         _ => 0 <= at < bytes.len() && !needs_separator && no_lexeme && malformed_atom_extent(bytes, at, error),
@@ -30,12 +42,13 @@ spec fn rejection_at(bytes: Seq<u8>, at: int, needs_separator: bool, depth: int,
 
 /// 厳格解析が診断を選ぶまでに受理した字句と、その直後の拒否条件を表す。
 ///
-/// 未閉鎖リストの開き位置と文字列内部の違反には、別途 `syntax_error_evidence` が根拠を与える。
+/// 未閉鎖リストでは、入力末尾まで開いているリストのうち、最も内側の開き括弧を指す。
+/// 文字列内部の違反には、別途 `syntax_error_evidence` が根拠を与える。
 pub closed spec fn strict_syntax_rejection(source: &str, error: Error) -> bool {
     let bytes = source.spec_bytes();
     exists|prefix: InputDerivation, at: int, needs_separator: bool, depth: int|
         #[trigger] scanned_input_prefix(bytes, prefix, at, needs_separator, depth)
-        && rejection_at(bytes, at, needs_separator, depth, error)
+        && rejection_at(bytes, prefix, at, needs_separator, depth, error)
 }
 
 pub(super) proof fn record_unexpected_close(
@@ -49,7 +62,7 @@ pub(super) proof fn record_unexpected_close(
     ensures strict_syntax_rejection(source, error),
 {
     reveal(lexeme_at);
-    assert(rejection_at(source.spec_bytes(), error.span.start as int, needs_separator, 0, error));
+    assert(rejection_at(source.spec_bytes(), prefix, error.span.start as int, needs_separator, 0, error));
 }
 
 pub(super) proof fn record_missing_separator(
@@ -63,7 +76,7 @@ pub(super) proof fn record_missing_separator(
             ==> kind is Atom,
     ensures strict_syntax_rejection(source, error),
 {
-    assert(rejection_at(source.spec_bytes(), error.span.start as int, true, depth, error));
+    assert(rejection_at(source.spec_bytes(), prefix, error.span.start as int, true, depth, error));
 }
 
 pub(super) proof fn record_malformed_atom(
@@ -77,19 +90,23 @@ pub(super) proof fn record_malformed_atom(
         malformed_atom_extent(source.spec_bytes(), at, error),
     ensures strict_syntax_rejection(source, error),
 {
-    assert(rejection_at(source.spec_bytes(), at, false, depth, error));
+    assert(rejection_at(source.spec_bytes(), prefix, at, false, depth, error));
 }
 
 pub(super) proof fn record_unclosed_list(
-    source: &str, error: Error, prefix: InputDerivation, needs_separator: bool, depth: int,
+    source: &str, error: Error, prefix: InputDerivation, needs_separator: bool, forms: Seq<Form>, open: Seq<usize>,
 )
     requires
         error.kind matches ErrorKind::UnclosedList { eof } && eof == source.spec_bytes().len(),
-        depth > 0,
-        scanned_input_prefix(source.spec_bytes(), prefix, source.spec_bytes().len() as int, needs_separator, depth),
+        open.len() > 0, open.last() < forms.len(),
+        forms[open.last() as int] is List,
+        error.span == form_span(forms[open.last() as int]),
+        model_matches(prefix.lexemes, prefix.lexemes.len() as int, forms, open),
+        scanned_input_prefix(source.spec_bytes(), prefix, source.spec_bytes().len() as int, needs_separator, open.len() as int),
     ensures strict_syntax_rejection(source, error),
 {
-    assert(rejection_at(source.spec_bytes(), source.spec_bytes().len() as int, needs_separator, depth, error));
+    reveal(model_matches);
+    assert(rejection_at(source.spec_bytes(), prefix, source.spec_bytes().len() as int, needs_separator, open.len() as int, error));
 }
 
 proof fn preceding_lexemes_agree(bytes: Seq<u8>, a: InputDerivation, b: InputDerivation, count: int)
@@ -121,7 +138,7 @@ proof fn rejected_prefix_cannot_be_shorter(
     requires
         scanned_input_prefix(bytes, a, a_stop, a_separator, a_depth),
         scanned_input_prefix(bytes, b, b_stop, b_separator, b_depth),
-        rejection_at(bytes, a_stop, a_separator, a_depth, error),
+        rejection_at(bytes, a, a_stop, a_separator, a_depth, error),
     ensures a.lexemes.len() >= b.lexemes.len(),
 {
     reveal(scanned_input_prefix);
@@ -160,21 +177,21 @@ proof fn bare_extents_agree(bytes: Seq<u8>, start: int, a_end: int, b_end: int)
     }
 }
 
-/// 厳格解析の一方が余分な閉じ括弧、区切りの欠落、不正な裸のアトムのいずれかを報告した場合、
-/// 同じ入力の他方でもエラー値が一致する。
+/// 厳格解析の一方が余分な閉じ括弧、区切りの欠落、不正な裸のアトム、未閉鎖リストの
+/// いずれかを報告した場合、同じ入力の他方でもエラー値が一致する。
 pub proof fn strict_token_errors_agree(source: &str, left: Error, right: Error)
     requires strict_syntax_rejection(source, left), strict_syntax_rejection(source, right),
         structural_error_location(source, left), structural_error_location(source, right),
-        left.kind is UnexpectedClose || left.kind is MissingSeparator || left.kind is InvalidAtom,
+        left.kind is UnexpectedClose || left.kind is MissingSeparator || left.kind is InvalidAtom || left.kind is UnclosedList,
     ensures left == right,
 {
     let bytes = source.spec_bytes();
     let (a, a_stop, a_separator, a_depth) = choose|prefix: InputDerivation, at: int, needs_separator: bool, depth: int|
         #[trigger] scanned_input_prefix(bytes, prefix, at, needs_separator, depth)
-            && rejection_at(bytes, at, needs_separator, depth, left);
+            && rejection_at(bytes, prefix, at, needs_separator, depth, left);
     let (b, b_stop, b_separator, b_depth) = choose|prefix: InputDerivation, at: int, needs_separator: bool, depth: int|
         #[trigger] scanned_input_prefix(bytes, prefix, at, needs_separator, depth)
-            && rejection_at(bytes, at, needs_separator, depth, right);
+            && rejection_at(bytes, prefix, at, needs_separator, depth, right);
     rejected_prefix_cannot_be_shorter(bytes, a, a_stop, a_separator, a_depth, left, b, b_stop, b_separator, b_depth);
     rejected_prefix_cannot_be_shorter(bytes, b, b_stop, b_separator, b_depth, right, a, a_stop, a_separator, a_depth);
     reveal(scanned_input_prefix);
@@ -191,9 +208,17 @@ pub proof fn strict_token_errors_agree(source: &str, left: Error, right: Error)
             assert(LexemeKind::Close is Atom);
         }
         assert(right.kind is MissingSeparator);
-    } else {
+    } else if left.kind is InvalidAtom {
         assert(right.kind is InvalidAtom) by { reveal(bare_atom_extent); };
         bare_extents_agree(bytes, a_stop, left.span.end as int, right.span.end as int);
+    } else {
+        assert(right.kind is UnclosedList) by { reveal(lexeme_at); };
+        assert(a.lexemes =~= b.lexemes) by {
+            assert forall|i: int| 0 <= i < a.lexemes.len()
+                implies a.lexemes[i] == b.lexemes[i] by {
+                preceding_lexemes_agree(bytes, a, b, i + 1);
+            };
+        };
     }
 }
 
