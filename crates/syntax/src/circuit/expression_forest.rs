@@ -259,6 +259,15 @@ pub closed spec fn expression_signals(source: &str, forms: Seq<Form>, start: int
     }
 }
 
+pub(super) proof fn bare_signal_index(source: &str, forms: Seq<Form>, first: int, end: int)
+    requires
+        0 <= first < end <= forms.len() <= usize::MAX, end == first + 1,
+        forms[first] is Atom, forms[first]->Atom_kind is Name,
+    ensures expression_signals(source, forms, first, end) == seq![first as usize],
+{
+    reveal_with_fuel(expression_signals, 2);
+}
+
 pub(super) proof fn expression_signal_evidence(
     source: &str, forms: Seq<Form>, start: int, stop: int, position: int,
 )

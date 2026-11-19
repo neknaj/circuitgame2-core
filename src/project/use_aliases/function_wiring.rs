@@ -11,10 +11,13 @@ use crate::project::circuits::read_indexed_atom;
 use crate::project::circuits::{name_in_source, parsed_circuit_matches, parsed_index_evidence};
 use crate::project::signatures::first_matching_name;
 use crate::project::{LocatedName, ProjectSource};
+#[cfg(verus_only)]
+use crate::project::location_in_source;
 use crate::syntax::circuit::{NameSite, NamedBuildCircuit};
 #[cfg(verus_only)]
 use crate::syntax::{
-    circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, build_signal_cursor_evidence, build_signal_evidence},
+    circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, build_signal_cursor_evidence, build_signal_evidence,
+        build_signal_owner_unique},
     form_span,
 };
 use alloc::vec::Vec;
@@ -300,6 +303,63 @@ fn bind_signals<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn checked_signal_driver(
+        &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring, definition: usize, position: usize,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+            ({
+                let project = self.targets.project_model();
+                let parsed = project.circuits_model()[file as int];
+                let frame = parsed.entry_ranges@[entry as int].definitions;
+                &&& file < project.circuits_model().len()
+                &&& entry < parsed.syntax.entries@.len() && entry < parsed.entry_ranges@.len()
+                &&& frame.start <= definition < frame.end <= parsed.definitions@.len()
+                &&& parsed.definitions@[definition as int].signals.start <= position
+                    < parsed.definitions@[definition as int].signals.end
+            }),
+        ensures ({
+            let project = self.targets.project_model();
+            let parsed = project.circuits_model()[file as int];
+            let source = project.sources_model()[file as int];
+            let first = parsed.entry_ranges@[entry as int].signals.start;
+            let bound = wiring.signals@[position - first];
+            &&& first <= position && position - first < wiring.signals@.len()
+            &&& bound.definition == definition
+            &&& *bound.site.source == source && location_in_source(bound.site)
+            &&& bound.site.span == form_span(parsed.syntax.forms@[parsed.signals@[position as int] as int])
+            &&& match bound.driver {
+                OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
+                OutputDriver::Definition(i) => i < wiring.drivers.definitions@.len()
+                    && wiring.drivers.definitions@[i as int].definition < definition,
+            }
+        }),
+    {
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*source, *parsed);
+        let model = parsed.build_model();
+        build_definition_scope_evidence(source.text, &model, entry as int, definition as int);
+        let (drivers, inputs) = choose|drivers: FuncDrivers, inputs: Seq<NameSite>|
+            #[trigger] self.func_driver_evidence(file, entry, limit, Ok(FuncDriverResult::Checked(drivers)))
+                && #[trigger] names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs)
+                && inputs.len() == drivers.signature.inputs@.len()
+                && wiring.drivers == drivers
+                && signal_sequence_result(source, parsed, entry as int, inputs, drivers.definitions@, Ok(wiring.signals));
+        reveal(bound_prefix);
+        let first = parsed.entry_ranges@[entry as int].signals.start;
+        let bound = wiring.signals@[position - first];
+        let name = choose|name: NameSite|
+            #[trigger] signal_site(source, parsed, entry as int, position as int, bound.definition, name)
+                && is_location(source, name, bound.site)
+                && local_binding(inputs, drivers.definitions@, bound.definition, name, bound.driver);
+        build_signal_owner_unique(source.text, &model, entry as int, definition as int,
+            bound.definition as int, position as int);
+    }
+
     pub(super) proof fn checked_wiring_is_func(
         &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiring,
     )

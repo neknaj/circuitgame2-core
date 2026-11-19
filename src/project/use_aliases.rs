@@ -4,6 +4,7 @@ mod batch;
 mod call_arity;
 mod definitions;
 mod function_drivers;
+mod function_atoms;
 mod function_literals;
 mod function_wiring;
 mod port_types;
@@ -18,6 +19,7 @@ pub use function_drivers::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };
 pub use function_literals::{FuncLiteralError, FuncLiteralWidths};
+pub use function_atoms::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use function_wiring::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };

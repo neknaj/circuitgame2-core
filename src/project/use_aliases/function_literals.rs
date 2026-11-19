@@ -57,7 +57,7 @@ pub enum FuncLiteralError<'p, 'a> {
 }
 
 #[verifier::opaque]
-spec fn output_indices(drivers: &FuncDrivers, prefix: int, map: Seq<Option<usize>>) -> bool {
+pub(super) open spec fn output_indices(drivers: &FuncDrivers, prefix: int, map: Seq<Option<usize>>) -> bool {
     &&& 0 <= prefix <= drivers.outputs@.len()
     &&& map.len() == drivers.definitions@.len()
     &&& forall|driver: int| 0 <= driver < map.len() ==> {
@@ -69,11 +69,11 @@ spec fn output_indices(drivers: &FuncDrivers, prefix: int, map: Seq<Option<usize
     }
 }
 
-spec fn drives_result(output: OutputDriver, driver: int) -> bool {
+pub(super) open spec fn drives_result(output: OutputDriver, driver: int) -> bool {
     output matches OutputDriver::Definition(index) && index == driver
 }
 
-fn index_outputs(drivers: &FuncDrivers) -> (map: Vec<Option<usize>>)
+pub(super) fn index_outputs(drivers: &FuncDrivers) -> (map: Vec<Option<usize>>)
     requires
         forall|i: int| 0 <= i < drivers.outputs@.len() && (#[trigger] drivers.outputs@[i]) is Definition
             ==> drivers.outputs@[i]->Definition_0 < drivers.definitions@.len(),
@@ -295,6 +295,15 @@ fn check_literals<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn literals_preserve_arity(
+        &self, file: usize, entry: usize, limit: u64, literals: FuncLiteralWidths,
+    )
+        requires self.func_literal_evidence(file, entry, limit, Ok(literals)),
+        ensures self.func_arity_evidence(file, entry, limit, Ok(literals.wiring)),
+            literals.wiring matches FuncWiringResult::Checked(wiring) ==>
+                literals.widths@.len() == wiring.drivers.definitions@.len(),
+    {
+    }
     /// 定数だけを対象とした幅の検査が、出力の駆動元と元ソースに対応することを表す。
     pub closed spec fn func_literal_evidence(
         &self, file: usize, entry: usize, limit: u64, result: Result<FuncLiteralWidths, FuncLiteralError>,

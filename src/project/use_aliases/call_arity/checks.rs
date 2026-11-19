@@ -5,25 +5,21 @@ use super::{DefinitionReferenceError, FuncCallTarget, UseAliases};
 use super::FuncCallArity;
 #[cfg(verus_only)]
 use super::super::definitions::definition_count;
-use crate::project::{FuncWiringError, FuncWiringResult, LocatedName, ProjectSource};
+use crate::project::{FuncWiringError, FuncWiringResult, LocatedName};
 #[cfg(verus_only)]
-use crate::project::DefinitionPosition;
+use crate::project::{DefinitionPosition, ProjectSource};
 #[cfg(verus_only)]
-use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
-#[cfg(verus_only)]
-use crate::project::declarations::located_name_evidence;
+use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence};
+use crate::project::circuits::form_location;
 #[cfg(verus_only)]
 use crate::project::location_in_source;
-use crate::syntax::{Form, circuit::{definition_root_is_call, definition_target_atoms}};
+use crate::syntax::circuit::{definition_root_is_call, definition_target_atoms};
 #[cfg(verus_only)]
 use crate::syntax::{
     circuit::{BuildDefinition, NamedBuildCircuit, build_definition_scope_evidence,
         build_entry_ranges_evidence, definition_target_range, ordinary_call_at},
-    form_span, form_spans_valid,
 };
 use vstd::prelude::*;
-#[cfg(verus_only)]
-use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -67,30 +63,6 @@ spec fn at_definition(parsed: &NamedBuildCircuit, entry: int, definition: int) -
 spec fn target_count(parsed: &NamedBuildCircuit, row: BuildDefinition) -> int {
     let (start, end) = definition_target_range(parsed.syntax.forms@, row);
     end - start
-}
-
-spec fn is_form_location(source: &ProjectSource, form: Form, loc: LocatedName) -> bool {
-    *loc.source == *source && loc.span == form_span(form) && location_in_source(loc)
-}
-
-fn form_location<'p, 'a>(source: &'p ProjectSource<'a>, forms: &[Form], index: usize)
-    -> (loc: LocatedName<'p, 'a>)
-    requires
-        index < forms@.len(),
-        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
-    ensures is_form_location(source, forms@[index as int], loc),
-{
-    let source_span = match &forms[index] {
-        Form::Atom { span: atom, .. } => atom,
-        Form::List { span: list, .. } => list,
-    };
-    let loc = LocatedName { source, span: source_span.start..source_span.end };
-    proof {
-        reveal(form_spans_valid);
-        assert(loc.span == form_span(forms@[index as int]));
-        located_name_evidence(loc);
-    }
-    loc
 }
 
 spec fn root_count_valid(source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition) -> bool {

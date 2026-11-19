@@ -6,7 +6,9 @@ use super::index::index_parsed_headers_into;
 #[cfg(verus_only)]
 use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_syntax};
 #[cfg(verus_only)]
-use super::expression_forest::{expression_forest, expression_references, expression_signal_evidence, expression_signals};
+use super::expression_forest::{
+    bare_signal_index, expression_forest, expression_references, expression_signal_evidence, expression_signals,
+};
 use super::*;
 
 verus! {
@@ -288,6 +290,78 @@ pub proof fn build_signal_evidence(
     vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
     expression_signal_evidence(source, index.syntax.forms@, row.expression.start as int,
         row.expression.end as int, offset);
+}
+
+/// 右辺全体が裸の名前なら、その定義の信号索引に当該アトムだけが含まれることを示す。
+pub proof fn build_bare_signal_position(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int,
+)
+    requires
+        build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
+        entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition
+            < index.entry_ranges@[entry].definitions.end <= index.definitions@.len(),
+        ({
+            let first = index.definitions@[definition].expression.start as int;
+            first < index.syntax.forms@.len() && index.syntax.forms@[first] is Atom
+                && index.syntax.forms@[first]->Atom_kind is Name
+        }),
+    ensures ({
+        let frame = index.entry_ranges@[entry].signals;
+        let row = index.definitions@[definition];
+        &&& frame.start <= row.signals.start < row.signals.end <= frame.end <= index.signals@.len()
+        &&& row.signals.end == row.signals.start + 1
+        &&& index.signals@[row.signals.start as int] == row.expression.start
+    }),
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    let row = index.definitions@[definition];
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    bare_signal_index(source, index.syntax.forms@, row.expression.start as int, row.expression.end as int);
+    let start = row.signals.start as int;
+    let end = row.signals.end as int;
+    let positions = index.signals@[start..end];
+    assert(positions == seq![row.expression.start]);
+    assert(positions.len() == end - start);
+    assert(positions[0] == index.signals@[start]);
+}
+
+proof fn signal_ranges_ordered(source: &str, index: &BuildCircuitIndex, entry: int, left: int, right: int)
+    requires
+        build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
+        entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= left < right < index.entry_ranges@[entry].definitions.end,
+    ensures index.definitions@[left].signals.end <= index.definitions@[right].signals.start,
+    decreases right - left,
+{
+    build_signal_cursor_evidence(source, index, entry, right);
+    build_definition_scope_evidence(source, index, entry, right - 1);
+    if left + 1 < right {
+        signal_ranges_ordered(source, index, entry, left, right - 1);
+    }
+}
+
+/// 一つの信号配列の添字は、同じ索引項目内の一つの定義にだけ属することを示す。
+pub proof fn build_signal_owner_unique(
+    source: &str, index: &BuildCircuitIndex, entry: int, first: int, other: int, position: int,
+)
+    requires
+        build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
+        entry < index.entry_ranges@.len(),
+        ({
+            let frame = index.entry_ranges@[entry].definitions;
+            frame.start <= first < frame.end && frame.start <= other < frame.end
+                && frame.end <= index.definitions@.len()
+        }),
+        index.definitions@[first].signals.start <= position < index.definitions@[first].signals.end,
+        index.definitions@[other].signals.start <= position < index.definitions@[other].signals.end,
+    ensures first == other,
+{
+    if first < other {
+        signal_ranges_ordered(source, index, entry, first, other);
+    } else if other < first {
+        signal_ranges_ordered(source, index, entry, other, first);
+    }
 }
 
 /// 平坦な定義行の左辺が、元の構文木にある名前または名前のリストに対応することを表す。

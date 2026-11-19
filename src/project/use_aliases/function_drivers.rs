@@ -454,6 +454,12 @@ pub(super) open spec fn expected_output_context(
         let port = #[trigger] drivers.signature.outputs@[i];
         *port.annotation.source == *source && location_in_source(port.annotation)
     }
+    &&& forall|i: int| 0 <= i < drivers.signature.inputs@.len() ==> {
+        let port = #[trigger] drivers.signature.inputs@[i];
+        *port.annotation.source == *source && location_in_source(port.annotation)
+    }
+    &&& forall|i: int, j: int| 0 <= i < j < drivers.definitions@.len()
+        ==> (#[trigger] drivers.definitions@[i]).definition <= (#[trigger] drivers.definitions@[j]).definition
 }
 
 spec fn after_collecting_names(
@@ -532,6 +538,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     name_in_source(source.text, driver.name)
                         && frame.start <= driver.definition < frame.end <= parsed.definitions@.len()
                 })
+            &&& forall|i: int, j: int| 0 <= i < j < checked.definitions@.len()
+                ==> (#[trigger] checked.definitions@[i]).definition <= (#[trigger] checked.definitions@[j]).definition
         }),
     {
         reveal(UseAliases::func_driver_evidence);

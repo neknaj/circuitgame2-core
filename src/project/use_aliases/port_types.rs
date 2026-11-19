@@ -324,6 +324,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 *port.annotation.source == project.sources_model()[file as int]
                     && location_in_source(port.annotation)
             }
+            &&& forall|i: int| 0 <= i < typed.inputs@.len() ==> {
+                let port = #[trigger] typed.inputs@[i];
+                *port.annotation.source == project.sources_model()[file as int]
+                    && location_in_source(port.annotation)
+            }
         }),
     {
         let project = &self.targets.project_model();
@@ -340,6 +345,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             *port.annotation.source == project.sources_model()[file as int] && location_in_source(port.annotation)
         } by {
             assert(self.typed_port_evidence(&context, signature.ports.outputs@[i], typed.outputs@[i]));
+        };
+        assert forall|i: int| 0 <= i < typed.inputs@.len() implies {
+            let port = #[trigger] typed.inputs@[i];
+            *port.annotation.source == project.sources_model()[file as int] && location_in_source(port.annotation)
+        } by {
+            assert(self.typed_port_evidence(&context, signature.ports.inputs@[i], typed.inputs@[i]));
         };
     }
 

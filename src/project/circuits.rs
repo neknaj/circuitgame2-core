@@ -6,11 +6,11 @@ use super::sources::{
     first_source_input, snapshot_matches,
 };
 use super::{
-    ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources,
+    LocatedName, ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources,
 };
 #[cfg(verus_only)]
 use super::{
-    normalized_path, project_sources_match, source_kind_of, source_set_error,
+    location_in_source, normalized_path, project_sources_match, source_kind_of, source_set_error,
     valid_source_snapshots,
 };
 use crate::syntax::Form;
@@ -190,6 +190,30 @@ impl<'a> CircuitProject<'a> {
     pub open spec fn matches(&self, inputs: Seq<SourceSnapshot>) -> bool {
         project_sources_match(inputs, self.sources_model()) && self.has_parsed_sources()
     }
+}
+
+pub(super) open spec fn is_form_location(source: &ProjectSource, form: Form, loc: LocatedName) -> bool {
+    *loc.source == *source && loc.span == form_span(form) && location_in_source(loc)
+}
+
+pub(super) fn form_location<'p, 'a>(source: &'p ProjectSource<'a>, forms: &[Form], index: usize)
+    -> (loc: LocatedName<'p, 'a>)
+    requires
+        index < forms@.len(),
+        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+    ensures is_form_location(source, forms@[index as int], loc),
+{
+    let source_span = match &forms[index] {
+        Form::Atom { span: atom, .. } => atom,
+        Form::List { span: list, .. } => list,
+    };
+    let loc = LocatedName { source, span: source_span.start..source_span.end };
+    proof {
+        reveal(form_spans_valid);
+        assert(loc.span == form_span(forms@[index as int]));
+        super::declarations::located_name_evidence(loc);
+    }
+    loc
 }
 
 pub(super) open spec fn name_in_source(text: &str, name: NameSite) -> bool {
