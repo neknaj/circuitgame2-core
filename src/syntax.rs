@@ -126,7 +126,7 @@ impl<'a> Lexer<'a> {
                         && self.cursor.source.spec_bytes()[segment.span.start as int] == 40)
                     &&& (segment.kind is Close ==> segment.span.end == segment.span.start + 1
                         && self.cursor.source.spec_bytes()[segment.span.start as int] == 41)
-                    &&& (segment.kind is Malformed ==> atom_and_close_error_evidence(
+                    &&& (segment.kind is Malformed ==> syntax_error_evidence(
                         self.cursor.source, segment.kind->Malformed_0))
                     &&& next.needs_separator == segment.kind.is_atom()
                     &&& segment.missing_separator == (self.needs_separator && segment.kind.is_atom())
@@ -159,8 +159,8 @@ impl<'a> Lexer<'a> {
                 true,
             ),
         };
-        assert(kind is Malformed ==> atom_and_close_error_evidence(self.cursor.source, kind->Malformed_0))
-            by { reveal(atom_and_close_error_evidence); };
+        assert(kind is Malformed ==> syntax_error_evidence(self.cursor.source, kind->Malformed_0))
+            by { reveal(syntax_error_evidence); reveal(atom_and_close_error_evidence); };
         let missing_separator = self.needs_separator && is_atom;
         Some((
             Segment { kind, span, missing_separator },
@@ -220,7 +220,7 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
             Ok(forms) => complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, false)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-            Err(error) => atom_and_close_error_evidence(source, error),
+            Err(error) => syntax_error_evidence(source, error),
         },
 {
     match parse_forms(source, false) {
@@ -643,6 +643,38 @@ pub open spec fn atom_and_close_error_evidence(source: &str, error: Error) -> bo
     }
 }
 
+pub open spec fn string_error_opening(kind: ErrorKind, span: Range<usize>) -> Option<usize> {
+    match kind {
+        ErrorKind::InvalidEscape { opening } | ErrorKind::NewlineInString { opening } => Some(opening),
+        ErrorKind::UnterminatedString => Some(span.start),
+        _ => None,
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn syntax_error_evidence(source: &str, error: Error) -> bool {
+    &&& atom_and_close_error_evidence(source, error)
+    &&& match string_error_opening(error.kind, error.span) {
+        Some(opening) => opening < source.spec_bytes().len()
+            && string_error_site(source.spec_bytes()[opening as int..], opening as int, error),
+        None => true,
+    }
+}
+
+proof fn parser_error_evidence(source: &str, error: Error)
+    requires
+        error.kind is MissingSeparator || error.kind is UnclosedList || (
+            error.kind is UnexpectedClose
+            && error.span.end == error.span.start + 1
+            && error.span.end <= source.spec_bytes().len()
+            && source.spec_bytes()[error.span.start as int] == 41
+        ),
+    ensures syntax_error_evidence(source, error),
+{
+    reveal(syntax_error_evidence);
+    reveal(atom_and_close_error_evidence);
+}
+
 pub open spec fn repair_input_span(repair: Repair) -> Option<(int, int)> {
     match repair {
         Repair::Skipped { span, .. } => Some((span.start as int, span.end as int)),
@@ -658,7 +690,7 @@ pub open spec fn repair_input_spans_valid(source: &str, repairs: Seq<Repair>, co
         Some((start, end)) => {
             &&& 0 <= start <= end <= consumed
             &&& (repairs[i] is Skipped ==> start < end
-                && atom_and_close_error_evidence(source, repairs[i]->Skipped_error))
+                && syntax_error_evidence(source, repairs[i]->Skipped_error))
             &&& is_char_boundary(source.spec_bytes(), start)
             &&& is_char_boundary(source.spec_bytes(), end)
         },
@@ -689,7 +721,7 @@ proof fn repair_spans_append(source: &str, repairs: Seq<Repair>, repair: Repair,
             Some((start, end)) => {
                 &&& before <= start <= end <= after
                 &&& (repair is Skipped ==> start < end
-                    && atom_and_close_error_evidence(source, repair->Skipped_error))
+                    && syntax_error_evidence(source, repair->Skipped_error))
                 &&& is_char_boundary(source.spec_bytes(), start)
                 &&& is_char_boundary(source.spec_bytes(), end)
             },
@@ -703,7 +735,7 @@ proof fn repair_spans_append(source: &str, repairs: Seq<Repair>, repair: Repair,
         Some((start, end)) => {
             &&& 0 <= start <= end <= after
             &&& (extended[i] is Skipped ==> start < end
-                && atom_and_close_error_evidence(source, extended[i]->Skipped_error))
+                && syntax_error_evidence(source, extended[i]->Skipped_error))
             &&& is_char_boundary(source.spec_bytes(), start)
             &&& is_char_boundary(source.spec_bytes(), end)
         },
@@ -735,7 +767,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 && complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, recovering)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-            Err(error) => atom_and_close_error_evidence(source, error),
+            Err(error) => syntax_error_evidence(source, error),
         },
 {
     let mut forms: Vec<Form> = Vec::new();
@@ -807,7 +839,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 repairs.push(repair);
             } else {
                 let error = Error { kind: ErrorKind::MissingSeparator, span: span.start..span.start };
-                assert(atom_and_close_error_evidence(source, error)) by { reveal(atom_and_close_error_evidence); };
+                proof { parser_error_evidence(source, error); }
                 return Err(error);
             }
         }
@@ -863,7 +895,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         kind: ErrorKind::UnexpectedClose,
                         span: span.start..span.end,
                     };
-                    assert(atom_and_close_error_evidence(source, error)) by { reveal(atom_and_close_error_evidence); };
+                    proof { parser_error_evidence(source, error); }
                     if recovering {
                         let repair = Repair::Skipped { span, error };
                         proof {
@@ -942,7 +974,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             }
         } else {
             let error = Error { kind: ErrorKind::UnclosedList { eof: length }, span: span.start..span.end };
-            assert(atom_and_close_error_evidence(source, error)) by { reveal(atom_and_close_error_evidence); };
+            proof { parser_error_evidence(source, error); }
             return Err(error);
         }
     }
@@ -1058,7 +1090,7 @@ impl<'a> SourceCursor<'a> {
                     &&& span.end == next.position()
                     &&& span.end <= self.source.spec_bytes().len()
                     &&& (kind is Quoted && kind->Quoted_0 is Some
-                        ==> string_error_kind(kind->Quoted_0->Some_0.kind))
+                        ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0))
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
                         =~= self.source.spec_bytes()[span.start as int..span.end as int])
                     &&& (kind is Open ==> span.end == span.start + 1
@@ -1084,6 +1116,15 @@ impl<'a> SourceCursor<'a> {
             );
             suffix_boundary(self.source, self.remaining);
             suffix_boundary(self.source, remaining);
+            if kind is Quoted && kind->Quoted_0 is Some {
+                let error = kind->Quoted_0->Some_0;
+                assert(syntax_error_evidence(self.source, error)) by {
+                    reveal(syntax_error_evidence);
+                    reveal(atom_and_close_error_evidence);
+                    assert(self.remaining.spec_bytes() =~= self.source.spec_bytes()[start as int..]);
+                    assert(string_error_opening(error.kind, error.span) == Some(start));
+                };
+            }
             if kind is Bare {
                 assert(kind->Bare_0.spec_bytes() =~= self.remaining.spec_bytes()[..(end - start)]);
                 assert(kind->Bare_0.spec_bytes() =~= self.source.spec_bytes()[start as int..end as int]);
@@ -1118,7 +1159,8 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
             RawSegment::Close => input.spec_bytes()[0] == 41
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
-            RawSegment::Quoted(Some(error)) => string_error_kind(error.kind),
+            RawSegment::Quoted(Some(error)) => string_error_kind(error.kind)
+                && string_error_site(input.spec_bytes(), start as int, error),
             _ => true,
         },
 {
@@ -1148,7 +1190,7 @@ spec fn string_error_kind(kind: ErrorKind) -> bool {
     kind is InvalidEscape || kind is NewlineInString || kind is UnterminatedString
 }
 
-spec fn string_error_site(bytes: Seq<u8>, start: int, error: Error) -> bool {
+pub open spec fn string_error_site(bytes: Seq<u8>, start: int, error: Error) -> bool {
     let at = error.span.start - start;
     let end = error.span.end - start;
     &&& bytes.len() > 0 && bytes[0] == 34
