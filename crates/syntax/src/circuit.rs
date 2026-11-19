@@ -11,6 +11,7 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod body;
+mod build;
 mod clauses;
 mod definitions;
 mod expression_forest;
@@ -23,6 +24,12 @@ mod test_items;
 mod test_values;
 pub use body::DefinitionReferences;
 use body::validate_routine_arguments;
+use build::BuildRows;
+pub use build::{BuildCircuitIndex, BuildDefinition, BuildEntryRanges, index_build_forms};
+#[cfg(verus_only)]
+pub use build::{
+    build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
+};
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
 pub use definitions::{
@@ -301,7 +308,51 @@ fn read_header(
             Err((kind, span)) => header_error_evidence(source, forms@, index as int, in_namespace, kind, span),
         },
 {
+    let mut rows = BuildRows::new();
+    read_header_into(source, forms, index, in_namespace, false, &mut rows)
+}
+
+fn read_header_into(
+    source: &str, forms: &[Form], index: usize, in_namespace: bool,
+    collect: bool, rows: &mut BuildRows,
+) -> (result: Result<(Head, usize), (HeaderError, Range<usize>)>)
+    requires
+        index < forms@.len(),
+        complete_list_indices(forms@),
+        nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        list_source_delimiters(source, forms@, false),
+    ensures
+        forall|head: Head| #[trigger] header_matches(source, forms@, index as int, in_namespace, head)
+            <==> (result matches Ok((actual, _)) && actual == head),
+        match result {
+            Ok((head, next)) => {
+                &&& forms@[index as int] is List
+                &&& next == forms@[index as int]->List_end
+                &&& index < next <= forms@.len()
+                &&& following_direct_form(forms@, index as int, next as int)
+                &&& (forall|candidate: Head| #[trigger] form_has_head(source, forms@, index as int, in_namespace, candidate)
+                    <==> candidate == head)
+                &&& head == Head::Namespace ==> (index + 3 <= next
+                    && forms@[index + 1] is Atom && forms@[index + 2] is Atom)
+            },
+            Err((kind, span)) => header_error_evidence(source, forms@, index as int, in_namespace, kind, span),
+        },
+        final(rows).entry_ranges == old(rows).entry_ranges,
+        final(rows).definitions@.len() >= old(rows).definitions@.len(),
+        final(rows).definitions@.take(old(rows).definitions@.len() as int) == old(rows).definitions@,
+        final(rows).references@.len() >= old(rows).references@.len(),
+        final(rows).references@.take(old(rows).references@.len() as int) == old(rows).references@,
+        collect ==> (result matches Ok((head, _)) ==>
+            build::build_entry_matches(source, forms@, index as int, head, BuildEntryRanges {
+                definitions: old(rows).definitions@.len() as usize..final(rows).definitions@.len() as usize,
+                references: old(rows).references@.len() as usize..final(rows).references@.len() as usize,
+            }, final(rows).definitions@, final(rows).references@)),
+
+{
     let (head, end, closing) = read_form_head(source, forms, index, in_namespace)?;
+    let _initial_definitions = rows.definitions.len();
+    let _initial_references = rows.references.len();
     assert(form_has_head(source, forms@, index as int, in_namespace, head));
     let first = index + 2;
     assert(form_region_ends_at(forms@, first as int, end as int));
@@ -313,7 +364,7 @@ fn read_header(
         Head::Using | Head::Namespace | Head::Use | Head::Export => validate_directive(source, forms, first, end, closing, head),
         Head::Struct => validate_structure_arguments(source, forms, first, end, closing),
         Head::Test => test_items::validate_test_arguments(source, forms, first, end, closing),
-        Head::Func | Head::Module | Head::ModulePart => validate_routine_arguments(source, forms, first, end, closing, head),
+        Head::Func | Head::Module | Head::ModulePart => validate_routine_arguments(source, forms, first, end, closing, head, collect, rows),
         Head::Latch | Head::Memory => {
             check_directive_word(source, forms, first, end, closing, HeaderError::ExpectedName)?;
             assert(form_region_ends_at(forms@, first + 1, end as int));
@@ -322,6 +373,19 @@ fn read_header(
     };
     assert(checked.is_ok() <==> header_arguments_match(source, forms@, first as int, end as int, head));
     checked?;
+    if collect {
+        let _final_definitions = rows.definitions.len();
+        let _final_references = rows.references.len();
+        proof {
+            assert(rows.definitions@[_initial_definitions as int.._final_definitions as int]
+                =~= rows.definitions@.skip(_initial_definitions as int));
+            assert(rows.references@.take(_final_references as int) =~= rows.references@);
+            assert(build::build_entry_matches(source, forms@, index as int, head, BuildEntryRanges {
+                definitions: _initial_definitions.._final_definitions,
+                references: _initial_references.._final_references,
+            }, rows.definitions@, rows.references@));
+        }
+    }
     if matches!(head, Head::Namespace) {
         proof { reveal(head_word_matches); }
     }

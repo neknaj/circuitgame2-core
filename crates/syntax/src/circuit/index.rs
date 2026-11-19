@@ -1,5 +1,7 @@
 //! トップレベルのフォームと名前空間の直下を入力順に索引に載せる。
 
+#[cfg(verus_only)]
+use super::build::build_entry_matches;
 use super::*;
 mod recovery;
 #[cfg(verus_only)]
@@ -11,6 +13,60 @@ pub use recovery::{
 };
 
 verus! {
+
+#[verifier::opaque]
+pub(super) open spec fn build_rows_match(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, ranges: Seq<BuildEntryRanges>,
+    definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>,
+) -> bool {
+    &&& ranges.len() == entries.len()
+    &&& definitions.len() == if ranges.len() == 0 { 0 } else { ranges.last().definitions.end }
+    &&& references.len() == if ranges.len() == 0 { 0 } else { ranges.last().references.end }
+    &&& forall|i: int| 0 <= i < entries.len() ==> {
+        let range = #[trigger] ranges[i];
+        &&& range.definitions.start == if i == 0 { 0 } else { ranges[i - 1].definitions.end }
+        &&& range.references.start == if i == 0 { 0 } else { ranges[i - 1].references.end }
+        &&& build_entry_matches(source, forms, entries[i].form as int, entries[i].head, range, definitions, references)
+    }
+}
+
+/// 新しい索引項目の区間を追加し、既存の項目が指す区間との連続性を保つ。
+proof fn record_build_entry(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, prior: BuildRows, rows: BuildRows, entry: Entry,
+    range: BuildEntryRanges,
+)
+    requires
+        build_rows_match(source, forms, entries, prior.entry_ranges@, prior.definitions@, prior.references@),
+        rows.entry_ranges@ == prior.entry_ranges@.push(range),
+        prior.definitions@.len() <= rows.definitions@.len(),
+        rows.definitions@.take(prior.definitions@.len() as int) == prior.definitions@,
+        prior.references@.len() <= rows.references@.len(),
+        rows.references@.take(prior.references@.len() as int) == prior.references@,
+        range.definitions.start == prior.definitions@.len(), range.definitions.end == rows.definitions@.len(),
+        range.references.start == prior.references@.len(), range.references.end == rows.references@.len(),
+        build_entry_matches(source, forms, entry.form as int, entry.head, range, rows.definitions@, rows.references@),
+    ensures build_rows_match(source, forms, entries.push(entry), rows.entry_ranges@, rows.definitions@, rows.references@),
+{
+    reveal(build_rows_match);
+    let more = entries.push(entry);
+    assert forall|i: int| 0 <= i < more.len() implies {
+        let range = #[trigger] rows.entry_ranges@[i];
+        &&& range.definitions.start == if i == 0 { 0 } else { rows.entry_ranges@[i - 1].definitions.end }
+        &&& range.references.start == if i == 0 { 0 } else { rows.entry_ranges@[i - 1].references.end }
+        &&& build_entry_matches(source, forms, more[i].form as int, more[i].head, range, rows.definitions@, rows.references@)
+    } by {
+        if i < entries.len() {
+            let ranges = prior.entry_ranges@[i];
+            let lo = ranges.definitions.start as int;
+            let hi = ranges.definitions.end as int;
+            let stop = ranges.references.end as int;
+            assert(build_entry_matches(source, forms, entries[i].form as int, entries[i].head, ranges,
+                prior.definitions@, prior.references@));
+            assert(prior.definitions@[lo..hi] =~= rows.definitions@[lo..hi]);
+            assert(prior.references@.take(stop) =~= rows.references@.take(stop));
+        }
+    };
+}
 
 /// 索引を付ける位置と、直接の親名前空間の添字を定める。
 pub open spec fn indexed_location(source: &str, forms: Seq<Form>, index: int, namespace: Option<usize>) -> bool {
@@ -48,6 +104,12 @@ pub closed spec fn circuit_source_error(source: &str, error: CircuitFormError) -
                 && forms_before(source, forms, index)
                 && header_error_evidence(source, forms, index, namespace.is_some(), kind, span)),
     }
+}
+
+pub(super) proof fn reject_circuit_syntax(source: &str, error: Error)
+    requires !well_formed_sexpr(source), syntax_error_evidence(source, error),
+    ensures !circuit_source_matches(source), circuit_source_error(source, CircuitFormError::Syntax(error)),
+{
 }
 
 #[verifier::opaque]
@@ -355,6 +417,7 @@ proof fn reject_index_entry(
 
 fn index_namespace(
     source: &str, forms: &[Form], entries: &mut Vec<Entry>, root: usize, first: usize, end: usize,
+    collect: bool, rows: &mut BuildRows,
 ) -> (result: Result<(), CircuitFormError>)
     requires
         well_formed_sexpr(source),
@@ -368,9 +431,13 @@ fn index_namespace(
         forms@[root as int]->List_end == end,
         first == root + 3 <= end,
         index_prefix(source, forms@, old(entries)@, first as int),
+        collect ==> build_rows_match(source, forms@, old(entries)@, old(rows).entry_ranges@,
+            old(rows).definitions@, old(rows).references@),
     ensures
         match result {
-            Ok(()) => index_prefix(source, forms@, final(entries)@, end as int),
+            Ok(()) => index_prefix(source, forms@, final(entries)@, end as int)
+                && (collect ==> build_rows_match(source, forms@, final(entries)@, final(rows).entry_ranges@,
+                    final(rows).definitions@, final(rows).references@)),
             Err(error) => !circuit_source_matches(source) && circuit_source_error(source, error),
         },
 {
@@ -391,10 +458,14 @@ fn index_namespace(
             forms@[root as int]->List_end == end,
             index < end ==> direct_form_in_range(forms@, first as int, end as int, index as int),
             index_prefix(source, forms@, entries@, index as int),
+            collect ==> build_rows_match(source, forms@, entries@, rows.entry_ranges@, rows.definitions@, rows.references@),
         decreases end - index,
     {
         assert(indexed_location(source, forms@, index as int, Some(root)));
-        let (head, next) = match read_header(source, forms, index, true) {
+        let ghost prior = *rows;
+        let first_definition = rows.definitions.len();
+        let first_reference = rows.references.len();
+        let (head, next) = match read_header_into(source, forms, index, true, collect, rows) {
             Ok(header) => header,
             Err((kind, span)) => {
                 proof { reject_index_entry(source, forms@, entries@, index as int, Some(root), kind, span); }
@@ -407,6 +478,15 @@ fn index_namespace(
             assert(form_region_ends_at(forms@, first as int, end as int));
             member_index_gap(source, forms@, root as int, end as int, index as int, next as int);
             append_index_entry(source, forms@, entries@, entry, next as int);
+        }
+        if collect {
+            let range = BuildEntryRanges {
+                definitions: first_definition..rows.definitions.len(),
+                references: first_reference..rows.references.len(),
+            };
+            let ghost added = range;
+            rows.entry_ranges.push(range);
+            proof { record_build_entry(source, forms@, entries@, prior, *rows, entry, added); }
         }
         entries.push(entry);
         index = next;
@@ -472,12 +552,35 @@ fn index_parsed_headers(source: &str, forms: &[Form])
             Err(error) => circuit_source_error(source, error),
         },
 {
+    let mut rows = BuildRows::new();
+    index_parsed_headers_into(source, forms, false, &mut rows)
+}
+
+pub(super) fn index_parsed_headers_into(source: &str, forms: &[Form], collect: bool, rows: &mut BuildRows)
+    -> (result: Result<Vec<Entry>, CircuitFormError>)
+    requires
+        well_formed_sexpr(source),
+        sexpr_form_model(source) == Some(forms@),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+        list_source_delimiters(source, forms@, false),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        rows.entry_ranges@.len() == 0 && rows.definitions@.len() == 0 && rows.references@.len() == 0,
+    ensures
+        result.is_ok() <==> circuit_source_matches(source),
+        match result {
+            Ok(entries) => circuit_index_matches(source, forms@, entries@)
+                && (collect ==> build_rows_match(source, forms@, entries@, final(rows).entry_ranges@,
+                    final(rows).definitions@, final(rows).references@)),
+            Err(error) => circuit_source_error(source, error),
+        },
+{
     let mut entries: Vec<Entry> = Vec::new();
     let mut root = 0;
     let length = forms.len();
     proof {
         reveal(direct_form_in_range);
         reveal(index_prefix);
+        reveal(build_rows_match);
     }
     while root < length
         invariant
@@ -490,9 +593,13 @@ fn index_parsed_headers(source: &str, forms: &[Form])
             form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             root < length ==> direct_form_in_range(forms@, 0, length as int, root as int),
             index_prefix(source, forms@, entries@, root as int),
+            collect ==> build_rows_match(source, forms@, entries@, rows.entry_ranges@, rows.definitions@, rows.references@),
         decreases length - root,
     {
-        let (head, end) = match read_header(source, forms, root, false) {
+        let ghost prior = *rows;
+        let first_definition = rows.definitions.len();
+        let first_reference = rows.references.len();
+        let (head, end) = match read_header_into(source, forms, root, false, collect, rows) {
             Ok(header) => header,
             Err((kind, span)) => {
                 proof { reject_index_entry(source, forms@, entries@, root as int, None, kind, span); }
@@ -509,9 +616,18 @@ fn index_parsed_headers(source: &str, forms: &[Form])
             root_index_gap(source, forms@, root as int, end as int, next as int, head);
             append_index_entry(source, forms@, entries@, entry, next as int);
         }
+        if collect {
+            let range = BuildEntryRanges {
+                definitions: first_definition..rows.definitions.len(),
+                references: first_reference..rows.references.len(),
+            };
+            let ghost added = range;
+            rows.entry_ranges.push(range);
+            proof { record_build_entry(source, forms@, entries@, prior, *rows, entry, added); }
+        }
         entries.push(entry);
         if matches!(head, Head::Namespace) {
-            index_namespace(source, forms, &mut entries, root, next, end)?;
+            index_namespace(source, forms, &mut entries, root, next, end, collect, rows)?;
         }
         root = end;
     }

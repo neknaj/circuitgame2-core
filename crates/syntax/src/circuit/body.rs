@@ -307,7 +307,8 @@ pub(super) open spec fn body_item_error(
 
 fn read_body_item(
     source: &str, forms: &[Form], index: usize, _limit: usize,
-) -> (result: Result<usize, (HeaderError, Range<usize>)>)
+    collect: bool, references: &mut Vec<ExpressionReference>,
+) -> (result: Result<(usize, Option<Range<usize>>), (HeaderError, Range<usize>)>)
     requires
         index < _limit <= forms@.len(),
         form_region_ends_at(forms@, index as int, _limit as int),
@@ -317,8 +318,23 @@ fn read_body_item(
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
     ensures
         result.is_ok() <==> body_item_matches(source, forms@, index as int, _limit as int),
-        result matches Ok(next) ==> index < next <= _limit
-            && following_direct_form(forms@, index as int, next as int),
+        final(references)@.len() >= old(references)@.len(),
+        final(references)@.take(old(references)@.len() as int) == old(references)@,
+        !collect ==> final(references)@ == old(references)@,
+        forall|i: int| old(references)@.len() <= i < final(references)@.len()
+            ==> expression_reference_in_source(source, forms@, #[trigger] final(references)@[i]),
+        result matches Ok((next, rhs)) ==> index < next <= _limit
+            && following_direct_form(forms@, index as int, next as int)
+            && forms@[index as int] is List && forms@[index as int]->List_end == next
+            && match rhs {
+                Some(rhs) => body_head_at(source, forms@, index + 1, next as int, BodyHead::Def)
+                    && targets_match(forms@, index + 2, next as int, rhs.start as int)
+                    && rhs.start < rhs.end == next && after_form(forms@, rhs.start as int) == next
+                    && (collect ==> final(references)@ == old(references)@ +
+                        expression_references(source, forms@, rhs.start as int, rhs.end as int)),
+                None => !body_head_at(source, forms@, index + 1, next as int, BodyHead::Def)
+                    && final(references)@ == old(references)@,
+            },
         result matches Err(error) ==> body_item_error(source, forms@, index as int, _limit as int, error),
 {
     let form = &forms[index];
@@ -336,10 +352,9 @@ fn read_body_item(
     assert(body_head_at(source, forms@, index + 1, end as int, kind));
     let first = index + 2;
     assert(form_region_ends_at(forms@, first as int, end as int));
-    let mut references = Vec::new();
-    inspect_body_arguments(source, forms, first, end, closing, kind, false, &mut references)?;
+    let rhs = inspect_body_arguments(source, forms, first, end, closing, kind, collect, references)?;
     proof { node_end_is_following_direct_form(forms@, index as int, end as int); }
-    Ok(end)
+    Ok((end, rhs))
 }
 
 /// 指定した位置より前にある直接の本体項目がすべて文法に従うことを表す。
@@ -384,6 +399,130 @@ proof fn record_body_item(
     };
 }
 
+#[verifier::opaque]
+pub(super) open spec fn flat_definition_matches(
+    source: &str, forms: Seq<Form>, start: int, end: int, row: BuildDefinition,
+    references: Seq<ExpressionReference>,
+) -> bool {
+    let item = row.form as int;
+    let first = row.references.start as int;
+    let last = row.references.end as int;
+    let value = row.expression.start as int;
+    let stop = row.expression.end as int;
+    &&& is_definition_at(source, forms, start, end, item)
+    &&& stop == forms[item]->List_end
+    &&& targets_match(forms, item + 2, stop, value)
+    &&& value < stop && after_form(forms, value) == stop
+    &&& 0 <= first <= last <= references.len()
+    &&& references[first..last] == expression_references(source, forms, value, stop)
+    &&& forall|i: int| first <= i < last
+        ==> expression_reference_in_source(source, forms, #[trigger] references[i])
+}
+
+/// 本体の検査済み部分にある定義が、平坦な配列の連続区間を占めることを表す。
+#[verifier::opaque]
+pub(super) open spec fn flat_body_matches(
+    source: &str, forms: Seq<Form>, start: int, end: int, cursor: int,
+    rows: Seq<BuildDefinition>, references: Seq<ExpressionReference>, first: int, stop: int,
+) -> bool {
+    &&& 0 <= first <= stop <= references.len()
+    &&& stop == if rows.len() == 0 { first } else { rows.last().references.end as int }
+    &&& forall|i: int| 0 <= i < rows.len() ==> {
+        let row = #[trigger] rows[i];
+        &&& flat_definition_matches(source, forms, start, end, row, references)
+        &&& row.form < cursor
+        &&& first <= row.references.start <= row.references.end <= stop
+        &&& row.references.start == if i == 0 { first } else { rows[i - 1].references.end as int }
+    }
+    &&& forall|i: int, j: int| 0 <= i < j < rows.len()
+        ==> (#[trigger] rows[i]).form < (#[trigger] rows[j]).form
+    &&& forall|i: int| #[trigger] is_definition_at(source, forms, start, end, i) && i < cursor
+        ==> exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).form == i
+}
+
+/// 平坦な本体の一行から、参照範囲と元ソースの根拠を取り出す。
+pub(super) proof fn flat_body_row_evidence(
+    source: &str, forms: Seq<Form>, start: int, end: int,
+    definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>,
+    first: int, stop: int, index: int,
+)
+    requires
+        flat_body_matches(source, forms, start, end, end, definitions, references, first, stop),
+        0 <= index < definitions.len(),
+    ensures
+        first <= definitions[index].references.start <= definitions[index].references.end <= stop,
+        forall|i: int| definitions[index].references.start <= i < definitions[index].references.end
+            ==> expression_reference_in_source(source, forms, #[trigger] references[i]),
+{
+    reveal(flat_body_matches);
+    let row = definitions[index];
+    assert(flat_definition_matches(source, forms, start, end, row, references));
+    reveal(flat_definition_matches);
+}
+
+/// 参照配列の末尾への追加は、検査済みの定義が指す区間を変えない。
+proof fn keep_flat_definition(
+    source: &str, forms: Seq<Form>, start: int, end: int, row: BuildDefinition,
+    before: Seq<ExpressionReference>, references: Seq<ExpressionReference>,
+)
+    requires
+        flat_definition_matches(source, forms, start, end, row, before),
+        before.len() <= references.len(),
+        references.take(before.len() as int) == before,
+    ensures flat_definition_matches(source, forms, start, end, row, references),
+{
+    reveal(flat_definition_matches);
+    let lo = row.references.start as int;
+    let hi = row.references.end as int;
+    assert(before[lo..hi] =~= references[lo..hi]);
+    assert forall|j: int| lo <= j < hi
+        implies expression_reference_in_source(source, forms, #[trigger] references[j]) by {
+        assert(references[j] == before[j]);
+    };
+}
+
+proof fn extend_flat_body(
+    source: &str, forms: Seq<Form>, start: int, end: int, index: int, next: int,
+    rows: Seq<BuildDefinition>, old_refs: Seq<ExpressionReference>, refs: Seq<ExpressionReference>,
+    first: int, new_row: Option<BuildDefinition>,
+)
+    requires
+        direct_form_in_range(forms, start, end, index),
+        form_region_ends_at(forms, start, end),
+        following_direct_form(forms, index, next),
+        index < next <= end,
+        flat_body_matches(source, forms, start, end, index, rows, old_refs, first, old_refs.len() as int),
+        old_refs.len() <= refs.len(),
+        refs.take(old_refs.len() as int) == old_refs,
+        match new_row {
+            Some(row) => flat_definition_matches(source, forms, start, end, row, refs)
+                && row.form == index && row.references.start == old_refs.len() && row.references.end == refs.len(),
+            None => !is_definition_at(source, forms, start, end, index) && refs == old_refs,
+        },
+    ensures
+        flat_body_matches(source, forms, start, end, next,
+            if let Some(row) = new_row { rows.push(row) } else { rows }, refs, first, refs.len() as int),
+{
+    reveal(flat_body_matches);
+    reveal(following_direct_form);
+    let extended = if let Some(row) = new_row { rows.push(row) } else { rows };
+    assert forall|i: int| 0 <= i < rows.len()
+        implies flat_definition_matches(source, forms, start, end, #[trigger] rows[i], refs) by {
+        keep_flat_definition(source, forms, start, end, rows[i], old_refs, refs);
+    };
+    assert forall|i: int| #[trigger] is_definition_at(source, forms, start, end, i) && i < next
+        implies exists|j: int| 0 <= j < extended.len() && (#[trigger] extended[j]).form == i by {
+        if i < index {
+            let j = choose|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).form == i;
+            assert(extended[j] == rows[j]);
+        } else {
+            assert(i == index);
+            assert(new_row is Some);
+            assert(extended[rows.len() as int].form == i);
+        }
+    };
+}
+
 /// 回路宣言の本体を、直接の本体項目が並ぶ順序で検査する。
 ///
 /// # Errors
@@ -391,6 +530,7 @@ proof fn record_body_item(
 /// 最初に違反した本体項目の診断を返す。
 fn validate_body(
     source: &str, forms: &[Form], start: usize, end: usize,
+    collect: bool, rows: &mut BuildRows,
 ) -> (result: Result<(), (HeaderError, Range<usize>)>)
     requires
         start <= end <= forms@.len(),
@@ -402,11 +542,23 @@ fn validate_body(
     ensures
         result.is_ok() <==> body_items_before(source, forms@, start as int, end as int, end as int),
         result matches Err(error) ==> body_error(source, forms@, start as int, end as int, error),
+        final(rows).entry_ranges == old(rows).entry_ranges,
+        final(rows).definitions@.len() >= old(rows).definitions@.len(),
+        final(rows).definitions@.take(old(rows).definitions@.len() as int) == old(rows).definitions@,
+        final(rows).references@.len() >= old(rows).references@.len(),
+        final(rows).references@.take(old(rows).references@.len() as int) == old(rows).references@,
+        collect && result.is_ok() ==> flat_body_matches(source, forms@, start as int, end as int, end as int,
+            final(rows).definitions@.skip(old(rows).definitions@.len() as int), final(rows).references@,
+            old(rows).references@.len() as int, final(rows).references@.len() as int),
 {
     let mut index = start;
+    let ghost initial = *rows;
+    let ghost first_def = rows.definitions@.len() as int;
+    let _ref_start = rows.references.len();
     proof {
         reveal(direct_form_in_range);
         reveal(body_items_before);
+        reveal(flat_body_matches);
     }
     while index < end
         invariant
@@ -418,11 +570,25 @@ fn validate_body(
             form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             index < end ==> direct_form_in_range(forms@, start as int, end as int, index as int),
             body_items_before(source, forms@, start as int, end as int, index as int),
+            initial == *old(rows),
+            _ref_start == initial.references@.len(),
+            first_def == initial.definitions@.len(),
+            rows.entry_ranges == initial.entry_ranges,
+            rows.definitions@.len() >= first_def,
+            rows.definitions@.take(first_def) == initial.definitions@,
+            rows.references@.len() >= _ref_start,
+            rows.references@.take(_ref_start as int) == initial.references@,
+            collect ==> flat_body_matches(source, forms@, start as int, end as int, index as int,
+                rows.definitions@.skip(first_def), rows.references@,
+                _ref_start as int, rows.references@.len() as int),
         decreases end - index,
     {
         assert(form_region_ends_at(forms@, index as int, end as int));
-        let next = match read_body_item(source, forms, index, end) {
-            Ok(next) => next,
+        let ghost prior_rows = rows.definitions@.skip(first_def);
+        let ghost prior_refs = rows.references@;
+        let reference_start = rows.references.len();
+        let (next, rhs) = match read_body_item(source, forms, index, end, collect, &mut rows.references) {
+            Ok(result) => result,
             Err(error) => {
                 assert(!body_items_before(source, forms@, start as int, end as int, end as int)) by {
                     reveal(body_items_before);
@@ -430,6 +596,28 @@ fn validate_body(
                 return Err(error);
             }
         };
+        if collect {
+            if let Some(expression) = rhs {
+                let row = BuildDefinition { form: index, expression, references: reference_start..rows.references.len() };
+                proof {
+                    assert(flat_definition_matches(source, forms@, start as int, end as int, row, rows.references@)) by {
+                        reveal(flat_definition_matches);
+                        assert(rows.references@[reference_start as int..rows.references@.len() as int]
+                            =~= expression_references(source, forms@, row.expression.start as int, row.expression.end as int));
+                    }
+                    extend_flat_body(source, forms@, start as int, end as int, index as int, next as int,
+                        prior_rows, prior_refs, rows.references@, _ref_start as int, Some(row));
+                }
+                let ghost expected = prior_rows.push(row);
+                rows.definitions.push(row);
+                assert(rows.definitions@.skip(first_def) =~= expected);
+            } else {
+                proof {
+                    extend_flat_body(source, forms@, start as int, end as int, index as int, next as int,
+                        prior_rows, prior_refs, rows.references@, _ref_start as int, None);
+                }
+            }
+        }
         proof { record_body_item(source, forms@, start as int, index as int, next as int, end as int); }
         index = next;
     }
@@ -461,6 +649,7 @@ pub(super) open spec fn routine_arguments_error(
 /// 署名から本体へ順に検査し、最初の違反の種別と UTF-8 バイト範囲を返す。
 pub(super) fn validate_routine_arguments(
     source: &str, forms: &[Form], first: usize, end: usize, closing: usize, head: Head,
+    collect: bool, rows: &mut BuildRows,
 ) -> (result: Result<(), (HeaderError, Range<usize>)>)
     requires
         first <= end <= forms@.len(),
@@ -476,11 +665,21 @@ pub(super) fn validate_routine_arguments(
         result matches Err(error) ==> routine_arguments_error(
             source, forms@, first as int, end as int, closing, head, error,
         ),
+        final(rows).entry_ranges == old(rows).entry_ranges,
+        final(rows).definitions@.len() >= old(rows).definitions@.len(),
+        final(rows).definitions@.take(old(rows).definitions@.len() as int) == old(rows).definitions@,
+        final(rows).references@.len() >= old(rows).references@.len(),
+        final(rows).references@.take(old(rows).references@.len() as int) == old(rows).references@,
+        collect && result.is_ok() ==>
+            exists|body: int| #[trigger] routine_signature_matches(source, forms@, first as int, end as int, head, body)
+                && flat_body_matches(source, forms@, body, end as int, end as int,
+                    final(rows).definitions@.skip(old(rows).definitions@.len() as int), final(rows).references@,
+                    old(rows).references@.len() as int, final(rows).references@.len() as int),
 {
     let body = read_routine_signature(source, forms, first, end, closing, head)?;
     assert(routine_signature_matches(source, forms@, first as int, end as int, head, body as int));
     assert(form_region_ends_at(forms@, body as int, end as int));
-    validate_body(source, forms, body, end)
+    validate_body(source, forms, body, end, collect, rows)
 }
 
 pub(super) open spec fn is_definition_at(
