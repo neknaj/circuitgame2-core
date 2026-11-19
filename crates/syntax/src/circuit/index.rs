@@ -133,6 +133,14 @@ pub closed spec fn circuit_index_matches(source: &str, forms: Seq<Form>, entries
     sexpr_form_model(source) == Some(forms) && index_prefix(source, forms, entries, forms.len() as int)
 }
 
+pub(super) proof fn same_indexed_forms(
+    source: &str, left: Seq<Form>, left_entries: Seq<Entry>, right: Seq<Form>, right_entries: Seq<Entry>,
+)
+    requires circuit_index_matches(source, left, left_entries), circuit_index_matches(source, right, right_entries),
+    ensures left == right,
+{
+}
+
 pub(super) proof fn entry_forms_in_order(source: &str, forms: Seq<Form>, entries: Seq<Entry>)
     requires circuit_index_matches(source, forms, entries),
     ensures forall|i: int, j: int| 0 <= i < j < entries.len()

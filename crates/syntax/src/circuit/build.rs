@@ -127,9 +127,10 @@ pub closed spec fn build_index_matches(source: &str, index: BuildCircuitIndex) -
             index.entry_ranges@, index.definitions@, index.references@, index.signals@)
 }
 
-proof fn indexed_build_entry_evidence(source: &str, index: &BuildCircuitIndex, entry: int)
+pub(super) proof fn indexed_build_entry_evidence(source: &str, index: &BuildCircuitIndex, entry: int)
     requires build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
     ensures
+        circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@),
         index.entry_ranges@.len() == index.syntax.entries@.len(),
         ({
             let item = index.syntax.entries@[entry];

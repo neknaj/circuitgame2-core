@@ -900,6 +900,114 @@ pub(super) open spec fn definitions_before(
         ==> (#[trigger] rows[i]).definition < (#[trigger] rows[j]).definition
 }
 
+proof fn same_definition_prefix(
+    source: &str, forms: Seq<Form>, start: int, end: int,
+    flat: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
+    first: int, stop: int, first_signal: int, stop_signal: int,
+    nested: Seq<DefinitionReferences>, count: int,
+)
+    requires
+        flat_body_matches(source, forms, start, end, end, flat, references, signals,
+            first, stop, first_signal, stop_signal),
+        definitions_before(source, forms, start, end, end, nested),
+        0 <= count <= flat.len(),
+        count <= nested.len(),
+    ensures
+        forall|i: int| 0 <= i < count ==> (#[trigger] flat[i]).form == (#[trigger] nested[i]).definition,
+    decreases count,
+{
+    if count == 0 {
+        return;
+    }
+    let i = count - 1;
+    // 両列は同じ定義を元ソース順に網羅するので、先行項目が一致すれば次の項目も一致する。
+    same_definition_prefix(source, forms, start, end, flat, references, signals,
+        first, stop, first_signal, stop_signal, nested, i);
+    reveal(flat_body_matches);
+    reveal(flat_definition_matches);
+    reveal(definitions_before);
+    let a = flat[i].form;
+    let b = nested[i].definition;
+    assert(is_definition_at(source, forms, start, end, a as int));
+    assert(is_definition_at(source, forms, start, end, b as int));
+    let j = choose|j: int| 0 <= j < nested.len() && (#[trigger] nested[j]).definition == a;
+    let k = choose|k: int| 0 <= k < flat.len() && (#[trigger] flat[k]).form == b;
+    if j < i {
+        assert(flat[j].form == nested[j].definition);
+        assert(flat[j].form < a);
+    }
+    if k < i {
+        assert(flat[k].form == nested[k].definition);
+        assert(nested[k].definition < b);
+    }
+    if j > i {
+        assert(b < a);
+    }
+    if k > i {
+        assert(a < b);
+    }
+    assert(a == b);
+}
+
+pub(super) proof fn same_body_references(
+    source: &str, forms: Seq<Form>, start: int, end: int,
+    flat: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
+    first: int, stop: int, first_signal: int, stop_signal: int, nested: Seq<DefinitionReferences>,
+)
+    requires
+        flat_body_matches(source, forms, start, end, end, flat, references, signals,
+            first, stop, first_signal, stop_signal),
+        definitions_before(source, forms, start, end, end, nested),
+    ensures
+        flat.len() == nested.len(),
+        forall|i: int| 0 <= i < flat.len() ==> {
+            let a = #[trigger] flat[i];
+            let b = #[trigger] nested[i];
+            &&& a.form == b.definition
+            &&& a.expression == b.expression
+            &&& first <= a.references.start <= a.references.end <= stop
+            &&& references[a.references.start as int..a.references.end as int] == b.references@
+        },
+{
+    let common = if flat.len() < nested.len() { flat.len() } else { nested.len() } as int;
+    same_definition_prefix(source, forms, start, end, flat, references, signals,
+        first, stop, first_signal, stop_signal, nested, common);
+    reveal(flat_body_matches);
+    reveal(flat_definition_matches);
+    reveal(definitions_before);
+    if common < flat.len() {
+        let a = flat[common].form;
+        assert(is_definition_at(source, forms, start, end, a as int));
+        let j = choose|j: int| 0 <= j < nested.len() && (#[trigger] nested[j]).definition == a;
+        assert(flat[j].form == a);
+        assert(flat[j].form < a);
+    }
+    if common < nested.len() {
+        let b = nested[common].definition;
+        assert(is_definition_at(source, forms, start, end, b as int));
+        let j = choose|j: int| 0 <= j < flat.len() && (#[trigger] flat[j]).form == b;
+        assert(nested[j].definition == b);
+        assert(nested[j].definition < b);
+    }
+    assert forall|i: int| 0 <= i < flat.len() implies {
+        let a = #[trigger] flat[i];
+        let b = #[trigger] nested[i];
+        &&& a.form == b.definition
+        &&& a.expression == b.expression
+        &&& first <= a.references.start <= a.references.end <= stop
+        &&& references[a.references.start as int..a.references.end as int] == b.references@
+    } by {
+        let a = flat[i];
+        let b = nested[i];
+        assert(a.form == b.definition);
+        assert(a.expression.end == b.expression.end);
+        let target = a.form as int + 2;
+        let end = a.expression.end as int;
+        assert(targets_match(forms, target, end, a.expression.start as int));
+        assert(targets_match(forms, target, end, b.expression.start as int));
+    };
+}
+
 /// 検査済みの署名から本体をたどり、各定義の右辺と参照を取り出す。
 pub(super) fn collect_definitions(
     source: &str, forms: &[Form], first: usize, end: usize, closing: usize, head: Head,

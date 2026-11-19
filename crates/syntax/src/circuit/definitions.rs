@@ -4,6 +4,10 @@ use super::body::collect_definitions;
 #[cfg(verus_only)]
 use super::body::{definitions_before, routine_arguments_match};
 #[cfg(verus_only)]
+use super::body::{flat_body_matches, same_body_references};
+#[cfg(verus_only)]
+use super::build::{build_entry_matches, indexed_build_entry_evidence};
+#[cfg(verus_only)]
 use super::index::indexed_entry_evidence;
 use super::*;
 
@@ -43,6 +47,104 @@ pub closed spec fn circuit_definitions_match(source: &str, index: CircuitDefinit
     let forms = index.syntax.forms@;
     let entries = index.syntax.entries@;
     definition_rows_match(source, forms, entries, index.definitions_by_entry@)
+}
+
+proof fn same_signature_end(source: &str, forms: Seq<Form>, root: int, end: int, head: Head, a: int, b: int)
+    requires
+        routine_signature_matches(source, forms, root + 2, end, head, a),
+        routine_signature_matches(source, forms, root + 2, end, head, b),
+    ensures a == b,
+{
+    if head is Func || head is Module {
+        let x = choose|out: int| #[trigger] ports_clause_matches(source, forms, root + 3, end, out, Clause::In)
+            && ports_clause_matches(source, forms, out, end, a, Clause::Out);
+        let y = choose|out: int| #[trigger] ports_clause_matches(source, forms, root + 3, end, out, Clause::In)
+            && ports_clause_matches(source, forms, out, end, b, Clause::Out);
+        assert(x == y);
+    }
+}
+
+/// 両方の索引にある同じ宣言または断片について、定義の順序、右辺の範囲、参照列が一致することを示す。
+///
+/// 呼び出し側は、両方の索引で値が等しい `Entry` の添字を渡す。
+pub proof fn same_indexed_definition_references(
+    source: &str, build: &BuildCircuitIndex, reference: &CircuitDefinitionIndex,
+    build_entry: int, reference_entry: int,
+)
+    requires
+        build_index_matches(source, *build),
+        circuit_definitions_match(source, *reference),
+        0 <= build_entry < build.syntax.entries@.len(),
+        0 <= reference_entry < reference.syntax.entries@.len(),
+        build.syntax.entries@[build_entry] == reference.syntax.entries@[reference_entry],
+    ensures
+        0 <= build_entry < build.entry_ranges@.len(),
+        0 <= reference_entry < reference.definitions_by_entry@.len(),
+        ({
+            let range = build.entry_ranges@[build_entry].definitions;
+            let nested = reference.definitions_by_entry@[reference_entry]@;
+            &&& 0 <= range.start <= range.end <= build.definitions@.len()
+            &&& range.end - range.start == nested.len()
+            &&& forall|i: int| 0 <= i < nested.len() ==> {
+                let a = #[trigger] build.definitions@[range.start + i];
+                let b = #[trigger] nested[i];
+                &&& a.form == b.definition
+                &&& a.expression == b.expression
+                &&& 0 <= a.references.start <= a.references.end <= build.references@.len()
+                &&& build.references@[a.references.start as int..a.references.end as int] == b.references@
+            }
+        }),
+{
+    indexed_build_entry_evidence(source, build, build_entry);
+    let forms = build.syntax.forms@;
+    let entry = build.syntax.entries@[build_entry];
+    let ranges = build.entry_ranges@[build_entry];
+    let nested = reference.definitions_by_entry@[reference_entry]@;
+    super::index::same_indexed_forms(source, forms, build.syntax.entries@,
+        reference.syntax.forms@, reference.syntax.entries@);
+    assert(forms == reference.syntax.forms@);
+    assert(routine_definition_rows(source, forms, entry, nested));
+    reveal(build_entry_matches);
+    if entry.head is Func || entry.head is Module || entry.head is ModulePart {
+        let root = entry.form as int;
+        let end = forms[root]->List_end as int;
+        let start = ranges.definitions.start as int;
+        let flat = build.definitions@[start..ranges.definitions.end as int];
+        let first = ranges.references.start as int;
+        let stop = ranges.references.end as int;
+        let references = build.references@.take(stop);
+        let first_signal = ranges.signals.start as int;
+        let stop_signal = ranges.signals.end as int;
+        let signals = build.signals@.take(stop_signal);
+        assert(exists|body: int| #[trigger] routine_signature_matches(source, forms, root + 2, end, entry.head, body)
+            && flat_body_matches(source, forms, body, end, end, flat, references, signals,
+                first, stop, first_signal, stop_signal));
+        let a = choose|body: int| #[trigger] routine_signature_matches(source, forms, root + 2, end, entry.head, body)
+            && flat_body_matches(source, forms, body, end, end, flat, references, signals, first, stop, first_signal, stop_signal);
+        let b = choose|body: int| #[trigger] routine_signature_matches(source, forms, root + 2, end, entry.head, body)
+            && definitions_before(source, forms, body, end, end, nested);
+        same_signature_end(source, forms, root, end, entry.head, a, b);
+        same_body_references(source, forms, a, end, flat, references, signals,
+            first, stop, first_signal, stop_signal, nested);
+        assert(flat.len() == nested.len());
+        assert forall|i: int| 0 <= i < nested.len() implies {
+            let row = #[trigger] build.definitions@[start + i];
+            let original = #[trigger] nested[i];
+            &&& row.form == original.definition
+            &&& row.expression == original.expression
+            &&& 0 <= row.references.start <= row.references.end <= build.references@.len()
+            &&& build.references@[row.references.start as int..row.references.end as int] == original.references@
+        } by {
+            let row = flat[i];
+            let original = nested[i];
+            assert(row == build.definitions@[start + i]);
+            let lo = row.references.start as int;
+            let hi = row.references.end as int;
+            assert(first <= lo <= hi <= stop);
+            assert(references[lo..hi] == original.references@);
+            assert(references[lo..hi] =~= build.references@[lo..hi]);
+        };
+    }
 }
 
 /// 定義一覧が厳格構文木と索引の各項目に対応することを表す。

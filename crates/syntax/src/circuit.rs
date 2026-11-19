@@ -52,7 +52,7 @@ pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
 pub use definitions::{
     circuit_definitions_match, definition_row_evidence, definition_rows_match,
-    definition_scope_evidence,
+    definition_scope_evidence, same_indexed_definition_references,
 };
 pub use expression_forest::{
     ExpressionReference, ExpressionReferenceKind, index_expression_references,
