@@ -34,7 +34,9 @@ pub(crate) open spec fn stops(mode: Boundary, byte: u8) -> bool {
     }
 }
 
-/// Returns the first matching boundary, or the length of the slice.
+/// 指定した境界に初めて達するバイト位置を返す。
+///
+/// 該当する位置がなければ、入力スライスの長さを返す。
 pub(crate) fn first_boundary(bytes: &[u8], mode: Boundary) -> (end: usize)
     ensures
         end <= bytes@.len(),
@@ -88,7 +90,9 @@ proof fn ascii_prefix_boundary(bytes: Seq<u8>, end: int)
     reveal_with_fuel(is_char_boundary, 2);
 }
 
-/// Splits at the end of whitespace, a line comment, a bare atom, or ordinary string content.
+/// 最初の境界で入力を切り分ける。
+///
+/// 後半は境界のバイトから始まる。境界がなければ後半は空になる。
 pub(crate) fn split_at_boundary(source: &str, mode: Boundary) -> (parts: (&str, &str))
     ensures
         parts.0.spec_bytes() + parts.1.spec_bytes() =~= source.spec_bytes(),
@@ -122,7 +126,7 @@ pub(crate) fn split_at_boundary(source: &str, mode: Boundary) -> (parts: (&str, 
     parts
 }
 
-/// Consumes one ASCII byte and preserves the exact remaining suffix.
+/// 先頭の ASCII 1バイトを消費し、直後から始まる接尾辞を返す。
 pub(crate) fn after_ascii(source: &str) -> (suffix: &str)
     requires
         source.spec_bytes().len() > 0,
@@ -138,7 +142,7 @@ pub(crate) fn after_ascii(source: &str) -> (suffix: &str)
     source.split_at(1).1
 }
 
-/// Splits off exactly the first character of a nonempty UTF-8 string.
+/// 空でない UTF-8 文字列を、先頭の Unicode スカラー値を表す部分と残りに分ける。
 pub(crate) fn split_first_scalar(source: &str) -> (parts: (&str, &str))
     requires
         source.spec_bytes().len() > 0,

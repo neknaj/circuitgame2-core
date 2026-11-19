@@ -16,7 +16,7 @@ pub(crate) open spec fn digit(radix: Radix, byte: u8) -> bool {
     }
 }
 
-/// Recognizes the nonempty digit part of a numeric atom.
+/// 数値アトムの数字部分に、指定した基数で有効な桁が1つ以上並ぶかを判定する。
 pub(crate) fn matches_digits(bytes: &[u8], radix: Radix) -> (result: bool)
     ensures
         result <==> (

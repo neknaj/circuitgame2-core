@@ -1,3 +1,5 @@
+//! S 式を回路文法に照らして検査し、宣言の位置を取り出す。
+
 use crate::{AtomKind, Error, Form, parse};
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -5,70 +7,123 @@ use vstd::prelude::*;
 
 verus! {
 
+/// 先頭語で識別される回路フォームの種別。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Head {
+    /// 基底を選ぶ `using`。
     Using,
+    /// 名前空間を宣言する `namespace`。
     Namespace,
+    /// 完全修飾名に別名を与える `use`。
     Use,
+    /// 名前を公開する `export`。
     Export,
+    /// 組み合わせ回路を宣言する `func`。
     Func,
+    /// 状態を持てる回路を宣言する `module`。
     Module,
+    /// モジュールの断片を宣言する `module-part`。
     ModulePart,
+    /// ビット列上のフィールド配置を宣言する `struct`。
     Struct,
+    /// ラッチを宣言する `latch`。
     Latch,
+    /// メモリを宣言する `memory`。
     Memory,
+    /// 回路のテストを宣言する `test`。
     Test,
 }
 
 } // verus!
 
+/// 回路フォームと、それを含む名前空間の位置。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
+    /// フォームの種別。
     pub head: Head,
+    /// フォームを指す、[`CircuitForms::forms`] 内の添字。
     pub form: usize,
+    /// 囲んでいる名前空間フォームの添字。トップレベルのフォームでは `None`。
     pub namespace: Option<usize>,
 }
 
+/// 回路文法に従う構文木と、回路フォームを参照するための索引。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CircuitForms {
+    /// S 式の全要素を先行順に並べた構文木。
     pub forms: Vec<Form>,
+    /// トップレベルのフォームと名前空間の直下にあるフォームを元入力順に並べた索引。
     pub entries: Vec<Entry>,
 }
 
+/// 回路フォームの構文検査で判明した文法上の誤り。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderError {
+    /// フォームを表すリストが必要である。
     ExpectedList,
+    /// リストの先頭にフォームを識別する名前が必要である。
     ExpectedHead,
+    /// 先頭語が回路フォームの種別を表していない。
     UnknownHead,
+    /// この位置には指定した種別のフォームを置けない。
     MisplacedHead(Head),
+    /// 名前空間を示す名前または相対パスが不足しているか、文法に合わない。
     ExpectedNamespacePath,
+    /// 基底の指定には `nor` が必要である。
     ExpectedNor,
+    /// 指定した位置に完全修飾名がない。
     ExpectedAbsolutePath,
+    /// 修飾子を含まない名前が必要である。
     ExpectedName,
+    /// 名前、相対パス、完全修飾名のいずれかが必要である。
     ExpectedReference,
+    /// 自然数が必要である。
     ExpectedNatural,
+    /// ポート名または型付きポートが必要である。
     ExpectedPort,
+    /// 型への参照またはビット幅を指定する型が必要である。
     ExpectedType,
+    /// 回路本体の項目には `def` または `expand` が必要である。
     ExpectedBodyItem,
+    /// `def` の出力先を示す名前または名前のリストが必要である。
     ExpectedTarget,
+    /// 回路式が必要である。
     ExpectedExpression,
+    /// テスト本体に `case` または操作が必要である。
     ExpectedTestItem,
-    MixedTestItems { first_head: (usize, usize) },
+    /// 一つのテストに `case` と操作が混在している。
+    MixedTestItems {
+        /// 最初の項目の先頭語を指す、元入力の半開バイト範囲の両端。
+        first_head: (usize, usize),
+    },
+    /// テスト用のリテラルまたは型を指定したリテラルが必要である。
     ExpectedTestValue,
+    /// 期待値にはテスト用の値または `any` が必要である。
     ExpectedTestValueOrAny,
+    /// 必須の節がないか、先頭語が期待するものと異なる。
     ExpectedClause(Clause),
+    /// この位置には引数を追加できない。
     UnexpectedArgument,
 }
 
+/// 宣言やテストの内部で期待される節の先頭語。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Clause {
+    /// 入力の節 `in`。
     In,
+    /// 出力の節 `out`。
     Out,
+    /// 期待値の節 `expect`。
     Expect,
+    /// ビット幅を指定する `bits`。
     Bits,
+    /// 構造体またはラッチの幅を指定する `width`。
     Width,
+    /// メモリのアドレス幅を指定する `address`。
     Address,
+    /// メモリのデータ型を指定する `data`。
     Data,
+    /// 構造体のフィールドの位置を指定する `at`。
     At,
 }
 
@@ -87,24 +142,42 @@ impl Clause {
     }
 }
 
+/// S 式解析または回路フォームの構文検査で失敗した理由。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CircuitFormError {
+    /// 回路フォームを調べる前に見つかった字句または S 式の誤り。
     Syntax(Error),
+    /// S 式として読める入力に含まれる回路文法の誤り。
     Header {
+        /// 期待する構文と、必要に応じてその関連位置。
         kind: HeaderError,
+        /// 元入力の UTF-8 半開バイト範囲。要素の挿入位置は長さ0となる。
         span: Range<usize>,
     },
 }
 
 /// 回路フォームの宣言位置を構文木の添字で返す。
 ///
-/// 宣言のシグネチャ、回路本体、テスト本体の構文を検査する。名前解決、型と結線の検査は後続の処理に委ねる。
+/// 単一ソースの宣言シグネチャ、回路本体、テスト本体を検査する。
+/// `(using nor)` を一度だけ指定する要件は、名前解決と同様にソース集合を対象とする後続の検査で扱う。
+/// 型と結線の検査も後続の処理で扱う。
 ///
 /// # Errors
 ///
 /// 字句、S 式、検査対象の回路フォームに誤りがあれば、元入力の UTF-8 バイト範囲をエラーに含める。
 /// 回路フォームに必須の要素がなければ、挿入位置を長さ0の範囲で示す。
 /// テストで `case` と操作が混在すると、最初と種類が異なる項目の先頭語を主範囲とする。最初の項目についても先頭語の範囲をエラーに含める。
+///
+/// # Examples
+///
+/// ```
+/// use circuitgame2_syntax::circuit::{Head, index_headers};
+///
+/// let result = index_headers("(namespace gates (func f (in) (out y) (def y 0)))")?;
+/// assert_eq!(result.entries[1].head, Head::Func);
+/// assert_eq!(result.entries[1].namespace, Some(result.entries[0].form));
+/// # Ok::<(), circuitgame2_syntax::circuit::CircuitFormError>(())
+/// ```
 pub fn index_headers(source: &str) -> Result<CircuitForms, CircuitFormError> {
     let forms = parse(source).map_err(CircuitFormError::Syntax)?;
     let mut entries = Vec::new();

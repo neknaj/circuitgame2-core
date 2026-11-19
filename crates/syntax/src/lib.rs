@@ -1,3 +1,8 @@
+//! NCG2 ソースを字句と構文木に分ける。
+//!
+//! 厳格な S 式解析には [`parse`]、エディタ向けの回復解析には [`parse_recovering`] を使う。
+//! 回路フォームの構文検査には [`circuit`] を使う。
+
 #![no_std]
 
 extern crate alloc;
@@ -45,39 +50,84 @@ use vstd::utf8::{
 
 verus! {
 
+/// 平坦な構文木のアトムまたはリストを表す。
+///
+/// `span` は元入力に対する半開バイト範囲である。開始位置と終了位置は UTF-8 の文字境界にある。
+/// リストの `end` は、その部分木を過ぎた最初の添字である。
 #[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Form {
-    Atom { kind: AtomKind, span: Range<usize> },
-    List { span: Range<usize>, end: usize },
+    /// リストの子またはトップレベルに現れる一つの字句。
+    Atom {
+        /// 字句の分類。文字列のエスケープは元入力に残る。
+        kind: AtomKind,
+        /// アトム全体の範囲。文字列では引用符も含む。
+        span: Range<usize>,
+    },
+    /// 開き括弧と子の部分木を持つ要素。
+    List {
+        /// 元入力上の開き括弧から閉じ括弧の直後まで。閉じ括弧を補った場合は元入力の末尾まで。
+        span: Range<usize>,
+        /// 同じ構文木の配列で部分木が終わる位置。末尾の部分木では配列の長さに等しい。
+        end: usize,
+    },
 }
 
+/// 字句文法で認識したアトムの種別。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomKind {
+    /// 修飾子を含まない名前。
     Name,
+    /// `::` で複数の名前をつないだ相対パス。
     RelativePath,
+    /// 先頭に `::` を持つ完全修飾名。
     AbsolutePath,
+    /// 十進数字の列。先頭にゼロを置ける。
     Natural,
+    /// 先頭に `-` を持つ十進整数。
     NegativeInteger,
+    /// `#b` に続く二進ビット列。
     Binary,
+    /// `#x` に続く十六進ビット列。
     Hexadecimal,
+    /// 二重引用符で囲んだ文字列。
     String,
 }
 
+/// 字句解析と S 式解析のエラー種別。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
+    /// トークン全体がどのアトムにも該当しない。
     InvalidAtom,
+    /// 隣り合うアトムの間に区切りがない。主範囲は区切りを挿入する位置を指す。
     MissingSeparator,
-    InvalidEscape { opening: usize },
+    /// 文字列内に許されないエスケープがある。主範囲はバックスラッシュと直後の文字を含む。
+    InvalidEscape {
+        /// 開き引用符のバイト位置。
+        opening: usize,
+    },
+    /// 入力末尾までに閉じ引用符がない。
     UnterminatedString,
-    NewlineInString { opening: usize },
+    /// 閉じ引用符の前に CR または LF がある。
+    NewlineInString {
+        /// 開き引用符のバイト位置。
+        opening: usize,
+    },
+    /// 対応する開き括弧がない閉じ括弧がある。
     UnexpectedClose,
-    UnclosedList { eof: usize },
+    /// 入力末尾に達してもリストが閉じていない。主範囲は開き括弧を指す。
+    UnclosedList {
+        /// 閉じ括弧を補える入力末尾のバイト位置。
+        eof: usize,
+    },
 }
 
+/// 構文エラーと元入力上の主範囲。
 #[derive(Debug, Eq, PartialEq)]
 pub struct Error {
+    /// 誤りの種別と、その説明に必要な関連位置。
     pub kind: ErrorKind,
+    /// UTF-8 の半開バイト範囲。挿入位置を示す場合は長さ0となる。
     pub span: Range<usize>,
 }
 
@@ -300,36 +350,65 @@ impl Iterator for Lexer<'_> {
 
 verus! {
 
-/// Syntax repairs and their source evidence, in parser processing order.
-/// These events describe the parser's recovery. Applying source edits requires
-/// resolving their ranges and intent first.
+/// 回復解析が行った操作と、その根拠となる元入力の位置を表す。
+///
+/// 操作の記録は解析順に並ぶ。元入力を編集する場合は、記録された範囲と各操作の意味を確認する。
 #[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Repair {
+    /// 不正な入力を読み飛ばした。
     Skipped {
+        /// 読み飛ばした元入力の半開バイト範囲。
         span: Range<usize>,
+        /// 読み飛ばす根拠となった構文エラー。
         error: Error,
     },
+    /// アトム間に区切りがあるものとして解析を続けた。
     InsertedSeparator {
+        /// 補完位置を示す元入力のバイト位置。
         offset: usize,
     },
+    /// 入力末尾でリストを閉じたものとして構文木を作った。
     InsertedClose {
+        /// 閉じ括弧の合成位置。入力のバイト長に等しい。
         offset: usize,
+        /// 対応する開き括弧の半開バイト範囲。
         opening: Range<usize>,
+        /// 閉じ括弧を補ったリストを指す、[`Recovered::forms`] 内の添字。
         list: usize,
     },
 }
 
+/// 回復解析で得た構文木と修復記録を保持する。
 #[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Recovered {
-    /// Provisional forest. A repaired list's span includes only source bytes.
+    /// 回復した構文木を先行順に並べる。
+    ///
+    /// 修復した箇所を含む構文は暫定である。合成した閉じ括弧は元入力の範囲を占めない。
     pub forms: Vec<Form>,
+    /// 入力の読み飛ばしや欠落の補完を解析順に並べる。
     pub repairs: Vec<Repair>,
 }
 
-/// Parses all forms in preorder. For a list, `end` is the index after its
-/// complete subtree. All source spans are half-open UTF-8 byte ranges.
+/// 入力全体を厳格に解析し、S 式の構文木を先行順で返す。
+///
+/// リストでは、リスト自身の要素に続いて子の部分木が並ぶ。範囲と添字の意味は [`Form`] を参照する。
+///
+/// # Errors
+///
+/// 不正な字句、アトム間の区切り不足、対応する括弧の欠落や余分な閉じ括弧を検出すると、
+/// 元入力上の範囲とエラー種別を返す。
+///
+/// # Examples
+///
+/// ```
+/// use circuitgame2_syntax::{Form, parse};
+///
+/// let forms = parse("(using nor)")?;
+/// assert!(matches!(&forms[0], Form::List { end: 3, .. }));
+/// # Ok::<(), circuitgame2_syntax::Error>(())
+/// ```
 pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
     ensures
         well_formed_sexpr(source) == result.is_ok(),
@@ -351,8 +430,19 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
     }
 }
 
-/// Recovers S-expressions for editor analysis. Missing closes are inserted at
-/// EOF, and unresolved nesting is preserved in the provisional forest.
+/// エディタ向けに構文エラーから回復し、得られた S 式の構文木と修復記録を返す。
+///
+/// 閉じ括弧が欠けたリストは入力末尾で閉じたものとし、合成位置と開き括弧の範囲を記録する。
+/// 読み飛ばした入力と補った区切りも記録する。妥当な入力では [`parse`] と同じ構文木を返し、修復記録は空になる。
+///
+/// # Examples
+///
+/// ```
+/// use circuitgame2_syntax::{Repair, parse_recovering};
+///
+/// let result = parse_recovering("(using");
+/// assert!(matches!(&result.repairs[..], [Repair::InsertedClose { offset: 6, .. }]));
+/// ```
 pub fn parse_recovering(source: &str) -> (result: Recovered)
     ensures
         complete_list_indices(result.forms@),
@@ -2151,7 +2241,6 @@ enum RawSegment<'a> {
     Bare(&'a str),
 }
 
-// 裸のアトムを分類する前に、入力の先頭から字句区間を1つ切り出す。
 fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
     requires
         input.spec_bytes().len() > 0,
@@ -2190,6 +2279,7 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         b'(' => (RawSegment::Open, after_ascii(input)),
         b')' => (RawSegment::Close, after_ascii(input)),
         b'"' => {
+            // 「診断と補完の仕様」のエラー回復に従い、不正な文字列内の括弧を同期点にしない。
             let (remaining, error) = scan_string(input, start);
             (RawSegment::Quoted(error), remaining)
         }
