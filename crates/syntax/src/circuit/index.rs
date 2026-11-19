@@ -1,8 +1,14 @@
 //! トップレベルのフォームと名前空間の直下を入力順に索引に載せる。
 
 use super::*;
+mod recovery;
 #[cfg(verus_only)]
 use crate::{sexpr_form_model, syntax_error_evidence, well_formed_sexpr};
+#[cfg(verus_only)]
+pub use recovery::circuit_recovery_matches;
+pub use recovery::{
+    CircuitRecovery, RecoveredCircuitForm, RecoveredFormOutcome, recover_circuit_forms,
+};
 
 verus! {
 
@@ -446,6 +452,26 @@ pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormE
         Ok(forms) => forms,
         Err(error) => return Err(CircuitFormError::Syntax(error)),
     };
+    let entries = index_parsed_headers(source, forms.as_slice())?;
+    Ok(CircuitForms { forms, entries })
+}
+
+/// 厳格に解析した S 式構文木から回路フォームを索引に載せる。
+fn index_parsed_headers(source: &str, forms: &[Form])
+    -> (result: Result<Vec<Entry>, CircuitFormError>)
+    requires
+        well_formed_sexpr(source),
+        sexpr_form_model(source) == Some(forms@),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+        list_source_delimiters(source, forms@, false),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures
+        result.is_ok() <==> circuit_source_matches(source),
+        match result {
+            Ok(entries) => circuit_index_matches(source, forms@, entries@),
+            Err(error) => circuit_source_error(source, error),
+        },
+{
     let mut entries: Vec<Entry> = Vec::new();
     let mut root = 0;
     let length = forms.len();
@@ -466,7 +492,7 @@ pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormE
             index_prefix(source, forms@, entries@, root as int),
         decreases length - root,
     {
-        let (head, end) = match read_header(source, &forms, root, false) {
+        let (head, end) = match read_header(source, forms, root, false) {
             Ok(header) => header,
             Err((kind, span)) => {
                 proof { reject_index_entry(source, forms@, entries@, root as int, None, kind, span); }
@@ -485,12 +511,12 @@ pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormE
         }
         entries.push(entry);
         if matches!(head, Head::Namespace) {
-            index_namespace(source, &forms, &mut entries, root, next, end)?;
+            index_namespace(source, forms, &mut entries, root, next, end)?;
         }
         root = end;
     }
     proof { indexed_prefix_is_valid(source, forms@, entries@, length as int); }
-    Ok(CircuitForms { forms, entries })
+    Ok(entries)
 }
 
 } // verus!
