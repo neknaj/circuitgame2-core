@@ -1,9 +1,20 @@
 //! S 式を回路文法に照らして検査し、宣言の位置を取り出す。
 
 use crate::{AtomKind, Error, Form, parse};
+#[cfg(verus_only)]
+use crate::{
+    complete_list_indices, form_span, form_spans_valid, list_delimited, list_source_delimiters,
+};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
+#[cfg(verus_only)]
+use vstd::utf8::{
+    encode_utf8_decode_utf8, encode_utf8_valid_utf8, is_char_boundary,
+    is_char_boundary_iff_not_is_continuation_byte,
+};
 
 verus! {
 
@@ -55,6 +66,8 @@ pub struct CircuitForms {
     /// トップレベルのフォームと名前空間の直下にあるフォームを元入力順に並べた索引。
     pub entries: Vec<Entry>,
 }
+
+verus! {
 
 /// 回路フォームの構文検査で判明した文法上の誤り。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +139,8 @@ pub enum Clause {
     /// 構造体のフィールドの位置を指定する `at`。
     At,
 }
+
+} // verus!
 
 impl Clause {
     fn spelling(self) -> &'static str {
@@ -212,31 +227,9 @@ fn read_header(
     index: usize,
     in_namespace: bool,
 ) -> Result<(Head, usize), CircuitFormError> {
-    let Form::List {
-        span: list_span,
-        end,
-    } = &forms[index]
-    else {
-        return Err(header_error(HeaderError::ExpectedList, span(&forms[index])));
-    };
-    let end = *end;
-    let head_index = index + 1;
-    let argument = head_index + 1;
-    let closing = list_span.end - 1;
-    let head_span = require_atom(
-        forms,
-        head_index,
-        end,
-        closing,
-        HeaderError::ExpectedHead,
-        |kind| kind == AtomKind::Name,
-    )?;
-    let Some(head) = recognize_head(&source[head_span.clone()]) else {
-        return Err(header_error(HeaderError::UnknownHead, head_span));
-    };
-    if !head_allowed(head, in_namespace) {
-        return Err(header_error(HeaderError::MisplacedHead(head), head_span));
-    }
+    let (head, end, closing) = read_form_head(source, forms, index, in_namespace)
+        .map_err(|(kind, span)| header_error(kind, span))?;
+    let argument = index + 2;
     match head {
         Head::Using => {
             let nor = require_atom(
@@ -875,6 +868,152 @@ pub open spec fn head_spelling(head: Head) -> &'static str {
         Head::Memory => "memory",
         Head::Test => "test",
     }
+}
+
+/// 元入力の綴りがフォームの先頭語と一致する名前アトムを判定する。
+#[verifier::opaque]
+pub open spec fn head_word_matches(source: &str, node: Form, head: Head) -> bool {
+    let span = form_span(node);
+    &&& node is Atom
+    &&& node->Atom_kind == AtomKind::Name
+    &&& source.spec_bytes()[span.start as int..span.end as int] == head_spelling(head).spec_bytes()
+}
+
+/// リストの最初の直接子が、現在の文脈に置ける先頭語であることを表す。
+pub open spec fn form_has_head(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool, head: Head,
+) -> bool {
+    &&& 0 <= index < forms.len()
+    &&& forms[index] is List
+    &&& index + 1 < forms[index]->List_end <= forms.len()
+    &&& head_word_matches(source, forms[index + 1], head)
+    &&& head_in_context(head, in_namespace)
+}
+
+/// フォームの先頭語を検査した結果のエラー種別と、その診断範囲の根拠を表す。
+pub open spec fn form_head_error_evidence(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool, kind: HeaderError, span: Range<usize>,
+) -> bool {
+    &&& 0 <= index < forms.len()
+    &&& {
+        let form = forms[index];
+        let list_span = form_span(form);
+        let child = forms[index + 1];
+        let has_child = form is List && index + 1 < form->List_end <= forms.len();
+        match kind {
+            HeaderError::ExpectedList => !(form is List) && span == list_span,
+            HeaderError::ExpectedHead => form is List && (
+                (form->List_end == index + 1 && list_span.end > 0
+                    && list_span.end <= source.spec_bytes().len()
+                    && source.spec_bytes()[list_span.end - 1] == 41
+                    && span.start == list_span.end - 1 && span.end == span.start)
+                || (has_child && !(child is Atom && child->Atom_kind == AtomKind::Name)
+                    && span == form_span(child))),
+            HeaderError::UnknownHead => has_child && child is Atom && child->Atom_kind == AtomKind::Name
+                && span == form_span(child)
+                && (forall|head: Head| !#[trigger] head_word_matches(source, child, head)),
+            HeaderError::MisplacedHead(head) => has_child && head_word_matches(source, child, head)
+                && !head_in_context(head, in_namespace) && span == form_span(child),
+            _ => false,
+        }
+    }
+}
+
+fn form_span_exec(form: &Form) -> (span: Range<usize>)
+    ensures span == form_span(*form),
+{
+    match form {
+        Form::Atom { span, .. } | Form::List { span, .. } => span.start..span.end,
+    }
+}
+
+fn source_span(source: &str, start: usize, end: usize) -> (word: &str)
+    requires
+        start < end <= source.spec_bytes().len(),
+        is_char_boundary(source.spec_bytes(), start as int),
+        is_char_boundary(source.spec_bytes(), end as int),
+    ensures word.spec_bytes() == source.spec_bytes()[start as int..end as int],
+{
+    let (prefix, _) = source.split_at(end);
+    proof {
+        encode_utf8_valid_utf8(source@);
+        encode_utf8_valid_utf8(prefix@);
+        assert(prefix.spec_bytes()[start as int] == source.spec_bytes()[start as int]);
+        is_char_boundary_iff_not_is_continuation_byte(source.spec_bytes(), start as int);
+        is_char_boundary_iff_not_is_continuation_byte(prefix.spec_bytes(), start as int);
+    }
+    let (_, word) = prefix.split_at(start);
+    assert(word.spec_bytes() =~= source.spec_bytes()[start as int..end as int]);
+    word
+}
+
+fn read_form_head(
+    source: &str, forms: &[Form], index: usize, in_namespace: bool,
+) -> (result: Result<(Head, usize, usize), (HeaderError, Range<usize>)>)
+    requires
+        index < forms@.len(),
+        complete_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        list_source_delimiters(source, forms@, false),
+    ensures
+        forall|head: Head| #[trigger] form_has_head(source, forms@, index as int, in_namespace, head)
+            <==> (result matches Ok((observed, _, _)) && observed == head),
+        match result {
+            Ok((_, end, closing)) => {
+                &&& forms@[index as int] is List
+                &&& end == forms@[index as int]->List_end
+                &&& closing + 1 == form_span(forms@[index as int]).end
+            },
+            Err((kind, span)) => form_head_error_evidence(source, forms@, index as int, in_namespace, kind, span),
+        },
+{
+    let form = &forms[index];
+    let Form::List { span: list_span, end: list_end } = form else {
+        return Err((HeaderError::ExpectedList, form_span_exec(form)));
+    };
+    let end = *list_end;
+    let head_index = index + 1;
+    assert(list_delimited(source.spec_bytes(), *form, false)) by {
+        reveal(list_source_delimiters);
+    };
+    let closing = list_span.end - 1;
+    if head_index == end {
+        return Err((HeaderError::ExpectedHead, closing..closing));
+    }
+    let child = &forms[head_index];
+    let Form::Atom { kind: AtomKind::Name, span: word_span } = child else {
+        assert forall|head: Head| !#[trigger] head_word_matches(source, *child, head) by {
+            reveal(head_word_matches);
+        };
+        return Err((HeaderError::ExpectedHead, form_span_exec(child)));
+    };
+    proof { encode_utf8_valid_utf8(source@); }
+    assert(word_span.start < word_span.end <= source.spec_bytes().len()
+        && is_char_boundary(source.spec_bytes(), word_span.start as int)
+        && is_char_boundary(source.spec_bytes(), word_span.end as int)) by {
+        reveal(form_spans_valid);
+        assert(form_span(*child) == *word_span);
+    };
+    let word = source_span(source, word_span.start, word_span.end);
+    let recognized = recognize_head(word);
+    assert forall|head: Head| #[trigger] head_word_matches(source, *child, head)
+        <==> recognized == Some(head) by {
+        reveal(head_word_matches);
+        assert(head_spelling(head).spec_bytes() == word.spec_bytes()
+            <==> head_spelling(head)@ == word@) by {
+            encode_utf8_decode_utf8(head_spelling(head)@);
+            encode_utf8_decode_utf8(word@);
+        };
+        assert(word.spec_bytes() == source.spec_bytes()[word_span.start as int..word_span.end as int]);
+        assert(head_spelling(head)@ == word@ <==> recognized == Some(head));
+    };
+    let Some(head) = recognized else {
+        return Err((HeaderError::UnknownHead, word_span.start..word_span.end));
+    };
+    if !head_allowed(head, in_namespace) {
+        return Err((HeaderError::MisplacedHead(head), word_span.start..word_span.end));
+    }
+    Ok((head, end, closing))
 }
 
 fn recognize_head(word: &str) -> (head: Option<Head>)

@@ -64,6 +64,28 @@ fn rejects_invalid_and_misplaced_headers() {
 }
 
 #[test]
+fn reports_head_errors_with_exact_ranges_and_preserves_validation_order() {
+    for (source, kind, text) in [
+        ("; 見出し\n()", HeaderError::ExpectedHead, ")"),
+        ("(() x)", HeaderError::ExpectedHead, "()"),
+        ("(using and) (unknown)", HeaderError::ExpectedNor, "and"),
+    ] {
+        let CircuitFormError::Header { kind: actual, span } = index_headers(source).unwrap_err()
+        else {
+            panic!("expected header error for {source:?}");
+        };
+        let start = source.find(text).unwrap();
+        let end = if text == ")" {
+            start
+        } else {
+            start + text.len()
+        };
+        assert_eq!(actual, kind, "{source:?}");
+        assert_eq!(span, start..end, "{source:?}");
+    }
+}
+
+#[test]
 fn validates_routine_and_storage_signatures() {
     let source = concat!(
         "(func f (in (x (bits 0008)) plain) (out (y ::ns::Word))) ",
