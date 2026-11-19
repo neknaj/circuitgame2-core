@@ -178,6 +178,94 @@ proof fn same_namespace_owner(source: &str, forms: Seq<Form>, index: int, parent
     indexed_subtree_location(source, forms, parent as int, forms[parent as int]->List_end as int, index, owner);
 }
 
+proof fn head_rejection_excludes_recognition(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool, error: (HeaderError, Range<usize>),
+)
+    requires form_head_error_evidence(source, forms, index, in_namespace, error.0, error.1),
+    ensures forall|head: Head| !#[trigger] form_has_head(source, forms, index, in_namespace, head),
+{
+    assert forall|head: Head| !#[trigger] form_has_head(source, forms, index, in_namespace, head) by {
+        if form_has_head(source, forms, index, in_namespace, head) {
+            if let HeaderError::MisplacedHead(found) = error.0 {
+                same_head_word(source, forms[index + 1], found, head);
+            } else {
+                reveal(head_word_matches);
+            }
+        }
+    };
+}
+
+proof fn head_errors_agree(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        form_head_error_evidence(source, forms, index, in_namespace, left.0, left.1),
+        form_head_error_evidence(source, forms, index, in_namespace, right.0, right.1),
+    ensures left == right,
+{
+    reveal(head_word_matches);
+    if let (HeaderError::MisplacedHead(a), HeaderError::MisplacedHead(b)) = (left.0, right.0) {
+        same_head_word(source, forms[index + 1], a, b);
+    }
+}
+
+proof fn header_errors_on_directives_agree(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        header_error_evidence(source, forms, index, in_namespace, left.0, left.1),
+        header_error_evidence(source, forms, index, in_namespace, right.0, right.1),
+        forall|head: Head| #[trigger] form_has_head(source, forms, index, in_namespace, head)
+            ==> head is Using || head is Namespace || head is Export || head is Use,
+    ensures left == right,
+{
+    let a_rejected = form_head_error_evidence(source, forms, index, in_namespace, left.0, left.1);
+    let b_rejected = form_head_error_evidence(source, forms, index, in_namespace, right.0, right.1);
+    if a_rejected || b_rejected {
+        if a_rejected {
+            head_rejection_excludes_recognition(source, forms, index, in_namespace, left);
+        } else {
+            head_rejection_excludes_recognition(source, forms, index, in_namespace, right);
+        }
+        assert(a_rejected && b_rejected);
+        head_errors_agree(source, forms, index, in_namespace, left, right);
+    } else {
+        let closing = (form_span(forms[index]).end - 1) as usize;
+        let stop = forms[index]->List_end as int;
+        let a = choose|head: Head| #[trigger] form_has_head(source, forms, index, in_namespace, head)
+            && form_span(forms[index]).end > 0
+            && header_arguments_error(source, forms, index + 2, stop, closing, head, left.0, left.1);
+        let b = choose|head: Head| #[trigger] form_has_head(source, forms, index, in_namespace, head)
+            && form_span(forms[index]).end > 0
+            && header_arguments_error(source, forms, index + 2, stop, closing, head, right.0, right.1);
+        same_head_word(source, forms[index + 1], a, b);
+        reveal(header_arguments_error);
+        super::directive_diagnostics::directive_errors_agree(source, forms, index + 2, stop, closing, a, left, right);
+    }
+}
+
+/// 同じフォームの先頭語または指示フォームの引数に違反があるとき、厳格索引の診断値が一致する。
+///
+/// フォームの位置は `first_circuit_header_error` から得られる。先頭語が有効な場合は
+/// `using`、`namespace`、`export`、`use` のいずれかであることを前提とする。
+pub proof fn circuit_directive_errors_agree(
+    source: &str, left: CircuitFormError, right: CircuitFormError, index: int, namespace: Option<usize>,
+)
+    requires
+        circuit_header_error_at(source, left, index, namespace),
+        circuit_header_error_at(source, right, index, namespace),
+        forall|head: Head| #[trigger] form_has_head(
+            source, sexpr_form_model(source)->Some_0, index, namespace.is_some(), head)
+            ==> head is Using || head is Namespace || head is Export || head is Use,
+    ensures left == right,
+{
+    let forms = sexpr_form_model(source)->Some_0;
+    header_errors_on_directives_agree(source, forms, index, namespace.is_some(),
+        (left->Header_kind, left->Header_span), (right->Header_kind, right->Header_span));
+}
+
 #[verifier::opaque]
 spec fn index_prefix(source: &str, forms: Seq<Form>, entries: Seq<Entry>, cursor: int) -> bool {
     &&& forall|k: int| 0 <= k < entries.len() ==> {
