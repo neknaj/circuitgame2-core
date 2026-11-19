@@ -21,6 +21,11 @@ mod structure;
 mod test_items;
 mod test_values;
 use body::validate_routine_arguments;
+pub use expression_forest::{
+    ExpressionReference, ExpressionReferenceKind, index_expression_references,
+};
+#[cfg(verus_only)]
+pub use expression_forest::{expression_reference_in_source, expression_source_reference_result};
 pub use index::index_headers;
 #[cfg(verus_only)]
 pub use index::{

@@ -228,7 +228,7 @@ pub(super) open spec fn expression_child_range(
         && arguments_match(forms, index + 2, end, builtin, child_start, child_end)
 }
 
-proof fn same_expression_head(
+pub(super) proof fn same_expression_head(
     source: &str, forms: Seq<Form>, head: int, left: Option<ExpressionHead>, right: Option<ExpressionHead>,
 )
     requires list_head_matches(source, forms, head, left), list_head_matches(source, forms, head, right),
@@ -306,7 +306,7 @@ pub(super) proof fn same_expression_list_error(
 /// 要素が欠けている場合は閉じ括弧の位置を長さ 0 の範囲で返す。
 pub(super) fn expression_children(
     source: &str, forms: &[Form], index: usize, end: usize, closing: usize,
-) -> (result: Result<Range<usize>, (HeaderError, Range<usize>)>)
+) -> (result: Result<(Range<usize>, Option<ExpressionHead>), (HeaderError, Range<usize>)>)
     requires
         index < end <= forms@.len(),
         forms@[index as int] is List,
@@ -319,9 +319,13 @@ pub(super) fn expression_children(
     ensures
         forall|start: int, stop: int| #[trigger] expression_child_range(
             source, forms@, index as int, end as int, start, stop,
-        ) <==> (result matches Ok(children) && start == children.start && stop == children.end),
+        ) <==> (result matches Ok((children, _)) && start == children.start && stop == children.end),
         match result {
-            Ok(children) => index < children.start <= children.end <= end
+            Ok((children, builtin)) => index + 1 < end && list_head_matches(source, forms@, index + 1, builtin)
+                && argument_matches(forms@, index + 1, end as int, HeaderError::ExpectedReference)
+                && arguments_match(forms@, index + 2, end as int, builtin,
+                    children.start as int, children.end as int)
+                && index < children.start <= children.end <= end
                 && (children.end == end || (children.start < children.end
                     && children.end == after_form(forms@, children.start as int))),
             Err(_) => true,
@@ -352,7 +356,10 @@ pub(super) fn expression_children(
             same_expression_head(source, forms@, head as int, builtin, witness);
         }
     };
-    children
+    match children {
+        Ok(children) => Ok((children, builtin)),
+        Err(error) => Err(error),
+    }
 }
 
 fn read_expression_arguments(

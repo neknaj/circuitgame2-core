@@ -3,17 +3,152 @@
 use super::expressions::expression_children;
 #[cfg(verus_only)]
 use super::expressions::{
-    after_form, expression_child_range, expression_list_error, same_expression_list_error,
+    after_form, argument_matches, expression_child_range, expression_list_error, list_head_matches,
+    same_expression_head, same_expression_list_error,
 };
 use super::*;
+#[cfg(verus_only)]
+use crate::{bare_atom_kind, sexpr_form_model, syntax_error_evidence, well_formed_sexpr};
 
 verus! {
+
+/// 回路式で共有宣言表を参照する名前の役割。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpressionReferenceKind {
+    /// 通常呼び出しの先頭にある回路名。
+    Callee,
+    /// `as` が指定する型名。
+    CastType,
+}
+
+/// 回路式が参照する名前と、元ソース上の位置。
+#[derive(Debug, Eq, PartialEq)]
+pub struct ExpressionReference {
+    /// 呼び出しと型参照のどちらに使うか。
+    pub kind: ExpressionReferenceKind,
+    /// 元の平坦な構文木で名前のアトムを指す添字。
+    pub form: usize,
+    /// 名前の UTF-8 半開バイト範囲。
+    pub span: Range<usize>,
+}
+
+/// 参照が構文木内の名前かパスを指し、範囲の両端が UTF-8 文字境界にあることを表す。
+pub open spec fn expression_reference_in_source(
+    source: &str, forms: Seq<Form>, item: ExpressionReference,
+) -> bool {
+    &&& item.form < forms.len()
+    &&& forms[item.form as int] is Atom
+    &&& reference_atom(forms[item.form as int]->Atom_kind)
+    &&& item.span == form_span(forms[item.form as int])
+    &&& item.span.start < item.span.end <= source.spec_bytes().len()
+    &&& is_char_boundary(source.spec_bytes(), item.span.start as int)
+    &&& is_char_boundary(source.spec_bytes(), item.span.end as int)
+    &&& bare_atom_kind(source.spec_bytes()[item.span.start as int..item.span.end as int])
+        == Some(forms[item.form as int]->Atom_kind)
+}
+
+fn indexed_reference(
+    _source: &str, forms: &[Form], form: usize, _end: usize, kind: ExpressionReferenceKind,
+) -> (item: ExpressionReference)
+    requires
+        form_spans_valid(_source, forms@, _source.spec_bytes().len() as int),
+        argument_matches(forms@, form as int, _end as int, HeaderError::ExpectedReference),
+    ensures
+        item.kind == kind && item.form == form && item.span == form_span(forms@[form as int]),
+        expression_reference_in_source(_source, forms@, item),
+{
+    proof { reveal(form_spans_valid); }
+    ExpressionReference { kind, form, span: form_span_exec(&forms[form]) }
+}
+
+spec fn local_reference(
+    forms: Seq<Form>, index: int, end: int, builtin: Option<ExpressionHead>,
+) -> Seq<ExpressionReference> {
+    if 0 <= index && index + 1 < end <= forms.len() && builtin is None {
+        seq![ExpressionReference {
+            kind: ExpressionReferenceKind::Callee, form: (index + 1) as usize, span: form_span(forms[index + 1]),
+        }]
+    } else if 0 <= index && index + 2 < end <= forms.len() && builtin == Some(ExpressionHead::As) {
+        seq![ExpressionReference {
+            kind: ExpressionReferenceKind::CastType, form: (index + 2) as usize, span: form_span(forms[index + 2]),
+        }]
+    } else {
+        Seq::empty()
+    }
+}
+
+/// 式列の子式を文法に従ってたどったときに現れる参照を、元ソース順で定める。
+#[verifier::opaque]
+pub closed spec fn expression_references(
+    source: &str, forms: Seq<Form>, start: int, stop: int,
+) -> Seq<ExpressionReference>
+    decreases stop - start,
+{
+    if !(0 <= start < stop <= forms.len()) {
+        Seq::empty()
+    } else {
+        match forms[start] {
+            Form::Atom { .. } => expression_references(source, forms, start + 1, stop),
+            Form::List { end, .. } => {
+                if start < end <= stop && exists|a: int, b: int| start < a <= b <= end
+                    && #[trigger] expression_child_range(source, forms, start, end as int, a, b)
+                {
+                    let (a, b) = choose|a: int, b: int| start < a <= b <= end
+                        && #[trigger] expression_child_range(source, forms, start, end as int, a, b);
+                    let builtin = choose|builtin: Option<ExpressionHead>|
+                        #[trigger] list_head_matches(source, forms, start + 1, builtin);
+                    local_reference(forms, start, end as int, builtin)
+                        + expression_references(source, forms, a, b)
+                        + expression_references(source, forms, end as int, stop)
+                } else {
+                    Seq::empty()
+                }
+            },
+        }
+    }
+}
+
+#[verifier::opaque]
+spec fn pending_references(source: &str, forms: Seq<Form>, pending: Seq<Range<usize>>) -> Seq<ExpressionReference>
+    decreases pending.len(),
+{
+    if pending.len() == 0 { Seq::empty() } else {
+        expression_references(source, forms, pending.last().start as int, pending.last().end as int)
+            + pending_references(source, forms, pending.drop_last())
+    }
+}
+
+proof fn list_reference_order(
+    source: &str, forms: Seq<Form>, start: int, stop: int, end: int, child_start: int, child_stop: int,
+    builtin: Option<ExpressionHead>,
+)
+    requires
+        0 <= start < end <= stop <= forms.len(),
+        expression_child_range(source, forms, start, end, child_start, child_stop),
+        start < child_start <= child_stop <= end,
+        list_head_matches(source, forms, start + 1, builtin),
+        forall|i: int, j: int| #[trigger] expression_child_range(source, forms, start, end, i, j)
+            ==> i == child_start && j == child_stop,
+    ensures
+        expression_references(source, forms, start, stop)
+            == local_reference(forms, start, end, builtin)
+                + expression_references(source, forms, child_start, child_stop)
+                + expression_references(source, forms, end, stop),
+{
+    reveal_with_fuel(expression_references, 1);
+    let (i, j) = choose|a: int, b: int| start < a <= b <= end
+        && #[trigger] expression_child_range(source, forms, start, end, a, b);
+    assert(i == child_start && j == child_stop);
+    let witness = choose|builtin: Option<ExpressionHead>|
+        #[trigger] list_head_matches(source, forms, start + 1, builtin);
+    same_expression_head(source, forms, start + 1, builtin, witness);
+}
 
 /// 半開区間に並ぶ式を回路文法に照らして判定する。
 ///
 /// リストでは、専用引数を除いた子式列と、そのリストの後に続く式列を判定する。
 #[verifier::opaque]
-pub(super) open spec fn expression_forest(source: &str, forms: Seq<Form>, start: int, stop: int) -> bool
+pub closed spec fn expression_forest(source: &str, forms: Seq<Form>, start: int, stop: int) -> bool
     decreases stop - start,
 {
     &&& 0 <= start <= stop <= forms.len()
@@ -35,7 +170,7 @@ pub(super) open spec fn expression_forest(source: &str, forms: Seq<Form>, start:
 ///
 /// リスト自身の違反を優先し、局所文法に合う場合は子式、後続の式の順に調べる。
 #[verifier::opaque]
-pub(super) open spec fn expression_forest_error(
+pub closed spec fn expression_forest_error(
     source: &str, forms: Seq<Form>, start: int, stop: int, error: (HeaderError, Range<usize>),
 ) -> bool
     decreases stop - start,
@@ -81,7 +216,7 @@ pub(super) open spec fn expression_atom_at(source: &str, form: Form) -> bool {
 
 /// 走査区間に含まれるリストが、区間の外まで延びないことを表す。
 #[verifier::opaque]
-pub(super) open spec fn expression_region(forms: Seq<Form>, start: int, stop: int) -> bool {
+pub open spec fn expression_region(forms: Seq<Form>, start: int, stop: int) -> bool {
     &&& 0 <= start <= stop <= forms.len()
     &&& forall|i: int| start <= i < stop && #[trigger] forms[i] is List
         ==> forms[i]->List_end <= stop
@@ -203,8 +338,87 @@ pub(super) fn validate_expressions(
             source, forms@, roots.start as int, roots.end as int, error,
         ) <==> result == Err(error),
 {
+    match inspect_expressions(source, forms, roots, false) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// 入力全体を回路式の列として読み、呼び出し名と型参照を元ソース順で取り出す。
+///
+/// 各添字は、同じ入力に [`parse`] を適用して得た構文木を指す。
+/// 局所信号名、フィールド名、専用フォームの先頭語は参照一覧に含めない。
+///
+/// # Errors
+///
+/// 字句や S 式の違反を優先し、入力を構文木にできた場合は式文法の最初の違反を返す。
+pub fn index_expression_references(
+    source: &str,
+) -> (result: Result<Vec<ExpressionReference>, CircuitFormError>)
+    ensures expression_source_reference_result(source, result),
+{
+    let forms = match parse(source) {
+        Ok(forms) => forms,
+        Err(error) => return Err(CircuitFormError::Syntax(error)),
+    };
+    let end = forms.len();
+    proof { reveal(expression_region); }
+    match inspect_expressions(source, forms.as_slice(), 0..end, true) {
+        Ok(items) => Ok(items),
+        Err((kind, span)) => Err(CircuitFormError::Header { kind, span }),
+    }
+}
+
+/// 入力全体の式参照索引または最初の診断を、厳格な構文木と式文法に結び付ける。
+pub closed spec fn expression_source_reference_result(
+    source: &str, result: Result<Vec<ExpressionReference>, CircuitFormError>,
+) -> bool {
+    match result {
+        Err(CircuitFormError::Syntax(error)) =>
+            !well_formed_sexpr(source) && syntax_error_evidence(source, error),
+        _ => if let Some(forms) = sexpr_form_model(source) {
+            let end = forms.len() as int;
+            &&& (result.is_ok() <==> expression_forest(source, forms, 0, end))
+            &&& match result {
+                Ok(items) => items@ == expression_references(source, forms, 0, end)
+                    && (forall|i: int| 0 <= i < items@.len()
+                        ==> expression_reference_in_source(source, forms, #[trigger] items@[i])),
+                Err(CircuitFormError::Header { kind, span }) =>
+                    expression_forest_error(source, forms, 0, end, (kind, span)),
+                _ => false,
+            }
+        } else {
+            false
+        },
+    }
+}
+
+/// 式列の索引に必要な構文木と元ソースの対応、および走査区間の境界を表す。
+pub open spec fn expression_index_region(source: &str, forms: Seq<Form>, roots: Range<usize>) -> bool {
+    &&& expression_region(forms, roots.start as int, roots.end as int)
+    &&& complete_list_indices(forms)
+    &&& nested_list_indices(forms)
+    &&& list_source_delimiters(source, forms, false)
+    &&& form_spans_valid(source, forms, source.spec_bytes().len() as int)
+}
+
+fn inspect_expressions(
+    source: &str, forms: &[Form], roots: Range<usize>, collect: bool,
+) -> (result: Result<Vec<ExpressionReference>, (HeaderError, Range<usize>)>)
+    requires expression_index_region(source, forms@, roots),
+    ensures
+        result.is_ok() <==> expression_forest(source, forms@, roots.start as int, roots.end as int),
+        collect ==> (result matches Ok(items) ==> items@ == expression_references(source, forms@, roots.start as int, roots.end as int)
+            && (forall|i: int| 0 <= i < items@.len()
+                ==> expression_reference_in_source(source, forms@, #[trigger] items@[i]))),
+        forall|error: (HeaderError, Range<usize>)| #[trigger] expression_forest_error(
+            source, forms@, roots.start as int, roots.end as int, error,
+        ) <==> result == Err(error),
+{
     let mut sequence = roots.start..roots.end;
     let mut pending: Vec<Range<usize>> = Vec::new();
+    let mut references: Vec<ExpressionReference> = Vec::new();
+    proof { reveal(pending_references); }
     // 式を処理すると未処理区間の合計長が減る。空区間からの復帰では保留数が減る。
     while sequence.start < sequence.end || pending.len() > 0
         invariant
@@ -221,22 +435,37 @@ pub(super) fn validate_expressions(
             forall|error: (HeaderError, Range<usize>)| #[trigger] expression_work_error(
                 source, forms@, sequence.start as int, sequence.end as int, pending@, error,
             ) <==> expression_forest_error(source, forms@, roots.start as int, roots.end as int, error),
+            collect ==> references@
+                + expression_references(source, forms@, sequence.start as int, sequence.end as int)
+                + pending_references(source, forms@, pending@)
+                =~= expression_references(source, forms@, roots.start as int, roots.end as int),
+            forall|i: int| 0 <= i < references@.len()
+                ==> expression_reference_in_source(source, forms@, #[trigger] references@[i]),
         decreases pending_expression_width(pending@) + sequence.end - sequence.start, pending@.len(),
     {
         let ghost before = pending@;
         let ghost start = sequence.start as int;
         let ghost stop = sequence.end as int;
+        let ghost emitted = references@;
         proof {
             reveal_with_fuel(expression_forest, 2);
             reveal_with_fuel(expression_forest_error, 2);
             reveal(expression_region);
         }
         if sequence.start == sequence.end {
+            assert(expression_references(source, forms@, start, stop) == Seq::empty()) by {
+                reveal_with_fuel(expression_references, 1);
+            }
             let Some(next) = pending.pop() else {
                 proof { assert(false); }
-                return Ok(());
+                return Ok(references);
             };
             assert(before == pending@.push(next));
+            assert(pending_references(source, forms@, before) ==
+                expression_references(source, forms@, next.start as int, next.end as int)
+                    + pending_references(source, forms@, pending@)) by {
+                reveal_with_fuel(pending_references, 1);
+            };
             assert(expression_region(forms@, next.start as int, next.end as int));
             assert(before.last() == next && before.drop_last() == pending@);
             assert(pending_expression_width(before)
@@ -270,6 +499,10 @@ pub(super) fn validate_expressions(
                         == expression_work_error(source, forms@, start + 1, stop, before, error));
                 };
                 proof { shrink_expression_region(forms@, start, start + 1, stop); }
+                assert(expression_references(source, forms@, start, stop)
+                    == expression_references(source, forms@, start + 1, stop)) by {
+                    reveal_with_fuel(expression_references, 1);
+                }
                 sequence.start += 1;
             }
             Form::List { span, end } => {
@@ -278,8 +511,8 @@ pub(super) fn validate_expressions(
                     assert(list_delimited(source.spec_bytes(), forms@[start], false));
                 }
                 let ghost next = *end as int;
-                let children = match expression_children(source, forms, index, *end, span.end - 1) {
-                    Ok(children) => children,
+                let (children, builtin) = match expression_children(source, forms, index, *end, span.end - 1) {
+                    Ok(parts) => parts,
                     Err(error) => {
                         assert forall|reported: (HeaderError, Range<usize>)| #[trigger] expression_forest_error(
                             source, forms@, roots.start as int, roots.end as int, reported,
@@ -295,6 +528,22 @@ pub(super) fn validate_expressions(
                 };
                 let ghost child_start = children.start as int;
                 let ghost child_stop = children.end as int;
+                proof {
+                    list_reference_order(source, forms@, start, stop, next, child_start, child_stop, builtin);
+                }
+                if collect {
+                    if builtin.is_none() {
+                        references.push(indexed_reference(
+                            source, forms, index + 1, *end, ExpressionReferenceKind::Callee,
+                        ));
+                    } else if matches!(builtin, Some(ExpressionHead::As)) {
+                        assert(index + 2 < *end);
+                        references.push(indexed_reference(
+                            source, forms, index + 2, *end, ExpressionReferenceKind::CastType,
+                        ));
+                    }
+                    assert(references@ =~= emitted + local_reference(forms@, start, next, builtin));
+                }
                 assert(expression_child_range(source, forms@, start, next, child_start, child_stop));
                 assert(expression_forest(source, forms@, start, stop) ==
                     (expression_forest(source, forms@, child_start, child_stop)
@@ -316,8 +565,17 @@ pub(super) fn validate_expressions(
                 if *end < sequence.end {
                     pending.push(*end..sequence.end);
                     assert(pending@.last() == (*end..sequence.end) && pending@.drop_last() == before);
+                    assert(pending_references(source, forms@, pending@) ==
+                        expression_references(source, forms@, next, stop)
+                            + pending_references(source, forms@, before)) by {
+                        reveal_with_fuel(pending_references, 1);
+                    };
                     assert(pending_expression_width(pending@)
                         == pending_expression_width(before) + stop - next);
+                } else {
+                    assert(expression_references(source, forms@, next, stop) == Seq::empty()) by {
+                        reveal_with_fuel(expression_references, 1);
+                    }
                 }
                 assert forall|error: (HeaderError, Range<usize>)| #[trigger] expression_work_error(
                     source, forms@, child_start, child_stop, pending@, error,
@@ -342,12 +600,14 @@ pub(super) fn validate_expressions(
         reveal(expression_forest);
         reveal(expression_forest_error);
         reveal(expression_region);
+        reveal(expression_references);
+        reveal(pending_references);
     }
     assert forall|error: (HeaderError, Range<usize>)|
         !#[trigger] expression_forest_error(source, forms@, roots.start as int, roots.end as int, error) by {
         assert(!expression_work_error(source, forms@, sequence.start as int, sequence.end as int, pending@, error));
     };
-    Ok(())
+    Ok(references)
 }
 
 
