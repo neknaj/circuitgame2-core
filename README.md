@@ -1,29 +1,49 @@
 # circuitgame2-core
 
-言語仕様と検証方針は [circuitgame2 の設計文書](https://github.com/neknaj/circuitgame2/tree/main/doc)を参照する。
+NCG2 の CLI と Web 向けの共通 Rust ライブラリ。現在は回路ソースの字句解析と構文解析を提供する。エディタ向けには、構文エラーを記録しながら S 式の構文木を返す回復解析も提供する。
 
-## クレート構成
+## 使い方
 
-`circuitgame2-core` は CLI や Web が依存する公開 API を提供する。現在の字句解析、S 式解析、回復処理とその証明は `crates/syntax` の `circuitgame2-syntax` に置く。利用側は引き続き `circuitgame2_core::syntax` から呼び出す。
+開発版を試すには、利用側の `Cargo.toml` に依存関係を追加する。
 
-## 検証とビルド
+```toml
+[dependencies]
+circuitgame2-core = { git = "https://github.com/neknaj/circuitgame2-core.git" }
+```
 
-[Verus 0.2026.11.02.8bf68ee](https://github.com/verus-lang/verus/releases/tag/release%2F0.2026.11.02.8bf68ee) の配布物を展開し、`cargo-verus` があるディレクトリを PATH に追加する。Rust のバージョンは `rust-toolchain.toml`、`vstd` のバージョンは `Cargo.toml` で固定している。
+次のコードを `src/main.rs` に置いて `cargo run` を実行すると、回路フォームを検査し、最初の宣言が `func` であることを確かめられる。
+
+```rust
+use circuitgame2_core::syntax::circuit::{Head, index_headers};
+
+fn main() {
+    let source = "(func identity (in x) (out y) (def y x))";
+    let circuit = index_headers(source).expect("valid circuit form");
+    assert_eq!(circuit.entries[0].head, Head::Func);
+}
+```
+
+- [API リファレンス](https://neknaj.github.io/circuitgame2-core/)
+- [回路文法](https://github.com/neknaj/circuitgame2/blob/main/doc/grammar.md)
+- [NCG2 の設計文書](https://github.com/neknaj/circuitgame2/tree/main/doc)
+
+## 開発
+
+Rust のバージョンは [rust-toolchain.toml](rust-toolchain.toml) に固定している。以下のコマンドはリポジトリのルートで実行する。
 
 ```sh
-cargo verus verify --workspace --locked
 cargo test --workspace --locked
 cargo build --workspace --locked --target wasm32-unknown-unknown
 ```
 
-Verus では数値アトムの数字部分を基数の規則に従って判定することを検証している。空白、行コメント、裸のアトム、文字列内の通常部分は、それぞれの字句規則で定めた最初の境界までを切り出す。括弧は ASCII の1バイトを、エスケープ直後では UTF-8 の文字を1つ消費する。いずれの分割でも元のバイト列を保存する。
+形式検証には [Verus 0.2026.11.02.8bf68ee](https://github.com/verus-lang/verus/releases/tag/release%2F0.2026.11.02.8bf68ee) を使う。配布物を展開し、`cargo-verus` のあるディレクトリを PATH に追加する。
 
-文字列走査では、各反復で残りの入力が減ること、返す接尾辞が元の入力の UTF-8 境界から始まること、診断範囲が入力内に収まることを検証している。次の字句区間を切り出す処理では、1バイト以上を消費し、元の入力の UTF-8 境界から始まる正確な接尾辞を返すことを検証している。
+```sh
+cargo verus verify --workspace --locked
+```
 
-厳格解析と回復解析で共用する走査ループでは、字句区間の両端が UTF-8 境界にあり、走査済みの範囲を欠落や重複なく覆うことを検証している。入力末尾まで走査した場合は、全入力が対象となる。厳格解析がエラーで途中終了する場合は、エラーを検出した字句区間までを対象とする。
+[検証設計](https://github.com/neknaj/circuitgame2/blob/main/doc/verification.md)に、各処理で証明する性質を記載している。
 
-裸のアトムは名前、パス、数値の分類を検証済みである。構文木に含まれる文字列については、対応する元入力の範囲が文字列の字句文法に適合することを検証している。厳格 S 式解析の成功時は、元入力全体を空白、行コメント、構文木のアトム、リストの開き括弧と閉じ括弧の区間に分割できることを検証している。構文木の各要素に対応する区間があり、リストごとに異なる閉じ括弧の区間が対応する。部分木に含まれる要素の範囲は親リストの括弧の内側に収まる。部分木の外の要素とは範囲が重ならず、アトム同士の間には区切りがある。
+## ライセンス
 
-厳格 S 式解析が返す構文木は、アトムと括弧で囲んだ S 式の列からなる再帰文法に従う。アトムと開閉括弧は、入力全体の被覆に使った区間列の要素に対応する。
-
-文法に適合する入力をすべて受理すること、回路フォームの文法適合、診断と回復の契約は引き続き検証対象とする。
+[MIT](LICENSE)
