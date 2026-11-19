@@ -234,7 +234,8 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
         match result {
             Ok(forms) => complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, false)
-                && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+                && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
+                && strict_source_covered(source, forms@),
             Err(error) => syntax_error_evidence(source, error),
         },
 {
@@ -261,7 +262,7 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
     }
 }
 
-spec fn covers(bytes: Seq<u8>, spans: Seq<(int, int)>, end: int) -> bool {
+pub open spec fn covers(bytes: Seq<u8>, spans: Seq<(int, int)>, end: int) -> bool {
     &&& 0 <= end <= bytes.len()
     &&& (spans.len() == 0 ==> end == 0)
     &&& (spans.len() > 0 ==> spans[spans.len() - 1].1 == end)
@@ -272,6 +273,267 @@ spec fn covers(bytes: Seq<u8>, spans: Seq<(int, int)>, end: int) -> bool {
         &&& is_char_boundary(bytes, span.1)
         &&& span.0 == if i == 0 { 0 } else { spans[i - 1].1 }
     }
+}
+
+pub open spec fn first_form_piece(form: Form) -> (int, int) {
+    let span = form_span(form);
+    (span.start as int, if form is List { span.start + 1 } else { span.end as int })
+}
+
+pub open spec fn list_close_piece(form: Form) -> (int, int) {
+    let end = form_span(form).end as int;
+    (end - 1, end)
+}
+
+pub open spec fn form_represents_piece(form: Form, piece: (int, int)) -> bool {
+    piece == first_form_piece(form)
+        || (form is List && form->List_end != 0
+            && form_span(form).start + 1 < form_span(form).end
+            && piece == list_close_piece(form))
+}
+
+pub open spec fn parsed_piece(source: &str, forms: Seq<Form>, piece: (int, int)) -> bool {
+    trivia_extent(source.spec_bytes(), piece.0, piece.1, false)
+        || trivia_extent(source.spec_bytes(), piece.0, piece.1, true)
+        || exists|i: int| 0 <= i < forms.len()
+            && form_represents_piece(#[trigger] forms[i], piece)
+}
+
+#[verifier::opaque]
+pub open spec fn pieces_represented(source: &str, forms: Seq<Form>, pieces: Seq<(int, int)>) -> bool {
+    forall|i: int| 0 <= i < pieces.len() ==> parsed_piece(source, forms, #[trigger] pieces[i])
+}
+
+pub open spec fn form_pieces_present(form: Form, pieces: Seq<(int, int)>) -> bool {
+    &&& pieces.contains(first_form_piece(form))
+    &&& (form is List && form->List_end != 0 ==> {
+        &&& form_span(form).start + 1 < form_span(form).end
+        &&& pieces.contains(list_close_piece(form))
+    })
+}
+
+#[verifier::opaque]
+pub open spec fn all_form_pieces_present(forms: Seq<Form>, pieces: Seq<(int, int)>) -> bool {
+    forall|i: int| 0 <= i < forms.len() ==> form_pieces_present(#[trigger] forms[i], pieces)
+}
+
+pub open spec fn closed_list(form: Form) -> bool {
+    form is List && form->List_end != 0
+}
+
+#[verifier::opaque]
+pub open spec fn distinct_list_closes(forms: Seq<Form>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < forms.len()
+        && #[trigger] closed_list(forms[i]) && #[trigger] closed_list(forms[j])
+        ==> form_span(forms[i]).end != form_span(forms[j]).end
+}
+
+proof fn append_without_close_preserves_distinct_closes(forms: Seq<Form>, form: Form)
+    requires distinct_list_closes(forms), !closed_list(form),
+    ensures distinct_list_closes(forms.push(form)),
+{
+    reveal(distinct_list_closes);
+    let extended = forms.push(form);
+    assert forall|i: int, j: int| 0 <= i < j < extended.len()
+        && #[trigger] closed_list(extended[i]) && #[trigger] closed_list(extended[j])
+        implies form_span(extended[i]).end != form_span(extended[j]).end by {
+        assert(extended[forms.len() as int] == form);
+        assert(extended[i] == forms[i] && extended[j] == forms[j]);
+    };
+}
+
+proof fn close_preserves_distinct_closes(
+    source: &str, before: Seq<Form>, after: Seq<Form>, closed: int, position: int,
+)
+    requires
+        distinct_list_closes(before),
+        form_spans_valid(source, before, position),
+        0 <= closed < before.len() == after.len(),
+        position < form_span(after[closed]).end,
+        forall|i: int| 0 <= i < before.len() && i != closed
+            ==> #[trigger] after[i] == before[i],
+    ensures distinct_list_closes(after),
+{
+    reveal(distinct_list_closes);
+    reveal(form_spans_valid);
+    assert forall|i: int, j: int| 0 <= i < j < after.len()
+        && #[trigger] closed_list(after[i]) && #[trigger] closed_list(after[j])
+        implies form_span(after[i]).end != form_span(after[j]).end by {
+        if i == closed {
+            assert(after[j] == before[j]);
+            assert(form_span(before[j]).end <= position);
+        } else if j == closed {
+            assert(after[i] == before[i]);
+            assert(form_span(before[i]).end <= position);
+        } else {
+            assert(after[i] == before[i] && after[j] == before[j]);
+        }
+    };
+}
+
+#[verifier::opaque]
+pub open spec fn strict_source_covered(source: &str, forms: Seq<Form>) -> bool {
+    &&& distinct_list_closes(forms)
+    &&& exists|pieces: Seq<(int, int)>| covers(source.spec_bytes(), pieces, source.spec_bytes().len() as int)
+        && #[trigger] pieces_represented(source, forms, pieces)
+        && all_form_pieces_present(forms, pieces)
+}
+
+proof fn source_coverage_from_pieces(source: &str, forms: Seq<Form>, pieces: Seq<(int, int)>)
+    requires
+        covers(source.spec_bytes(), pieces, source.spec_bytes().len() as int),
+        pieces_represented(source, forms, pieces),
+        all_form_pieces_present(forms, pieces),
+        distinct_list_closes(forms),
+    ensures strict_source_covered(source, forms),
+{
+    reveal(strict_source_covered);
+}
+
+proof fn append_represented_piece(
+    source: &str, forms: Seq<Form>, pieces: Seq<(int, int)>, piece: (int, int),
+)
+    requires pieces_represented(source, forms, pieces), parsed_piece(source, forms, piece),
+    ensures pieces_represented(source, forms, pieces.push(piece)),
+{
+    reveal(pieces_represented);
+    let extended = pieces.push(piece);
+    assert forall|i: int| 0 <= i < extended.len()
+        implies parsed_piece(source, forms, #[trigger] extended[i]) by {
+        if i < pieces.len() {
+            assert(extended[i] == pieces[i]);
+        }
+    };
+}
+
+proof fn preserve_represented_pieces(
+    source: &str, before: Seq<Form>, after: Seq<Form>, pieces: Seq<(int, int)>,
+)
+    requires
+        pieces_represented(source, before, pieces),
+        before.len() <= after.len(),
+        forall|i: int, piece: (int, int)| 0 <= i < before.len()
+            && #[trigger] form_represents_piece(before[i], piece)
+            ==> form_represents_piece(after[i], piece),
+    ensures pieces_represented(source, after, pieces),
+{
+    reveal(pieces_represented);
+    assert forall|i: int| 0 <= i < pieces.len()
+        implies parsed_piece(source, after, #[trigger] pieces[i]) by {
+        let piece = pieces[i];
+        assert(parsed_piece(source, before, piece));
+        if !trivia_extent(source.spec_bytes(), piece.0, piece.1, false)
+            && !trivia_extent(source.spec_bytes(), piece.0, piece.1, true)
+        {
+            let witness = choose|j: int| 0 <= j < before.len()
+                && form_represents_piece(#[trigger] before[j], piece);
+            assert(form_represents_piece(before[witness], piece));
+            assert(form_represents_piece(after[witness], piece));
+        }
+    };
+}
+
+proof fn appended_form_preserves_pieces(
+    source: &str, forms: Seq<Form>, added: Form, pieces: Seq<(int, int)>,
+)
+    requires pieces_represented(source, forms, pieces),
+    ensures pieces_represented(source, forms.push(added), pieces),
+{
+    preserve_represented_pieces(source, forms, forms.push(added), pieces);
+}
+
+proof fn closed_form_preserves_pieces(
+    source: &str, before: Seq<Form>, after: Seq<Form>, closed: int, pieces: Seq<(int, int)>,
+)
+    requires
+        pieces_represented(source, before, pieces),
+        before.len() == after.len(),
+        0 <= closed < before.len(),
+        before[closed] is List && before[closed]->List_end == 0,
+        after[closed] is List && after[closed]->List_span.start == before[closed]->List_span.start,
+        forall|i: int| 0 <= i < before.len() && i != closed
+            ==> #[trigger] after[i] == before[i],
+    ensures pieces_represented(source, after, pieces),
+{
+    assert forall|i: int, piece: (int, int)| 0 <= i < before.len()
+        && #[trigger] form_represents_piece(before[i], piece)
+        implies form_represents_piece(after[i], piece) by {
+        if i == closed {
+            assert(piece == (before[i]->List_span.start as int, before[i]->List_span.start + 1));
+        } else {
+            assert(after[i] == before[i]);
+        }
+    };
+    preserve_represented_pieces(source, before, after, pieces);
+}
+
+proof fn piece_membership_preserved(pieces: Seq<(int, int)>, piece: (int, int))
+    ensures
+        forall|old: (int, int)| #[trigger] pieces.contains(old) ==> pieces.push(piece).contains(old),
+        pieces.push(piece).contains(piece),
+{
+    let extended = pieces.push(piece);
+    assert(extended[pieces.len() as int] == piece);
+    assert forall|old: (int, int)| #[trigger] pieces.contains(old)
+        implies extended.contains(old) by {
+        let i = choose|i: int| 0 <= i < pieces.len() && pieces[i] == old;
+        assert(extended[i] == old);
+    };
+}
+
+proof fn form_pieces_preserved(
+    forms: Seq<Form>, after: Seq<Form>, pieces: Seq<(int, int)>, piece: (int, int),
+)
+    requires
+        all_form_pieces_present(forms, pieces),
+        forall|i: int| 0 <= i < after.len()
+            && (i >= forms.len() || #[trigger] after[i] != forms[i])
+            ==> form_pieces_present(after[i], pieces.push(piece)),
+    ensures all_form_pieces_present(after, pieces.push(piece)),
+{
+    reveal(all_form_pieces_present);
+    piece_membership_preserved(pieces, piece);
+    assert forall|i: int| 0 <= i < after.len()
+        implies form_pieces_present(#[trigger] after[i], pieces.push(piece)) by {
+        if i < forms.len() && after[i] == forms[i] {
+            assert(form_pieces_present(forms[i], pieces));
+        }
+    };
+}
+
+proof fn add_form_pieces(forms: Seq<Form>, added: Form, pieces: Seq<(int, int)>, piece: (int, int))
+    requires
+        all_form_pieces_present(forms, pieces),
+        first_form_piece(added) == piece,
+        added is List ==> added->List_end == 0,
+    ensures all_form_pieces_present(forms.push(added), pieces.push(piece)),
+{
+    piece_membership_preserved(pieces, piece);
+    let after = forms.push(added);
+    assert(after[forms.len() as int] == added);
+    form_pieces_preserved(forms, after, pieces, piece);
+}
+
+proof fn close_form_pieces(
+    before: Seq<Form>, after: Seq<Form>, closed: int, pieces: Seq<(int, int)>, piece: (int, int),
+)
+    requires
+        all_form_pieces_present(before, pieces),
+        before.len() == after.len(),
+        0 <= closed < before.len(),
+        before[closed] is List && after[closed] is List,
+        first_form_piece(before[closed]) == first_form_piece(after[closed]),
+        form_span(after[closed]).start + 1 < form_span(after[closed]).end,
+        list_close_piece(after[closed]) == piece,
+        forall|i: int| 0 <= i < before.len() && i != closed
+            ==> #[trigger] after[i] == before[i],
+    ensures all_form_pieces_present(after, pieces.push(piece)),
+{
+    reveal(all_form_pieces_present);
+    piece_membership_preserved(pieces, piece);
+    assert(form_pieces_present(before[closed], pieces));
+    assert(form_pieces_present(after[closed], pieces.push(piece)));
+    form_pieces_preserved(before, after, pieces, piece);
 }
 
 spec fn pending_lists(forms: Seq<Form>, open: Seq<usize>) -> bool {
@@ -300,7 +562,7 @@ pub open spec fn bare_atom_extent(bytes: Seq<u8>, start: int, end: int) -> bool 
     &&& (end < bytes.len() ==> bare_atom_delimiter(bytes[end]))
 }
 
-spec fn trivia_byte(byte: u8, comment: bool) -> bool {
+pub open spec fn trivia_byte(byte: u8, comment: bool) -> bool {
     if comment {
         byte != 10 && byte != 13
     } else {
@@ -309,7 +571,7 @@ spec fn trivia_byte(byte: u8, comment: bool) -> bool {
 }
 
 #[verifier::opaque]
-spec fn trivia_extent(bytes: Seq<u8>, start: int, end: int, comment: bool) -> bool {
+pub open spec fn trivia_extent(bytes: Seq<u8>, start: int, end: int, comment: bool) -> bool {
     &&& 0 <= start < end <= bytes.len()
     &&& (comment ==> bytes[start] == 59)
     &&& forall|i: int| start <= i < end ==> trivia_byte(#[trigger] bytes[i], comment)
@@ -913,7 +1175,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 && repair_input_spans_valid(source, repairs@, source.spec_bytes().len() as int)
                 && complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, recovering)
-                && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+                && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
+                && (!recovering ==> strict_source_covered(source, forms@)),
             Err(error) => syntax_error_evidence(source, error),
         },
 {
@@ -927,6 +1190,12 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         encode_utf8_valid_utf8(source@);
         reveal(form_spans_valid);
         assert(form_spans_valid(source, forms@, 0));
+        reveal(pieces_represented);
+        assert(pieces_represented(source, forms@, spans));
+        reveal(all_form_pieces_present);
+        assert(all_form_pieces_present(forms@, spans));
+        reveal(distinct_list_closes);
+        assert(distinct_list_closes(forms@));
         reveal(nested_list_indices);
         assert(nested_list_indices(forms@));
         reveal(repair_input_spans_valid);
@@ -942,6 +1211,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             length == source.spec_bytes().len(),
             valid_utf8(source.spec_bytes()),
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
+            !recovering ==> pieces_represented(source, forms@, spans)
+                && all_form_pieces_present(forms@, spans)
+                && distinct_list_closes(forms@),
             no_inserted_closes(repairs@),
             repair_input_spans_valid(source, repairs@, lexer.cursor.position()),
             form_spans_valid(source, forms@, lexer.cursor.position()),
@@ -950,10 +1222,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, recovering),
             open_order(open@),
+        ensures !recovering ==> strict_source_covered(source, forms@),
         decreases length - lexer.cursor.position(),
     {
         let Some((segment, next)) = lexer.next_segment() else {
-            assert(covers(source.spec_bytes(), spans, length as int));
+            proof {
+                if !recovering {
+                    source_coverage_from_pieces(source, forms@, spans);
+                }
+            }
             break;
         };
         let ghost previous_position = lexer.cursor.position();
@@ -962,8 +1239,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         let span = segment.span;
         let missing_separator = segment.missing_separator;
         let ghost old_spans = spans;
+        let ghost piece = (span.start as int, span.end as int);
         proof {
-            spans = spans.push((span.start as int, span.end as int));
+            spans = spans.push(piece);
             assert forall|i: int| 0 <= i < spans.len() implies {
                 let part = #[trigger] spans[i];
                 &&& 0 <= part.0 < part.1 <= span.end
@@ -992,7 +1270,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         }
         let ghost repairs_before_segment = repairs@;
         match kind {
-            SegmentKind::Whitespace | SegmentKind::Comment => {}
+            SegmentKind::Whitespace | SegmentKind::Comment => {
+                proof {
+                    if !recovering {
+                        assert(parsed_piece(source, forms@, piece));
+                        append_represented_piece(source, forms@, old_spans, piece);
+                        form_pieces_preserved(forms@, forms@, old_spans, piece);
+                    }
+                }
+            }
             SegmentKind::Malformed(error) => {
                 if recovering {
                     let repair = Repair::Skipped { span, error };
@@ -1024,6 +1310,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     nested_after_append(before, added);
                     indices_after_append(before, previous, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
+                    if !recovering {
+                        appended_form_preserves_pieces(source, before, added, old_spans);
+                        add_form_pieces(before, added, old_spans, piece);
+                        append_without_close_preserves_distinct_closes(before, added);
+                        assert(parsed_piece(source, forms@, piece)) by {
+                            assert(form_represents_piece(forms@[before.len() as int], piece));
+                        };
+                        append_represented_piece(source, forms@, old_spans, piece);
+                    }
                 }
             }
             SegmentKind::Close => {
@@ -1036,6 +1331,20 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         nested_after_close(before, forms@, previous, index);
                         indices_after_finish(before, forms@, previous, open@, index);
                         close_form_span(source, before, forms@, index as int, previous_position, lexer.cursor.position());
+                        if !recovering {
+                            let closed = index as int;
+                            assert(form_span(before[closed]).end <= previous_position) by {
+                                reveal(form_spans_valid);
+                            };
+                            assert(form_span(before[closed]).end == form_span(before[closed]).start + 1);
+                            closed_form_preserves_pieces(source, before, forms@, closed, old_spans);
+                            close_form_pieces(before, forms@, closed, old_spans, piece);
+                            close_preserves_distinct_closes(source, before, forms@, closed, previous_position);
+                            assert(parsed_piece(source, forms@, piece)) by {
+                                assert(form_represents_piece(forms@[index as int], piece));
+                            };
+                            append_represented_piece(source, forms@, old_spans, piece);
+                        }
                     }
                 } else {
                     let error = Error {
@@ -1065,6 +1374,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     nested_after_append(before, added);
                     indices_after_append(before, open@, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
+                    if !recovering {
+                        appended_form_preserves_pieces(source, before, added, old_spans);
+                        add_form_pieces(before, added, old_spans, piece);
+                        append_without_close_preserves_distinct_closes(before, added);
+                        assert(parsed_piece(source, forms@, piece)) by {
+                            assert(form_represents_piece(forms@[before.len() as int], piece));
+                        };
+                        append_represented_piece(source, forms@, old_spans, piece);
+                    }
                 }
             }
         }
@@ -1079,6 +1397,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     proof { no_closes_implies_evidence(source, forms@, repairs@); }
     while open.len() > 0
         invariant
+            !recovering ==> strict_source_covered(source, forms@),
             length == source.spec_bytes().len(),
             is_char_boundary(source.spec_bytes(), length as int),
             form_spans_valid(source, forms@, length as int),
