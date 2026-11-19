@@ -110,6 +110,16 @@ fn reports_head_errors_with_exact_ranges_and_preserves_validation_order() {
         ("; 見出し\n()", HeaderError::ExpectedHead, ")"),
         ("(() x)", HeaderError::ExpectedHead, "()"),
         ("(using and) (unknown)", HeaderError::ExpectedNor, "and"),
+        (
+            "(namespace ::n (unknown)) (using and)",
+            HeaderError::ExpectedNamespacePath,
+            "::n",
+        ),
+        (
+            "(namespace n (test f (reset)) (use alias x)) (using and)",
+            HeaderError::ExpectedAbsolutePath,
+            "alias",
+        ),
     ] {
         let CircuitFormError::Header { kind: actual, span } = index_headers(source).unwrap_err()
         else {
@@ -124,6 +134,20 @@ fn reports_head_errors_with_exact_ranges_and_preserves_validation_order() {
         assert_eq!(actual, kind, "{source:?}");
         assert_eq!(span, start..end, "{source:?}");
     }
+}
+
+#[test]
+fn reports_sexpr_errors_before_circuit_form_errors() {
+    use circuitgame2_core::syntax::{ErrorKind, parse};
+
+    let source = "(unknown) )";
+    let syntax_error = parse(source).unwrap_err();
+    assert_eq!(syntax_error.kind, ErrorKind::UnexpectedClose);
+    assert_eq!(syntax_error.span, 10..11);
+    assert_eq!(
+        index_headers(source),
+        Err(CircuitFormError::Syntax(syntax_error))
+    );
 }
 
 #[test]

@@ -14,11 +14,17 @@ mod body;
 mod clauses;
 mod expression_forest;
 mod expressions;
+mod index;
 mod ports;
 mod structure;
 mod test_items;
 mod test_values;
 use body::validate_routine_arguments;
+pub use index::index_headers;
+#[cfg(verus_only)]
+pub use index::{
+    circuit_index_matches, circuit_source_error, circuit_source_matches, indexed_location,
+};
 #[cfg(verus_only)]
 pub use ports::{
     port_error_evidence, port_matches, ports_clause_matches, ports_error_evidence,
@@ -75,9 +81,8 @@ pub enum Head {
     Test,
 }
 
-} // verus!
-
 /// 回路フォームと、それを含む名前空間の位置。
+#[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
     /// フォームの種別。
@@ -89,6 +94,7 @@ pub struct Entry {
 }
 
 /// 回路文法に従う構文木と、回路フォームを参照するための索引。
+#[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CircuitForms {
     /// S 式の全要素を先行順に並べた構文木。
@@ -96,8 +102,6 @@ pub struct CircuitForms {
     /// トップレベルのフォームと名前空間の直下にあるフォームを元入力順に並べた索引。
     pub entries: Vec<Entry>,
 }
-
-verus! {
 
 /// 回路フォームの構文検査で判明した文法上の誤り。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,9 +174,8 @@ pub enum Clause {
     At,
 }
 
-} // verus!
-
 /// S 式解析または回路フォームの構文検査で失敗した理由。
+#[verifier::allow(autoderive_clone_without_spec)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CircuitFormError {
     /// 回路フォームを調べる前に見つかった字句または S 式の誤り。
@@ -186,136 +189,121 @@ pub enum CircuitFormError {
     },
 }
 
-/// 回路フォームの宣言位置を構文木の添字で返す。
+/// 宣言の種類ごとに、先頭語に続く引数と本文の文法を定める。
 ///
-/// 単一ソースの宣言シグネチャ、回路本体、テスト本体を検査する。
-/// `(using nor)` を一度だけ指定する要件は、名前解決と同様にソース集合を対象とする後続の検査で扱う。
-/// 型と結線の検査も後続の処理で扱う。
+/// 名前空間の直下にあるフォームは、索引を作るときに個別に調べる。
+pub closed spec fn header_arguments_match(
+    source: &str, forms: Seq<Form>, first: int, end: int, head: Head,
+) -> bool {
+    match head {
+        Head::Using | Head::Namespace | Head::Use | Head::Export =>
+            directive_arguments_match(source, forms, first, end, head),
+        Head::Struct => structure_arguments_match(source, forms, first, end),
+        Head::Test => test_items::test_arguments_match(source, forms, first, end),
+        Head::Func | Head::Module | Head::ModulePart => body::routine_arguments_match(source, forms, first, end, head),
+        Head::Latch | Head::Memory => directive_word_at(source, forms, first, end, HeaderError::ExpectedName)
+            && storage_arguments_match(source, forms, first + 1, end, head),
+    }
+}
+
+/// 宣言の先頭語を認識した後の、最初の引数または本文の違反を表す。
+pub closed spec fn header_arguments_error(
+    source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
+    kind: HeaderError, span: Range<usize>,
+) -> bool {
+    match head {
+        Head::Using | Head::Namespace | Head::Use | Head::Export =>
+            directive_error_evidence(source, forms, first, end, closing, head, kind, span),
+        Head::Struct => structure_error_evidence(source, forms, first, end, closing, kind, span),
+        Head::Test => test_items::test_arguments_error(source, forms, first, end, closing, (kind, span)),
+        Head::Func | Head::Module | Head::ModulePart =>
+            body::routine_arguments_error(source, forms, first, end, closing, head, (kind, span)),
+        Head::Latch | Head::Memory => {
+            if directive_word_at(source, forms, first, end, HeaderError::ExpectedName) {
+                storage_error_evidence(source, forms, first + 1, end, closing, head, kind, span)
+            } else {
+                kind == HeaderError::ExpectedName && directive_argument_error_span(forms, first, end, closing, span)
+            }
+        },
+    }
+}
+
+/// フォームの先頭語、配置文脈、引数と本文が文法に従うことを表す。
+pub open spec fn header_matches(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool, head: Head,
+) -> bool {
+    form_has_head(source, forms, index, in_namespace, head)
+        && header_arguments_match(source, forms, index + 2, forms[index]->List_end as int, head)
+}
+
+/// 先頭語や配置の違反を先に調べ、続いて引数や本文の違反の根拠を与える。
+pub open spec fn header_error_evidence(
+    source: &str, forms: Seq<Form>, index: int, in_namespace: bool, kind: HeaderError, span: Range<usize>,
+) -> bool {
+    form_head_error_evidence(source, forms, index, in_namespace, kind, span)
+    || (exists|head: Head| #[trigger] form_has_head(source, forms, index, in_namespace, head)
+        && form_span(forms[index]).end > 0
+        && header_arguments_error(source, forms, index + 2, forms[index]->List_end as int,
+            (form_span(forms[index]).end - 1) as usize, head, kind, span))
+}
+
+/// 一つの回路フォームを検査し、種別と次の直接兄弟の添字を返す。
 ///
 /// # Errors
 ///
-/// 字句、S 式、検査対象の回路フォームに誤りがあれば、元入力の UTF-8 バイト範囲をエラーに含める。
-/// 回路フォームに必須の要素がなければ、挿入位置を長さ0の範囲で示す。
-/// テストで `case` と操作が混在すると、最初と種類が異なる項目の先頭語を主範囲とする。最初の項目についても先頭語の範囲をエラーに含める。
-///
-/// # Examples
-///
-/// ```
-/// use circuitgame2_syntax::circuit::{Head, index_headers};
-///
-/// let result = index_headers("(namespace gates (func f (in) (out y) (def y 0)))")?;
-/// assert_eq!(result.entries[1].head, Head::Func);
-/// assert_eq!(result.entries[1].namespace, Some(result.entries[0].form));
-/// # Ok::<(), circuitgame2_syntax::circuit::CircuitFormError>(())
-/// ```
-pub fn index_headers(source: &str) -> Result<CircuitForms, CircuitFormError> {
-    let forms = parse(source).map_err(CircuitFormError::Syntax)?;
-    let mut entries = Vec::new();
-    let mut root = 0;
-    while root < forms.len() {
-        let (head, end) = read_header(source, &forms, root, false)?;
-        entries.push(Entry {
-            head,
-            form: root,
-            namespace: None,
-        });
-        if head == Head::Namespace {
-            let mut item = namespace_members_start(&forms, root, end);
-            while item < end {
-                let (head, next) = read_header(source, &forms, item, true)?;
-                entries.push(Entry {
-                    head,
-                    form: item,
-                    namespace: Some(root),
-                });
-                item = next;
-            }
-        }
-        root = end;
-    }
-    Ok(CircuitForms { forms, entries })
-}
-
+/// 先頭語と配置を検査し、続いて引数と本文の最初の違反を返す。
 fn read_header(
-    source: &str,
-    forms: &[Form],
-    index: usize,
-    in_namespace: bool,
-) -> Result<(Head, usize), CircuitFormError> {
-    let (head, end, closing) = read_form_head(source, forms, index, in_namespace)
-        .map_err(|(kind, span)| header_error(kind, span))?;
-    let argument = index + 2;
-    match head {
-        Head::Using | Head::Namespace | Head::Use | Head::Export => {
-            validate_directive(source, forms, argument, end, closing, head)
-                .map_err(|(kind, span)| header_error(kind, span))?;
-        }
-        Head::Struct => {
-            validate_structure_arguments(source, forms, argument, end, closing)
-                .map_err(|(kind, span)| header_error(kind, span))?;
-        }
-        Head::Test => {
-            test_items::validate_test_arguments(source, forms, argument, end, closing)
-                .map_err(|(kind, span)| header_error(kind, span))?;
-        }
-        Head::Func | Head::Module | Head::ModulePart => {
-            validate_routine_arguments(source, forms, argument, end, closing, head)
-                .map_err(|(kind, span)| header_error(kind, span))?;
-        }
+    source: &str, forms: &[Form], index: usize, in_namespace: bool,
+) -> (result: Result<(Head, usize), (HeaderError, Range<usize>)>)
+    requires
+        index < forms@.len(),
+        complete_list_indices(forms@),
+        nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        list_source_delimiters(source, forms@, false),
+    ensures
+        forall|head: Head| #[trigger] header_matches(source, forms@, index as int, in_namespace, head)
+            <==> (result matches Ok((actual, _)) && actual == head),
+        match result {
+            Ok((head, next)) => {
+                &&& forms@[index as int] is List
+                &&& next == forms@[index as int]->List_end
+                &&& index < next <= forms@.len()
+                &&& following_direct_form(forms@, index as int, next as int)
+                &&& (forall|candidate: Head| #[trigger] form_has_head(source, forms@, index as int, in_namespace, candidate)
+                    <==> candidate == head)
+                &&& head == Head::Namespace ==> (index + 3 <= next
+                    && forms@[index + 1] is Atom && forms@[index + 2] is Atom)
+            },
+            Err((kind, span)) => header_error_evidence(source, forms@, index as int, in_namespace, kind, span),
+        },
+{
+    let (head, end, closing) = read_form_head(source, forms, index, in_namespace)?;
+    assert(form_has_head(source, forms@, index as int, in_namespace, head));
+    let first = index + 2;
+    assert(form_region_ends_at(forms@, first as int, end as int));
+    proof {
+        reveal(list_source_delimiters);
+        assert(list_delimited(source.spec_bytes(), forms@[index as int], false));
+    }
+    let checked = match head {
+        Head::Using | Head::Namespace | Head::Use | Head::Export => validate_directive(source, forms, first, end, closing, head),
+        Head::Struct => validate_structure_arguments(source, forms, first, end, closing),
+        Head::Test => test_items::validate_test_arguments(source, forms, first, end, closing),
+        Head::Func | Head::Module | Head::ModulePart => validate_routine_arguments(source, forms, first, end, closing, head),
         Head::Latch | Head::Memory => {
-            require_name(forms, argument, end, closing)?;
-            validate_storage_arguments(source, forms, argument + 1, end, closing, head)
-                .map_err(|(kind, span)| header_error(kind, span))?;
-        }
+            check_directive_word(source, forms, first, end, closing, HeaderError::ExpectedName)?;
+            assert(form_region_ends_at(forms@, first + 1, end as int));
+            validate_storage_arguments(source, forms, first + 1, end, closing, head)
+        },
+    };
+    assert(checked.is_ok() <==> header_arguments_match(source, forms@, first as int, end as int, head));
+    checked?;
+    if matches!(head, Head::Namespace) {
+        proof { reveal(head_word_matches); }
     }
     Ok((head, end))
 }
-
-fn require_name(
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-) -> Result<(), CircuitFormError> {
-    require_atom(
-        forms,
-        index,
-        end,
-        closing,
-        HeaderError::ExpectedName,
-        |kind| kind == AtomKind::Name,
-    )?;
-    Ok(())
-}
-
-fn require_atom(
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-    expected: HeaderError,
-    accepts: impl FnOnce(AtomKind) -> bool,
-) -> Result<Range<usize>, CircuitFormError> {
-    if index >= end {
-        return Err(header_error(expected, closing..closing));
-    }
-    match &forms[index] {
-        Form::Atom { kind, span } if accepts(*kind) => Ok(span.clone()),
-        form => Err(header_error(expected, span(form))),
-    }
-}
-
-fn span(form: &Form) -> Range<usize> {
-    match form {
-        Form::Atom { span, .. } | Form::List { span, .. } => span.clone(),
-    }
-}
-
-fn header_error(kind: HeaderError, span: Range<usize>) -> CircuitFormError {
-    CircuitFormError::Header { kind, span }
-}
-
-verus! {
 
 pub open spec fn head_spelling(head: Head) -> &'static str {
     match head {
@@ -480,28 +468,6 @@ proof fn node_end_is_following_direct_form(forms: Seq<Form>, index: int, next: i
             assert(forms[index] is List && forms[index]->List_end > skipped);
         };
     };
-}
-
-fn namespace_members_start(forms: &[Form], namespace: usize, end: usize) -> (first: usize)
-    requires
-        namespace + 3 <= end <= forms@.len(),
-        forms@[namespace as int] is List && forms@[namespace as int]->List_end == end,
-        forms@[namespace + 1] is Atom,
-        forms@[namespace + 2] is Atom,
-    ensures
-        first == namespace + 3 <= end,
-        first < end ==> direct_form_in_range(forms@, namespace + 1, end as int, first as int),
-{
-    let _ = (forms, end);
-    let first = namespace + 3;
-    proof {
-        reveal(direct_form_in_range);
-        assert forall|earlier: int| namespace + 1 <= earlier < first
-            implies !(#[trigger] forms@[earlier] is List) by {
-            assert(earlier == namespace + 1 || earlier == namespace + 2);
-        };
-    }
-    first
 }
 
 fn read_form_head(
