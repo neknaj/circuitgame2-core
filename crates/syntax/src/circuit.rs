@@ -11,10 +11,11 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod clauses;
+mod expression_forest;
 mod expressions;
 mod ports;
 mod structure;
-use expressions::expression_children;
+use expression_forest::validate_expressions;
 use ports::read_routine_signature;
 #[cfg(verus_only)]
 pub use ports::{
@@ -489,30 +490,7 @@ fn expression_end(
 }
 
 fn expressions(source: &str, forms: &[Form], roots: Range<usize>) -> Result<(), CircuitFormError> {
-    let mut pending = Vec::new();
-    pending.push(roots);
-    while let Some(mut sequence) = pending.pop() {
-        while sequence.start < sequence.end {
-            let index = sequence.start;
-            match &forms[index] {
-                Form::Atom { kind, span } => {
-                    if !expression_atom(*kind, &source[span.clone()]) {
-                        return Err(header_error(HeaderError::ExpectedExpression, span.clone()));
-                    }
-                    sequence.start += 1;
-                }
-                Form::List { span, end } => {
-                    let children = expression_children(source, forms, index, *end, span.end - 1)
-                        .map_err(|(kind, span)| header_error(kind, span))?;
-                    if *end < sequence.end {
-                        pending.push(*end..sequence.end);
-                    }
-                    sequence = children;
-                }
-            }
-        }
-    }
-    Ok(())
+    validate_expressions(source, forms, roots).map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn natural_at(

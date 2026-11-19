@@ -56,23 +56,23 @@ pub(super) open spec fn first_error(
 /// 式の文法に従い、必須引数から余剰引数まで左から順に検査する。
 ///
 /// 子式の位置ではフォームが存在することを求める。その内容は子式を走査するときに検査する。
-pub(super) open spec fn argument_shape(
+pub(super) open spec fn argument_shape_error(
     forms: Seq<Form>, first: int, end: int, closing: usize, builtin: Option<ExpressionHead>,
-) -> (Option<(HeaderError, Range<usize>)>, int, int) {
+) -> Option<(HeaderError, Range<usize>)> {
     let value = if builtin == Some(ExpressionHead::As) { first + 1 } else { first };
-    let next = after_form(forms, value);
+    let next = if value < end { after_form(forms, value) } else { end };
     let present = argument_error(forms, value, end, closing, HeaderError::ExpectedExpression);
     match builtin {
-        None => (None, first, end),
-        Some(ExpressionHead::Concat) => (present, first, end),
-        Some(ExpressionHead::As) => (first_error(
+        None => None,
+        Some(ExpressionHead::Concat) => present,
+        Some(ExpressionHead::As) => first_error(
             argument_error(forms, first, end, closing, HeaderError::ExpectedReference),
             first_error(present, argument_error(forms, next, end, closing, HeaderError::UnexpectedArgument)),
-        ), value, next),
+        ),
         Some(ExpressionHead::Slice) => {
             let after_count = next + 2;
             let after_step = if after_count < end { after_count + 1 } else { after_count };
-            (first_error(present, first_error(
+            first_error(present, first_error(
                 argument_error(forms, next, end, closing, HeaderError::ExpectedNatural),
                 first_error(
                     argument_error(forms, next + 1, end, closing, HeaderError::ExpectedNatural),
@@ -83,7 +83,7 @@ pub(super) open spec fn argument_shape(
                         argument_error(forms, after_step, end, closing, HeaderError::UnexpectedArgument),
                     ),
                 ),
-            )), value, next)
+            ))
         },
         Some(head) => {
             let (auxiliary, after) = match head {
@@ -95,9 +95,8 @@ pub(super) open spec fn argument_shape(
                 ),
                 _ => (None, next),
             };
-            (first_error(present, first_error(auxiliary,
-                argument_error(forms, after, end, closing, HeaderError::UnexpectedArgument))),
-                value, next)
+            first_error(present, first_error(auxiliary,
+                argument_error(forms, after, end, closing, HeaderError::UnexpectedArgument)))
         },
     }
 }
@@ -255,6 +254,38 @@ fn read_expression_head(source: &str, form: &Form) -> (head: Option<ExpressionHe
     head
 }
 
+/// リストの先頭語と引数のうち、最初の違反に対応する診断を表す。
+pub(super) open spec fn expression_list_error(
+    source: &str, forms: Seq<Form>, index: int, end: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+) -> bool {
+    let head_error = argument_error(forms, index + 1, end, closing, HeaderError::ExpectedReference);
+    head_error == Some(error) || (head_error is None
+        && (exists|builtin: Option<ExpressionHead>|
+            #[trigger] list_head_matches(source, forms, index + 1, builtin)
+            && argument_shape_error(forms, index + 2, end, closing, builtin) == Some(error)))
+}
+
+pub(super) proof fn same_expression_list_error(
+    source: &str, forms: Seq<Form>, index: int, end: int, closing: usize,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        expression_list_error(source, forms, index, end, closing, left),
+        expression_list_error(source, forms, index, end, closing, right),
+    ensures left == right,
+{
+    if argument_error(forms, index + 1, end, closing, HeaderError::ExpectedReference) is None {
+        let left_head = choose|builtin: Option<ExpressionHead>|
+            #[trigger] list_head_matches(source, forms, index + 1, builtin)
+            && argument_shape_error(forms, index + 2, end, closing, builtin) == Some(left);
+        let right_head = choose|builtin: Option<ExpressionHead>|
+            #[trigger] list_head_matches(source, forms, index + 1, builtin)
+            && argument_shape_error(forms, index + 2, end, closing, builtin) == Some(right);
+        same_expression_head(source, forms, index + 1, left_head, right_head);
+    }
+}
+
 /// リスト形式の式の局所文法を検査し、走査する子式の添字範囲を返す。
 ///
 /// # Errors
@@ -278,17 +309,14 @@ pub(super) fn expression_children(
             source, forms@, index as int, end as int, start, stop,
         ) <==> (result matches Ok(children) && start == children.start && stop == children.end),
         match result {
-            Ok(children) => index < children.start <= children.end <= end,
+            Ok(children) => index < children.start <= children.end <= end
+                && (children.end == end || (children.start < children.end
+                    && children.end == after_form(forms@, children.start as int))),
             Err(_) => true,
         },
         match result {
             Ok(_) => true,
-            Err(error) => {
-                let head_error = argument_error(forms@, index + 1, end as int, closing, HeaderError::ExpectedReference);
-                head_error == Some(error) || (head_error is None
-                    && (exists|builtin: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms@, index + 1, builtin)
-                        && argument_shape(forms@, index + 2, end as int, closing, builtin).0 == Some(error)))
-            },
+            Err(error) => expression_list_error(source, forms@, index as int, end as int, closing, error),
         },
 {
     let head = index + 1;
@@ -328,9 +356,9 @@ fn read_expression_arguments(
             <==> (result matches Ok(children) && start == children.start && stop == children.end),
         match result {
             Ok(children) => first <= children.start <= children.end <= end
-                && argument_shape(forms@, first as int, end as int, closing, builtin)
-                    == (None, children.start as int, children.end as int),
-            Err(error) => argument_shape(forms@, first as int, end as int, closing, builtin).0 == Some(error),
+                && (children.end == end || (children.start < children.end
+                    && children.end == after_form(forms@, children.start as int))),
+            Err(error) => argument_shape_error(forms@, first as int, end as int, closing, builtin) == Some(error),
         },
 {
     if matches!(builtin, Some(ExpressionHead::As)) {

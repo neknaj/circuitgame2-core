@@ -500,6 +500,16 @@ fn reports_malformed_routine_body_items_and_expressions() {
         ("(def y (as 1 x))", HeaderError::ExpectedReference, "1"),
         ("(def y (raw x y))", HeaderError::UnexpectedArgument, "y"),
         (
+            "(def y (concat (raw 00) (slice x nope 1)))",
+            HeaderError::ExpectedExpression,
+            "00",
+        ),
+        (
+            "(def y (concat (raw 0) (slice x nope 1)))",
+            HeaderError::ExpectedNatural,
+            "nope",
+        ),
+        (
             "(def y (nor (raw 1) 00))",
             HeaderError::ExpectedExpression,
             "00",
