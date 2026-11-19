@@ -659,9 +659,27 @@ pub open spec fn string_error_opening(kind: ErrorKind, span: Range<usize>) -> Op
     }
 }
 
+pub open spec fn structural_error_location(source: &str, error: Error) -> bool {
+    let bytes = source.spec_bytes();
+    match error.kind {
+        ErrorKind::MissingSeparator => {
+            &&& error.span.start == error.span.end
+            &&& error.span.start < bytes.len()
+            &&& is_char_boundary(bytes, error.span.start as int)
+        },
+        ErrorKind::UnclosedList { eof } => {
+            &&& eof == bytes.len()
+            &&& error.span.end == error.span.start + 1 <= eof
+            &&& bytes[error.span.start as int] == 40
+        },
+        _ => true,
+    }
+}
+
 #[verifier::opaque]
 pub open spec fn syntax_error_evidence(source: &str, error: Error) -> bool {
     &&& atom_and_close_error_evidence(source, error)
+    &&& structural_error_location(source, error)
     &&& match string_error_opening(error.kind, error.span) {
         Some(opening) => opening < source.spec_bytes().len()
             && string_error_site(source.spec_bytes()[opening as int..], opening as int, error),
@@ -671,6 +689,7 @@ pub open spec fn syntax_error_evidence(source: &str, error: Error) -> bool {
 
 proof fn parser_error_evidence(source: &str, error: Error)
     requires
+        structural_error_location(source, error),
         error.kind is MissingSeparator || error.kind is UnclosedList || (
             error.kind is UnexpectedClose
             && error.span.end == error.span.start + 1
@@ -982,7 +1001,13 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             }
         } else {
             let error = Error { kind: ErrorKind::UnclosedList { eof: length }, span: span.start..span.end };
-            proof { parser_error_evidence(source, error); }
+            proof {
+                assert(structural_error_location(source, error)) by {
+                    reveal(list_source_delimiters);
+                    assert(list_delimited(source.spec_bytes(), forms@[index as int], recovering));
+                };
+                parser_error_evidence(source, error);
+            }
             return Err(error);
         }
     }
