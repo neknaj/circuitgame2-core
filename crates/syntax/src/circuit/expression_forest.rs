@@ -567,6 +567,88 @@ pub closed spec fn expression_forest_error(
     }
 }
 
+/// 文法に適合する式列には、式列の診断が成立しない。
+pub(super) proof fn expression_forest_match_excludes_error(
+    source: &str, forms: Seq<Form>, start: int, stop: int, error: (HeaderError, Range<usize>),
+)
+    requires expression_forest(source, forms, start, stop),
+    ensures !expression_forest_error(source, forms, start, stop, error),
+    decreases stop - start,
+{
+    reveal(expression_forest);
+    reveal(expression_forest_error);
+    if expression_forest_error(source, forms, start, stop, error) {
+        match forms[start] {
+            Form::Atom { .. } => {
+                expression_forest_match_excludes_error(source, forms, start + 1, stop, error);
+            },
+            Form::List { end, .. } => {
+                let next = end as int;
+                let (a, b) = choose|a: int, b: int| start < a <= b <= next
+                    && #[trigger] expression_child_range(source, forms, start, next, a, b)
+                    && expression_forest(source, forms, a, b);
+                let (i, j) = choose|i: int, j: int| start < i <= j <= next
+                    && #[trigger] expression_child_range(source, forms, start, next, i, j)
+                    && (expression_forest_error(source, forms, i, j, error)
+                        || (expression_forest(source, forms, i, j)
+                            && expression_forest_error(source, forms, next, stop, error)));
+                same_child_interval(source, forms, start, next, a, b, i, j);
+                if expression_forest_error(source, forms, i, j, error) {
+                    expression_forest_match_excludes_error(source, forms, i, j, error);
+                } else {
+                    expression_forest_match_excludes_error(source, forms, next, stop, error);
+                }
+            },
+        }
+    }
+}
+
+/// リスト自身、子式、後続の式の検査順に従うと、式列の診断値は一意に定まる。
+pub(super) proof fn expression_forest_errors_agree(
+    source: &str, forms: Seq<Form>, start: int, stop: int,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        expression_forest_error(source, forms, start, stop, left),
+        expression_forest_error(source, forms, start, stop, right),
+    ensures left == right,
+    decreases stop - start,
+{
+    reveal(expression_forest_error);
+    match forms[start] {
+        Form::Atom { .. } => {
+            if expression_atom_at(source, forms[start]) {
+                expression_forest_errors_agree(source, forms, start + 1, stop, left, right);
+            }
+        },
+        Form::List { span, end } => {
+            let next = end as int;
+            if exists|i: int, j: int| #[trigger] expression_child_range(source, forms, start, next, i, j) {
+                let (a, b) = choose|a: int, b: int| start < a <= b <= next
+                    && #[trigger] expression_child_range(source, forms, start, next, a, b)
+                    && (expression_forest_error(source, forms, a, b, left)
+                        || (expression_forest(source, forms, a, b)
+                            && expression_forest_error(source, forms, next, stop, left)));
+                let (i, j) = choose|i: int, j: int| start < i <= j <= next
+                    && #[trigger] expression_child_range(source, forms, start, next, i, j)
+                    && (expression_forest_error(source, forms, i, j, right)
+                        || (expression_forest(source, forms, i, j)
+                            && expression_forest_error(source, forms, next, stop, right)));
+                same_child_interval(source, forms, start, next, a, b, i, j);
+                if expression_forest(source, forms, a, b) {
+                    expression_forest_match_excludes_error(source, forms, a, b, left);
+                    expression_forest_match_excludes_error(source, forms, a, b, right);
+                    expression_forest_errors_agree(source, forms, next, stop, left, right);
+                } else {
+                    expression_forest_errors_agree(source, forms, a, b, left, right);
+                }
+            } else {
+                same_expression_list_error(source, forms, start, next, (span.end - 1) as usize, left, right);
+            }
+        },
+    }
+}
+
 /// 名前、1 ビットを表す 0 と 1、ビット列をアトムとして受理する。
 pub(super) open spec fn expression_atom_at(source: &str, form: Form) -> bool {
     match form {

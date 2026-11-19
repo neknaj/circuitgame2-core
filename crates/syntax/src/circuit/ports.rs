@@ -7,6 +7,11 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
+use super::clause_diagnostics::{
+    named_error_spans_agree, named_match_excludes_error, type_after_agrees, type_errors_agree,
+    type_match_excludes_error,
+};
+#[cfg(verus_only)]
 use super::clauses::{enclosing_region_bounds_form, natural_clause_matches, reference_atom};
 #[cfg(verus_only)]
 use super::index::indexed_entry_evidence;
@@ -148,6 +153,58 @@ pub open spec fn port_error_evidence(
     }
 }
 
+proof fn port_match_excludes_error(
+    source: &str, forms: Seq<Form>, index: int, limit: int, error: (HeaderError, Range<usize>),
+)
+    requires port_matches(source, forms, index, limit),
+    ensures !port_error_evidence(source, forms, index, limit, error.0, error.1),
+{
+    if port_error_evidence(source, forms, index, limit, error.0, error.1) && forms[index] is List {
+        let end = forms[index]->List_end as int;
+        let close = (form_span(forms[index]).end - 1) as usize;
+        let type_index = index + 2;
+        type_match_excludes_error(source, forms, type_index, end, close, end, error);
+        let after = choose|next: int| #[trigger] type_matches(source, forms, type_index, end, next)
+            && next < end && error.1 == form_span(forms[next]);
+        type_after_agrees(source, forms, type_index, end, end, after);
+    }
+}
+
+proof fn port_errors_agree(
+    source: &str, forms: Seq<Form>, index: int, limit: int,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        port_error_evidence(source, forms, index, limit, left.0, left.1),
+        port_error_evidence(source, forms, index, limit, right.0, right.1),
+    ensures left == right,
+{
+    if forms[index] is List {
+        let end = forms[index]->List_end as int;
+        let close = (form_span(forms[index]).end - 1) as usize;
+        let type_index = index + 2;
+        if directive_word_at(source, forms, index + 1, end, HeaderError::ExpectedName) {
+            let left_type = type_error_evidence(source, forms, type_index, end, close, left.0, left.1);
+            let right_type = type_error_evidence(source, forms, type_index, end, close, right.0, right.1);
+            if left_type && right_type {
+                type_errors_agree(source, forms, type_index, end, close, left, right);
+            } else if !left_type {
+                let after = choose|next: int| #[trigger] type_matches(source, forms, type_index, end, next)
+                    && next < end && left.1 == form_span(forms[next]);
+                type_match_excludes_error(source, forms, type_index, end, close, after, right);
+                let other_after = choose|next: int|
+                    #[trigger] type_matches(source, forms, type_index, end, next)
+                    && next < end && right.1 == form_span(forms[next]);
+                type_after_agrees(source, forms, type_index, end, after, other_after);
+            } else {
+                let after = choose|next: int| #[trigger] type_matches(source, forms, type_index, end, next)
+                    && next < end && right.1 == form_span(forms[next]);
+                type_match_excludes_error(source, forms, type_index, end, close, after, left);
+            }
+        }
+    }
+}
+
 fn read_port(source: &str, forms: &[Form], index: usize, _limit: usize)
     -> (result: Result<usize, (HeaderError, Range<usize>)>)
     requires
@@ -229,6 +286,66 @@ pub open spec fn ports_error_evidence(
         || (exists|i: int| #[trigger] direct_form_in_range(forms, index + 2, end, i)
             && ports_match_before(source, forms, index + 2, end, i)
             && port_error_evidence(source, forms, i, end, kind, span))))
+}
+
+proof fn ports_match_excludes_error(
+    source: &str, forms: Seq<Form>, index: int, limit: int, closing: usize, clause: Clause,
+    after: int, error: (HeaderError, Range<usize>),
+)
+    requires ports_clause_matches(source, forms, index, limit, after, clause),
+    ensures !ports_error_evidence(source, forms, index, limit, closing, clause, error.0, error.1),
+{
+    if ports_error_evidence(source, forms, index, limit, closing, clause, error.0, error.1) {
+        named_match_excludes_error(source, forms, index, limit, closing, clause, after, error.1);
+        let port = choose|i: int|
+            #[trigger] direct_form_in_range(forms, index + 2, after, i)
+            && ports_match_before(source, forms, index + 2, after, i)
+            && port_error_evidence(source, forms, i, after, error.0, error.1);
+        assert(port_matches(source, forms, port, after)) by {
+            reveal(direct_form_in_range);
+            reveal(ports_match_before);
+        };
+        port_match_excludes_error(source, forms, port, after, error);
+    }
+}
+
+proof fn ports_errors_agree(
+    source: &str, forms: Seq<Form>, index: int, limit: int, closing: usize, clause: Clause,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        ports_error_evidence(source, forms, index, limit, closing, clause, left.0, left.1),
+        ports_error_evidence(source, forms, index, limit, closing, clause, right.0, right.1),
+    ensures left == right,
+{
+    let end = forms[index]->List_end as int;
+    if named_clause_matches(source, forms, index, limit, end, clause) {
+        named_match_excludes_error(source, forms, index, limit, closing, clause, end, left.1);
+        named_match_excludes_error(source, forms, index, limit, closing, clause, end, right.1);
+        let start = index + 2;
+        if clause is Out && start == end {
+            reveal(direct_form_in_range);
+            assert(forall|i: int| !#[trigger] direct_form_in_range(forms, start, end, i));
+        } else {
+            let left_port = choose|i: int| #[trigger] direct_form_in_range(forms, start, end, i)
+                && ports_match_before(source, forms, start, end, i)
+                && port_error_evidence(source, forms, i, end, left.0, left.1);
+            let right_port = choose|i: int| #[trigger] direct_form_in_range(forms, start, end, i)
+                && ports_match_before(source, forms, start, end, i)
+                && port_error_evidence(source, forms, i, end, right.0, right.1);
+            // 後の違反を選ぶには、先のポートが文法に適合していなければならない。
+            reveal(ports_match_before);
+            if left_port < right_port {
+                port_match_excludes_error(source, forms, left_port, end, left);
+            } else if right_port < left_port {
+                port_match_excludes_error(source, forms, right_port, end, right);
+            } else {
+                port_errors_agree(source, forms, left_port, end, left, right);
+            }
+        }
+    } else {
+        named_error_spans_agree(source, forms, index, limit, closing, clause, left.1, right.1);
+    }
 }
 
 proof fn record_port(
@@ -354,6 +471,70 @@ pub open spec fn routine_signature_error_evidence(
         && (ports_error_evidence(source, forms, first + 1, limit, closing, Clause::In, kind, span)
             || (exists|out: int| #[trigger] ports_clause_matches(source, forms, first + 1, limit, out, Clause::In)
                 && ports_error_evidence(source, forms, out, limit, closing, Clause::Out, kind, span)))
+    }
+}
+
+/// 構文に適合した署名から、本体の開始位置が一意に定まることを示す。
+pub(super) proof fn routine_signature_after_agrees(
+    source: &str, forms: Seq<Form>, first: int, limit: int, head: Head, left: int, right: int,
+)
+    requires
+        routine_signature_matches(source, forms, first, limit, head, left),
+        routine_signature_matches(source, forms, first, limit, head, right),
+    ensures left == right,
+{
+    if head is Func || head is Module {
+        let left_out = choose|out: int|
+            #[trigger] ports_clause_matches(source, forms, first + 1, limit, out, Clause::In)
+            && ports_clause_matches(source, forms, out, limit, left, Clause::Out);
+        let right_out = choose|out: int|
+            #[trigger] ports_clause_matches(source, forms, first + 1, limit, out, Clause::In)
+            && ports_clause_matches(source, forms, out, limit, right, Clause::Out);
+        assert(left_out == right_out);
+    }
+}
+
+/// 宣言名と入出力節が文法に適合すれば、署名に違反は存在しない。
+pub(super) proof fn routine_signature_match_excludes_error(
+    source: &str, forms: Seq<Form>, first: int, limit: int, closing: usize, head: Head,
+    after: int, error: (HeaderError, Range<usize>),
+)
+    requires routine_signature_matches(source, forms, first, limit, head, after),
+    ensures !routine_signature_error_evidence(source, forms, first, limit, closing, head, error.0, error.1),
+{
+    if routine_signature_error_evidence(source, forms, first, limit, closing, head, error.0, error.1) {
+        let out = choose|i: int|
+            #[trigger] ports_clause_matches(source, forms, first + 1, limit, i, Clause::In)
+            && ports_clause_matches(source, forms, i, limit, after, Clause::Out);
+        ports_match_excludes_error(source, forms, first + 1, limit, closing, Clause::In, out, error);
+        let error_out = choose|i: int|
+            #[trigger] ports_clause_matches(source, forms, first + 1, limit, i, Clause::In)
+            && ports_error_evidence(source, forms, i, limit, closing, Clause::Out, error.0, error.1);
+        assert(out == error_out);
+        ports_match_excludes_error(source, forms, out, limit, closing, Clause::Out, after, error);
+    }
+}
+
+/// 同じ署名の診断根拠は、最初の違反について同じ種別と範囲を定める。
+pub(super) proof fn routine_signature_errors_agree(
+    source: &str, forms: Seq<Form>, first: int, limit: int, closing: usize, head: Head,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        routine_signature_error_evidence(source, forms, first, limit, closing, head, left.0, left.1),
+        routine_signature_error_evidence(source, forms, first, limit, closing, head, right.0, right.1),
+    ensures left == right,
+{
+    if directive_word_at(source, forms, first, limit, HeaderError::ExpectedName) {
+        let input = first + 1;
+        let out = forms[input]->List_end as int;
+        if ports_clause_matches(source, forms, input, limit, out, Clause::In) {
+            ports_match_excludes_error(source, forms, input, limit, closing, Clause::In, out, left);
+            ports_match_excludes_error(source, forms, input, limit, closing, Clause::In, out, right);
+            ports_errors_agree(source, forms, out, limit, closing, Clause::Out, left, right);
+        } else {
+            ports_errors_agree(source, forms, input, limit, closing, Clause::In, left, right);
+        }
     }
 }
 

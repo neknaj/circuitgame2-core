@@ -257,6 +257,7 @@ pub fn index_definition_references(source: &str)
     -> (result: Result<CircuitDefinitionIndex, CircuitFormError>)
     ensures
         result.is_ok() <==> circuit_source_matches(source),
+        forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
         match result {
             Ok(index) => circuit_definitions_match(source, index),
             Err(error) => circuit_source_error(source, error),

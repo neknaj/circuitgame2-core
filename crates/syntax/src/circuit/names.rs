@@ -368,10 +368,11 @@ proof fn record_named_form(
 ///
 /// # Errors
 ///
-/// [`index_headers`] と同じ回路構文の診断を返す。
+/// [`index_named_build_forms`] と同じ最初の違反を報告する。診断の種別と範囲も一致する。
 pub fn index_named_forms(source: &str) -> (result: Result<NamedCircuit<'_>, CircuitFormError>)
     ensures
         result.is_ok() <==> circuit_source_matches(source),
+        forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
         match result {
             Ok(named) => circuit_index_matches(source, named.syntax.forms@, named.syntax.entries@)
                 && form_spans_valid(source, named.syntax.forms@, source.spec_bytes().len() as int)
@@ -392,10 +393,11 @@ pub fn index_named_forms(source: &str) -> (result: Result<NamedCircuit<'_>, Circ
 ///
 /// # Errors
 ///
-/// [`index_headers`] と同じ回路構文の診断を返す。
+/// [`index_named_forms`] と同じ最初の違反を報告する。診断の種別と範囲も一致する。
 pub fn index_named_build_forms(source: &str) -> (result: Result<NamedBuildCircuit<'_>, CircuitFormError>)
     ensures
         result.is_ok() <==> circuit_source_matches(source),
+        forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
         match result {
             Ok(named) => build_index_matches(source, named.build_model())
                 && named.entry_ranges@.len() == named.syntax.entries@.len()

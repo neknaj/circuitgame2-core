@@ -4,15 +4,19 @@
 use super::clauses::enclosing_region_bounds_form;
 #[cfg(verus_only)]
 use super::expression_forest::{
-    expression_forest, expression_forest_error, expression_index_region,
-    expression_reference_in_source, expression_references, expression_region, expression_signals,
+    expression_forest, expression_forest_error, expression_forest_errors_agree,
+    expression_forest_match_excludes_error, expression_index_region, expression_reference_in_source,
+    expression_references, expression_region, expression_signals,
 };
 use super::expression_forest::{inspect_expressions, inspect_expressions_into};
 #[cfg(verus_only)]
 use super::expressions::{after_form, argument_error, argument_matches};
 use super::expressions::{check_argument, read_expression_form};
 #[cfg(verus_only)]
-use super::ports::{RoutineLayout, routine_layout_matches};
+use super::ports::{
+    RoutineLayout, routine_layout_matches, routine_signature_after_agrees,
+    routine_signature_errors_agree, routine_signature_match_excludes_error,
+};
 use super::ports::{read_routine_signature, routine_layout};
 use super::*;
 
@@ -62,6 +66,59 @@ pub(super) open spec fn targets_error(
                     && (forall|name: int| index < name < bad
                         ==> #[trigger] argument_matches(forms, name, stop, expected))
             },
+        }
+    }
+}
+
+/// 左辺の形式が正しければ、左辺を原因とする診断は成立しない。
+proof fn targets_match_excludes_error(
+    forms: Seq<Form>, index: int, end: int, closing: usize, after: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires
+        targets_match(forms, index, end, after),
+    ensures
+        !targets_error(forms, index, end, closing, error),
+{
+    if targets_error(forms, index, end, closing, error) && forms[index] is List {
+        let span = forms[index]->List_span;
+        let expected = HeaderError::ExpectedName;
+        let bad = choose|bad: int| index < bad <= after && (bad < after || bad == index + 1)
+            && #[trigger] argument_error(forms, bad, after, (span.end - 1) as usize, expected) == Some(error)
+            && (forall|name: int| index < name < bad
+                ==> #[trigger] argument_matches(forms, name, after, expected));
+        assert(index + 1 < after);
+        assert(argument_matches(forms, bad, after, expected));
+    }
+}
+
+/// 左辺がリストなら、最初に名前の規則に違反した要素を診断する。
+proof fn targets_errors_agree(
+    forms: Seq<Form>, index: int, end: int, closing: usize,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        targets_error(forms, index, end, closing, left),
+        targets_error(forms, index, end, closing, right),
+    ensures
+        left == right,
+{
+    if index < end && forms[index] is List {
+        let stop = forms[index]->List_end as int;
+        let close = (forms[index]->List_span.end - 1) as usize;
+        let expected = HeaderError::ExpectedName;
+        let a = choose|bad: int| index < bad <= stop && (bad < stop || bad == index + 1)
+            && #[trigger] argument_error(forms, bad, stop, close, expected) == Some(left)
+            && (forall|name: int| index < name < bad
+                ==> #[trigger] argument_matches(forms, name, stop, expected));
+        let b = choose|bad: int| index < bad <= stop && (bad < stop || bad == index + 1)
+            && #[trigger] argument_error(forms, bad, stop, close, expected) == Some(right)
+            && (forall|name: int| index < name < bad
+                ==> #[trigger] argument_matches(forms, name, stop, expected));
+        if a < b {
+            assert(argument_matches(forms, a, stop, expected));
+        } else if b < a {
+            assert(argument_matches(forms, b, stop, expected));
         }
     }
 }
@@ -134,6 +191,24 @@ pub(super) open spec fn body_arguments_match(
     }
 }
 
+/// 左辺が文法に適合する定義で、右辺の式の個数と内容を順に検査した場合の診断根拠を表す。
+pub(super) open spec fn definition_rhs_error(
+    source: &str, forms: Seq<Form>, value: int, end: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+) -> bool {
+    if value == end {
+        argument_error(forms, value, end, closing, HeaderError::ExpectedExpression) == Some(error)
+    } else {
+        let after = after_form(forms, value);
+        &&& value < after <= end
+        &&& if after < end {
+            argument_error(forms, after, end, closing, HeaderError::UnexpectedArgument) == Some(error)
+        } else {
+            expression_forest_error(source, forms, value, end, error)
+        }
+    }
+}
+
 /// 引数の配置を先に検査し、定義に式が一つある場合にその内容の診断を採用する。
 pub(super) open spec fn body_arguments_error(
     source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, kind: BodyHead,
@@ -143,17 +218,54 @@ pub(super) open spec fn body_arguments_error(
         BodyHead::Expand => argument_error(forms, first, end, closing, HeaderError::ExpectedReference) == Some(error),
         BodyHead::Def => targets_error(forms, first, end, closing, error)
             || (exists|value: int| #[trigger] targets_match(forms, first, end, value)
-                && (if value == end {
-                    argument_error(forms, value, end, closing, HeaderError::ExpectedExpression) == Some(error)
-                } else {
-                    let after = after_form(forms, value);
-                    &&& value < after <= end
-                    &&& if after < end {
-                        argument_error(forms, after, end, closing, HeaderError::UnexpectedArgument) == Some(error)
-                    } else {
-                        expression_forest_error(source, forms, value, end, error)
-                    }
-                })),
+                && definition_rhs_error(source, forms, value, end, closing, error)),
+    }
+}
+
+proof fn body_arguments_match_excludes_error(
+    source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, kind: BodyHead,
+    error: (HeaderError, Range<usize>),
+)
+    requires body_arguments_match(source, forms, first, end, kind),
+    ensures !body_arguments_error(source, forms, first, end, closing, kind, error),
+{
+    if kind is Def && body_arguments_error(source, forms, first, end, closing, kind, error) {
+        let value = choose|value: int| #[trigger] targets_match(forms, first, end, value)
+            && value < end && after_form(forms, value) == end
+            && expression_forest(source, forms, value, end);
+        targets_match_excludes_error(forms, first, end, closing, value, error);
+        let bad_value = choose|value: int| #[trigger] targets_match(forms, first, end, value)
+            && definition_rhs_error(source, forms, value, end, closing, error);
+        assert(value == after_form(forms, first) == bad_value);
+        expression_forest_match_excludes_error(source, forms, value, end, error);
+    }
+}
+
+proof fn body_arguments_errors_agree(
+    source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, kind: BodyHead,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        body_arguments_error(source, forms, first, end, closing, kind, left),
+        body_arguments_error(source, forms, first, end, closing, kind, right),
+    ensures left == right,
+{
+    if kind is Def {
+        let value = after_form(forms, first);
+        if targets_match(forms, first, end, value) {
+            targets_match_excludes_error(forms, first, end, closing, value, left);
+            targets_match_excludes_error(forms, first, end, closing, value, right);
+            let left_value = choose|value: int| #[trigger] targets_match(forms, first, end, value)
+                && definition_rhs_error(source, forms, value, end, closing, left);
+            let right_value = choose|value: int| #[trigger] targets_match(forms, first, end, value)
+                && definition_rhs_error(source, forms, value, end, closing, right);
+            assert(left_value == value == right_value);
+            if value < end && after_form(forms, value) == end {
+                expression_forest_errors_agree(source, forms, value, end, left, right);
+            }
+        } else {
+            targets_errors_agree(forms, first, end, closing, left, right);
+        }
     }
 }
 
@@ -311,6 +423,62 @@ pub(super) open spec fn body_item_error(
                     && directive_argument_error_span(forms, index + 1, end, close, error.1)
             }
         },
+    }
+}
+
+proof fn body_heads_agree(
+    source: &str, forms: Seq<Form>, index: int, end: int, left: BodyHead, right: BodyHead,
+)
+    requires
+        body_head_at(source, forms, index, end, left),
+        body_head_at(source, forms, index, end, right),
+    ensures left == right,
+{
+    let left_word = body_head_spelling(left);
+    let right_word = body_head_spelling(right);
+    encode_utf8_decode_utf8(left_word@);
+    encode_utf8_decode_utf8(right_word@);
+    assert(left_word@ == right_word@);
+}
+
+proof fn body_item_match_excludes_error(
+    source: &str, forms: Seq<Form>, index: int, limit: int, error: (HeaderError, Range<usize>),
+)
+    requires body_item_matches(source, forms, index, limit),
+    ensures !body_item_error(source, forms, index, limit, error),
+{
+    if body_item_error(source, forms, index, limit, error) {
+        let end = forms[index]->List_end as int;
+        let close = (form_span(forms[index]).end - 1) as usize;
+        let kind = choose|kind: BodyHead| #[trigger] body_head_at(source, forms, index + 1, end, kind)
+            && body_arguments_match(source, forms, index + 2, end, kind);
+        let bad_kind = choose|kind: BodyHead| #[trigger] body_head_at(source, forms, index + 1, end, kind)
+            && body_arguments_error(source, forms, index + 2, end, close, kind, error);
+        body_heads_agree(source, forms, index + 1, end, kind, bad_kind);
+        body_arguments_match_excludes_error(source, forms, index + 2, end, close, kind, error);
+    }
+}
+
+proof fn body_item_errors_agree(
+    source: &str, forms: Seq<Form>, index: int, limit: int,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        body_item_error(source, forms, index, limit, left),
+        body_item_error(source, forms, index, limit, right),
+    ensures left == right,
+{
+    if forms[index] is List {
+        let end = forms[index]->List_end as int;
+        let close = (form_span(forms[index]).end - 1) as usize;
+        if exists|kind: BodyHead| #[trigger] body_head_at(source, forms, index + 1, end, kind) {
+            let left_kind = choose|kind: BodyHead| #[trigger] body_head_at(source, forms, index + 1, end, kind)
+                && body_arguments_error(source, forms, index + 2, end, close, kind, left);
+            let right_kind = choose|kind: BodyHead| #[trigger] body_head_at(source, forms, index + 1, end, kind)
+                && body_arguments_error(source, forms, index + 2, end, close, kind, right);
+            body_heads_agree(source, forms, index + 1, end, left_kind, right_kind);
+            body_arguments_errors_agree(source, forms, index + 2, end, close, left_kind, left, right);
+        }
     }
 }
 
@@ -484,6 +652,31 @@ pub(super) open spec fn body_error(
     exists|index: int| #[trigger] direct_form_in_range(forms, start, end, index)
         && body_items_before(source, forms, start, end, index)
         && body_item_error(source, forms, index, end, error)
+}
+
+proof fn body_errors_agree(
+    source: &str, forms: Seq<Form>, start: int, end: int,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        body_error(source, forms, start, end, left),
+        body_error(source, forms, start, end, right),
+    ensures left == right,
+{
+    let a = choose|index: int| #[trigger] direct_form_in_range(forms, start, end, index)
+        && body_items_before(source, forms, start, end, index)
+        && body_item_error(source, forms, index, end, left);
+    let b = choose|index: int| #[trigger] direct_form_in_range(forms, start, end, index)
+        && body_items_before(source, forms, start, end, index)
+        && body_item_error(source, forms, index, end, right);
+    reveal(body_items_before);
+    if a < b {
+        body_item_match_excludes_error(source, forms, a, end, left);
+    } else if b < a {
+        body_item_match_excludes_error(source, forms, b, end, right);
+    } else {
+        body_item_errors_agree(source, forms, a, end, left, right);
+    }
 }
 
 proof fn record_body_item(
@@ -820,6 +1013,31 @@ pub(super) open spec fn routine_arguments_error(
     routine_signature_error_evidence(source, forms, first, end, closing, head, error.0, error.1)
     || (exists|body: int| #[trigger] routine_signature_matches(source, forms, first, end, head, body)
         && body_error(source, forms, body, end, error))
+}
+
+/// 署名を優先し、本体ではソース順で最初の違反を診断するため、種別と範囲が一意に定まる。
+pub(super) proof fn routine_arguments_errors_agree(
+    source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        routine_arguments_error(source, forms, first, end, closing, head, left),
+        routine_arguments_error(source, forms, first, end, closing, head, right),
+    ensures left == right,
+{
+    if exists|body: int| #[trigger] routine_signature_matches(source, forms, first, end, head, body) {
+        let body = choose|body: int| #[trigger] routine_signature_matches(source, forms, first, end, head, body);
+        routine_signature_match_excludes_error(source, forms, first, end, closing, head, body, left);
+        routine_signature_match_excludes_error(source, forms, first, end, closing, head, body, right);
+        let left_body = choose|body: int| #[trigger] routine_signature_matches(source, forms, first, end, head, body)
+            && body_error(source, forms, body, end, left);
+        let right_body = choose|body: int| #[trigger] routine_signature_matches(source, forms, first, end, head, body)
+            && body_error(source, forms, body, end, right);
+        routine_signature_after_agrees(source, forms, first, end, head, left_body, right_body);
+        body_errors_agree(source, forms, left_body, end, left, right);
+    } else {
+        routine_signature_errors_agree(source, forms, first, end, closing, head, left, right);
+    }
 }
 
 /// 関数、モジュール、モジュール断片の署名と本体を順に検査する。

@@ -120,6 +120,21 @@ pub closed spec fn circuit_source_error(source: &str, error: CircuitFormError) -
     }
 }
 
+/// 回路ソースが診断の根拠を持つなら、回路文法には適合しない。
+proof fn circuit_diagnostic_excludes_match(source: &str, error: CircuitFormError)
+    requires circuit_source_error(source, error),
+    ensures !circuit_source_matches(source),
+{
+    if circuit_source_matches(source) && error is Header {
+        let (index, owner) = choose|index: int, owner: Option<usize>|
+            #[trigger] circuit_header_error_at(source, error, index, owner);
+        let forms = sexpr_form_model(source)->Some_0;
+        reveal(direct_form_in_range);
+        assert(index < forms.len());
+        assert(exists|head: Head| #[trigger] header_matches(source, forms, index, owner.is_some(), head));
+    }
+}
+
 pub(super) proof fn reject_circuit_syntax(source: &str, error: Error)
     requires !well_formed_sexpr(source), syntax_error_evidence(source, error), strict_syntax_rejection(source, error),
     ensures !circuit_source_matches(source), circuit_source_error(source, CircuitFormError::Syntax(error)),
@@ -210,16 +225,13 @@ proof fn head_errors_agree(
     }
 }
 
-proof fn header_errors_on_declarations_agree(
+proof fn header_errors_agree(
     source: &str, forms: Seq<Form>, index: int, in_namespace: bool,
     left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
 )
     requires
         header_error_evidence(source, forms, index, in_namespace, left.0, left.1),
         header_error_evidence(source, forms, index, in_namespace, right.0, right.1),
-        forall|head: Head| #[trigger] form_has_head(source, forms, index, in_namespace, head)
-            ==> head is Using || head is Namespace || head is Export || head is Use
-                || head is Struct || head is Latch || head is Memory,
     ensures left == right,
 {
     let a_rejected = form_head_error_evidence(source, forms, index, in_namespace, left.0, left.1);
@@ -246,37 +258,68 @@ proof fn header_errors_on_declarations_agree(
         let first = index + 2;
         match a {
             Head::Struct => super::structure::structure_errors_agree(source, forms, first, stop, closing, left, right),
+            Head::Test => super::test_diagnostics::test_arguments_errors_agree(source, forms, first, stop, closing, left, right),
             Head::Latch | Head::Memory => {
                 if directive_word_at(source, forms, first, stop, HeaderError::ExpectedName) {
                     super::clause_diagnostics::storage_errors_agree(
                         source, forms, first + 1, stop, closing, a, left, right);
                 }
             },
-            _ => super::directive_diagnostics::directive_errors_agree(source, forms, first, stop, closing, a, left, right),
+            Head::Func | Head::Module | Head::ModulePart =>
+                super::body::routine_arguments_errors_agree(source, forms, first, stop, closing, a, left, right),
+            Head::Using | Head::Namespace | Head::Export | Head::Use =>
+                super::directive_diagnostics::directive_errors_agree(source, forms, first, stop, closing, a, left, right),
         }
     }
 }
 
-/// 先頭語や、指示・構造体・状態素子の宣言で見つかった違反について、厳格索引の診断値が一致する。
+/// 同じ回路フォームの違反を報告する診断は、種別と範囲を含む値全体が一致する。
 ///
 /// フォームの位置は `first_circuit_header_error` から得られる。
-/// 有効な先頭語を認識できた場合は、`using`、`namespace`、`export`、`use`、
-/// `struct`、`latch`、`memory` のいずれかを対象とする。
 pub proof fn circuit_header_errors_agree(
     source: &str, left: CircuitFormError, right: CircuitFormError, index: int, namespace: Option<usize>,
 )
     requires
         circuit_header_error_at(source, left, index, namespace),
         circuit_header_error_at(source, right, index, namespace),
-        forall|head: Head| #[trigger] form_has_head(
-            source, sexpr_form_model(source)->Some_0, index, namespace.is_some(), head)
-            ==> head is Using || head is Namespace || head is Export || head is Use
-                || head is Struct || head is Latch || head is Memory,
     ensures left == right,
 {
     let forms = sexpr_form_model(source)->Some_0;
-    header_errors_on_declarations_agree(source, forms, index, namespace.is_some(),
+    header_errors_agree(source, forms, index, namespace.is_some(),
         (left->Header_kind, left->Header_span), (right->Header_kind, right->Header_span));
+}
+
+/// 同じ入力について、厳格解析の診断仕様を満たすエラー値は一意に定まる。
+///
+/// 字句と S 式の違反、およびすべての回路フォームの違反を対象とする。
+/// 診断が保持する主範囲と関連範囲も一致する。
+pub proof fn circuit_source_errors_agree(source: &str, left: CircuitFormError, right: CircuitFormError)
+    requires circuit_source_error(source, left), circuit_source_error(source, right),
+    ensures left == right,
+{
+    match left {
+        CircuitFormError::Syntax(_) => circuit_token_errors_agree(source, left, right),
+        CircuitFormError::Header { .. } => {
+            let (index, namespace) = first_circuit_header_error(source, left, right);
+            circuit_header_errors_agree(source, left, right, index, namespace);
+        },
+    }
+}
+
+/// 診断の仕様と実行結果の対応を、索引の表現に依存せず示す。
+pub(super) proof fn circuit_result_diagnostics<T>(source: &str, result: Result<T, CircuitFormError>)
+    requires
+        result.is_ok() <==> circuit_source_matches(source),
+        result matches Err(error) ==> circuit_source_error(source, error),
+    ensures
+        forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
+{
+    assert forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error)
+        implies result == Err(error) by {
+        circuit_diagnostic_excludes_match(source, error);
+        let reported = result->Err_0;
+        circuit_source_errors_agree(source, reported, error);
+    };
 }
 
 /// 同じフォームの先頭語または指示フォームの引数に違反があるとき、厳格索引の診断値が一致する。
@@ -829,6 +872,7 @@ fn index_namespace(
 pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormError>)
     ensures
         result.is_ok() <==> circuit_source_matches(source),
+        forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
         match result {
             Ok(index) => circuit_index_matches(source, index.forms@, index.entries@)
                 && form_spans_valid(source, index.forms@, source.spec_bytes().len() as int)
@@ -839,9 +883,17 @@ pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormE
 {
     let forms = match parse(source) {
         Ok(forms) => forms,
-        Err(error) => return Err(CircuitFormError::Syntax(error)),
+        Err(error) => {
+            proof {
+                reject_circuit_syntax(source, error);
+                circuit_result_diagnostics::<()>(source, Err(CircuitFormError::Syntax(error)));
+            }
+            return Err(CircuitFormError::Syntax(error));
+        },
     };
-    let entries = index_parsed_headers(source, forms.as_slice())?;
+    let indexed = index_parsed_headers(source, forms.as_slice());
+    proof { circuit_result_diagnostics(source, indexed); }
+    let entries = indexed?;
     Ok(CircuitForms { forms, entries })
 }
 

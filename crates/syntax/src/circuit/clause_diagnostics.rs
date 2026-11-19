@@ -9,7 +9,7 @@ use vstd::prelude::*;
 
 verus! {
 
-proof fn named_error_spans_agree(
+pub(super) proof fn named_error_spans_agree(
     source: &str, forms: Seq<Form>, index: int, limit: int, closing: usize, clause: Clause,
     left: Range<usize>, right: Range<usize>,
 )
@@ -20,7 +20,7 @@ proof fn named_error_spans_agree(
 {
 }
 
-proof fn named_match_excludes_error(
+pub(super) proof fn named_match_excludes_error(
     source: &str, forms: Seq<Form>, index: int, limit: int, closing: usize, clause: Clause,
     after: int, span: Range<usize>,
 )

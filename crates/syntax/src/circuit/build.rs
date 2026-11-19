@@ -420,10 +420,11 @@ pub fn definition_target_atoms(forms: &[Form], row: &BuildDefinition) -> (range:
 ///
 /// # Errors
 ///
-/// 字句、S 式、回路文法の順に、最初の違反を返す。
+/// 字句と S 式の解析で最初に見つかる違反を返す。解析が成功した場合は、回路フォームを入力順に検査する。
 pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, CircuitFormError>)
     ensures
         result.is_ok() <==> circuit_source_matches(source),
+        forall|error: CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
         match result {
             Ok(index) => build_index_matches(source, index)
                 && circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@)
@@ -436,12 +437,17 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
     let forms = match parse(source) {
         Ok(forms) => forms,
         Err(error) => {
-            proof { reject_circuit_syntax(source, error); }
+            proof {
+                reject_circuit_syntax(source, error);
+                super::index::circuit_result_diagnostics::<()>(source, Err(CircuitFormError::Syntax(error)));
+            }
             return Err(CircuitFormError::Syntax(error));
         },
     };
     let mut rows = BuildRows::new();
-    let entries = index_parsed_headers_into(source, forms.as_slice(), true, &mut rows)?;
+    let indexed = index_parsed_headers_into(source, forms.as_slice(), true, &mut rows);
+    proof { super::index::circuit_result_diagnostics(source, indexed); }
+    let entries = indexed?;
     proof { reveal(build_rows_match); }
     Ok(BuildCircuitIndex {
         syntax: CircuitForms { forms, entries },
