@@ -271,7 +271,7 @@ fn recovers_only_when_the_first_violation_is_circuit_syntax() {
     ));
     assert!(matches!(
         failure.recovery,
-        Some(CircuitRecovery::WithSyntaxRepairs(_))
+        Some(CircuitRecovery::WithSyntaxRepairs { .. })
     ));
 
     let escaped = snapshot("../bad-path.ncg2", 9, "");

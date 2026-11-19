@@ -42,8 +42,8 @@ pub use expression_forest::{
 #[cfg(verus_only)]
 pub use expression_forest::{expression_reference_in_source, expression_source_reference_result};
 pub use index::{
-    CircuitRecovery, RecoveredCircuitForm, RecoveredFormOutcome, index_headers,
-    recover_circuit_forms,
+    CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
+    index_headers, recover_circuit_forms,
 };
 #[cfg(verus_only)]
 pub use index::{

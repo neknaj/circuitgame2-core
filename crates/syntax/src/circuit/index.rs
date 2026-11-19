@@ -9,7 +9,8 @@ use crate::{sexpr_form_model, syntax_error_evidence, well_formed_sexpr};
 #[cfg(verus_only)]
 pub use recovery::circuit_recovery_matches;
 pub use recovery::{
-    CircuitRecovery, RecoveredCircuitForm, RecoveredFormOutcome, recover_circuit_forms,
+    CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
+    recover_circuit_forms,
 };
 
 verus! {

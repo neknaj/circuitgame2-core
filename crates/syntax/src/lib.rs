@@ -394,6 +394,10 @@ pub struct Recovered {
     pub forms: Vec<Form>,
     /// 入力の読み飛ばしや欠落の補完を解析順に並べる。
     pub repairs: Vec<Repair>,
+    /// 深さ 0 で読み始め、修復を挟まず元入力の閉じ括弧で閉じたリストの範囲。
+    ///
+    /// UTF-8 の半開バイト範囲を元入力順に並べる。アトムと補完されたリストは含まない。
+    pub original_lists: Vec<Range<usize>>,
 }
 
 /// 入力全体を厳格に解析し、S 式の構文木を先行順で返す。
@@ -428,7 +432,7 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
         },
 {
     match parse_forms(source, false) {
-        Ok((forms, _)) => {
+        Ok((forms, _, _)) => {
             proof { derive_strict_forest(source, forms@); }
             Ok(forms)
         }
@@ -459,9 +463,10 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
         inserted_closes_match(source, result.forms@, result.repairs@),
         repair_input_spans_valid(source, result.repairs@, source.spec_bytes().len() as int),
         form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
+        original_list_ranges(source, result.original_lists@, result.repairs@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
-        Ok((forms, repairs)) => Recovered { forms, repairs },
+        Ok((forms, repairs, original_lists)) => Recovered { forms, repairs, original_lists },
         Err(_) => unreachable!("recovery handles each syntax error"),
     }
 }
@@ -1788,17 +1793,96 @@ proof fn initialize_parse_invariants(
     assert(list_source_delimiters(source, forms, recovering));
 }
 
-#[verifier::rlimit(30)]
-fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>), Error>)
+spec fn completed_original_list(source: &str, span: Range<usize>, consumed: int) -> bool {
+    let bytes = source.spec_bytes();
+    &&& span.start + 1 < span.end <= consumed <= bytes.len()
+    &&& bytes[span.start as int] == b'(' && bytes[span.end - 1] == b')'
+    &&& is_char_boundary(bytes, span.start as int) && is_char_boundary(bytes, span.end as int)
+}
+
+spec fn repair_precedes(repair: Repair, start: int) -> bool {
+    match repair_input_span(repair) { Some((_, end)) => end <= start, None => true }
+}
+
+/// 確定したリストの範囲が元入力の括弧を含み、互いに重ならないことを表す。
+///
+/// 各範囲の内部には、読み飛ばした元入力の範囲や補った区切りの位置がない。
+pub closed spec fn original_list_ranges(
+    source: &str, lists: Seq<Range<usize>>, repairs: Seq<Repair>, consumed: int,
+) -> bool {
+    &&& forall|i: int| 0 <= i < lists.len() ==> completed_original_list(source, #[trigger] lists[i], consumed)
+    &&& forall|i: int, j: int| 0 <= i < j < lists.len() ==> (#[trigger] lists[i]).end <= (#[trigger] lists[j]).start
+    &&& forall|i: int, j: int| 0 <= i < lists.len() && 0 <= j < repairs.len() ==> {
+        let list = #[trigger] lists[i];
+        match repair_input_span(#[trigger] repairs[j]) {
+            Some((start, end)) => end <= list.start || list.end <= start,
+            None => true,
+        }
+    }
+}
+
+proof fn advance_original_lists(
+    source: &str, lists: Seq<Range<usize>>, repairs: Seq<Repair>, after: Seq<Repair>, before: int, consumed: int,
+)
+    requires
+        original_list_ranges(source, lists, repairs, before),
+        before <= consumed <= source.spec_bytes().len(),
+        repairs.is_prefix_of(after),
+        forall|i: int| repairs.len() <= i < after.len() ==>
+            match repair_input_span(#[trigger] after[i]) { Some((start, _)) => before <= start, None => true },
+    ensures original_list_ranges(source, lists, after, consumed),
+{
+    reveal(original_list_ranges);
+    assert forall|i: int, j: int| 0 <= i < lists.len() && 0 <= j < after.len() implies {
+        let list = #[trigger] lists[i];
+        match repair_input_span(#[trigger] after[j]) {
+            Some((start, end)) => end <= list.start || list.end <= start,
+            None => true,
+        }
+    } by {
+        if j < repairs.len() {
+            assert(after[j] == repairs[j]);
+        } else {
+            assert(lists[i].end <= before);
+        }
+    };
+}
+
+proof fn append_original_list(
+    source: &str, lists: Seq<Range<usize>>, repairs: Seq<Repair>, span: Range<usize>, consumed: int,
+)
+    requires
+        original_list_ranges(source, lists, repairs, consumed),
+        completed_original_list(source, span, consumed),
+        forall|i: int| 0 <= i < lists.len() ==> (#[trigger] lists[i]).end <= span.start,
+        forall|i: int| 0 <= i < repairs.len() ==> repair_precedes(#[trigger] repairs[i], span.start as int),
+    ensures original_list_ranges(source, lists.push(span), repairs, consumed),
+{
+    reveal(original_list_ranges);
+    let updated = lists.push(span);
+    assert forall|i: int, j: int| 0 <= i < updated.len() && 0 <= j < repairs.len() implies {
+        let list = #[trigger] updated[i];
+        match repair_input_span(#[trigger] repairs[j]) {
+            Some((start, end)) => end <= list.start || list.end <= start,
+            None => true,
+        }
+    } by {
+        if i < lists.len() { assert(updated[i] == lists[i]); }
+    };
+}
+
+#[verifier::rlimit(55)]
+fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>, Vec<Range<usize>>), Error>)
     ensures
         recovering || well_formed_sexpr(source) ==> result.is_ok(),
         !recovering && result.is_ok() ==> well_formed_sexpr(source),
         match result {
-            Ok((forms, repairs)) => inserted_closes_match(source, forms@, repairs@)
+            Ok((forms, repairs, original_lists)) => inserted_closes_match(source, forms@, repairs@)
                 && repair_input_spans_valid(source, repairs@, source.spec_bytes().len() as int)
                 && complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, recovering)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
+                && original_list_ranges(source, original_lists@, repairs@, source.spec_bytes().len() as int)
                 && (!recovering ==> strict_source_covered(source, forms@))
                 && (well_formed_sexpr(source) ==> repairs@.len() == 0
                     && sexpr_form_model(source) == Some(forms@)),
@@ -1808,6 +1892,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     let mut forms: Vec<Form> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
     let mut repairs: Vec<Repair> = Vec::new();
+    let mut original_lists: Vec<Range<usize>> = Vec::new();
+    let mut root: Option<(usize, usize)> = None;
     let mut lexer = Lexer::new(source);
     let length = source.as_bytes().len();
     let ghost mut spans: Seq<(int, int)> = Seq::empty();
@@ -1822,6 +1908,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         }
 
         initialize_parse_invariants(source, forms@, spans, repairs@, recovering);
+        reveal(original_list_ranges);
     }
 
     loop
@@ -1850,6 +1937,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, recovering),
             open_order(open@),
+            original_list_ranges(source, original_lists@, repairs@, lexer.cursor.position()),
+            root matches Some((start, checkpoint)) ==> {
+                &&& start < lexer.cursor.position()
+                &&& source.spec_bytes()[start as int] == b'('
+                &&& is_char_boundary(source.spec_bytes(), start as int)
+                &&& checkpoint <= repairs@.len()
+                &&& forall|i: int| 0 <= i < checkpoint ==> repair_precedes(#[trigger] repairs@[i], start as int)
+                &&& forall|i: int| 0 <= i < original_lists@.len() ==> (#[trigger] original_lists@[i]).end <= start
+            },
         ensures
             valid_utf8(source.spec_bytes()),
             form_spans_valid(source, forms@, length as int),
@@ -1858,6 +1954,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             well_formed_sexpr(source) ==> open@.len() == 0 && repairs@.len() == 0
                 && sexpr_form_model(source) == Some(forms@),
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
+            original_list_ranges(source, original_lists@, repairs@, length as int),
         decreases length - lexer.cursor.position(),
     {
         let Some((segment, next)) = lexer.next_segment() else {
@@ -1892,6 +1989,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         let ghost previous_open = old_open.len();
         let ghost scanned_segment = segment;
         let ghost previous_position = lexer.cursor.position();
+        let ghost repairs_before = repairs@;
         let ghost old_forms = forms@;
         let ghost previous_needs_separator = lexer.needs_separator;
         let kind = segment.kind;
@@ -1928,6 +2026,13 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             }
         }
         let ghost repairs_before_segment = repairs@;
+        let ghost previous_lists = original_lists@;
+        proof {
+            advance_original_lists(source, previous_lists, repairs_before, repairs@,
+                previous_position, previous_position);
+            advance_original_lists(source, previous_lists, repairs@, repairs@,
+                previous_position, lexer.cursor.position());
+        }
         match kind {
             SegmentKind::Whitespace | SegmentKind::Comment => {
                 proof {
@@ -1945,11 +2050,29 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     let repair = Repair::Skipped { span, error };
                     proof { repair_spans_append(source, repairs@, repair, previous_position, lexer.cursor.position()); }
                     repairs.push(repair);
+                    proof {
+                        advance_original_lists(source, original_lists@, repairs_before_segment, repairs@,
+                            previous_position, lexer.cursor.position());
+                    }
                 } else {
                     return Err(error);
                 }
             }
             SegmentKind::Open => {
+                if recovering && open.len() == 0 {
+                    proof {
+                        reveal(original_list_ranges);
+                        reveal(repair_input_spans_valid);
+                        assert(span.start == previous_position);
+                        assert forall|i: int| 0 <= i < original_lists@.len()
+                            implies (#[trigger] original_lists@[i]).end <= span.start by {
+                            assert(completed_original_list(source, original_lists@[i], previous_position));
+                        };
+                        assert forall|i: int| 0 <= i < repairs@.len()
+                            implies repair_precedes(#[trigger] repairs@[i], span.start as int) by {};
+                    }
+                    root = Some((span.start, repairs.len()));
+                }
                 let ghost before = forms@;
                 let ghost previous = open@;
                 let index = forms.len();
@@ -1986,6 +2109,19 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 if let Some(index) = open.pop() {
                     let ghost before = forms@;
                     finish_list(&mut forms, index, span.end);
+                    if recovering && open.len() == 0 {
+                        if let Some((start, checkpoint)) = root {
+                            if repairs.len() == checkpoint {
+                                let confirmed = start..span.end;
+                                proof {
+                                    append_original_list(source, original_lists@, repairs@, confirmed,
+                                        lexer.cursor.position());
+                                }
+                                original_lists.push(confirmed);
+                            }
+                        }
+                        root = None;
+                    }
                     proof {
                         delimiters_after_close(source, before, forms@, index as int, recovering);
                         nested_after_close(before, forms@, previous, index);
@@ -2014,6 +2150,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                             repair_spans_append(source, repairs@, repair, previous_position, lexer.cursor.position());
                         }
                         repairs.push(repair);
+                        proof {
+                            advance_original_lists(source, original_lists@, repairs_before_segment, repairs@,
+                                previous_position, lexer.cursor.position());
+                        }
                     } else {
                         return Err(error);
                     }
@@ -2078,6 +2218,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, recovering),
             open_order(open@),
+            original_list_ranges(source, original_lists@, repairs@, length as int),
         decreases open@.len(),
     {
         let ghost previous = open@;
@@ -2099,6 +2240,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             let repair = Repair::InsertedClose { offset: length, opening, list: index };
             proof { repair_spans_append(source, repairs@, repair, length as int, length as int); }
             repairs.push(repair);
+            proof { advance_original_lists(source, original_lists@, previous_repairs, repairs@, length as int, length as int); }
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
             proof {
@@ -2131,7 +2273,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         assert(i <= usize::MAX);
         assert(!open@.contains(i as usize));
     };
-    Ok((forms, repairs))
+    Ok((forms, repairs, original_lists))
 }
 
 fn finish_list(forms: &mut Vec<Form>, index: usize, offset: usize)

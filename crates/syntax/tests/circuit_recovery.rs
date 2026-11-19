@@ -80,8 +80,10 @@ fn valid_input_returns_the_same_index_as_the_strict_parser() {
 
 #[test]
 fn keeps_s_expression_repairs_separate_from_circuit_diagnostics() {
-    let CircuitRecovery::WithSyntaxRepairs(recovered) =
-        recover_circuit_forms("(namespace app (export visible)")
+    let CircuitRecovery::WithSyntaxRepairs {
+        recovered,
+        original,
+    } = recover_circuit_forms("(namespace app (export visible)")
     else {
         panic!("expected tentative scope after a missing delimiter");
     };
@@ -89,14 +91,124 @@ fn keeps_s_expression_repairs_separate_from_circuit_diagnostics() {
         recovered.repairs.as_slice(),
         [Repair::InsertedClose { list: 0, .. }]
     ));
+    assert!(original.is_empty());
 
-    let CircuitRecovery::WithSyntaxRepairs(recovered) = recover_circuit_forms("\"open (using nor)")
+    let CircuitRecovery::WithSyntaxRepairs {
+        recovered,
+        original,
+    } = recover_circuit_forms("\"open (using nor)")
     else {
         panic!("expected a skipped unterminated string");
     };
     assert!(recovered.forms.is_empty());
+    assert!(original.is_empty());
     assert!(matches!(
         recovered.repairs.as_slice(),
         [Repair::Skipped { .. }]
+    ));
+}
+
+#[test]
+fn checks_unrepaired_roots_before_and_after_repairs_in_source_order() {
+    let source = concat!(
+        "; 日本語の前置き\n",
+        "(using nor) ) ",
+        "(using #b102 nor) ",
+        "(namespace app (export visible)) ",
+        "(namespace unfinished (export tentative)",
+    );
+    let CircuitRecovery::WithSyntaxRepairs {
+        recovered,
+        original,
+    } = recover_circuit_forms(source)
+    else {
+        panic!("expected recovered S expressions and original lists");
+    };
+    assert_eq!(recovered.original_lists.len(), 2);
+    let [Some(first), Some(second)] = original.as_slice() else {
+        panic!("expected exactly two independent lists");
+    };
+    assert_eq!(&source[first.span.clone()], "(using nor)");
+    assert_eq!(
+        &source[second.span.clone()],
+        "(namespace app (export visible))"
+    );
+    assert!(first.span.end < second.span.start);
+    assert!(matches!(
+        first.checked[0].outcome,
+        RecoveredFormOutcome::Valid(Head::Using)
+    ));
+    assert!(matches!(
+        second.checked[0].outcome,
+        RecoveredFormOutcome::Valid(Head::Namespace)
+    ));
+    assert!(matches!(
+        second.checked[1].outcome,
+        RecoveredFormOutcome::Valid(Head::Export)
+    ));
+    assert_eq!(second.checked[1].namespace, Some(second.checked[0].form));
+    assert!(
+        recovered
+            .repairs
+            .iter()
+            .any(|repair| matches!(repair, Repair::InsertedClose { .. }))
+    );
+}
+
+#[test]
+fn identifies_primary_and_related_positions_in_the_original_fragment() {
+    let source = "; 診断の前置き\n) (test demo (reset) (case)) (using)";
+    let CircuitRecovery::WithSyntaxRepairs { original, .. } = recover_circuit_forms(source) else {
+        panic!("expected a skipped right parenthesis");
+    };
+    let [Some(test), Some(using)] = original.as_slice() else {
+        panic!("expected independent diagnostics for both lists");
+    };
+    let RecoveredFormOutcome::Rejected {
+        kind: HeaderError::MixedTestItems {
+            first_head: (start, end),
+        },
+        span,
+        ..
+    } = &test.checked[0].outcome
+    else {
+        panic!("expected mixed test items");
+    };
+    assert_eq!(
+        &source[test.span.start + *start..test.span.start + *end],
+        "reset"
+    );
+    assert_eq!(
+        &source[test.span.start + span.start..test.span.start + span.end],
+        "case"
+    );
+    let RecoveredFormOutcome::Rejected { span, .. } = &using.checked[0].outcome else {
+        panic!("expected a missing argument");
+    };
+    assert_eq!(span.start, span.end);
+    assert_eq!(using.span.start + span.start, using.span.end - 1);
+}
+
+#[test]
+fn excludes_the_root_that_needed_an_inserted_separator() {
+    let source = "(using a\"b\") (using nor)";
+    let CircuitRecovery::WithSyntaxRepairs {
+        recovered,
+        original,
+    } = recover_circuit_forms(source)
+    else {
+        panic!("expected recovery after a missing separator");
+    };
+    assert!(matches!(
+        recovered.repairs.as_slice(),
+        [Repair::InsertedSeparator { .. }]
+    ));
+    let [Some(list)] = original.as_slice() else {
+        panic!("expected only the following root to be checked");
+    };
+    assert_eq!(&source[list.span.clone()], "(using nor)");
+    assert!(matches!(
+        list.checked[0].outcome,
+        RecoveredFormOutcome::Valid(Head::Using)
     ));
 }
