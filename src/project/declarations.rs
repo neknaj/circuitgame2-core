@@ -13,7 +13,7 @@ use super::parsed_circuit_matches;
 use super::{CircuitProject, NameKey, ProjectSource};
 use crate::syntax::circuit::{Head, NamedForm};
 use alloc::vec::Vec;
-use collision_index::no_indexed_conflicts;
+use collision_index::first_candidate;
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -605,14 +605,24 @@ pub fn index_declarations<'p, 'a>(
         },
 {
     let items = read_occurrences(project);
-    if no_indexed_conflicts(items.as_slice()) {
-        proof {
-            rule_out_conflicts(project, items@);
-            reveal(occurrences_before);
-        }
-        return Ok(DeclarationTable { occurrences: items });
+    match first_candidate(items.as_slice()) {
+        Ok(None) => {
+            proof {
+                rule_out_conflicts(project, items@);
+                reveal(occurrences_before);
+            }
+            return Ok(DeclarationTable { occurrences: items });
+        },
+        Ok(Some((left, right))) => {
+            proof { reveal(occurrences_before); }
+            if let Some(error) = check_pair(items[left], items[right]) {
+                proof { record_conflict(project, items@, left as int, right as int, error); }
+                return Err(error);
+            }
+        },
+        Err(()) => {},
     }
-    // 索引で衝突候補が見つかった場合は、出現順で診断の組と元ソース範囲を確定する。
+    // 索引で候補を確定できない場合も、出現順の全組比較で診断を返す。
     let mut left = 0;
     let mut right = 1;
     while left < items.len()

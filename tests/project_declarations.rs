@@ -180,3 +180,39 @@ fn orders_conflicts_by_first_occurrence_then_second_occurrence() {
         assert_eq!(error.second.span, second_start..second_start + 1);
     }
 }
+
+#[test]
+fn orders_conflicting_namespace_components_by_the_following_declaration() {
+    let namespace = "; 名前空間の宣言\n(namespace a::b)";
+    let child = "; 子名前空間と衝突する宣言\n(namespace a (struct b (width 1)))";
+    let root = "(struct a (width 1))";
+    let project = parse_circuit_project(&[
+        snapshot("namespace.ncg2", 4, namespace),
+        snapshot("child.ncg2", 5, child),
+        snapshot("root.ncg2", 6, root),
+    ])
+    .unwrap();
+    let error = index_declarations(&project).unwrap_err();
+    assert_eq!(error.kind, NameConflictKind::DeclarationAndNamespace);
+    assert_eq!(error.first.source.id.components(), ["namespace.ncg2"]);
+    assert_eq!(error.first.source.revision, 4);
+    assert_eq!(&namespace[error.first.span], "b");
+    assert_eq!(error.second.source.id.components(), ["child.ncg2"]);
+    assert_eq!(error.second.source.revision, 5);
+    assert_eq!(&child[error.second.span], "b");
+}
+
+#[test]
+fn keeps_the_first_two_of_three_declarations_of_one_name() {
+    let text = "(struct word (width 1))";
+    let project = parse_circuit_project(&[
+        snapshot("early.ncg2", 7, text),
+        snapshot("middle.ncg2", 8, text),
+        snapshot("late.ncg2", 9, text),
+    ])
+    .unwrap();
+    let error = index_declarations(&project).unwrap_err();
+    assert_eq!(error.kind, NameConflictKind::DuplicateDeclaration);
+    assert_eq!(error.first.source.id.components(), ["early.ncg2"]);
+    assert_eq!(error.second.source.id.components(), ["middle.ncg2"]);
+}

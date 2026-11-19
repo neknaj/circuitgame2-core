@@ -211,7 +211,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(resolved) => resolved,
                 Err(DefinitionReferenceError::Rejected { site, reason }) => {
                     let error = DefinitionBatchError { position: at, site, reason };
-                    assert(self.definition_batch_error_evidence(error));
+                    assert(self.definition_batch_error_evidence(error)) by {
+                        assert(self.resolution_at(at, Err(DefinitionReferenceError::Rejected { site, reason })));
+                        assert(self.resolutions_before(at, found@));
+                    };
                     return Err(error);
                 },
                 Err(DefinitionReferenceError::UnknownPosition) => {
