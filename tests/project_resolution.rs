@@ -44,26 +44,33 @@ fn applies_visibility_to_declarations_and_preserves_declaration_identity() {
     ])
     .unwrap();
     let table = index_exports(&project).unwrap();
-    let AbsoluteTarget::Declaration { source, form } = table
+    let resolved = table
         .resolve_absolute("::app::logic::Shared", Some("another"))
-        .unwrap()
-    else {
+        .unwrap();
+    let AbsoluteTarget::Declaration { source, form } = &resolved else {
         panic!("expected a declaration");
     };
     let direct = table
         .declarations()
-        .declaration(NameKey {
+        .direct_target(NameKey {
             parent: Some("app::logic"),
             name: "Shared",
         })
         .unwrap();
-    assert!(core::ptr::eq(source, direct.0) && core::ptr::eq(form, direct.1));
+    assert!(resolved.is_same_target(&direct));
+    let AbsoluteTarget::Declaration {
+        source: direct_source,
+        form: direct_form,
+    } = direct
+    else {
+        panic!("expected a direct declaration");
+    };
+    assert!(core::ptr::eq(*source, direct_source) && core::ptr::eq(*form, direct_form));
     assert!(table.resolve_absolute("::Root", None).is_ok());
-    assert!(
-        table
-            .resolve_absolute("::app::logic::Hidden", Some("app::logic"))
-            .is_ok()
-    );
+    let hidden = table
+        .resolve_absolute("::app::logic::Hidden", Some("app::logic"))
+        .unwrap();
+    assert!(!resolved.is_same_target(&hidden));
 
     for (path, caller, name) in [
         ("::Root", Some("app"), "Root"),
@@ -95,15 +102,28 @@ fn resolves_implicit_namespaces_and_distinguishes_missing_and_malformed_paths() 
         ("::app::logic", Some("app"), "logic"),
         ("::app::logic::inner", Some("app::logic"), "inner"),
     ] {
-        let AbsoluteTarget::Namespace { key, introduced_at } =
-            table.resolve_absolute(path, Some("outside")).unwrap()
-        else {
+        let target = table.resolve_absolute(path, Some("outside")).unwrap();
+        let direct = table
+            .declarations()
+            .direct_target(NameKey { parent, name })
+            .unwrap();
+        assert!(target.is_same_target(&direct));
+        let AbsoluteTarget::Namespace { key, introduced_at } = target else {
             panic!("expected a namespace");
         };
         assert_eq!(key, NameKey { parent, name });
         assert_eq!(introduced_at.source.revision, 3);
         assert_eq!(&text[introduced_at.span], name);
     }
+    assert!(
+        table
+            .declarations()
+            .direct_target(NameKey {
+                parent: Some("app"),
+                name: "log",
+            })
+            .is_none()
+    );
     assert!(matches!(
         table.resolve_absolute("::app::log", None),
         Err(AbsoluteResolutionError::Missing)

@@ -1,12 +1,13 @@
 //! 完全修飾名を共有宣言表と公開表に照合する。
 
+use super::declarations::key_of;
 #[cfg(verus_only)]
-use super::declarations::declaration_location_evidence;
+use super::declarations::{declaration_location_evidence, form_key};
 #[cfg(verus_only)]
 use super::location_in_source;
 #[cfg(verus_only)]
 use super::name_keys::key_view;
-use super::{ExportTable, LocatedName, NameKey, ProjectSource};
+use super::{DeclarationTable, ExportTable, LocatedName, NameKey, ProjectSource};
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, absolute_path_parts, bare_atom_kind};
 use crate::syntax::{circuit::NamedForm, split_absolute_path};
@@ -35,6 +36,32 @@ pub enum AbsoluteTarget<'p, 'a, 'q> {
     },
 }
 
+/// 対象の種別と完全修飾名から、同じ共有宣言表での同一性を定める。
+pub open spec fn same_target(left: AbsoluteTarget, right: AbsoluteTarget) -> bool {
+    match (left, right) {
+        (AbsoluteTarget::Declaration { form: left, .. }, AbsoluteTarget::Declaration { form: right, .. }) =>
+            key_view(form_key(*left)) == key_view(form_key(*right)),
+        (AbsoluteTarget::Namespace { key: left, .. }, AbsoluteTarget::Namespace { key: right, .. }) =>
+            key_view(left) == key_view(right),
+        _ => false,
+    }
+}
+
+impl AbsoluteTarget<'_, '_, '_> {
+    /// 同じ共有宣言表から得た二つの対象が、一つの宣言または名前空間を指すかを返す。
+    pub fn is_same_target(&self, other: &AbsoluteTarget) -> (same: bool)
+        ensures same == same_target(*self, *other),
+    {
+        match (self, other) {
+            (Self::Declaration { form: left, .. }, AbsoluteTarget::Declaration { form: right, .. }) =>
+                key_of(left).same_name(key_of(right)),
+            (Self::Namespace { key: left, .. }, AbsoluteTarget::Namespace { key: right, .. }) =>
+                left.same_name(*right),
+            _ => false,
+        }
+    }
+}
+
 /// 完全修飾名を解決できなかった理由。
 #[derive(Debug)]
 pub enum AbsoluteResolutionError<'p, 'a> {
@@ -53,9 +80,44 @@ pub open spec fn declaration_visible_from(table: &ExportTable, key: NameKey, fro
 }
 
 /// 共有宣言表にキーに対応する独立宣言があることを表す。
-pub open spec fn declaration_exists(table: &ExportTable, key: NameKey) -> bool {
+pub open spec fn declaration_exists(table: &DeclarationTable, key: NameKey) -> bool {
     exists|source: &ProjectSource, form: &NamedForm|
-        #[trigger] table.declarations_model().declaration_at(key, source, form)
+        #[trigger] table.declaration_at(key, source, form)
+}
+
+/// 指定した名前空間の直下で、キーに対応する宣言または名前空間の有無を表す。
+pub open spec fn direct_target_matches(
+    table: &DeclarationTable, key: NameKey, result: Option<AbsoluteTarget>,
+) -> bool {
+    match result {
+        Some(AbsoluteTarget::Declaration { source, form }) =>
+            table.declaration_at(key, source, form)
+                && location_in_source(LocatedName { source, span: form.name.span }),
+        Some(AbsoluteTarget::Namespace { key: observed, introduced_at }) =>
+            observed == key && !declaration_exists(table, key)
+                && table.namespace_at(key, introduced_at) && location_in_source(introduced_at),
+        None => !declaration_exists(table, key)
+            && (forall|location: LocatedName| !#[trigger] table.namespace_at(key, location)),
+    }
+}
+
+impl<'p, 'a> DeclarationTable<'p, 'a> {
+    /// 名前空間の直下にある独立宣言または子名前空間を、指定した名前で探す。
+    ///
+    /// 中間の名前空間も対象に含める。子名前空間を導入した箇所が複数あれば、最初の箇所を返す。
+    pub fn direct_target<'q>(&self, key: NameKey<'q>) -> (result: Option<AbsoluteTarget<'p, 'a, 'q>>)
+        requires self.well_formed(),
+        ensures direct_target_matches(self, key, result),
+    {
+        if let Some((source, form)) = self.declaration(key) {
+            proof { declaration_location_evidence(self, key, source, form); }
+            Some(AbsoluteTarget::Declaration { source, form })
+        } else if let Some(introduced_at) = self.namespace(key) {
+            Some(AbsoluteTarget::Namespace { key, introduced_at })
+        } else {
+            None
+        }
+    }
 }
 
 /// 完全修飾名の成分と参照元に対して、解決結果または診断の根拠を定める。
@@ -65,18 +127,15 @@ pub open spec fn has_resolution(
 ) -> bool {
     let declarations = table.declarations_model();
     match result {
-        Ok(AbsoluteTarget::Declaration { source, form }) =>
-            declarations.declaration_at(key, source, form) && declaration_visible_from(table, key, from),
-        Ok(AbsoluteTarget::Namespace { key: observed, introduced_at }) =>
-            observed == key && !declaration_exists(table, key)
-                && declarations.namespace_at(key, introduced_at) && location_in_source(introduced_at),
+        Ok(target @ AbsoluteTarget::Declaration { .. }) =>
+            direct_target_matches(&declarations, key, Some(target)) && declaration_visible_from(table, key, from),
+        Ok(target @ AbsoluteTarget::Namespace { .. }) =>
+            direct_target_matches(&declarations, key, Some(target)),
         Err(AbsoluteResolutionError::Private(location)) =>
             !declaration_visible_from(table, key, from) && location_in_source(location)
                 && (exists|form: &NamedForm| #[trigger] declarations.declaration_at(key, location.source, form)
                     && location.span == form.name.span),
-        Err(AbsoluteResolutionError::Missing) =>
-            !declaration_exists(table, key)
-                && (forall|location: LocatedName| !#[trigger] declarations.namespace_at(key, location)),
+        Err(AbsoluteResolutionError::Missing) => direct_target_matches(&declarations, key, None),
         Err(AbsoluteResolutionError::InvalidPath) => false,
     }
 }
@@ -114,19 +173,17 @@ impl<'p, 'a> ExportTable<'p, 'a> {
         };
         let key = NameKey { parent, name };
         assert(absolute_path_parts(path, key.parent, key.name));
-        let declarations = self.declarations();
-        if let Some((source, form)) = declarations.declaration(key) {
-            if key.same_name(NameKey { parent: from, name }) || self.is_public(key) {
-                return Ok(AbsoluteTarget::Declaration { source, form });
+        match self.declarations().direct_target(key) {
+            Some(target @ AbsoluteTarget::Declaration { source, form }) => {
+                if key.same_name(NameKey { parent: from, name }) || self.is_public(key) {
+                    Ok(target)
+                } else {
+                    let span = &form.name.span;
+                    Err(AbsoluteResolutionError::Private(LocatedName { source, span: span.start..span.end }))
+                }
             }
-            proof { declaration_location_evidence(declarations, key, source, form); }
-            let span = &form.name.span;
-            return Err(AbsoluteResolutionError::Private(LocatedName { source, span: span.start..span.end }));
-        }
-        if let Some(introduced_at) = declarations.namespace(key) {
-            Ok(AbsoluteTarget::Namespace { key, introduced_at })
-        } else {
-            Err(AbsoluteResolutionError::Missing)
+            Some(target @ AbsoluteTarget::Namespace { .. }) => Ok(target),
+            None => Err(AbsoluteResolutionError::Missing),
         }
     }
 }

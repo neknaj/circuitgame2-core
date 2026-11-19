@@ -72,11 +72,12 @@ fn defines_binding(head: Head) -> (binding: bool)
     matches!(head, Head::Namespace | Head::Func | Head::Module | Head::Struct | Head::Latch | Head::Memory)
 }
 
-spec fn form_key(form: NamedForm) -> NameKey {
+/// 独立宣言の所属名前空間と名前から照合キーを定める。
+pub open spec fn form_key(form: NamedForm) -> NameKey {
     NameKey { parent: if let Some(parent) = form.namespace { Some(parent.word) } else { None }, name: form.name.word }
 }
 
-fn key_of<'a>(form: &NamedForm<'a>) -> (key: NameKey<'a>)
+pub(super) fn key_of<'a>(form: &NamedForm<'a>) -> (key: NameKey<'a>)
     ensures key == form_key(*form),
 {
     let parent = if let Some(path) = &form.namespace {
@@ -462,12 +463,12 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
 
     /// 独立宣言が属するファイルと、名前索引の項目との対応を表す。
     pub closed spec fn declaration_at(&self, key: NameKey, source: &ProjectSource, form: &NamedForm) -> bool {
-        exists|i: int| 0 <= i < self.occurrences@.len()
+        &&& key_view(form_key(*form)) == key_view(key)
+        &&& exists|i: int| 0 <= i < self.occurrences@.len()
             && {
                 let item = #[trigger] self.occurrences@[i];
                 &&& !(item.form.head is Namespace)
                 &&& *item.source == *source && *item.form == *form
-                &&& key_view(form_key(*item.form)) == key_view(key)
             }
     }
 

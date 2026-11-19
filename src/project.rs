@@ -29,7 +29,9 @@ pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 pub use path::{canonical_components, normalized_path, source_kind_of};
 pub use resolution::{AbsoluteResolutionError, AbsoluteTarget};
 #[cfg(verus_only)]
-pub use resolution::{absolute_resolution_evidence, declaration_visible_from};
+pub use resolution::{
+    absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
+};
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
