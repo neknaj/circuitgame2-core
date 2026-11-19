@@ -29,10 +29,14 @@ use body::validate_routine_arguments;
 pub use body::{DefinitionReferences, first_routine_expansion};
 use build::BuildRows;
 pub use call_shapes::{
-    CallShape, RoutineArity, definition_root_is_call, indexed_call_shape, routine_arity,
+    CallShape, RoutineArity, call_argument_range, definition_root_is_call, indexed_call_shape,
+    next_call_argument, routine_arity,
 };
 #[cfg(verus_only)]
-pub use call_shapes::{call_shape_matches, definition_call_index, routine_arity_matches};
+pub use call_shapes::{
+    call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index,
+    indexed_call_arguments, routine_arity_matches, routine_arity_port_counts,
+};
 pub use build::{
     BuildCircuitIndex, BuildDefinition, BuildEntryRanges, definition_target_atoms,
     index_build_forms,

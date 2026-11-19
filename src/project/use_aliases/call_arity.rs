@@ -1,7 +1,9 @@
 //! 呼び出しを名前解決し、参照先の宣言から必要な入出力数を求める。
 
 mod checks;
+mod typed;
 pub use checks::FuncArityError;
+pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
 
 use super::{DefinitionBinding, DefinitionReferenceError, UseAliases};
 #[cfg(verus_only)]
@@ -19,7 +21,8 @@ use crate::syntax::circuit::{
 };
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    build_definition_scope_evidence, build_entry_ranges_evidence, call_shape_matches, routine_arity_matches,
+    build_definition_scope_evidence, build_entry_ranges_evidence, call_arguments_match, call_shape_matches,
+    indexed_call_arguments, routine_arity_matches,
 };
 use vstd::prelude::*;
 
@@ -121,6 +124,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && call.call.form + 1 == indexed.form
                         && location_in_source(LocatedName { source: call.source, span: call.call.span })
                         && call_shape_matches(source.text, parsed.syntax.forms@, row, indexed, Some(call.call))
+                        && call_arguments_match(parsed.syntax.forms@, call.call)
                         && exists|resolved: ResolvedDefinitionReference|
                             #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
                                 && target_ports_match(&project, resolved, call.target),
@@ -169,7 +173,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let position = row.references.start + reference;
         let shape = indexed_call_shape(source.text, parsed.syntax.forms.as_slice(), row, parsed.references.as_slice(), position);
         let Some(call) = shape else { return Ok(None); };
-        proof { located_name_evidence(LocatedName { source, span: call.span }); }
+        proof {
+            located_name_evidence(LocatedName { source, span: call.span });
+            indexed_call_arguments(source.text, parsed.syntax.forms@, *row, parsed.references@[position as int], call);
+        }
         assert(self.func_call_at(file, entry, definition, reference));
         let resolved = match self.resolve_definition_reference(file, entry, definition, reference) {
             Ok(resolved) => resolved,

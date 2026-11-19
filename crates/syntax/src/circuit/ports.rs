@@ -427,7 +427,9 @@ fn collect_port_sites(_source: &str, forms: &[Form], clause: usize, stop: usize,
     requires
         ports_clause_matches(_source, forms@, clause as int, _limit as int, stop as int, _direction),
         complete_list_indices(forms@), nested_list_indices(forms@),
-    ensures port_sites_before(_source, forms@, clause + 2, stop as int, stop as int, sites@),
+    ensures
+        port_sites_before(_source, forms@, clause + 2, stop as int, stop as int, sites@),
+        sites@.len() == super::call_shapes::argument_count(forms@, clause + 2, stop as int),
 {
     let first = clause + 2;
     let mut at = first;
@@ -443,6 +445,8 @@ fn collect_port_sites(_source: &str, forms: &[Form], clause: usize, stop: usize,
             first == clause + 2 <= at <= stop,
             at < stop ==> direct_form_in_range(forms@, first as int, stop as int, at as int),
             port_sites_before(_source, forms@, first as int, stop as int, at as int, sites@),
+            sites@.len() + super::call_shapes::argument_count(forms@, at as int, stop as int)
+                == super::call_shapes::argument_count(forms@, first as int, stop as int),
         decreases stop - at,
     {
         proof {
@@ -469,10 +473,12 @@ fn collect_port_sites(_source: &str, forms: &[Form], clause: usize, stop: usize,
             assert(form_region_ends_at(forms@, first as int, stop as int));
             add_port_site(_source, forms@, first as int, stop as int, sites@, site, next as int);
             reveal(following_direct_form);
+            reveal_with_fuel(super::call_shapes::argument_count, 1);
         }
         sites.push(site);
         at = next;
     }
+    proof { reveal_with_fuel(super::call_shapes::argument_count, 1); }
     sites
 }
 
@@ -489,9 +495,23 @@ pub closed spec fn routine_ports_match(
         let end = forms[out]->List_end as int;
         ports matches Some(ports) && port_sites_before(source, forms, first + 2, out, out, ports.inputs@)
             && port_sites_before(source, forms, out + 2, end, end, ports.outputs@)
+            && ports.inputs@.len() == super::call_shapes::argument_count(forms, first + 2, out)
+            && ports.outputs@.len() == super::call_shapes::argument_count(forms, out + 2, end)
     } else {
         ports.is_none()
     }
+}
+
+pub(super) proof fn routine_port_list_counts(
+    source: &str, syntax: &CircuitForms, entry: int, ports: RoutinePorts, layout: RoutineLayout,
+)
+    requires
+        routine_ports_match(source, syntax, entry, Some(ports)),
+        routine_layout_matches(source, syntax, entry, Some(layout)),
+    ensures
+        ports.inputs@.len() == super::call_shapes::argument_count(syntax.forms@, layout.input + 2, layout.output as int),
+        ports.outputs@.len() == super::call_shapes::argument_count(syntax.forms@, layout.output + 2, layout.body as int),
+{
 }
 
 /// 署名の有無が、厳格索引の項目の種別に対応することを示す。

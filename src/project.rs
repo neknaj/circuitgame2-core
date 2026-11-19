@@ -88,7 +88,10 @@ pub use use_aliases::{
     RelativeTarget, ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
     check_use_aliases,
 };
-pub use use_aliases::{FuncArityError, FuncCallArity, FuncCallTarget};
+pub use use_aliases::{
+    CallPortType, FuncArityError, FuncCallArity, FuncCallSignature, FuncCallSignatureError,
+    FuncCallTarget, TypedFuncCall,
+};
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use use_aliases::{

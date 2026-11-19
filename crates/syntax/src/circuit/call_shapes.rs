@@ -48,7 +48,7 @@ pub open spec fn definition_call_index(
 }
 
 #[verifier::opaque]
-spec fn argument_count(forms: Seq<Form>, first: int, end: int) -> nat
+pub(super) open spec fn argument_count(forms: Seq<Form>, first: int, end: int) -> nat
     decreases end - first,
 {
     if 0 <= first < end <= forms.len() && first < after_form(forms, first) <= end {
@@ -75,6 +75,94 @@ pub closed spec fn call_shape_matches(
     } else {
         shape is None
     }
+}
+
+/// 呼び出しの構文木に直接の引数列があり、その個数が索引に記録した値と一致することを表す。
+pub closed spec fn call_arguments_match(forms: Seq<Form>, call: CallShape) -> bool {
+    let form = call.form as int;
+    &&& form < forms.len() && forms[form] is List
+    &&& form + 2 <= forms[form]->List_end <= forms.len()
+    &&& call.arguments == argument_count(forms, form + 2, forms[form]->List_end as int)
+}
+
+/// 参照索引から得た呼び出しの形を、直接の引数列に結び付ける。
+pub proof fn indexed_call_arguments(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference, call: CallShape,
+)
+    requires call_shape_matches(source, forms, row, reference, Some(call)),
+    ensures call_arguments_match(forms, call),
+{
+    super::expression_forest::ordinary_call_bounds(source, forms, reference.form - 1, row.expression.end as int);
+}
+
+/// 呼び出しの引数として残っている構文木範囲に、指定数の直接の式が並ぶことを表す。
+pub closed spec fn call_argument_sequence(forms: Seq<Form>, range: Range<usize>, count: int) -> bool {
+    expression_region(forms, range.start as int, range.end as int)
+        && count == argument_count(forms, range.start as int, range.end as int)
+}
+
+/// 検査済みの呼び出しから、引数列の構文木範囲を返す。
+///
+/// 戻り値は半開範囲で、呼び出し名を含まない。引数がなければ空になる。
+///
+/// # Panics
+///
+/// 呼び出しの添字と構文木を手動で組み立て、対応しない値を渡すとパニックすることがある。
+pub fn call_argument_range(forms: &[Form], call: &CallShape) -> (range: Range<usize>)
+    requires call_arguments_match(forms@, *call), nested_list_indices(forms@),
+    ensures
+        call_argument_sequence(forms@, range, call.arguments as int),
+        expression_region(forms@, range.start as int, range.end as int),
+        range.start == call.form + 2 <= range.end <= forms@.len(),
+        range.end == forms@[call.form as int]->List_end,
+{
+    let Form::List { end: list_end, .. } = &forms[call.form] else {
+        proof { assert(false); }
+        unreachable!()
+    };
+    proof { list_children_region(forms@, call.form as int, call.form + 2, *list_end as int); }
+    call.form + 2..*list_end
+}
+
+/// 残りの引数列から、先頭の引数式が占める半開範囲を返す。
+///
+/// 次の呼び出しでは、この範囲の末尾を残りの引数列の先頭に使う。
+/// 入れ子のリストは、その末尾の添字まで一度に進む。
+///
+/// # Panics
+///
+/// 構文木と引数範囲を手動で変更し、範囲が構文木に収まらなければパニックすることがある。
+pub fn next_call_argument(
+    forms: &[Form], remaining: Range<usize>,
+) -> (argument: Option<Range<usize>>)
+    requires expression_region(forms@, remaining.start as int, remaining.end as int), complete_list_indices(forms@),
+    ensures
+        argument.is_none() <==> remaining.start == remaining.end,
+        argument matches Some(arg) ==>
+            arg.start == remaining.start && arg.start < arg.end <= remaining.end
+                && arg.end == (if forms@[arg.start as int] is List {
+                    forms@[arg.start as int]->List_end as int
+                } else { arg.start + 1 })
+                && expression_region(forms@, arg.end as int, remaining.end as int),
+        forall|count: int| #[trigger] call_argument_sequence(forms@, remaining, count) ==> match argument {
+            None => count == 0,
+            Some(arg) => 0 < count && call_argument_sequence(forms@, (arg.end..remaining.end), count - 1),
+        },
+{
+    proof {
+        reveal(expression_region);
+        reveal(complete_list_indices);
+        reveal_with_fuel(argument_count, 1);
+    }
+    if remaining.start == remaining.end {
+        return None;
+    }
+    let end = match &forms[remaining.start] {
+        Form::Atom { .. } => remaining.start + 1,
+        Form::List { end, .. } => *end,
+    };
+    assert(expression_region(forms@, end as int, remaining.end as int));
+    Some(remaining.start..end)
 }
 
 fn count_arguments(forms: &[Form], first: usize, end: usize) -> (count: usize)
@@ -218,6 +306,24 @@ pub closed spec fn routine_arity_matches(
                 && arity.outputs > 0,
         None => routine_layout_matches(source, syntax, entry, None),
     }
+}
+
+/// 個数だけを取り出した署名と、全ポートを取り出した署名が同じ個数を持つことを示す。
+pub proof fn routine_arity_port_counts(
+    source: &str, syntax: &CircuitForms, entry: int, arity: RoutineArity, ports: RoutinePorts,
+)
+    requires
+        routine_arity_matches(source, syntax, entry, Some(arity)),
+        routine_ports_match(source, syntax, entry, Some(ports)),
+    ensures arity.inputs == ports.inputs@.len(), arity.outputs == ports.outputs@.len(),
+{
+    let forms = syntax.forms@;
+    let layout = choose|layout: RoutineLayout|
+        #[trigger] routine_layout_matches(source, syntax, entry, Some(layout))
+            && arity.inputs == argument_count(forms, layout.input + 2, layout.output as int)
+            && arity.outputs == argument_count(forms, layout.output + 2, layout.body as int)
+            && arity.outputs > 0;
+    super::ports::routine_port_list_counts(source, syntax, entry, ports, layout);
 }
 
 /// 厳格索引の項目から、宣言された入力数と出力数を求める。

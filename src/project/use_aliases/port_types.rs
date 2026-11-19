@@ -17,7 +17,7 @@ use crate::project::name_keys::key_view;
 #[cfg(verus_only)]
 use crate::project::signatures::{checked_signature_ports, routine_signature_evidence};
 #[cfg(verus_only)]
-use crate::project::widths::{checked_name_sites, checked_width_sites, reference_kind};
+use crate::project::widths::{checked_name_sites, checked_width_counts, checked_width_sites, reference_kind};
 use crate::project::{
     CheckedPort, DeclaredPortType, LocatedName, OutputSource, PortDirection, ProjectSource,
     RoutineSignatureError, check_routine_signature,
@@ -25,7 +25,7 @@ use crate::project::{
 use crate::syntax::Form;
 use crate::syntax::circuit::{NamedForm, PortTypeSite};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{indexed_entry_evidence, namespace_name_evidence};
+use crate::syntax::circuit::{RoutineArity, indexed_entry_evidence, namespace_name_evidence, routine_arity_matches};
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 use alloc::vec::Vec;
@@ -352,6 +352,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         } by {
             assert(self.typed_port_evidence(&context, signature.ports.inputs@[i], typed.inputs@[i]));
         };
+    }
+
+    pub(super) proof fn typed_signature_arity(
+        &self, file: usize, entry: usize, max_width: u64, typed: TypedRoutineSignature, arity: RoutineArity,
+    )
+        requires
+            self.typed_signature_evidence(file, entry, max_width, Ok(Some(typed))),
+            ({
+                let project = self.targets.project_model();
+                &&& file < project.circuits_model().len() && file < project.sources_model().len()
+                &&& routine_arity_matches(project.sources_model()[file as int].text,
+                    &project.circuits_model()[file as int].syntax, entry as int, Some(arity))
+            }),
+        ensures typed.inputs@.len() == arity.inputs, typed.outputs@.len() == arity.outputs,
+    {
+        let project = &self.targets.project_model();
+        let (context, signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+                && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
+                && self.typed_after_signature(&context, &signature, Ok(Some(typed)));
+        checked_signature_ports(project, file as int, entry as int, max_width, signature);
+        checked_width_counts(project, file as int, entry as int, max_width, signature.ports, arity);
     }
 
     pub(super) proof fn typed_signature_skips_non_routines(&self, file: usize, entry: usize, max_width: u64)
