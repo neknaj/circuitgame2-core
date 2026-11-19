@@ -122,6 +122,10 @@ impl<'a> Lexer<'a> {
                     &&& segment.span.end <= self.cursor.source.spec_bytes().len()
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.start as int)
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.end as int)
+                    &&& (segment.kind is Open ==> segment.span.end == segment.span.start + 1
+                        && self.cursor.source.spec_bytes()[segment.span.start as int] == 40)
+                    &&& (segment.kind is Close ==> segment.span.end == segment.span.start + 1
+                        && self.cursor.source.spec_bytes()[segment.span.start as int] == 41)
                     &&& next.needs_separator == segment.kind.is_atom()
                     &&& segment.missing_separator == (self.needs_separator && segment.kind.is_atom())
                 },
@@ -210,6 +214,7 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
     ensures
         match result {
             Ok(forms) => complete_list_indices(forms@) && nested_list_indices(forms@)
+                && list_source_delimiters(source, forms@, false)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
         },
@@ -226,6 +231,7 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
     ensures
         complete_list_indices(result.forms@),
         nested_list_indices(result.forms@),
+        list_source_delimiters(source, result.forms@, true),
         form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
@@ -331,6 +337,66 @@ proof fn close_form_span(source: &str, forms: Seq<Form>, updated: Seq<Form>, ind
         assert(form_span(updated[i]).start == form_span(forms[i]).start);
         if i > 0 {
             assert(form_span(updated[i - 1]).start == form_span(forms[i - 1]).start);
+        }
+    };
+}
+
+pub open spec fn list_delimited(bytes: Seq<u8>, form: Form, recovering: bool) -> bool {
+    match form {
+        Form::List { span, end } => {
+            &&& span.start < bytes.len()
+            &&& bytes[span.start as int] == 40
+            &&& (end > 0 ==> 0 < span.end <= bytes.len()
+                && (bytes[span.end - 1] == 41 || (recovering && span.end == bytes.len())))
+        },
+        Form::Atom { .. } => true,
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn list_source_delimiters(source: &str, forms: Seq<Form>, recovering: bool) -> bool {
+    forall|i: int| 0 <= i < forms.len()
+        ==> list_delimited(source.spec_bytes(), #[trigger] forms[i], recovering)
+}
+
+proof fn delimiters_after_append(source: &str, forms: Seq<Form>, form: Form, recovering: bool)
+    requires
+        list_source_delimiters(source, forms, recovering),
+        list_delimited(source.spec_bytes(), form, recovering),
+    ensures list_source_delimiters(source, forms.push(form), recovering),
+{
+    reveal(list_source_delimiters);
+    let extended = forms.push(form);
+    assert forall|i: int| 0 <= i < extended.len()
+        implies list_delimited(source.spec_bytes(), #[trigger] extended[i], recovering) by {
+        if i < forms.len() {
+            assert(extended[i] == forms[i]);
+        }
+    };
+}
+
+proof fn delimiters_after_close(source: &str, forms: Seq<Form>, updated: Seq<Form>,
+    index: int, recovering: bool)
+    requires
+        list_source_delimiters(source, forms, recovering),
+        updated.len() == forms.len(),
+        0 <= index < forms.len(),
+        forms[index] is List,
+        updated[index] is List,
+        form_span(updated[index]).start == form_span(forms[index]).start,
+        0 < form_span(updated[index]).end <= source.spec_bytes().len(),
+        source.spec_bytes()[form_span(updated[index]).end - 1] == 41
+            || (recovering && form_span(updated[index]).end == source.spec_bytes().len()),
+        forall|i: int| 0 <= i < forms.len() && i != index ==> #[trigger] updated[i] == forms[i],
+    ensures list_source_delimiters(source, updated, recovering),
+{
+    reveal(list_source_delimiters);
+    assert forall|i: int| 0 <= i < updated.len()
+        implies list_delimited(source.spec_bytes(), #[trigger] updated[i], recovering) by {
+        if i != index {
+            assert(updated[i] == forms[i]);
+        } else {
+            assert(list_delimited(source.spec_bytes(), forms[i], recovering));
         }
     };
 }
@@ -487,6 +553,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         recovering ==> result.is_ok(),
         match result {
             Ok((forms, _)) => complete_list_indices(forms@) && nested_list_indices(forms@)
+                && list_source_delimiters(source, forms@, recovering)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
         },
@@ -503,6 +570,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         assert(form_spans_valid(source, forms@, 0));
         reveal(nested_list_indices);
         assert(nested_list_indices(forms@));
+        reveal(list_source_delimiters);
+        assert(list_source_delimiters(source, forms@, recovering));
     }
 
     loop
@@ -516,6 +585,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
             nested_list_indices(forms@),
+            list_source_delimiters(source, forms@, recovering),
             open_order(open@),
         decreases length - lexer.cursor.position(),
     {
@@ -583,6 +653,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         let j = choose|j: int| 0 <= j < previous.len() && previous[j] == value;
                         assert(open@[j] == value);
                     };
+                    delimiters_after_append(source, before, added, recovering);
                     nested_after_append(before, added);
                     indices_after_append(before, previous, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
@@ -594,6 +665,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     let ghost before = forms@;
                     finish_list(&mut forms, index, span.end);
                     proof {
+                        delimiters_after_close(source, before, forms@, index as int, recovering);
                         nested_after_close(before, forms@, previous, index);
                         indices_after_finish(before, forms@, previous, open@, index);
                         close_form_span(source, before, forms@, index as int, previous_position, lexer.cursor.position());
@@ -617,6 +689,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 forms.push(form);
                 assert(forms.len() == before.len() + 1);
                 proof {
+                    delimiters_after_append(source, before, added, recovering);
                     nested_after_append(before, added);
                     indices_after_append(before, open@, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
@@ -634,6 +707,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
             nested_list_indices(forms@),
+            list_source_delimiters(source, forms@, recovering),
             open_order(open@),
         decreases open@.len(),
     {
@@ -646,6 +720,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             Form::Atom { .. } => unreachable!("only list indices are stacked"),
         };
         if recovering {
+            assert(length > 0) by {
+                reveal(list_source_delimiters);
+                assert(list_delimited(source.spec_bytes(), forms@[index as int], recovering));
+            };
             repairs.push(Repair::InsertedClose {
                 offset: length,
                 opening: span.start..span.end,
@@ -654,6 +732,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
             proof {
+                delimiters_after_close(source, before, forms@, index as int, recovering);
                 nested_after_close(before, forms@, previous, index);
                 indices_after_finish(before, forms@, previous, open@, index);
                 close_form_span(source, before, forms@, index as int, length as int, length as int);
@@ -769,13 +848,17 @@ impl<'a> SourceCursor<'a> {
         ensures
             match step {
                 None => self.position() == self.source.spec_bytes().len(),
-                Some((_, span, next)) => {
+                Some((kind, span, next)) => {
                     &&& next.source == self.source
                     &&& next.valid()
                     &&& span.start == self.position()
                     &&& span.start < span.end
                     &&& span.end == next.position()
                     &&& span.end <= self.source.spec_bytes().len()
+                    &&& (kind is Open ==> span.end == span.start + 1
+                        && self.source.spec_bytes()[span.start as int] == 40)
+                    &&& (kind is Close ==> span.end == span.start + 1
+                        && self.source.spec_bytes()[span.start as int] == 41)
                     &&& is_char_boundary(self.source.spec_bytes(), span.start as int)
                     &&& is_char_boundary(self.source.spec_bytes(), span.end as int)
                 },
@@ -821,6 +904,10 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         match result.0 {
             RawSegment::Bare(atom) =>
                 atom.spec_bytes() + result.1.spec_bytes() =~= input.spec_bytes(),
+            RawSegment::Open => input.spec_bytes()[0] == 40
+                && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
+            RawSegment::Close => input.spec_bytes()[0] == 41
+                && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
             _ => true,
         },
 {
