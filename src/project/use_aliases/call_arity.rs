@@ -2,9 +2,11 @@
 
 mod checks;
 mod inputs;
+mod outputs;
 mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
+pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
 
 use super::{DefinitionBinding, DefinitionReferenceError, UseAliases};

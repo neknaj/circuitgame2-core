@@ -121,6 +121,19 @@ spec fn driver_site(source: &str, forms: Seq<Form>, definitions: Seq<BuildDefini
     &&& name_in_source(source, driver.name)
 }
 
+pub(super) open spec fn indexed_driver_site(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, driver: DefinitionDriver,
+) -> bool {
+    let frame = parsed.entry_ranges@[entry].definitions;
+    let forms = parsed.syntax.forms@;
+    let (start, end) = definition_target_range(forms, parsed.definitions@[driver.definition as int]);
+    &&& frame.start <= driver.definition < frame.end <= parsed.definitions@.len()
+    &&& driver.result_index < end - start
+    &&& 0 <= start + driver.result_index < forms.len()
+    &&& driver.name.span == form_span(forms[start + driver.result_index])
+    &&& name_in_source(source.text, driver.name)
+}
+
 spec fn drivers_before(
     source: &str, forms: Seq<Form>, definitions: Seq<BuildDefinition>, first: int, end: int,
     def: int, result: int, drivers: Seq<DefinitionDriver>,
@@ -570,7 +583,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& typed_name_sites(circuits[file as int].syntax.forms@, checked.signature.inputs@)
             &&& expected_output_context(source, &circuits[file as int], entry as int, checked)
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
-                ==> name_in_source(source.text, (#[trigger] checked.definitions@[i]).name)
+                ==> indexed_driver_site(source, &circuits[file as int], entry as int, #[trigger] checked.definitions@[i])
         }),
     {
         self.reveal_checked_driver_result(file, entry, max_width, checked);

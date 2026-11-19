@@ -12,6 +12,7 @@ mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,
+    FuncCallOutputError, FuncCallOutputTypes,
     FuncCallTarget, TypedFuncCall,
 };
 pub use definitions::{

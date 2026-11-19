@@ -26,7 +26,7 @@ verus! {
 pub struct SignalType<'p, 'a> {
     /// 入力宣言または右辺から得た型。
     pub ty: ResolvedPortType<'p, 'a>,
-    /// 型を与えた入力の注釈または定数の範囲。信号名を介した参照でも元の範囲を保つ。
+    /// 型を与えたポートの注釈、定数、または組み込み呼び出しの範囲。信号名を介しても元の範囲を保つ。
     pub origin: LocatedName<'p, 'a>,
 }
 

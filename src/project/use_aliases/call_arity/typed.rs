@@ -98,6 +98,17 @@ pub enum FuncCallSignatureError<'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn call_has_signature_result(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        result: Result<Option<TypedFuncCall>, FuncCallSignatureError>,
+    )
+        requires
+            self.func_call_at(file, entry, definition, reference),
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, result),
+        ensures result != Ok(None),
+    {
+    }
+
     proof fn selected_function_arity(
         &self, file: usize, entry: usize, definition: usize, reference: usize,
         call: FuncCallArity, target_file: usize, target_entry: usize, arity: RoutineArity,
