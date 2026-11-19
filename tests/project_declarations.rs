@@ -1,0 +1,151 @@
+use circuitgame2_core::project::{
+    NameConflictKind, NameKey, SourceSnapshot, index_declarations, parse_circuit_project,
+};
+use circuitgame2_core::syntax::circuit::Head;
+
+fn snapshot<'a>(path: &'a str, revision: u64, text: &'a str) -> SourceSnapshot<'a> {
+    SourceSnapshot {
+        path,
+        revision,
+        text,
+    }
+}
+
+#[test]
+fn shares_namespace_paths_and_finds_implicit_ancestors() {
+    let project = parse_circuit_project(&[
+        snapshot(
+            "part.ncg2",
+            3,
+            "(namespace app::logic (module-part worker (def y 0)))",
+        ),
+        snapshot(
+            "decl.ncg2",
+            2,
+            "(namespace app::logic (module worker (in) (out y)))",
+        ),
+        snapshot("empty.ncg2", 7, "(namespace app::other::empty)"),
+    ])
+    .unwrap();
+    let table = index_declarations(&project).unwrap();
+    let key = NameKey {
+        parent: Some("app::logic"),
+        name: "worker",
+    };
+    let (source, form) = table.declaration(key).unwrap();
+    assert_eq!(source.id.components(), ["decl.ncg2"]);
+    assert_eq!(form.head, Head::Module);
+    assert_eq!(&source.text[form.name.span.clone()], "worker");
+    assert!(
+        table
+            .declaration(NameKey {
+                parent: None,
+                name: "worker"
+            })
+            .is_none()
+    );
+
+    for (parent, name) in [
+        (None, "app"),
+        (Some("app"), "logic"),
+        (Some("app"), "other"),
+        (Some("app::other"), "empty"),
+    ] {
+        let location = table.namespace(NameKey { parent, name }).unwrap();
+        assert_eq!(&location.source.text[location.span], name);
+    }
+    assert!(
+        table
+            .namespace(NameKey {
+                parent: Some("app"),
+                name: "log"
+            })
+            .is_none()
+    );
+    assert!(
+        table
+            .namespace(NameKey {
+                parent: None,
+                name: "app::logic"
+            })
+            .is_none()
+    );
+}
+
+#[test]
+fn keeps_name_identity_when_snapshots_are_reordered() {
+    let left = "(namespace app (func evaluate (in) (out y)))";
+    let right = "(namespace app (module evaluate (in) (out y)))";
+    for reverse in [false, true] {
+        let mut sources = [
+            snapshot("a.ncg2", 4, left),
+            snapshot("./a.ncg2", 4, left),
+            snapshot("b.ncg2", 8, right),
+        ];
+        if reverse {
+            sources.reverse();
+        }
+        let project = parse_circuit_project(&sources).unwrap();
+        let error = index_declarations(&project).unwrap_err();
+        assert_eq!(error.kind, NameConflictKind::DuplicateDeclaration);
+        let expected = if reverse {
+            [("b.ncg2", 8), ("a.ncg2", 4)]
+        } else {
+            [("a.ncg2", 4), ("b.ncg2", 8)]
+        };
+        for (location, (file, revision)) in [error.first, error.second].into_iter().zip(expected) {
+            assert_eq!(location.source.id.components(), [file]);
+            assert_eq!(location.source.revision, revision);
+            assert_eq!(&location.source.text[location.span], "evaluate");
+        }
+    }
+}
+
+#[test]
+fn points_to_the_conflicting_namespace_component() {
+    let case = "; 名前空間\n(namespace app::logic::internal)";
+    for (conflicting_decl, component) in [
+        ("(struct app (width 1))", "app"),
+        ("(namespace app (struct logic (width 1)))", "logic"),
+    ] {
+        for reverse in [false, true] {
+            let mut sources = [
+                snapshot("namespaces.ncg2", 8, case),
+                snapshot("decls.ncg2", 3, conflicting_decl),
+            ];
+            if reverse {
+                sources.reverse();
+            }
+            let project = parse_circuit_project(&sources).unwrap();
+            let error = index_declarations(&project).unwrap_err();
+            assert_eq!(error.kind, NameConflictKind::DeclarationAndNamespace);
+            let (ns, decl) = if reverse {
+                (error.second, error.first)
+            } else {
+                (error.first, error.second)
+            };
+            assert_eq!(ns.source.id.components(), ["namespaces.ncg2"]);
+            assert_eq!(ns.source.revision, 8);
+            let start = case.find(component).unwrap();
+            assert_eq!(ns.span, start..start + component.len());
+            assert_eq!(decl.source.id.components(), ["decls.ncg2"]);
+            assert_eq!(decl.source.revision, 3);
+            assert_eq!(&conflicting_decl[decl.span], component);
+        }
+    }
+
+    let project = parse_circuit_project(&[
+        snapshot(
+            "decls.ncg2",
+            3,
+            "(namespace app (struct logic (width 1))) (struct ap (width 1))",
+        ),
+        snapshot(
+            "namespaces.ncg2",
+            8,
+            "(namespace app::logic-extra) (namespace application)",
+        ),
+    ])
+    .unwrap();
+    assert!(index_declarations(&project).is_ok());
+}

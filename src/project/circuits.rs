@@ -13,10 +13,13 @@ use super::{
     normalized_path, project_sources_match, source_kind_of, source_set_error,
     valid_source_snapshots,
 };
+#[cfg(verus_only)]
+use crate::syntax::circuit::NameSite;
 use crate::syntax::circuit::{CircuitFormError, NamedCircuit, index_named_forms};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    circuit_index_matches, circuit_source_error, circuit_source_matches, named_forms_match,
+    circuit_index_matches, circuit_source_error, circuit_source_matches, name_site_matches,
+    named_form_matches, named_forms_match,
 };
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
@@ -24,6 +27,8 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
+#[cfg(verus_only)]
+use vstd::utf8::is_char_boundary;
 
 verus! {
 
@@ -131,15 +136,46 @@ impl<'a> CircuitProject<'a> {
         self.circuits@
     }
 
-    /// 各ソースに対応する構文木と名前索引が得られたことを表す。
-    pub open spec fn matches(&self, inputs: Seq<SourceSnapshot>) -> bool {
+    /// ソースの列と、その解析結果が同じ位置で対応することを表す。
+    pub open spec fn has_parsed_sources(&self) -> bool {
         let sources = self.sources_model();
         let circuits = self.circuits_model();
-        &&& project_sources_match(inputs, sources)
         &&& circuits.len() == sources.len()
         &&& forall|i: int| 0 <= i < sources.len() ==>
             #[trigger] parsed_circuit_matches(sources[i], circuits[i])
     }
+
+    /// 各ソースに対応する構文木と名前索引が得られたことを表す。
+    pub open spec fn matches(&self, inputs: Seq<SourceSnapshot>) -> bool {
+        project_sources_match(inputs, self.sources_model()) && self.has_parsed_sources()
+    }
+}
+
+pub(super) open spec fn name_in_source(text: &str, name: NameSite) -> bool {
+    &&& name.span.start < name.span.end <= text.spec_bytes().len()
+    &&& name.span.end == name.span.start + name.word.spec_bytes().len()
+    &&& is_char_boundary(text.spec_bytes(), name.span.start as int)
+    &&& is_char_boundary(text.spec_bytes(), name.span.end as int)
+    &&& text.spec_bytes()[name.span.start as int..name.span.end as int] == name.word.spec_bytes()
+}
+
+pub(super) proof fn parsed_name_span(
+    source: ProjectSource, parsed: NamedCircuit, index: int,
+)
+    requires
+        parsed_circuit_matches(source, parsed),
+        0 <= index < parsed.names@.len(),
+    ensures name_in_source(source.text, parsed.names@[index].name),
+{
+    let named = parsed.names@[index];
+    let forms = parsed.syntax.forms@;
+    let entries = parsed.syntax.entries@;
+    reveal(named_forms_match);
+    let i = choose|i: int| 0 <= i < entries.len()
+        && #[trigger] named_form_matches(source.text, forms, entries[i], named);
+    reveal(named_form_matches);
+    reveal(name_site_matches);
+    assert(name_site_matches(source.text, forms, named.form + 2, named.name));
 }
 
 proof fn parsed_sources_cover_prefix(
