@@ -341,6 +341,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(in crate::project::use_aliases) proof fn arity_preserves_wiring(
+        &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiringResult,
+    )
+        requires self.func_arity_evidence(file, entry, max_width, Ok(wiring)),
+        ensures self.func_wiring_evidence(file, entry, max_width, Ok(wiring)),
+    {
+    }
+
     /// 配線を検査した後、`func` の右辺の入出力数を確かめる。
     ///
     /// 右辺全体の出力数は左辺の名前の数に、子式の出力数は 1 にそろえる。

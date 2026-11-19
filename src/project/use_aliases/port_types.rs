@@ -319,6 +319,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& forall|i: int| 0 <= i < typed.output_inputs@.len()
                 ==> ((#[trigger] typed.output_inputs@[i]) matches Some(input) ==> input < typed.inputs@.len())
             &&& typed_name_sites(forms, typed.inputs@) && typed_name_sites(forms, typed.outputs@)
+            &&& forall|i: int| 0 <= i < typed.outputs@.len() ==> {
+                let port = #[trigger] typed.outputs@[i];
+                *port.annotation.source == project.sources_model()[file as int]
+                    && location_in_source(port.annotation)
+            }
         }),
     {
         let project = &self.targets.project_model();
@@ -330,6 +335,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         checked_width_sites(project, file as int, entry as int, max_width, signature.ports);
         self.typed_names_follow_declared(&context, signature.ports.inputs@, typed.inputs@);
         self.typed_names_follow_declared(&context, signature.ports.outputs@, typed.outputs@);
+        assert forall|i: int| 0 <= i < typed.outputs@.len() implies {
+            let port = #[trigger] typed.outputs@[i];
+            *port.annotation.source == project.sources_model()[file as int] && location_in_source(port.annotation)
+        } by {
+            assert(self.typed_port_evidence(&context, signature.ports.outputs@[i], typed.outputs@[i]));
+        };
     }
 
     pub(super) proof fn typed_signature_skips_non_routines(&self, file: usize, entry: usize, max_width: u64)

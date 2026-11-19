@@ -89,6 +89,7 @@ pub use use_aliases::{
     check_use_aliases,
 };
 pub use use_aliases::{FuncArityError, FuncCallArity, FuncCallTarget};
+pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };

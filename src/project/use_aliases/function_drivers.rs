@@ -438,6 +438,24 @@ spec fn func_at(circuits: Seq<NamedBuildCircuit>, file: usize, entry: usize) -> 
     &&& circuits[file as int].syntax.entries@[entry as int].head is Func
 }
 
+pub(super) open spec fn expected_output_context(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, drivers: FuncDrivers,
+) -> bool {
+    &&& 0 <= entry < parsed.entry_ranges@.len()
+    &&& drivers.outputs@.len() == drivers.signature.outputs@.len()
+    &&& forall|i: int| 0 <= i < drivers.outputs@.len() && (#[trigger] drivers.outputs@[i]) is Definition
+        ==> drivers.outputs@[i]->Definition_0 < drivers.definitions@.len()
+    &&& forall|i: int| 0 <= i < drivers.definitions@.len() ==> {
+        let def = (#[trigger] drivers.definitions@[i]).definition;
+        let frame = parsed.entry_ranges@[entry].definitions;
+        frame.start <= def < frame.end <= parsed.definitions@.len()
+    }
+    &&& forall|i: int| 0 <= i < drivers.signature.outputs@.len() ==> {
+        let port = #[trigger] drivers.signature.outputs@[i];
+        *port.annotation.source == *source && location_in_source(port.annotation)
+    }
+}
+
 spec fn after_collecting_names(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize,
     signature: &TypedRoutineSignature, inputs: Seq<NameSite>, outputs: Seq<NameSite>,
@@ -496,20 +514,33 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     proof fn reveal_checked_driver_result(
         &self, file: usize, entry: usize, max_width: u64, checked: FuncDrivers,
     )
-        requires self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
+        requires self.can_resolve(), self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
         ensures ({
             let project = self.targets.project_model();
             let source = &project.sources_model()[file as int];
+            let parsed = &project.circuits_model()[file as int];
+            let frame = parsed.entry_ranges@[entry as int].definitions;
             &&& func_at(project.circuits_model(), file, entry)
             &&& self.typed_signature_evidence(file, entry, max_width, Ok(Some(checked.signature)))
+            &&& entry < parsed.entry_ranges@.len()
+            &&& checked.outputs@.len() == checked.signature.outputs@.len()
+            &&& forall|i: int| 0 <= i < checked.outputs@.len() && (#[trigger] checked.outputs@[i]) is Definition
+                ==> checked.outputs@[i]->Definition_0 < checked.definitions@.len()
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
-                ==> name_in_source(source.text, (#[trigger] checked.definitions@[i]).name)
+                ==> ({
+                    let driver = #[trigger] checked.definitions@[i];
+                    name_in_source(source.text, driver.name)
+                        && frame.start <= driver.definition < frame.end <= parsed.definitions@.len()
+                })
         }),
     {
         reveal(UseAliases::func_driver_evidence);
+        self.targets.parsed_project_model();
         let project = self.targets.project_model();
         let parsed = &project.circuits_model()[file as int];
         let source = &project.sources_model()[file as int];
+        assert(parsed_circuit_matches(*source, *parsed));
+        parsed_index_evidence(*source, *parsed);
         let result = Ok(FuncDriverResult::Checked(checked));
         let (signature, inputs, outputs, definitions) = choose|sig: TypedRoutineSignature, ins: Seq<NameSite>,
             outs: Seq<NameSite>, defs: Seq<DefinitionDriver>|
@@ -521,7 +552,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn checked_driver_sources(
         &self, file: usize, entry: usize, max_width: u64, checked: FuncDrivers,
     )
-        requires self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
+        requires self.can_resolve(), self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
         ensures ({
             let project = self.targets.project_model();
             let source = &project.sources_model()[file as int];
@@ -529,6 +560,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& file < circuits.len() && entry < circuits[file as int].syntax.entries@.len()
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
             &&& typed_name_sites(circuits[file as int].syntax.forms@, checked.signature.inputs@)
+            &&& expected_output_context(source, &circuits[file as int], entry as int, checked)
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
                 ==> name_in_source(source.text, (#[trigger] checked.definitions@[i]).name)
         }),

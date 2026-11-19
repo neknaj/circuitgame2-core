@@ -345,6 +345,12 @@ impl<'p, 'a> UseTargets<'p, 'a> {
         self.project.has_parsed_sources() && use_targets_match(self.project, *self)
     }
 
+    pub(super) proof fn parsed_project_model(&self)
+        requires self.covers_project(),
+        ensures self.project_model().has_parsed_sources(),
+    {
+    }
+
     pub(super) proof fn declarations_cover_project(&self)
         requires self.covers_project(),
         ensures declaration_table_matches(&self.project_model(), self.exports_model().declarations_model()),

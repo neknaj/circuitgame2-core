@@ -3,6 +3,8 @@
 use super::function_drivers::{find_driver, name_location, typed_port_names};
 #[cfg(verus_only)]
 use super::function_drivers::{disjoint_input, is_location, names_match_ports, same_word};
+#[cfg(verus_only)]
+use super::function_drivers::expected_output_context;
 use super::{DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver, UseAliases};
 use crate::project::circuits::read_indexed_atom;
 #[cfg(verus_only)]
@@ -301,13 +303,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn checked_wiring_is_func(
         &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiring,
     )
-        requires self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(wiring))),
+        requires self.can_resolve(), self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(wiring))),
         ensures ({
             let project = self.targets.project_model();
             let circuits = project.circuits_model();
             &&& file < circuits.len() && file < project.sources_model().len()
             &&& entry < circuits[file as int].syntax.entries@.len()
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
+            &&& expected_output_context(&project.sources_model()[file as int], &circuits[file as int], entry as int, wiring.drivers)
         }),
     {
         self.checked_driver_sources(file, entry, max_width, wiring.drivers);
