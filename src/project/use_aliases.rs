@@ -1,5 +1,8 @@
 //! 解決済みの `use` をスコープごとに照合し、別名の束縛と重複警告を求める。
 
+mod relative;
+pub use relative::{RelativeResolutionError, RelativeTarget};
+
 #[cfg(verus_only)]
 use super::name_keys::key_bytes;
 #[cfg(verus_only)]
@@ -310,8 +313,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         result: Result<Option<UnqualifiedTarget>, ReferenceScopeError>,
     ) -> bool {
         let circuits = self.targets.project_model().circuits_model();
-        let items = self.targets.directives_model();
-        let table = self.targets.exports_model().declarations_model();
+        match result {
+            Err(error) => self.scope_matches(file, block, Err(error)),
+            Ok(found) => file < circuits.len() && {
+                let names = circuits[file as int].names@;
+                exists|namespace: Option<&str>| #[trigger] scope_namespace_matches(names, block, namespace)
+                    && self.unqualified_binding_matches(file, block, name, namespace, found)
+            },
+        }
+    }
+
+    spec fn scope_matches(
+        &self, file: usize, block: Option<usize>, result: Result<Option<&str>, ReferenceScopeError>,
+    ) -> bool {
+        let circuits = self.targets.project_model().circuits_model();
         match result {
             Err(ReferenceScopeError::UnknownFile) => file >= circuits.len(),
             Err(ReferenceScopeError::UnknownBlock) =>
@@ -319,23 +334,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let names = circuits[file as int].names@;
                     forall|i: int| 0 <= i < names.len() ==> !is_namespace_block(#[trigger] names[i], index)
                 }),
-            Ok(found) => file < circuits.len() && {
-                let names = circuits[file as int].names@;
-                exists|namespace: Option<&str>| #[trigger] scope_namespace_matches(names, block, namespace)
-                    && match found {
-                        Some(UnqualifiedTarget::Alias(item)) => {
-                            &&& alias_lookup_matches(items, file, block, name, Some(item))
-                            &&& key_bytes(alias_key(*item)) == key_bytes(NameKey { parent: namespace, name })
-                            &&& allows_direct(&table, *item)
-                            &&& absolute_resolution_evidence(&self.targets.exports_model(),
-                                item.site.reference.word, item.site.namespace, Ok(item.target))
-                        },
-                        Some(UnqualifiedTarget::Direct(target)) => alias_lookup_matches(items, file, block, name, None)
-                            && direct_target_matches(&table, NameKey { parent: namespace, name }, Some(target)),
-                        None => alias_lookup_matches(items, file, block, name, None)
-                            && direct_target_matches(&table, NameKey { parent: namespace, name }, None),
-                    }
+            Ok(namespace) => file < circuits.len()
+                && scope_namespace_matches(circuits[file as int].names@, block, namespace),
+        }
+    }
+
+    spec fn unqualified_binding_matches(
+        &self, file: usize, block: Option<usize>, name: &str, namespace: Option<&str>,
+        found: Option<UnqualifiedTarget>,
+    ) -> bool {
+        let items = self.targets.directives_model();
+        let table = self.targets.exports_model().declarations_model();
+        match found {
+            Some(UnqualifiedTarget::Alias(item)) => {
+                &&& alias_lookup_matches(items, file, block, name, Some(item))
+                &&& key_bytes(alias_key(*item)) == key_bytes(NameKey { parent: namespace, name })
+                &&& allows_direct(&table, *item)
+                &&& absolute_resolution_evidence(&self.targets.exports_model(),
+                    item.site.reference.word, item.site.namespace, Ok(item.target))
             },
+            Some(UnqualifiedTarget::Direct(target)) => alias_lookup_matches(items, file, block, name, None)
+                && direct_target_matches(&table, NameKey { parent: namespace, name }, Some(target)),
+            None => alias_lookup_matches(items, file, block, name, None)
+                && direct_target_matches(&table, NameKey { parent: namespace, name }, None),
         }
     }
 
@@ -357,6 +378,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.unqualified_resolution_matches(file, block, name, result),
     {
+        let namespace = self.scope_namespace(file, block)?;
+        Ok(self.lookup_in_scope(file, block, namespace, name))
+    }
+
+    fn scope_namespace(
+        &self, file: usize, block: Option<usize>,
+    ) -> (result: Result<Option<&'a str>, ReferenceScopeError>)
+        ensures self.scope_matches(file, block, result),
+    {
         let circuits = self.targets.project().circuits();
         if file >= circuits.len() {
             return Err(ReferenceScopeError::UnknownFile);
@@ -371,6 +401,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             None
         };
         assert(scope_namespace_matches(parsed.names@, block, namespace));
+        Ok(namespace)
+    }
+
+    fn lookup_in_scope<'q>(
+        &'q self, file: usize, block: Option<usize>, namespace: Option<&'q str>, name: &'q str,
+    ) -> (found: Option<UnqualifiedTarget<'t, 'p, 'a, 'q>>)
+        requires self.can_resolve(), self.scope_matches(file, block, Ok(namespace)),
+        ensures self.unqualified_binding_matches(file, block, name, namespace, found),
+    {
         if let Some(item) = first_binding(self.directives(), file, block, name) {
             proof {
                 let items = self.directives_model();
@@ -379,7 +418,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && items[i] == *item
                     && (forall|j: int| 0 <= j < i ==> !alias_in_scope(#[trigger] items[j], file, block, name));
                 if let Some(index) = block {
-                    let names = parsed.names@;
+                    let names = self.targets.project_model().circuits_model()[file as int].names@;
                     let path = namespace->Some_0;
                     let j = choose|j: int| 0 <= j < names.len()
                         && #[trigger] is_namespace_block(names[j], index) && names[j].name.word == path;
@@ -388,12 +427,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 resolved_use_evidence(self.targets, i, namespace);
                 assert(disposition_matches(items, i, self.dispositions@[i]));
             }
-            return Ok(Some(UnqualifiedTarget::Alias(item)));
+            return Some(UnqualifiedTarget::Alias(item));
         }
         let table = self.targets.exports().declarations();
-        match table.direct_target(NameKey { parent: namespace, name }) {
-            Some(target) => Ok(Some(UnqualifiedTarget::Direct(target))),
-            None => Ok(None),
+        if let Some(target) = table.direct_target(NameKey { parent: namespace, name }) {
+            Some(UnqualifiedTarget::Direct(target))
+        } else {
+            None
         }
     }
 }

@@ -193,9 +193,18 @@ impl<'p, 'a> ExportTable<'p, 'a> {
         };
         let key = NameKey { parent, name };
         assert(absolute_path_parts(path, key.parent, key.name));
+        self.resolve_key(key, from)
+    }
+
+    /// 宣言表のキーを解決し、参照元から末尾の宣言が見えることを確かめる。
+    pub(super) fn resolve_key<'q>(&self, key: NameKey<'q>, from: Option<&str>)
+        -> (result: Result<AbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>>)
+        requires self.declarations_model().well_formed(),
+        ensures has_resolution(self, key, from, result),
+    {
         match self.declarations().direct_target(key) {
             Some(target @ AbsoluteTarget::Declaration { source, form }) => {
-                if key.same_name(NameKey { parent: from, name }) || self.is_public(key) {
+                if key.same_name(NameKey { parent: from, name: key.name }) || self.is_public(key) {
                     Ok(target)
                 } else {
                     let span = &form.name.span;

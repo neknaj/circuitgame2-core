@@ -220,21 +220,35 @@ fn classify_path(atom: &str) -> (result: Option<AtomKind>)
 
 /// 親パスと末尾の名前が、完全修飾名の元のバイト列を復元することを表す。
 pub closed spec fn absolute_path_parts(path: &str, parent: Option<&str>, name: &str) -> bool {
-    let bytes = path.spec_bytes();
-    &&& bare_atom_kind(bytes) == Some(AtomKind::AbsolutePath)
+    &&& bare_atom_kind(path.spec_bytes()) == Some(AtomKind::AbsolutePath)
+    &&& body_path_parts(path.spec_bytes().skip(2), parent, name)
+}
+
+spec fn body_path_parts(bytes: Seq<u8>, parent: Option<&str>, name: &str) -> bool {
     &&& name_component(name.spec_bytes())
     &&& match parent {
-        None => name.spec_bytes() == bytes.skip(2),
+        None => name.spec_bytes() == bytes,
         Some(parent) => {
             let prefix = parent.spec_bytes();
-            let separator = prefix.len() + 2;
+            let separator = prefix.len();
             &&& prefix.len() > 0
             &&& separator + 2 < bytes.len()
-            &&& prefix == bytes[2..separator]
+            &&& prefix == bytes.take(separator as int)
             &&& colon_pair(bytes, separator as int)
             &&& name.spec_bytes() == bytes.skip((separator + 2) as int)
         },
     }
+}
+
+/// 先頭の名前と残りの成分が、相対パスの元のバイト列を復元することを表す。
+pub closed spec fn relative_path_parts(path: &str, head: &str, middle: Option<&str>, name: &str) -> bool {
+    let bytes = path.spec_bytes();
+    let at = head.spec_bytes().len() as int;
+    &&& bare_atom_kind(bytes) == Some(AtomKind::RelativePath)
+    &&& name_component(head.spec_bytes())
+    &&& head.spec_bytes() == bytes.take(at)
+    &&& colon_pair(bytes, at)
+    &&& body_path_parts(bytes.skip(at + 2), middle, name)
 }
 
 spec fn last_colon_at(bytes: Seq<u8>, at: int) -> bool {
@@ -313,9 +327,44 @@ pub fn split_absolute_path(path: &str) -> (result: Option<(Option<&str>, &str)>)
     assert(colon_pair(path.spec_bytes(), 0));
     let body = after_ascii(after_ascii(path));
     assert(body.spec_bytes() =~= path.spec_bytes().skip(2));
+    Some(split_path_body(body))
+}
+
+/// 相対パスを、先頭の名前、中間のパス、末尾の名前に分ける。
+///
+/// 成分が二つの場合、中間のパスは `None`。すべて元入力の部分文字列である。
+pub fn split_relative_path(path: &str) -> (result: Option<(&str, Option<&str>, &str)>)
+    ensures
+        result.is_some() == (bare_atom_kind(path.spec_bytes()) == Some(AtomKind::RelativePath)),
+        result matches Some((head, middle, name)) ==> relative_path_parts(path, head, middle, name),
+{
+    if !matches!(classify(path), Some(AtomKind::RelativePath)) {
+        return None;
+    }
+    let (head, separator) = split_at_boundary(path, Boundary::Colon);
+    let ghost bytes = path.spec_bytes();
+    let ghost at = head.spec_bytes().len() as int;
+    proof {
+        assert(head.spec_bytes() =~= bytes.take(at));
+        assert(separator.spec_bytes() =~= bytes.skip(at));
+        assert(first_colon(bytes, at));
+        path_body_at(bytes, at);
+        assert(!name_component(bytes));
+        assert(colon_pair(bytes, at));
+    }
+    let tail = after_ascii(after_ascii(separator));
+    assert(tail.spec_bytes() =~= bytes.skip(at + 2));
+    let (middle, name) = split_path_body(tail);
+    Some((head, middle, name))
+}
+
+fn split_path_body(body: &str) -> (parts: (Option<&str>, &str))
+    requires path_body(body.spec_bytes()),
+    ensures body_path_parts(body.spec_bytes(), parts.0, parts.1),
+{
     let Some(last) = last_colon(body.as_bytes()) else {
         proof { last_path_component(body.spec_bytes(), -1); }
-        return Some((None, body));
+        return (None, body);
     };
     proof { last_path_component(body.spec_bytes(), last as int); }
     let separator = last - 1;
@@ -325,17 +374,14 @@ pub fn split_absolute_path(path: &str) -> (result: Option<(Option<&str>, &str)>)
     }
     let (parent, tail) = body.split_at(separator);
     let name = after_ascii(after_ascii(tail));
-    assert(absolute_path_parts(path, Some(parent), name)) by {
+    assert(body_path_parts(body.spec_bytes(), Some(parent), name)) by {
         let offset = separator as int;
         assert(parent.spec_bytes().len() == offset);
         assert(name.spec_bytes() =~= body.spec_bytes().skip(last + 1));
         assert(name_component(name.spec_bytes()));
-        assert(offset + 4 < path.spec_bytes().len());
-        assert(parent.spec_bytes() =~= path.spec_bytes()[2..offset + 2]);
-        assert(name.spec_bytes() =~= path.spec_bytes().skip(offset + 4));
-        assert(colon_pair(path.spec_bytes(), offset + 2));
+        assert(parent.spec_bytes() =~= body.spec_bytes().take(offset));
     };
-    Some((Some(parent), name))
+    (Some(parent), name)
 }
 
 } // verus!
