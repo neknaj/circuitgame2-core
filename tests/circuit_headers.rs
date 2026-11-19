@@ -706,3 +706,44 @@ fn reports_both_heads_when_cases_and_actions_are_mixed() {
         assert_eq!(&source[span], unexpected);
     }
 }
+
+#[test]
+fn projects_names_and_preserves_distinct_blocks_with_the_same_path() {
+    use circuitgame2_core::syntax::circuit::index_named_forms;
+
+    let source = concat!(
+        "; 名前の範囲をバイト単位で検査する\n",
+        "(using nor) (struct Top (width 1)) ",
+        "(namespace logic::inner (module cpu (in) (out y)) (export cpu)) ",
+        "(namespace logic::inner (module-part cpu (def y 0)) (test cpu (reset))) ",
+        "(namespace empty)",
+    );
+    let indexed = index_named_forms(source).unwrap();
+    let names: Vec<_> = indexed
+        .names
+        .iter()
+        .map(|entry| (entry.head, entry.name.word))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (Head::Struct, "Top"),
+            (Head::Namespace, "logic::inner"),
+            (Head::Module, "cpu"),
+            (Head::Namespace, "logic::inner"),
+            (Head::ModulePart, "cpu"),
+            (Head::Namespace, "empty"),
+        ]
+    );
+    let module = &indexed.names[2];
+    let fragment = &indexed.names[4];
+    assert_eq!(module.block, Some(indexed.names[1].form));
+    assert_eq!(fragment.block, Some(indexed.names[3].form));
+    assert_eq!(module.namespace.as_ref().unwrap(), &indexed.names[1].name);
+    assert_eq!(fragment.namespace.as_ref().unwrap(), &indexed.names[3].name);
+    assert_ne!(module.namespace, fragment.namespace);
+    assert!(indexed.names[0].namespace.is_none());
+    for entry in &indexed.names {
+        assert_eq!(&source[entry.name.span.clone()], entry.name.word);
+    }
+}

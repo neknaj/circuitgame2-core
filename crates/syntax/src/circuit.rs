@@ -15,6 +15,7 @@ mod clauses;
 mod expression_forest;
 mod expressions;
 mod index;
+mod names;
 mod ports;
 mod structure;
 mod test_items;
@@ -25,6 +26,9 @@ pub use index::index_headers;
 pub use index::{
     circuit_index_matches, circuit_source_error, circuit_source_matches, indexed_location,
 };
+pub use names::{NameSite, NamedCircuit, NamedForm, index_named_forms};
+#[cfg(verus_only)]
+pub use names::{name_site_matches, named_form_matches, named_forms_match, named_head};
 #[cfg(verus_only)]
 pub use ports::{
     port_error_evidence, port_matches, ports_clause_matches, ports_error_evidence,

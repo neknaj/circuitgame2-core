@@ -64,6 +64,30 @@ pub closed spec fn circuit_index_matches(source: &str, forms: Seq<Form>, entries
     sexpr_form_model(source) == Some(forms) && index_prefix(source, forms, entries, forms.len() as int)
 }
 
+/// 検証済みの索引項目の位置と種別を、回路文法の認識関係に結び付ける。
+pub(super) proof fn indexed_entry_evidence(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, index: int,
+)
+    requires
+        circuit_index_matches(source, forms, entries),
+        0 <= index < entries.len(),
+    ensures
+        indexed_location(source, forms, entries[index].form as int, entries[index].namespace),
+        header_matches(source, forms, entries[index].form as int, entries[index].namespace.is_some(), entries[index].head),
+        forall|earlier: int| 0 <= earlier < index ==> (#[trigger] entries[earlier]).form < entries[index].form,
+        entries[index].namespace matches Some(parent) ==>
+            exists|head: Head| #[trigger] header_matches(source, forms, parent as int, false, head),
+{
+    reveal(index_prefix);
+    if let Some(parent) = entries[index].namespace {
+        let entry = entries[index];
+        assert(indexed_location(source, forms, parent as int, None));
+        reveal(direct_form_in_range);
+        assert(parent < forms.len());
+        indexed_prefix_is_valid(source, forms, entries, forms.len() as int);
+    }
+}
+
 proof fn indexed_subtree_location(
     source: &str, forms: Seq<Form>, root: int, end: int, index: int, owner: Option<usize>,
 )
@@ -290,7 +314,8 @@ pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormE
     ensures
         result.is_ok() <==> circuit_source_matches(source),
         match result {
-            Ok(index) => circuit_index_matches(source, index.forms@, index.entries@),
+            Ok(index) => circuit_index_matches(source, index.forms@, index.entries@)
+                && form_spans_valid(source, index.forms@, source.spec_bytes().len() as int),
             Err(error) => circuit_source_error(source, error),
         },
 {
