@@ -173,6 +173,56 @@ pub closed spec fn routine_port_widths_evidence(
     }
 }
 
+pub(super) proof fn checked_width_sites(
+    project: &CircuitProject, file: int, entry: int, max_width: u64, widths: RoutinePortWidths,
+)
+    requires
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths))),
+    ensures
+        0 <= file < project.circuits_model().len(),
+        checked_name_sites(project.circuits_model()[file].syntax.forms@, widths.inputs@),
+        checked_name_sites(project.circuits_model()[file].syntax.forms@, widths.outputs@),
+{
+    assert(0 <= file < project.circuits_model().len());
+    let source = &project.sources_model()[file];
+    let syntax = &project.circuits_model()[file].syntax;
+    let ports = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
+        && widths.inputs@.len() == ports.inputs@.len() && widths.outputs@.len() == ports.outputs@.len()
+        && checked_before(source.text, syntax, ports.inputs@, widths.inputs@, max_width)
+        && checked_before(source.text, syntax, ports.outputs@, widths.outputs@, max_width);
+    sites_for_direction(source.text, syntax, entry, max_width, ports, true, widths.inputs@);
+    sites_for_direction(source.text, syntax, entry, max_width, ports, false, widths.outputs@);
+}
+
+proof fn sites_for_direction(
+    source: &str, syntax: &CircuitForms, entry: int, max_width: u64,
+    ports: RoutinePorts, input: bool, selected: Seq<CheckedPort>,
+)
+    requires
+        routine_ports_match(source, syntax, entry, Some(ports)),
+        checked_before(source, syntax, if input { ports.inputs@ } else { ports.outputs@ }, selected, max_width),
+    ensures checked_name_sites(syntax.forms@, selected),
+{
+    assert forall|i: int| 0 <= i < selected.len() implies {
+        let site = (#[trigger] selected[i]).site;
+        &&& site.name < syntax.forms@.len()
+        &&& syntax.forms@[site.name as int] is Atom
+        &&& site.ty matches PortTypeSite::Bits { width } ==>
+            width < syntax.forms@.len() && syntax.forms@[width as int] is Atom
+    } by {
+        port_site_evidence(source, syntax, entry, ports, input, i);
+    };
+}
+
+pub(super) open spec fn checked_name_sites(forms: Seq<crate::syntax::Form>, ports: Seq<CheckedPort>) -> bool {
+    forall|i: int| 0 <= i < ports.len() ==> {
+        let site = (#[trigger] ports[i]).site;
+        &&& site.name < forms.len() && forms[site.name as int] is Atom
+        &&& site.ty matches PortTypeSite::Bits { width } ==>
+            width < forms.len() && forms[width as int] is Atom
+    }
+}
+
 fn check_ports<'p, 'a>(
     source: &'p ProjectSource<'a>, syntax: &CircuitForms, _entry: usize, ports: &RoutinePorts,
     input: bool, max_width: u64,

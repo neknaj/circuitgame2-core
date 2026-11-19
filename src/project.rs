@@ -8,11 +8,18 @@ mod exports;
 mod name_keys;
 mod path;
 mod resolution;
+mod signatures;
 mod sources;
 mod use_aliases;
 mod use_targets;
 mod widths;
 
+#[cfg(verus_only)]
+pub use signatures::routine_signature_evidence;
+pub use signatures::{
+    CheckedRoutineSignature, OutputSource, PortDirection, RoutineSignatureError, SharedPortType,
+    check_routine_signature,
+};
 #[cfg(verus_only)]
 pub use widths::routine_port_widths_evidence;
 pub use widths::{
