@@ -1,6 +1,9 @@
 use crate::{AtomKind, Error, Form, parse};
 use alloc::vec::Vec;
 use core::ops::Range;
+use vstd::prelude::*;
+
+verus! {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Head {
@@ -16,6 +19,8 @@ pub enum Head {
     Memory,
     Test,
 }
+
+} // verus!
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
@@ -107,21 +112,10 @@ fn read_header(
         HeaderError::ExpectedHead,
         |kind| kind == AtomKind::Name,
     )?;
-    let head = match &source[head_span.clone()] {
-        "using" => Head::Using,
-        "namespace" => Head::Namespace,
-        "use" => Head::Use,
-        "export" => Head::Export,
-        "func" => Head::Func,
-        "module" => Head::Module,
-        "module-part" => Head::ModulePart,
-        "struct" => Head::Struct,
-        "latch" => Head::Latch,
-        "memory" => Head::Memory,
-        "test" => Head::Test,
-        _ => return Err(header_error(HeaderError::UnknownHead, head_span)),
+    let Some(head) = recognize_head(&source[head_span.clone()]) else {
+        return Err(header_error(HeaderError::UnknownHead, head_span));
     };
-    if in_namespace && matches!(head, Head::Namespace | Head::Using) {
+    if !head_allowed(head, in_namespace) {
         return Err(header_error(HeaderError::MisplacedHead(head), head_span));
     }
     match head {
@@ -230,3 +224,56 @@ fn span(form: &Form) -> Range<usize> {
 fn header_error(kind: HeaderError, span: Range<usize>) -> CircuitFormError {
     CircuitFormError::Header { kind, span }
 }
+
+verus! {
+
+pub open spec fn head_spelling(head: Head) -> &'static str {
+    match head {
+        Head::Using => "using",
+        Head::Namespace => "namespace",
+        Head::Use => "use",
+        Head::Export => "export",
+        Head::Func => "func",
+        Head::Module => "module",
+        Head::ModulePart => "module-part",
+        Head::Struct => "struct",
+        Head::Latch => "latch",
+        Head::Memory => "memory",
+        Head::Test => "test",
+    }
+}
+
+fn recognize_head(word: &str) -> (head: Option<Head>)
+    ensures
+        forall|candidate: Head| #[trigger] head_spelling(candidate)@ == word@
+            <==> head == Some(candidate),
+{
+    let head = if word == "using" { Some(Head::Using) }
+        else if word == "namespace" { Some(Head::Namespace) }
+        else if word == "use" { Some(Head::Use) }
+        else if word == "export" { Some(Head::Export) }
+        else if word == "func" { Some(Head::Func) }
+        else if word == "module" { Some(Head::Module) }
+        else if word == "module-part" { Some(Head::ModulePart) }
+        else if word == "struct" { Some(Head::Struct) }
+        else if word == "latch" { Some(Head::Latch) }
+        else if word == "memory" { Some(Head::Memory) }
+        else if word == "test" { Some(Head::Test) }
+        else { None };
+    assert forall|candidate: Head| #[trigger] head_spelling(candidate)@ == word@
+        <==> head == Some(candidate) by {
+    };
+    head
+}
+
+pub open spec fn head_in_context(head: Head, in_namespace: bool) -> bool {
+    !in_namespace || !(head is Using || head is Namespace)
+}
+
+fn head_allowed(head: Head, in_namespace: bool) -> (allowed: bool)
+    ensures allowed == head_in_context(head, in_namespace),
+{
+    !in_namespace || !matches!(head, Head::Using | Head::Namespace)
+}
+
+} // verus!
