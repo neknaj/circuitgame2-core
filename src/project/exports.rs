@@ -391,6 +391,12 @@ pub closed spec fn export_table_matches(project: &CircuitProject, table: ExportT
     &&& forall|key: NameKey| #[trigger] published(table.names@, key) <==> indicated(project, key)
 }
 
+pub(super) proof fn exports_use_project_declarations(project: &CircuitProject, table: ExportTable)
+    requires export_table_matches(project, table),
+    ensures declaration_table_matches(project, table.declarations_model()), !project_names_conflict(project),
+{
+}
+
 impl<'p, 'a> ExportTable<'p, 'a> {
     /// 完全修飾名で指定した独立宣言が公開されていることを表す。
     pub closed spec fn publishes(&self, key: NameKey) -> bool {

@@ -1,12 +1,14 @@
 //! 解決済みの `use` をスコープごとに照合し、別名の束縛と重複警告を求める。
 
 mod batch;
+mod call_arity;
 mod definitions;
 mod function_drivers;
 mod function_wiring;
 mod port_types;
 mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
+pub use call_arity::{FuncCallArity, FuncCallTarget};
 pub use definitions::{
     DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
     DefinitionReferenceSite, ResolvedDefinitionReference,

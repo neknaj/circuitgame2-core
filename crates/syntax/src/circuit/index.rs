@@ -133,6 +133,14 @@ pub closed spec fn circuit_index_matches(source: &str, forms: Seq<Form>, entries
     sexpr_form_model(source) == Some(forms) && index_prefix(source, forms, entries, forms.len() as int)
 }
 
+pub(super) proof fn entry_forms_in_order(source: &str, forms: Seq<Form>, entries: Seq<Entry>)
+    requires circuit_index_matches(source, forms, entries),
+    ensures forall|i: int, j: int| 0 <= i < j < entries.len()
+        ==> (#[trigger] entries[i]).form < (#[trigger] entries[j]).form,
+{
+    reveal(index_prefix);
+}
+
 /// 検証済みの索引項目の位置と種別を、回路文法の認識関係に結び付ける。
 pub proof fn indexed_entry_evidence(
     source: &str, forms: Seq<Form>, entries: Seq<Entry>, index: int,

@@ -162,6 +162,72 @@ pub open spec fn named_forms_match(
         ==> (#[trigger] names[left]).form < (#[trigger] names[right]).form
 }
 
+/// 名前索引の項目に対応する厳格索引の添字を、構文木の位置で検索する。
+///
+/// 同じ厳格解析から得た索引と、範囲内の名前添字を渡す。
+///
+/// # Panics
+///
+/// 名前添字が範囲外か、手動で変更した索引で対応する項目が見つからない場合はパニックする。
+pub fn named_build_entry(_source: &str, parsed: &NamedBuildCircuit, name: usize) -> (entry: usize)
+    requires
+        circuit_index_matches(_source, parsed.syntax.forms@, parsed.syntax.entries@),
+        named_forms_match(_source, parsed.syntax.forms@, parsed.syntax.entries@, parsed.names@,
+            parsed.syntax.entries@.len() as int),
+        name < parsed.names@.len(),
+    ensures
+        entry < parsed.syntax.entries@.len(),
+        parsed.syntax.entries@[entry as int].form == parsed.names@[name as int].form,
+        parsed.syntax.entries@[entry as int].head == parsed.names@[name as int].head,
+{
+    let named = &parsed.names[name];
+    let entries = parsed.syntax.entries.as_slice();
+    let ghost target = {
+        reveal(named_forms_match);
+        choose|i: int| 0 <= i < entries@.len()
+            && #[trigger] named_form_matches(_source, parsed.syntax.forms@, entries@[i], *named)
+    };
+    proof {
+        reveal(named_form_matches);
+        assert(entries@[target].form == named.form && entries@[target].head == named.head);
+        super::index::entry_forms_in_order(_source, parsed.syntax.forms@, entries@);
+    }
+    let mut lo = 0;
+    let mut hi = entries.len();
+    while lo < hi
+        invariant
+            lo <= target < hi <= entries@.len(),
+            name < parsed.names@.len(), *named == parsed.names@[name as int],
+            entries@ == parsed.syntax.entries@,
+            entries@[target].form == named.form && entries@[target].head == named.head,
+            forall|i: int, j: int| 0 <= i < j < entries@.len()
+                ==> (#[trigger] entries@[i]).form < (#[trigger] entries@[j]).form,
+        decreases hi - lo,
+    {
+        let mid = lo + (hi - lo) / 2;
+        let form = entries[mid].form;
+        if form < named.form {
+            assert(mid < target) by {
+                if target < mid { assert(entries@[target].form < entries@[mid as int].form); }
+            };
+            lo = mid + 1;
+        } else if form > named.form {
+            assert(target < mid) by {
+                if mid < target { assert(entries@[mid as int].form < entries@[target].form); }
+            };
+            hi = mid;
+        } else {
+            assert(target == mid) by {
+                if target < mid { assert(entries@[target].form < entries@[mid as int].form); }
+                if mid < target { assert(entries@[mid as int].form < entries@[target].form); }
+            };
+            return mid;
+        }
+    }
+    proof { assert(false); }
+    unreachable!()
+}
+
 proof fn named_first_argument(source: &str, forms: Seq<Form>, index: int, member: bool, head: Head)
     requires named_head(head), header_matches(source, forms, index, member, head),
     ensures

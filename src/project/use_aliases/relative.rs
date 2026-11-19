@@ -5,6 +5,8 @@ use super::{ReferenceScopeError, UnqualifiedTarget, UseAliases};
 use crate::project::ExportTable;
 #[cfg(verus_only)]
 use crate::project::resolution::has_resolution;
+#[cfg(verus_only)]
+use crate::project::declarations::{declaration_key_evidence, form_key};
 use crate::project::{
     AbsoluteResolutionError, AbsoluteTarget, LocatedName, NameKey, ProjectSource,
 };
@@ -127,6 +129,25 @@ spec fn path_outcome(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn relative_declaration_evidence(
+        &self, file: usize, block: Option<usize>, path: &str, source: &ProjectSource, form: &NamedForm,
+    )
+        requires self.relative_resolution_matches(file, block, path, Ok(RelativeTarget::Declaration { source, form })),
+        ensures self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+    {
+        let table = &self.targets.exports_model();
+        let result = Ok(RelativeTarget::Declaration { source, form });
+        let (head, middle, name, from, binding) = choose|head: &str, middle: Option<&str>,
+            name: &str, from: Option<&str>, binding: Option<UnqualifiedTarget>|
+            #![trigger relative_path_parts(path, head, middle, name), self.unqualified_binding_matches(file, block, head, from, binding)]
+            relative_path_parts(path, head, middle, name)
+                && self.scope_matches(file, block, Ok(from))
+                && self.unqualified_binding_matches(file, block, head, from, binding)
+                && path_outcome(table, from, binding, middle, name, result);
+        let key = choose|key: NameKey|
+            #[trigger] has_resolution(table, key, from, Ok(AbsoluteTarget::Declaration { source, form }));
+        declaration_key_evidence(&table.declarations_model(), key, source, form);
+    }
     pub(super) proof fn relative_requires_valid_input(
         &self, file: usize, block: Option<usize>, path: &str, from: Option<&str>,
         found: Result<RelativeTarget, RelativeResolutionError>,

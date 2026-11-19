@@ -12,7 +12,7 @@ use super::{
 #[cfg(verus_only)]
 use super::{
     absolute_resolution_evidence, export_error_evidence, export_table_matches, location_in_source,
-    parsed_circuit_matches,
+    parsed_circuit_matches, declaration_table_matches, project_names_conflict,
 };
 use crate::syntax::circuit::{Head, NameSite, NamedBuildCircuit};
 #[cfg(verus_only)]
@@ -343,6 +343,14 @@ impl<'p, 'a> UseTargets<'p, 'a> {
     /// 全 `use` が、構文済みプロジェクトにある指定と対応することを表す。
     pub closed spec fn covers_project(&self) -> bool {
         self.project.has_parsed_sources() && use_targets_match(self.project, *self)
+    }
+
+    pub(super) proof fn declarations_cover_project(&self)
+        requires self.covers_project(),
+        ensures declaration_table_matches(&self.project_model(), self.exports_model().declarations_model()),
+            !project_names_conflict(&self.project_model()),
+    {
+        super::exports::exports_use_project_declarations(self.project, self.exports);
     }
 
     /// 解決に使った公開表を返す。

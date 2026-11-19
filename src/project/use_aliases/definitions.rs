@@ -4,6 +4,12 @@ use super::{RelativeResolutionError, RelativeTarget, UnqualifiedTarget, UseAlias
 #[cfg(verus_only)]
 use crate::project::absolute_resolution_evidence;
 #[cfg(verus_only)]
+use crate::project::declarations::{declaration_key_evidence, form_key};
+#[cfg(verus_only)]
+use crate::project::resolution::absolute_declaration_evidence;
+#[cfg(verus_only)]
+use crate::project::NameKey;
+#[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
 use crate::project::circuits::read_indexed_atom;
 use crate::project::{AbsoluteResolutionError, AbsoluteTarget, LocatedName, ProjectSource};
@@ -413,6 +419,74 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.definition_resolution_evidence(file, entry, definition, reference, Err(DefinitionReferenceError::UnknownPosition)),
         ensures false,
     {
+    }
+
+    proof fn binding_declaration_origin(
+        &self, file: usize, request: ReferenceRequest, from: Option<&str>, kind: AtomKind,
+        source: &ProjectSource, form: &NamedForm,
+    )
+        requires self.binding_evidence(file, request, from, kind, Ok(DefinitionBinding::Declaration { source, form })),
+        ensures
+            accepts_declaration(request.role, form.head),
+            self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+    {
+        let table = &self.targets.exports_model();
+        let binding = Ok(DefinitionBinding::Declaration { source, form });
+        match kind {
+            AtomKind::Name => {
+                let found = choose|found: Option<UnqualifiedTarget>|
+                    #[trigger] self.unqualified_binding_matches(file, request.block, request.word, from, found)
+                    && binding == unqualified_binding(request, found);
+                match found {
+                    Some(UnqualifiedTarget::Alias(item)) =>
+                        absolute_declaration_evidence(table, item.site.reference.word, item.site.namespace, source, form),
+                    Some(UnqualifiedTarget::Direct(_)) =>
+                        declaration_key_evidence(&table.declarations_model(),
+                            NameKey { parent: from, name: request.word }, source, form),
+                    None => { assert(false); },
+                }
+            },
+            AtomKind::RelativePath => {
+                let found = choose|found: Result<RelativeTarget, RelativeResolutionError>|
+                    #[trigger] self.relative_resolution_matches(file, request.block, request.word, found)
+                    && relative_binding(request, found, binding);
+                self.relative_declaration_evidence(file, request.block, request.word, source, form);
+            },
+            AtomKind::AbsolutePath => {
+                let found = choose|found: Result<AbsoluteTarget, AbsoluteResolutionError>|
+                    #[trigger] absolute_resolution_evidence(table, request.word, from, found)
+                    && absolute_outcome(request, found, binding);
+                absolute_declaration_evidence(table, request.word, from, source, form);
+            },
+            _ => { assert(false); },
+        }
+    }
+
+    pub(super) proof fn resolved_func_declaration(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        result: ResolvedDefinitionReference, source: &ProjectSource, form: &NamedForm,
+    )
+        requires
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(result)),
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                parsed.syntax.entries@[entry as int].head is Func
+                    && parsed.references@[parsed.definitions@[def].references.start + reference].kind is Callee
+            }),
+            result.binding == (DefinitionBinding::Declaration { source, form }),
+        ensures
+            form.head is Func,
+            self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+    {
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[file as int];
+        let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        let indexed = parsed.references@[parsed.definitions@[def].references.start + reference];
+        let kind = parsed.syntax.forms@[indexed.form as int]->Atom_kind;
+        let from = choose|from: Option<&str>| #[trigger] self.scope_matches(file, result.site.block, Ok(from))
+            && self.binding_evidence(file, result.site.request_model(), from, kind, Ok(result.binding));
+        self.binding_declaration_origin(file, result.site.request_model(), from, kind, source, form);
     }
 
     /// 定義の右辺にある回路名または型名を、その定義のスコープで解決する。

@@ -328,6 +328,7 @@ pub(super) proof fn declaration_key_evidence(
 )
     requires table.declaration_at(key, source, form),
     ensures key_view(form_key(*form)) == key_view(key),
+        table.declaration_at(form_key(*form), source, form),
 {
 }
 
@@ -530,6 +531,19 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             result.is_none() ==> forall|source: &ProjectSource, form: &NamedForm|
                 !#[trigger] self.declaration_at(key, source, form),
     {
+        match self.declaration_occurrence(key) {
+            Some(item) => Some((item.source, item.form)),
+            None => None,
+        }
+    }
+
+    fn declaration_occurrence(&self, key: NameKey) -> (result: Option<Occurrence<'p, 'a>>)
+        ensures
+            result matches Some(item) ==> self.occurrences@.contains(item)
+                && self.declaration_at(key, item.source, item.form) && !(item.form.head is Namespace),
+            result.is_none() ==> forall|source: &ProjectSource, form: &NamedForm|
+                !#[trigger] self.declaration_at(key, source, form),
+    {
         proof { use_type_invariant(self); }
         if let Some(lookup) = &self.lookup {
             let rank = lookup.candidate(self.occurrences.as_slice(), key, false);
@@ -539,7 +553,7 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             let item = self.occurrences[rank];
             if !matches!(item.form.head, Head::Namespace) && key_of(item.form).same_name(key) {
                 assert(self.declaration_at(key, item.source, item.form));
-                return Some((item.source, item.form));
+                return Some(item);
             }
         }
         // 名前の綴りを連結した索引では、公開キーの親と末尾の分け方を照合し直す。
@@ -556,11 +570,51 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             let item = self.occurrences[index];
             if !matches!(item.form.head, Head::Namespace) && key_of(item.form).same_name(key) {
                 assert(self.declaration_at(key, item.source, item.form));
-                return Some((item.source, item.form));
+                return Some(item);
             }
             index += 1;
         }
         None
+    }
+
+    pub(super) fn selected_declaration_position(
+        &self, key: NameKey, Ghost(project): Ghost<CircuitProject>,
+        Ghost(source): Ghost<ProjectSource>, Ghost(form): Ghost<NamedForm>,
+    ) -> (position: (usize, usize))
+        requires
+            declaration_table_matches(&project, *self), !project_names_conflict(&project),
+            self.declaration_at(key, &source, &form),
+        ensures
+            ({
+                let (file, index) = position;
+                &&& file < project.sources_model().len() && file < project.circuits_model().len()
+                &&& index < project.circuits_model()[file as int].names@.len()
+                &&& project.sources_model()[file as int] == source
+                &&& project.circuits_model()[file as int].names@[index as int] == form
+            }),
+    {
+        let Some(item) = self.declaration_occurrence(key) else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        proof {
+            reveal(occurrences_before);
+            let witness = choose|i: int| 0 <= i < self.occurrences@.len()
+                && (#[trigger] self.occurrences@[i]).form.head != Head::Namespace
+                && *self.occurrences@[i].source == source && *self.occurrences@[i].form == form;
+            let selected = self.occurrences@[witness];
+            let other = choose|i: int| 0 <= i < self.occurrences@.len() && self.occurrences@[i] == item;
+            assert(self.occurrences@[other] == item);
+            assert(occurrence_matches(&project, item));
+            assert(occurrence_matches(&project, selected));
+            // 完全修飾名は一意なので、再検索した出現箇所と解決時の宣言は一致する。
+            if item._file != selected._file || item._index != selected._index {
+                assert(conflicts(*item.form, *selected.form));
+                assert(project_names_conflict(&project));
+            }
+            assert(*item.source == source && *item.form == form);
+        }
+        (item._file, item._index)
     }
 
     /// 名前空間を導入した成分の範囲と、そのファイルを表す。

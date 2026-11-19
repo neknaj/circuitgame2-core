@@ -173,6 +173,18 @@ pub open spec fn absolute_resolution_evidence(
     }
 }
 
+pub(super) proof fn absolute_declaration_evidence(
+    table: &ExportTable, path: &str, from: Option<&str>, source: &ProjectSource, form: &NamedForm,
+)
+    requires absolute_resolution_evidence(table, path, from, Ok(AbsoluteTarget::Declaration { source, form })),
+    ensures table.declarations_model().declaration_at(form_key(*form), source, form),
+{
+    let target = Ok(AbsoluteTarget::Declaration { source, form });
+    let key = choose|key: NameKey| #[trigger] absolute_path_parts(path, key.parent, key.name)
+        && has_resolution(table, key, from, target);
+    declaration_key_evidence(&table.declarations_model(), key, source, form);
+}
+
 impl<'p, 'a> ExportTable<'p, 'a> {
     /// 参照元の名前空間から、完全修飾名が指す宣言または名前空間を解決する。
     ///

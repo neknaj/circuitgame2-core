@@ -68,7 +68,7 @@ pub use index::{
 };
 pub use names::{
     NameSite, NamedBuildCircuit, NamedCircuit, NamedForm, index_named_build_forms,
-    index_named_forms,
+    index_named_forms, named_build_entry,
 };
 #[cfg(verus_only)]
 pub use names::{
