@@ -149,18 +149,24 @@ pub open spec fn well_formed_sexpr(source: &str) -> bool {
     exists|witness: InputDerivation| #[trigger] sexpr_input_derivation(source.spec_bytes(), witness)
 }
 
+#[verifier::opaque]
+pub open spec fn chosen_input_derivation(source: &str) -> Option<InputDerivation> {
+    if well_formed_sexpr(source) {
+        Some(choose|witness: InputDerivation| #[trigger] sexpr_input_derivation(source.spec_bytes(), witness))
+    } else {
+        None
+    }
+}
+
 pub(super) proof fn choose_input_derivation(source: &str) -> (witness: Option<InputDerivation>)
     ensures
+        witness == chosen_input_derivation(source),
         witness.is_some() == well_formed_sexpr(source),
         witness is Some ==> sexpr_input_derivation(source.spec_bytes(), witness->Some_0),
 {
     reveal(well_formed_sexpr);
-    let bytes = source.spec_bytes();
-    if exists|witness: InputDerivation| #[trigger] sexpr_input_derivation(bytes, witness) {
-        Some(choose|witness: InputDerivation| #[trigger] sexpr_input_derivation(bytes, witness))
-    } else {
-        None
-    }
+    reveal(chosen_input_derivation);
+    chosen_input_derivation(source)
 }
 
 #[verifier::opaque]
@@ -194,7 +200,7 @@ pub(super) proof fn input_ends(
     bytes: Seq<u8>, witness: InputDerivation, i: int, needs_separator: bool, depth: int,
 )
     requires input_progress(bytes, witness, i, bytes.len() as int, needs_separator, depth),
-    ensures depth == 0,
+    ensures depth == 0, i == witness.lexemes.len(),
 {
     reveal(input_progress);
     reveal(sexpr_input_derivation);
@@ -214,6 +220,8 @@ pub(super) proof fn input_next(
         input_progress(bytes, witness, i, position, needs_separator, depth),
         position < bytes.len(),
     ensures
+        0 <= i < witness.lexemes.len(),
+        lexeme == witness.lexemes[i],
         lexeme.start == position,
         lexeme_at(bytes, lexeme.start, lexeme.end, lexeme.kind),
         !(needs_separator && lexeme.kind is Atom),

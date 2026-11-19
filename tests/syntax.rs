@@ -97,10 +97,17 @@ fn balances_only_parenthesis_tokens() {
 #[test]
 fn recovering_parser_matches_strict_on_valid_source() {
     use circuitgame2_core::syntax::parse_recovering;
-    let source = "(namespace logic (func invert (in x) (out y)))\r\n(\"日\")";
-    let result = parse_recovering(source);
-    assert_eq!(result.forms, parse(source).unwrap());
-    assert!(result.repairs.is_empty());
+    for source in [
+        "",
+        "; コメントだけ ()\r\n",
+        "()(()())",
+        "a(; 括弧 )\r\n\"[)]\" (x))z",
+        "(namespace logic (func invert (in x) (out y)))\r\n(\"日\")",
+    ] {
+        let result = parse_recovering(source);
+        assert_eq!(result.forms, parse(source).unwrap(), "{source:?}");
+        assert!(result.repairs.is_empty(), "{source:?}");
+    }
 }
 
 #[test]
