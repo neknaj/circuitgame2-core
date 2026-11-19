@@ -4,6 +4,7 @@ extern crate alloc;
 
 mod atom;
 mod boundary;
+pub mod circuit;
 mod digits;
 
 use crate::boundary::{Boundary, after_ascii, split_at_boundary, split_first_scalar};
