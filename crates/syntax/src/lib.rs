@@ -28,6 +28,10 @@ pub use form_model::sexpr_form_model;
 #[cfg(verus_only)]
 mod lexical;
 #[cfg(verus_only)]
+mod strict_error;
+#[cfg(verus_only)]
+pub use strict_error::{strict_syntax_rejection, strict_token_errors_agree};
+#[cfg(verus_only)]
 pub use lexical::{
     InputDerivation, Lexeme, LexemeKind, input_lexeme_valid, lexeme_at, sexpr_input_derivation,
     well_formed_sexpr,
@@ -248,7 +252,11 @@ impl<'a> Lexer<'a> {
                     &&& (segment.kind is Close ==> segment.span.end == segment.span.start + 1
                         && self.cursor.source.spec_bytes()[segment.span.start as int] == 41)
                     &&& (segment.kind is Malformed ==> syntax_error_evidence(
-                        self.cursor.source, segment.kind->Malformed_0))
+                        self.cursor.source, segment.kind->Malformed_0)
+                        && (segment.kind->Malformed_0.kind is InvalidAtom
+                            || string_error_kind(segment.kind->Malformed_0.kind))
+                        && strict_error::malformed_atom_extent(self.cursor.source.spec_bytes(),
+                            segment.span.start as int, segment.kind->Malformed_0))
                     &&& (segment.kind is Atom ==> form_atom_matches(self.cursor.source,
                         Form::Atom { kind: segment.kind->Atom_0, span: segment.span }))
                     &&& next.needs_separator == segment.kind.is_atom()
@@ -438,7 +446,7 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
                 && strict_source_covered(source, forms@)
                 && strict_sexpr_derivation(source, forms@)
                 && sexpr_form_model(source) == Some(forms@),
-            Err(error) => syntax_error_evidence(source, error),
+            Err(error) => syntax_error_evidence(source, error) && strict_syntax_rejection(source, error),
         },
 {
     match parse_forms(source, false) {
@@ -1896,7 +1904,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 && (!recovering ==> strict_source_covered(source, forms@))
                 && (well_formed_sexpr(source) ==> repairs@.len() == 0
                     && sexpr_form_model(source) == Some(forms@)),
-            Err(error) => syntax_error_evidence(source, error),
+            Err(error) => syntax_error_evidence(source, error) && strict_syntax_rejection(source, error),
         },
 {
     let mut forms: Vec<Form> = Vec::new();
@@ -1961,6 +1969,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             form_spans_valid(source, forms@, length as int),
             repair_input_spans_valid(source, repairs@, length as int),
             !recovering ==> strict_source_covered(source, forms@),
+            !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
+                length as int, lexer.needs_separator, open@.len() as int),
             well_formed_sexpr(source) ==> open@.len() == 0 && repairs@.len() == 0
                 && sexpr_form_model(source) == Some(forms@),
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
@@ -2031,7 +2041,16 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 repairs.push(repair);
             } else {
                 let error = Error { kind: ErrorKind::MissingSeparator, span: span.start..span.start };
-                proof { parser_error_evidence(source, error); }
+                proof {
+                    parser_error_evidence(source, error);
+                    reveal(lexical_step_agrees);
+                    assert forall|end: int, candidate: LexemeKind|
+                        #[trigger] lexeme_at(source.spec_bytes(), previous_position, end, candidate)
+                        implies candidate is Atom by {
+                        assert(segment_lexeme(kind) == Some(candidate));
+                    };
+                    strict_error::record_missing_separator(source, error, input_prefix, previous_open as int);
+                }
                 return Err(error);
             }
         }
@@ -2065,6 +2084,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                             previous_position, lexer.cursor.position());
                     }
                 } else {
+                    proof {
+                        reveal(lexical_step_agrees);
+                        strict_error::record_malformed_atom(source, error, input_prefix, previous_position, previous_open as int);
+                    }
                     return Err(error);
                 }
             }
@@ -2165,6 +2188,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                                 previous_position, lexer.cursor.position());
                         }
                     } else {
+                        proof { strict_error::record_unexpected_close(source, error, input_prefix, previous_needs_separator); }
                         return Err(error);
                     }
                 }
@@ -2215,6 +2239,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     while open.len() > 0
         invariant
             !recovering ==> strict_source_covered(source, forms@),
+            !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
+                length as int, lexer.needs_separator, open@.len() as int),
             well_formed_sexpr(source) ==> open@.len() == 0 && repairs@.len() == 0
                 && sexpr_form_model(source) == Some(forms@),
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
@@ -2268,6 +2294,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     assert(list_delimited(source.spec_bytes(), forms@[index as int], recovering));
                 };
                 parser_error_evidence(source, error);
+                strict_error::record_unclosed_list(source, error, input_prefix, lexer.needs_separator, previous.len() as int);
             }
             return Err(error);
         }
@@ -2389,7 +2416,8 @@ impl<'a> SourceCursor<'a> {
                     &&& (kind is Quoted && kind->Quoted_0 is None
                         ==> quoted_atom(self.source.spec_bytes()[span.start as int..span.end as int]))
                     &&& (kind is Quoted && kind->Quoted_0 is Some
-                        ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0))
+                        ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0)
+                            && string_error_kind(kind->Quoted_0->Some_0.kind))
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
                         =~= self.source.spec_bytes()[span.start as int..span.end as int]
                         && bare_atom_extent(self.source.spec_bytes(), span.start as int, span.end as int))

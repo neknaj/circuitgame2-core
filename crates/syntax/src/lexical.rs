@@ -2,6 +2,9 @@ use super::{
     AtomKind, bare_atom_delimiter, bare_atom_extent, bare_atom_kind, quoted_atom, trivia_byte,
     trivia_extent,
 };
+use super::quoted_prefix::{
+    initialize_quoted_prefixes, quoted_body, quoted_prefix_at, quoted_prefixes_viable,
+};
 use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
@@ -107,6 +110,62 @@ pub ghost struct Lexeme {
     pub start: int,
     pub end: int,
     pub kind: LexemeKind,
+}
+
+// 両候補を同じエスケープ規則でたどると、先に閉じる引用符をもう一方の本文に含められない。
+proof fn quoted_closes_agree(bytes: Seq<u8>, from: int, first: int, second: int)
+    requires
+        0 <= from <= first < bytes.len(),
+        from <= second < bytes.len(),
+        bytes[first] == 34, bytes[second] == 34,
+        quoted_body(bytes, from, first), quoted_body(bytes, from, second),
+    ensures first == second,
+    decreases first - from,
+{
+    reveal(quoted_body);
+    if from == first || from == second {
+        assert(bytes[from] == 34);
+        assert(super::boundary::stops(super::Boundary::StringSpecial, bytes[from]));
+        assert(from == first && from == second);
+    } else {
+        let next = if bytes[from] == 92 { from + 2 } else { from + 1 };
+        quoted_closes_agree(bytes, next, first, second);
+    }
+}
+
+/// 同じ開始位置で字句規則を満たす字句は、種別と終了位置が一致する。
+pub(super) proof fn lexemes_agree(bytes: Seq<u8>, a: Lexeme, b: Lexeme)
+    requires
+        a.start == b.start,
+        lexeme_at(bytes, a.start, a.end, a.kind),
+        lexeme_at(bytes, b.start, b.end, b.kind),
+    ensures a == b,
+{
+    let start = a.start;
+    lexical_extent_facts(bytes, start, a.end, a.kind);
+    lexical_extent_facts(bytes, start, b.end, b.kind);
+    reveal(lexeme_at);
+    if a.kind is Whitespace || a.kind is Comment {
+        raw_trivia_matches(bytes, start, a.end, b.end, b.kind, a.kind is Comment);
+    } else if a.kind is Open || a.kind is Close {
+        assert(a.kind == b.kind);
+    } else if a.kind == LexemeKind::Atom(AtomKind::String) {
+        assert(b.kind == a.kind);
+        let remaining = bytes[start..];
+        let first = a.end - start - 1;
+        let second = b.end - start - 1;
+        reveal(quoted_prefix_at);
+        reveal(quoted_atom);
+        assert(remaining[..first + 1] =~= bytes[start..a.end]);
+        assert(remaining[..second + 1] =~= bytes[start..b.end]);
+        assert(quoted_prefix_at(remaining, first));
+        assert(quoted_prefix_at(remaining, second));
+        initialize_quoted_prefixes(remaining);
+        reveal(quoted_prefixes_viable);
+        quoted_closes_agree(remaining, 1, first, second);
+    } else {
+        raw_bare_matches(bytes, start, a.end, b.end, b.kind);
+    }
 }
 
 pub ghost struct InputDerivation {

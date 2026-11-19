@@ -70,7 +70,7 @@ pub use index::{
 };
 #[cfg(verus_only)]
 pub use index::{
-    basis_entry_evidence, circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_source_error,
+    basis_entry_evidence, circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_source_error, circuit_token_errors_agree,
     circuit_source_matches, complete_recovery_agrees_with_index, export_entry_evidence, indexed_entry_evidence, indexed_location,
     use_entry_evidence,
 };

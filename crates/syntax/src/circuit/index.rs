@@ -5,7 +5,8 @@ use super::build::{build_entry_matches, keep_build_entry};
 use super::*;
 mod recovery;
 #[cfg(verus_only)]
-use crate::{sexpr_form_model, syntax_error_evidence, well_formed_sexpr};
+use crate::{sexpr_form_model, strict_syntax_rejection, strict_token_errors_agree,
+    structural_error_location, syntax_error_evidence, well_formed_sexpr};
 #[cfg(verus_only)]
 pub use recovery::{circuit_recovery_matches, complete_recovery_agrees_with_index};
 pub use recovery::{
@@ -97,7 +98,8 @@ pub closed spec fn circuit_source_matches(source: &str) -> bool {
 /// 回路文法の診断では、入力全体が S 式の文法に従い、診断位置より前に検査するすべてのフォームが回路文法に従う。
 pub closed spec fn circuit_source_error(source: &str, error: CircuitFormError) -> bool {
     match error {
-        CircuitFormError::Syntax(error) => !well_formed_sexpr(source) && syntax_error_evidence(source, error),
+        CircuitFormError::Syntax(error) => !well_formed_sexpr(source) && syntax_error_evidence(source, error)
+            && strict_syntax_rejection(source, error),
         CircuitFormError::Header { kind, span } => well_formed_sexpr(source)
             && (exists|forms: Seq<Form>, index: int, namespace: Option<usize>|
                 sexpr_form_model(source) == Some(forms)
@@ -108,9 +110,25 @@ pub closed spec fn circuit_source_error(source: &str, error: CircuitFormError) -
 }
 
 pub(super) proof fn reject_circuit_syntax(source: &str, error: Error)
-    requires !well_formed_sexpr(source), syntax_error_evidence(source, error),
+    requires !well_formed_sexpr(source), syntax_error_evidence(source, error), strict_syntax_rejection(source, error),
     ensures !circuit_source_matches(source), circuit_source_error(source, CircuitFormError::Syntax(error)),
 {
+}
+
+/// 余分な閉じ括弧、区切りの欠落、不正な裸のアトムを報告したとき、厳格な回路索引のエラー値が一致する。
+pub proof fn circuit_token_errors_agree(source: &str, left: CircuitFormError, right: CircuitFormError)
+    requires
+        circuit_source_error(source, left), circuit_source_error(source, right),
+        left matches CircuitFormError::Syntax(error)
+            && (error.kind is UnexpectedClose || error.kind is MissingSeparator || error.kind is InvalidAtom),
+    ensures left == right,
+{
+    let a = left->Syntax_0;
+    let b = right->Syntax_0;
+    reveal(syntax_error_evidence);
+    assert(right is Syntax);
+    assert(structural_error_location(source, a) && structural_error_location(source, b));
+    strict_token_errors_agree(source, a, b);
 }
 
 #[verifier::opaque]
