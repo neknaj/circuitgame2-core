@@ -104,7 +104,7 @@ pub use use_aliases::{
 };
 pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
 #[cfg(verus_only)]
-pub use use_aliases::{alias_conflict_evidence, use_aliases_acceptable, use_aliases_match};
+pub use use_aliases::{alias_conflict_evidence, alias_conflicts_agree, use_alias_dispositions_agree, use_aliases_acceptable, use_aliases_match};
 pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};
 #[cfg(verus_only)]
 pub use use_targets::{use_target_error_evidence, use_targets_match};

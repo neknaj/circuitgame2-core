@@ -97,6 +97,28 @@ pub closed spec fn project_sources_match(inputs: Seq<SourceSnapshot>, sources: S
     source_prefix_matches(inputs, sources, inputs.len() as int)
 }
 
+/// ソース列に同じ正規化済みファイル識別子が二度現れないことを表す。
+pub closed spec fn source_ids_unique(sources: Seq<ProjectSource>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < sources.len() ==>
+        (#[trigger] sources[i]).id.components_model() != (#[trigger] sources[j]).id.components_model()
+}
+
+/// 収集済みのソース列では、正規化済みファイル識別子が一意に定まる。
+pub(super) proof fn collected_source_ids_unique(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>)
+    requires project_sources_match(inputs, sources),
+    ensures source_ids_unique(sources),
+{
+    reveal(source_prefix_matches);
+}
+
+/// 同じソース列の二つの位置で、ファイル識別子が一致するのは添字が等しいときに限る。
+pub(super) proof fn source_ordinals_agree(sources: Seq<ProjectSource>, left: int, right: int)
+    requires source_ids_unique(sources), 0 <= left < sources.len(), 0 <= right < sources.len(),
+    ensures left == right
+        <==> sources[left].id.components_model() == sources[right].id.components_model(),
+{
+}
+
 pub(super) proof fn collected_source_origin(
     inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, index: int,
 )

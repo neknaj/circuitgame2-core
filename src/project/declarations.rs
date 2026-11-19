@@ -332,6 +332,35 @@ pub(super) proof fn declaration_key_evidence(
 {
 }
 
+/// 衝突のない宣言表で、同じキーを持つ独立宣言のソースと構文項目が一致する。
+pub(super) proof fn declaration_sites_agree(
+    project: &CircuitProject, table: &DeclarationTable, key: NameKey,
+    left_source: &ProjectSource, left_form: &NamedForm, right_source: &ProjectSource, right_form: &NamedForm,
+)
+    requires
+        declaration_table_matches(project, *table),
+        !project_names_conflict(project),
+        table.declaration_at(key, left_source, left_form),
+        table.declaration_at(key, right_source, right_form),
+    ensures left_source == right_source, left_form == right_form,
+{
+    reveal(occurrences_before);
+    let items = table.occurrences@;
+    let left = choose|i: int| 0 <= i < items.len()
+        && !((#[trigger] items[i]).form.head is Namespace)
+        && *items[i].source == *left_source && *items[i].form == *left_form;
+    let right = choose|i: int| 0 <= i < items.len()
+        && !((#[trigger] items[i]).form.head is Namespace)
+        && *items[i].source == *right_source && *items[i].form == *right_form;
+    let a = items[left];
+    let b = items[right];
+    assert(occurrence_matches(project, a) && occurrence_matches(project, b));
+    if a._file != b._file || a._index != b._index {
+        assert(conflicts(*a.form, *b.form));
+        assert(project_names_conflict(project));
+    }
+}
+
 pub(super) proof fn declaration_key_equivalence(project: &CircuitProject, left: NameKey, right: NameKey)
     requires key_view(left) == key_view(right),
     ensures project_declares(project, left) <==> project_declares(project, right),
@@ -638,6 +667,41 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
                 &&& portion_matches(*item.form, key, location.span)
                 &&& forall|j: int| 0 <= j < i ==> !lookup_matches(*(#[trigger] self.occurrences@[j]).form, key, true)
             }
+    }
+
+    /// 同じ名前空間の最初の導入箇所では、ソースと名前成分の範囲が一致する。
+    pub(super) proof fn first_namespace_sites_agree(&self, key: NameKey, left: LocatedName, right: LocatedName)
+        requires self.first_namespace_at(key, left), self.first_namespace_at(key, right),
+        ensures left == right,
+    {
+        let items = self.occurrences@;
+        let a = choose|i: int| 0 <= i < items.len()
+            && {
+                let item = #[trigger] items[i];
+                &&& item.form.head is Namespace
+                &&& *item.source == *left.source
+                &&& portion_matches(*item.form, key, left.span)
+                &&& forall|j: int| 0 <= j < i ==> !lookup_matches(*(#[trigger] items[j]).form, key, true)
+            };
+        let b = choose|i: int| 0 <= i < items.len()
+            && {
+                let item = #[trigger] items[i];
+                &&& item.form.head is Namespace
+                &&& *item.source == *right.source
+                &&& portion_matches(*item.form, key, right.span)
+                &&& forall|j: int| 0 <= j < i ==> !lookup_matches(*(#[trigger] items[j]).form, key, true)
+            };
+        assert(lookup_matches(*items[a].form, key, true));
+        assert(lookup_matches(*items[b].form, key, true));
+        assert(a == b);
+        let form = *items[a].form;
+        let (left_start, left_end) = choose|lo: int, hi: int| #[trigger] namespace_component(form.name.word, key, lo, hi)
+            && left.span.start == form.name.span.start + lo && left.span.end == form.name.span.start + hi;
+        let (right_start, right_end) = choose|lo: int, hi: int| #[trigger] namespace_component(form.name.word, key, lo, hi)
+            && right.span.start == form.name.span.start + lo && right.span.end == form.name.span.start + hi;
+        super::name_keys::namespace_component_bounds_agree(
+            form.name.word, key, left_start, left_end, right_start, right_end,
+        );
     }
 
     /// 明示された名前空間と中間の名前空間を探し、最初の導入箇所を返す。

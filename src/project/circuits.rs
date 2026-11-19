@@ -2,8 +2,8 @@
 
 #[cfg(verus_only)]
 use super::sources::{
-    collected_source_for_input, collected_source_origin, collected_sources_follow_input_order,
-    first_source_input, snapshot_matches,
+    collected_source_for_input, collected_source_ids_unique, collected_source_origin,
+    collected_sources_follow_input_order, first_source_input, snapshot_matches, source_ids_unique,
 };
 use super::{
     LocatedName, ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources,
@@ -177,11 +177,12 @@ impl<'a> CircuitProject<'a> {
         self.circuits@
     }
 
-    /// ソースの列と、その解析結果が同じ位置で対応することを表す。
+    /// 正規化済みファイル識別子が一意で、各ソースとその解析結果が同じ位置で対応することを表す。
     pub open spec fn has_parsed_sources(&self) -> bool {
         let sources = self.sources_model();
         let circuits = self.circuits_model();
         &&& circuits.len() == sources.len()
+        &&& source_ids_unique(sources)
         &&& forall|i: int| 0 <= i < sources.len() ==>
             #[trigger] parsed_circuit_matches(sources[i], circuits[i])
     }
@@ -428,6 +429,7 @@ fn parse_circuit_project_internal<'a>(
     }
     proof {
         parsed_sources_cover_prefix(inputs@, sources@, circuits@, sources@.len() as int, inputs@.len() as int);
+        collected_source_ids_unique(inputs@, sources@);
     }
     Ok(CircuitProject { sources, circuits })
 }

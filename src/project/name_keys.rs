@@ -111,6 +111,17 @@ pub closed spec fn namespace_component(path: &str, key: NameKey, start: int, end
     &&& (end == bytes.len() || bytes_at(bytes, end, separator))
 }
 
+/// 同じキーに対応する名前空間成分の開始位置と終了位置が一致する。
+pub(super) proof fn namespace_component_bounds_agree(
+    path: &str, key: NameKey, left_start: int, left_end: int, right_start: int, right_end: int,
+)
+    requires
+        namespace_component(path, key, left_start, left_end),
+        namespace_component(path, key, right_start, right_end),
+    ensures left_start == right_start, left_end == right_end,
+{
+}
+
 pub(super) open spec fn full_name_bytes(key: NameKey) -> Seq<u8> {
     let (parent, name) = key_bytes(key);
     match parent {

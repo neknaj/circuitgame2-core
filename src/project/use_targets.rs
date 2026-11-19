@@ -257,6 +257,30 @@ pub closed spec fn use_targets_match(project: &CircuitProject, targets: UseTarge
         && resolved_before(project, &targets.exports, targets.directives@, project.circuits_model().len() as int, 0)
 }
 
+/// 同じ解析済みプロジェクトの二つの `use` は、ファイル添字が等しいときに限り同じソースファイルに書かれている。
+pub(super) proof fn resolved_uses_share_file(targets: &UseTargets, left: int, right: int)
+    requires
+        targets.covers_project(),
+        0 <= left < targets.directives_model().len(),
+        0 <= right < targets.directives_model().len(),
+    ensures ({
+        let a = targets.directives_model()[left];
+        let b = targets.directives_model()[right];
+        a._file == b._file
+            <==> a.site.source.id.components_model() == b.site.source.id.components_model()
+    }),
+{
+    reveal(resolved_before);
+    let a = targets.directives_model()[left];
+    let b = targets.directives_model()[right];
+    let project = targets.project_model();
+    assert(resolved_at(&project, &targets.exports_model(), a));
+    assert(resolved_at(&project, &targets.exports_model(), b));
+    let sources = project.sources_model();
+    assert(*a.site.source == sources[a._file as int] && *b.site.source == sources[b._file as int]);
+    super::sources::source_ordinals_agree(sources, a._file as int, b._file as int);
+}
+
 pub(super) proof fn resolved_use_evidence(
     targets: &UseTargets, index: int, namespace: Option<&str>,
 )

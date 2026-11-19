@@ -1,5 +1,6 @@
 //! 解決済みの `use` をスコープごとに照合し、別名の束縛と重複警告を求める。
 
+mod alias_index;
 mod batch;
 mod call_arity;
 mod definitions;
@@ -38,10 +39,11 @@ pub use relative::{RelativeResolutionError, RelativeTarget};
 #[cfg(verus_only)]
 use super::name_keys::key_bytes;
 #[cfg(verus_only)]
-use super::resolution::direct_targets_agree;
+use super::resolution::{direct_targets_agree, selected_direct_target_matches, selected_direct_targets_agree};
 #[cfg(verus_only)]
-use super::use_targets::resolved_use_evidence;
+use super::use_targets::{resolved_use_evidence, resolved_uses_share_file};
 use super::{AbsoluteTarget, NameKey, ResolvedUse, UseTargets};
+use alias_index::AliasIndex;
 #[cfg(verus_only)]
 use super::{DeclarationTable, absolute_resolution_evidence, direct_target_matches, same_target};
 #[cfg(verus_only)]
@@ -113,10 +115,10 @@ pub(super) fn own_conflict<'t, 'p, 'a>(error: UseAliasConflict<'t, 'p, 'a>) -> (
 }
 
 /// 解決済みの各 `use` に対応する別名の束縛と警告。
-#[derive(Debug)]
 pub struct UseAliases<'t, 'p, 'a> {
     targets: &'t UseTargets<'p, 'a>,
     dispositions: Vec<AliasDisposition>,
+    index: Option<AliasIndex>,
 }
 
 /// 無修飾名が指す直接の束縛、または別名を作った指定。
@@ -204,6 +206,119 @@ spec fn alias_lookup_matches(
     }
 }
 
+#[cfg(verus_only)]
+type AliasKey = ((usize, Option<usize>), Seq<u8>);
+
+/// ファイル添字、ブロック添字、別名の UTF-8 バイト列を索引のキーにする。
+spec fn scoped_alias_key(item: ResolvedUse) -> AliasKey {
+    ((item._file, item.site.block), key_bytes(NameKey { parent: None, name: item.site.alias.word }).1)
+}
+
+/// 索引の各束縛が、処理済みの指定のうち同じキーを持つ最初の指定を指すことを表す。
+spec fn alias_index_matches(bindings: Map<AliasKey, usize>, items: Seq<ResolvedUse>, stop: int) -> bool {
+    &&& 0 <= stop <= items.len()
+    &&& forall|i: int| 0 <= i < stop ==> bindings.contains_key(scoped_alias_key(#[trigger] items[i]))
+    &&& forall|key: AliasKey| #[trigger] bindings.contains_key(key) ==> {
+        let first = bindings[key] as int;
+        &&& 0 <= first < stop
+        &&& scoped_alias_key(items[first]) == key
+        &&& forall|i: int| 0 <= i < first ==> scoped_alias_key(#[trigger] items[i]) != key
+    }
+}
+
+/// 新しいキーだけを登録すると、次の指定まで索引が最初の位置を保つ。
+proof fn advance_alias_index(bindings: Map<AliasKey, usize>, items: Seq<ResolvedUse>, at: usize)
+    requires alias_index_matches(bindings, items, at as int), at < items.len(),
+    ensures ({
+        let key = scoped_alias_key(items[at as int]);
+        let next = if bindings.contains_key(key) { bindings } else { bindings.insert(key, at) };
+        alias_index_matches(next, items, at + 1)
+    }),
+{
+    let key = scoped_alias_key(items[at as int]);
+    let next = if bindings.contains_key(key) { bindings } else { bindings.insert(key, at) };
+    assert forall|i: int| 0 <= i <= at implies next.contains_key(scoped_alias_key(#[trigger] items[i])) by {
+        if i < at {
+            assert(bindings.contains_key(scoped_alias_key(items[i])));
+        }
+    };
+    if !bindings.contains_key(key) {
+        assert forall|i: int| 0 <= i < at implies scoped_alias_key(#[trigger] items[i]) != key by {
+            assert(bindings.contains_key(scoped_alias_key(items[i])));
+        };
+    }
+}
+
+/// 索引のキーの一致を、正規化ファイル ID を使う既存の別名照合に対応づける。
+proof fn alias_keys_agree(targets: &UseTargets, left: int, right: int)
+    requires
+        targets.covers_project(),
+        0 <= left < targets.directives_model().len(),
+        0 <= right < targets.directives_model().len(),
+    ensures ({
+        let items = targets.directives_model();
+        (scoped_alias_key(items[left]) == scoped_alias_key(items[right]))
+            <==> same_alias(items[left], items[right])
+    }),
+{
+    resolved_uses_share_file(targets, left, right);
+}
+
+/// 索引で見つけた先行指定が、線形照合で選ぶ最初の指定であることを示す。
+proof fn indexed_first_alias(targets: &UseTargets, bindings: Map<AliasKey, usize>, at: int, previous: Option<usize>)
+    requires
+        targets.covers_project(),
+        0 <= at < targets.directives_model().len(),
+        alias_index_matches(bindings, targets.directives_model(), at),
+        ({
+            let key = scoped_alias_key(targets.directives_model()[at]);
+            previous == if bindings.contains_key(key) {
+                Some(bindings[key])
+            } else { None }
+        }),
+    ensures ({
+        let items = targets.directives_model();
+        match previous {
+            Some(first) => first_alias(items, at, first as int),
+            None => forall|i: int| 0 <= i < at ==> !same_alias(#[trigger] items[i], items[at]),
+        }
+    }),
+{
+    let items = targets.directives_model();
+    let stop = match previous {
+        Some(first) => {
+            alias_keys_agree(targets, first as int, at);
+            first as int
+        },
+        None => at,
+    };
+    assert forall|i: int| 0 <= i < stop implies !same_alias(#[trigger] items[i], items[at]) by {
+        alias_keys_agree(targets, i, at);
+    };
+}
+
+fn lookup_alias<'t, 'p, 'a>(
+    index: Option<&AliasIndex>, items: &'t [ResolvedUse<'p, 'a>], file: usize, block: Option<usize>, name: &str,
+) -> (found: Option<&'t ResolvedUse<'p, 'a>>)
+    requires index matches Some(index) ==> index.valid() && alias_index_matches(index.bindings(), items@, items@.len() as int),
+    ensures alias_lookup_matches(items@, file, block, name, found),
+{
+    let Some(index) = index else {
+        return first_binding(items, file, block, name);
+    };
+    let ghost key = ((file, block), key_bytes(NameKey { parent: None, name }).1);
+    if let Some(first) = index.lookup((file, block), name) {
+        assert(alias_in_scope(items@[first as int], file, block, name));
+        Some(&items[first])
+    } else {
+        assert forall|i: int| 0 <= i < items@.len() implies !alias_in_scope(#[trigger] items@[i], file, block, name) by {
+            assert(index.bindings().contains_key(scoped_alias_key(items@[i])));
+            assert(scoped_alias_key(items@[i]) != key);
+        };
+        None
+    }
+}
+
 fn first_binding<'t, 'p, 'a>(
     items: &'t [ResolvedUse<'p, 'a>], file: usize, block: Option<usize>, name: &str,
 ) -> (found: Option<&'t ResolvedUse<'p, 'a>>)
@@ -286,8 +401,13 @@ spec fn checked_prefix(
 pub closed spec fn use_aliases_acceptable(targets: &UseTargets) -> bool {
     let items = targets.directives_model();
     let table = targets.exports_model().declarations_model();
-    &&& forall|i: int| 0 <= i < items.len() ==> allows_direct(&table, #[trigger] items[i])
-    &&& forall|i: int, j: int| 0 <= i < j < items.len()
+    alias_prefix_acceptable(&table, items, items.len() as int)
+}
+
+spec fn alias_prefix_acceptable(table: &DeclarationTable, items: Seq<ResolvedUse>, stop: int) -> bool {
+    &&& 0 <= stop <= items.len()
+    &&& forall|i: int| 0 <= i < stop ==> allows_direct(table, #[trigger] items[i])
+    &&& forall|i: int, j: int| 0 <= i < j < stop
         && #[trigger] same_alias(items[i], items[j])
         ==> same_target(items[i].target, items[j].target)
 }
@@ -313,6 +433,24 @@ proof fn compatible_pair(items: Seq<ResolvedUse>, decisions: Seq<AliasDispositio
     }
 }
 
+/// 束縛と警告を記録した範囲では、すべての指定が衝突の規則に従う。
+proof fn checked_alias_prefix_is_acceptable(
+    table: &DeclarationTable, items: Seq<ResolvedUse>, dispositions: Seq<AliasDisposition>,
+)
+    requires checked_prefix(table, items, dispositions),
+    ensures alias_prefix_acceptable(table, items, dispositions.len() as int),
+{
+    assert forall|i: int| 0 <= i < dispositions.len()
+        implies allows_direct(table, #[trigger] items[i]) by {
+        assert(disposition_matches(items, i, dispositions[i]));
+    };
+    assert forall|i: int, j: int| 0 <= i < j < dispositions.len()
+        && #[trigger] same_alias(items[i], items[j])
+        implies same_target(items[i].target, items[j].target) by {
+        compatible_pair(items, dispositions, i, j);
+    };
+}
+
 /// 各指定に対して、衝突しない束縛または最初の指定を指す重複警告があることを表す。
 pub closed spec fn use_aliases_match(targets: &UseTargets, aliases: UseAliases) -> bool {
     &&& *aliases.targets == *targets
@@ -320,19 +458,125 @@ pub closed spec fn use_aliases_match(targets: &UseTargets, aliases: UseAliases) 
     &&& checked_prefix(&targets.exports_model().declarations_model(), targets.directives_model(), aliases.dispositions@)
 }
 
-/// 診断が、異なる対象を同じ別名に割り当てた指定を指すことを表す。
+proof fn first_alias_position_agrees(items: Seq<ResolvedUse>, at: int, left: int, right: int)
+    requires first_alias(items, at, left), first_alias(items, at, right),
+    ensures left == right,
+{
+    if left < right {
+        assert(!same_alias(items[left], items[at]));
+    } else if right < left {
+        assert(!same_alias(items[right], items[at]));
+    }
+}
+
+/// 同じ解決済みの指定から得た束縛と警告は、指定の順序と最初の指定の位置が一致する。
+pub proof fn use_alias_dispositions_agree(targets: &UseTargets, left: UseAliases, right: UseAliases)
+    requires use_aliases_match(targets, left), use_aliases_match(targets, right),
+    ensures left.dispositions_model() == right.dispositions_model(),
+{
+    let items = targets.directives_model();
+    let a = left.dispositions_model();
+    let b = right.dispositions_model();
+    assert forall|i: int| 0 <= i < items.len() implies #[trigger] a[i] == #[trigger] b[i] by {
+        assert(disposition_matches(items, i, a[i]) && disposition_matches(items, i, b[i]));
+        match (a[i], b[i]) {
+            (AliasDisposition::Duplicate { first: l }, AliasDisposition::Duplicate { first: r }) => {
+                first_alias_position_agrees(items, i, l as int, r as int);
+            },
+            (AliasDisposition::Binding, AliasDisposition::Duplicate { first }) |
+            (AliasDisposition::Duplicate { first }, AliasDisposition::Binding) => {
+                assert(!same_alias(items[first as int], items[i]));
+            },
+            _ => {},
+        }
+    };
+    assert(a =~= b);
+}
+
+/// 診断が最初に衝突した指定を指すことを表す。
+///
+/// 同じ指定で二種類の衝突が起きる場合は、直接宣言または子名前空間との衝突を選ぶ。
 pub closed spec fn alias_conflict_evidence(targets: &UseTargets, error: UseAliasConflict) -> bool {
     let items = targets.directives_model();
     let table = targets.exports_model().declarations_model();
-    match error {
+    exists|at: int| #[trigger] alias_conflict_at(&table, items, at, error)
+}
+
+spec fn alias_conflict_at(table: &DeclarationTable, items: Seq<ResolvedUse>, at: int, error: UseAliasConflict) -> bool {
+    &&& 0 <= at < items.len()
+    &&& alias_prefix_acceptable(table, items, at)
+    &&& match error {
         UseAliasConflict::BetweenUses { later, first } =>
-            exists|i: int, j: int| #[trigger] first_alias(items, i, j)
-                && items[i] == *later && items[j] == *first
-                && !same_target(first.target, later.target),
-        UseAliasConflict::Direct { directive, existing } =>
-            exists|i: int| 0 <= i < items.len() && #[trigger] items[i] == *directive
-                && direct_target_matches(&table, alias_key(*directive), Some(existing))
-                && !same_target(existing, directive.target),
+            items[at] == *later && allows_direct(table, *later) && !same_target(first.target, later.target)
+                && (exists|before: int| #[trigger] first_alias(items, at, before) && items[before] == *first),
+        UseAliasConflict::Direct { directive, existing } => items[at] == *directive
+            && selected_direct_target_matches(table, alias_key(*directive), Some(existing))
+            && !same_target(existing, directive.target),
+    }
+}
+
+proof fn alias_conflict_blocks_prefix(
+    table: &DeclarationTable, items: Seq<ResolvedUse>, at: int, end: int, error: UseAliasConflict,
+)
+    requires alias_conflict_at(table, items, at, error), at < end,
+    ensures !alias_prefix_acceptable(table, items, end),
+{
+    if alias_prefix_acceptable(table, items, end) {
+        match error {
+            UseAliasConflict::BetweenUses { first, .. } => {
+                let other = choose|before: int| #[trigger] first_alias(items, at, before) && items[before] == *first;
+                assert(same_target(items[other].target, items[at].target));
+            },
+            UseAliasConflict::Direct { .. } => {
+                assert(allows_direct(table, items[at]));
+            },
+        }
+    }
+}
+
+proof fn first_alias_conflict_position(targets: &UseTargets, left: UseAliasConflict, right: UseAliasConflict)
+    -> (position: int)
+    requires alias_conflict_evidence(targets, left), alias_conflict_evidence(targets, right),
+    ensures
+        alias_conflict_at(&targets.exports_model().declarations_model(), targets.directives_model(), position, left),
+        alias_conflict_at(&targets.exports_model().declarations_model(), targets.directives_model(), position, right),
+{
+    let items = targets.directives_model();
+    let table = &targets.exports_model().declarations_model();
+    let a = choose|at: int| #[trigger] alias_conflict_at(table, items, at, left);
+    let b = choose|at: int| #[trigger] alias_conflict_at(table, items, at, right);
+    if a < b {
+        alias_conflict_blocks_prefix(table, items, a, b, left);
+    } else if b < a {
+        alias_conflict_blocks_prefix(table, items, b, a, right);
+    }
+    a
+}
+
+/// 同じ解決済みの指定から得た衝突診断は、主範囲と相手の範囲を含む値全体が一致する。
+pub proof fn alias_conflicts_agree(targets: &UseTargets, left: UseAliasConflict, right: UseAliasConflict)
+    requires targets.covers_project(), alias_conflict_evidence(targets, left), alias_conflict_evidence(targets, right),
+    ensures left == right,
+{
+    let at = first_alias_conflict_position(targets, left, right);
+    let items = targets.directives_model();
+    let table = &targets.exports_model().declarations_model();
+    match (left, right) {
+        (UseAliasConflict::BetweenUses { first: a, .. }, UseAliasConflict::BetweenUses { first: b, .. }) => {
+            let l = choose|before: int| #[trigger] first_alias(items, at, before) && items[before] == *a;
+            let r = choose|before: int| #[trigger] first_alias(items, at, before) && items[before] == *b;
+            first_alias_position_agrees(items, at, l, r);
+        },
+        (
+            UseAliasConflict::Direct { existing: a, .. },
+            UseAliasConflict::Direct { existing: b, .. },
+        ) => {
+            targets.declarations_cover_project();
+            selected_direct_targets_agree(&targets.project_model(), table, alias_key(items[at]), Some(a), Some(b));
+        },
+        _ => {
+            assert(allows_direct(table, items[at]));
+        },
     }
 }
 
@@ -372,6 +616,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& self.targets.covers_project()
         &&& self.targets.exports_model().declarations_model().well_formed()
         &&& use_aliases_match(self.targets, *self)
+        &&& (self.index matches Some(index) ==> index.valid()
+            && alias_index_matches(index.bindings(), self.directives_model(), self.directives_model().len() as int))
     }
 
     /// 無修飾名の検索結果と参照元スコープ、別名、共有宣言表との対応を表す。
@@ -477,7 +723,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(), self.scope_matches(file, block, Ok(namespace)),
         ensures self.unqualified_binding_matches(file, block, name, namespace, found),
     {
-        if let Some(item) = first_binding(self.directives(), file, block, name) {
+        if let Some(item) = lookup_alias(self.index.as_ref(), self.directives(), file, block, name) {
             proof {
                 let items = self.directives_model();
                 let i = choose|i: int| 0 <= i < items.len()
@@ -522,7 +768,7 @@ spec fn scope_namespace_matches(names: Seq<NamedForm>, block: Option<usize>, nam
 ///
 /// # Errors
 ///
-/// 異なる対象が同じ別名を取り合う場合、衝突を起こした指定と相手の位置を返す。
+/// 指定をソース順に照合し、最初に衝突を起こした指定と相手の位置を返す。
 /// 一つの指定で両方の衝突が起きた場合は、直接宣言または子名前空間との衝突を返す。
 pub fn check_use_aliases<'t, 'p, 'a>(targets: &'t UseTargets<'p, 'a>)
     -> (result: Result<UseAliases<'t, 'p, 'a>, UseAliasConflict<'t, 'p, 'a>>)
@@ -537,14 +783,17 @@ pub fn check_use_aliases<'t, 'p, 'a>(targets: &'t UseTargets<'p, 'a>)
     let items = targets.directives();
     let table = targets.exports().declarations();
     let mut dispositions = Vec::new();
+    let mut index = Some(AliasIndex::new());
     let mut at = 0;
     while at < items.len()
         invariant
+            targets.covers_project(),
             items@ == targets.directives_model(),
             *table == targets.exports_model().declarations_model(),
             table.well_formed(),
             at == dispositions@.len(),
             checked_prefix(table, items@, dispositions@),
+            index matches Some(index) ==> index.valid() && alias_index_matches(index.bindings(), items@, at as int),
         decreases items@.len() - at,
     {
         let directive = &items[at];
@@ -553,6 +802,8 @@ pub fn check_use_aliases<'t, 'p, 'a>(targets: &'t UseTargets<'p, 'a>)
         if let Some(existing) = direct {
             if !existing.is_same_target(&directive.target) {
                 let error = UseAliasConflict::Direct { directive, existing };
+                proof { checked_alias_prefix_is_acceptable(table, items@, dispositions@); }
+                assert(alias_conflict_at(table, items@, at as int, error));
                 assert(alias_conflict_evidence(targets, error));
                 assert(!allows_direct(table, *directive));
                 assert(!use_aliases_acceptable(targets));
@@ -566,10 +817,30 @@ pub fn check_use_aliases<'t, 'p, 'a>(targets: &'t UseTargets<'p, 'a>)
                 direct_targets_agree(table, alias_key(*directive), direct_model, Some(existing));
             };
         }
-        let disposition = if let Some(first) = find_first(items, at) {
+        let mut indexed = None;
+        if let Some(ref mut bindings) = index {
+            let ghost prior = bindings.bindings();
+            indexed = bindings.insert_if_absent((directive._file, directive.site.block), directive.site.alias.word, at);
+            proof {
+                if let Some(previous) = indexed {
+                    indexed_first_alias(targets, prior, at as int, previous);
+                    advance_alias_index(prior, items@, at);
+                }
+            }
+        }
+        let first = if let Some(previous) = indexed {
+            previous
+        } else {
+            // 部分索引から名前を引くと登録漏れが生じるため、以降は線形検索を使う。
+            index = None;
+            find_first(items, at)
+        };
+        let disposition = if let Some(first) = first {
             let previous = &items[first];
             if !previous.target.is_same_target(&directive.target) {
                 let error = UseAliasConflict::BetweenUses { later: directive, first: previous };
+                proof { checked_alias_prefix_is_acceptable(table, items@, dispositions@); }
+                assert(alias_conflict_at(table, items@, at as int, error));
                 assert(alias_conflict_evidence(targets, error));
                 assert(same_alias(*previous, *directive));
                 assert(!use_aliases_acceptable(targets));
@@ -583,18 +854,17 @@ pub fn check_use_aliases<'t, 'p, 'a>(targets: &'t UseTargets<'p, 'a>)
         dispositions.push(disposition);
         at += 1;
     }
-    proof {
-        assert forall|i: int| 0 <= i < items@.len()
-            implies allows_direct(table, #[trigger] items@[i]) by {
-            assert(disposition_matches(items@, i, dispositions@[i]));
-        };
-        assert forall|i: int, j: int| 0 <= i < j < items@.len()
-            && #[trigger] same_alias(items@[i], items@[j])
-            implies same_target(items@[i].target, items@[j].target) by {
-            compatible_pair(items@, dispositions@, i, j);
-        };
-    }
-    Ok(UseAliases { targets, dispositions })
+    proof { checked_alias_prefix_is_acceptable(table, items@, dispositions@); }
+    Ok(UseAliases { targets, dispositions, index })
 }
 
 } // verus!
+
+impl core::fmt::Debug for UseAliases<'_, '_, '_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.debug_struct("UseAliases")
+            .field("targets", &self.targets)
+            .field("dispositions", &self.dispositions)
+            .finish()
+    }
+}

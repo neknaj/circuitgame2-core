@@ -2,9 +2,12 @@
 
 use super::declarations::key_of;
 #[cfg(verus_only)]
-use super::declarations::{declaration_key_evidence, declaration_location_evidence, form_key};
+use super::declarations::{
+    declaration_key_evidence, declaration_location_evidence, declaration_sites_agree,
+    declaration_table_matches, form_key, project_names_conflict,
+};
 #[cfg(verus_only)]
-use super::location_in_source;
+use super::{CircuitProject, location_in_source};
 #[cfg(verus_only)]
 use super::name_keys::key_view;
 use super::{DeclarationTable, ExportTable, LocatedName, NameKey, ProjectSource};
@@ -121,13 +124,50 @@ pub(super) proof fn direct_targets_agree(
     }
 }
 
+/// 直接束縛の結果と、子名前空間を最初に導入した箇所との対応を表す。
+pub open spec fn selected_direct_target_matches(
+    table: &DeclarationTable, key: NameKey, result: Option<AbsoluteTarget>,
+) -> bool {
+    &&& direct_target_matches(table, key, result)
+    &&& result matches Some(AbsoluteTarget::Namespace { introduced_at, .. }) ==>
+        table.first_namespace_at(key, introduced_at)
+}
+
+/// 衝突のない宣言表では、直接束縛の対象と出現位置が一意に定まる。
+pub(super) proof fn selected_direct_targets_agree(
+    project: &CircuitProject, table: &DeclarationTable, key: NameKey,
+    left: Option<AbsoluteTarget>, right: Option<AbsoluteTarget>,
+)
+    requires
+        declaration_table_matches(project, *table),
+        !project_names_conflict(project),
+        selected_direct_target_matches(table, key, left),
+        selected_direct_target_matches(table, key, right),
+    ensures left == right,
+{
+    direct_targets_agree(table, key, left, right);
+    match (left, right) {
+        (
+            Some(AbsoluteTarget::Declaration { source: a, form: b }),
+            Some(AbsoluteTarget::Declaration { source: c, form: d }),
+        ) => declaration_sites_agree(project, table, key, a, b, c, d),
+        (
+            Some(AbsoluteTarget::Namespace { introduced_at: a, .. }),
+            Some(AbsoluteTarget::Namespace { introduced_at: b, .. }),
+        ) => table.first_namespace_sites_agree(key, a, b),
+        _ => {},
+    }
+}
+
 impl<'p, 'a> DeclarationTable<'p, 'a> {
     /// 名前空間の直下にある独立宣言または子名前空間を、指定した名前で探す。
     ///
     /// 中間の名前空間も対象に含める。子名前空間を導入した箇所が複数あれば、最初の箇所を返す。
     pub fn direct_target<'q>(&self, key: NameKey<'q>) -> (result: Option<AbsoluteTarget<'p, 'a, 'q>>)
         requires self.well_formed(),
-        ensures direct_target_matches(self, key, result),
+        ensures
+            direct_target_matches(self, key, result),
+            selected_direct_target_matches(self, key, result),
     {
         if let Some((source, form)) = self.declaration(key) {
             proof { declaration_location_evidence(self, key, source, form); }
