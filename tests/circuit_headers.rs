@@ -24,6 +24,47 @@ fn indexes_direct_headers_and_namespace_members() {
 }
 
 #[test]
+fn visits_namespace_members_and_resumes_at_the_next_root() {
+    use circuitgame2_core::syntax::Form;
+
+    let source = concat!(
+        "(namespace empty) (namespace actual ",
+        "(func f (in) (out y) (def y (raw (concat 0 1)))) ",
+        "(export f)) (using nor)",
+    );
+    let result = index_headers(source).unwrap();
+    let parent = result.entries[1].form;
+    let expected = [
+        (Head::Namespace, "(namespace empty)", None),
+        (Head::Namespace, "(namespace actual", None),
+        (Head::Func, "(func f", Some(parent)),
+        (Head::Export, "(export f)", Some(parent)),
+        (Head::Using, "(using nor)", None),
+    ];
+    assert_eq!(result.entries.len(), expected.len());
+    for (entry, (head, prefix, namespace)) in result.entries.iter().zip(expected) {
+        let Form::List { span, .. } = &result.forms[entry.form] else {
+            panic!("a circuit entry must point to a list");
+        };
+        assert_eq!((entry.head, entry.namespace), (head, namespace));
+        assert_eq!(span.start, source.find(prefix).unwrap());
+    }
+}
+
+#[test]
+fn reports_a_non_list_direct_member_after_a_nested_declaration() {
+    let source = "(namespace n (func f (in) (out y) (def y (raw 1))) invalid)";
+    let start = source.find("invalid").unwrap();
+    assert_eq!(
+        index_headers(source),
+        Err(CircuitFormError::Header {
+            kind: HeaderError::ExpectedList,
+            span: start..start + "invalid".len(),
+        }),
+    );
+}
+
+#[test]
 fn rejects_invalid_and_misplaced_headers() {
     for (source, kind, text) in [
         ("func", HeaderError::ExpectedList, "func"),

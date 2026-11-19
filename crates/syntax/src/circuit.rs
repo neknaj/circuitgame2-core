@@ -4,6 +4,7 @@ use crate::{AtomKind, Error, Form, parse};
 #[cfg(verus_only)]
 use crate::{
     complete_list_indices, form_span, form_spans_valid, list_delimited, list_source_delimiters,
+    nested_list_indices,
 };
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -205,7 +206,7 @@ pub fn index_headers(source: &str) -> Result<CircuitForms, CircuitFormError> {
             namespace: None,
         });
         if head == Head::Namespace {
-            let mut item = root + 3;
+            let mut item = namespace_members_start(&forms, root, end);
             while item < end {
                 let (head, next) = read_header(source, &forms, item, true)?;
                 entries.push(Entry {
@@ -888,12 +889,105 @@ fn source_span(source: &str, start: usize, end: usize) -> (word: &str)
     word
 }
 
+/// 区間内で、先行するリストの部分木に属さないフォームの位置を表す。
+#[verifier::opaque]
+pub open spec fn direct_form_in_range(forms: Seq<Form>, start: int, limit: int, index: int) -> bool {
+    &&& 0 <= start <= index < limit <= forms.len()
+    &&& forall|earlier: int| start <= earlier < index && #[trigger] forms[earlier] is List
+        ==> forms[earlier]->List_end <= index
+}
+
+/// 構文木全体または、走査開始位置を囲むリストの末尾を表す。
+pub open spec fn form_region_ends_at(forms: Seq<Form>, first: int, limit: int) -> bool {
+    limit == forms.len() || exists|parent: int| 0 <= parent < first
+        && #[trigger] forms[parent] is List && forms[parent]->List_end == limit
+}
+
+/// 現在のフォームと次の直接子の間に、他の直接子がないことを表す。
+///
+/// `next` が区間末尾に等しければ、次の直接子は存在しない。
+#[verifier::opaque]
+pub open spec fn following_direct_form(forms: Seq<Form>, index: int, next: int) -> bool {
+    forall|first: int, limit: int| #[trigger] direct_form_in_range(forms, first, limit, index)
+        && form_region_ends_at(forms, first, limit) ==> {
+        &&& index < next <= limit
+        &&& (next < limit ==> direct_form_in_range(forms, first, limit, next))
+        &&& forall|skipped: int| index < skipped < next
+            ==> !#[trigger] direct_form_in_range(forms, first, limit, skipped)
+    }
+}
+
+proof fn list_end_is_following_direct_form(forms: Seq<Form>, index: int, next: int)
+    requires
+        0 <= index < next <= forms.len(),
+        forms[index] is List && forms[index]->List_end == next,
+        nested_list_indices(forms),
+    ensures following_direct_form(forms, index, next),
+{
+    reveal(following_direct_form);
+    assert forall|first: int, limit: int| #[trigger] direct_form_in_range(forms, first, limit, index)
+        && form_region_ends_at(forms, first, limit) implies {
+        &&& index < next <= limit
+        &&& (next < limit ==> direct_form_in_range(forms, first, limit, next))
+        &&& forall|skipped: int| index < skipped < next
+            ==> !#[trigger] direct_form_in_range(forms, first, limit, skipped)
+    } by {
+        reveal(direct_form_in_range);
+        reveal(nested_list_indices);
+        if limit < forms.len() {
+            let parent = choose|parent: int| 0 <= parent < first
+                && #[trigger] forms[parent] is List && forms[parent]->List_end == limit;
+            assert(parent < index < forms[parent]->List_end);
+            assert(next <= limit);
+        }
+        if next < limit {
+            assert forall|earlier: int| first <= earlier < next && #[trigger] forms[earlier] is List
+                implies forms[earlier]->List_end <= next by {
+                if earlier < index {
+                    assert(forms[earlier]->List_end <= index);
+                } else if earlier > index {
+                    assert(earlier < forms[index]->List_end);
+                }
+            };
+        }
+        assert forall|skipped: int| index < skipped < next
+            implies !#[trigger] direct_form_in_range(forms, first, limit, skipped) by {
+            reveal(direct_form_in_range);
+            assert(first <= index < skipped);
+            assert(forms[index]->List_end > skipped);
+        };
+    };
+}
+
+fn namespace_members_start(forms: &[Form], namespace: usize, end: usize) -> (first: usize)
+    requires
+        namespace + 3 <= end <= forms@.len(),
+        forms@[namespace as int] is List && forms@[namespace as int]->List_end == end,
+        forms@[namespace + 1] is Atom,
+        forms@[namespace + 2] is Atom,
+    ensures
+        first == namespace + 3 <= end,
+        first < end ==> direct_form_in_range(forms@, namespace + 1, end as int, first as int),
+{
+    let _ = (forms, end);
+    let first = namespace + 3;
+    proof {
+        reveal(direct_form_in_range);
+        assert forall|earlier: int| namespace + 1 <= earlier < first
+            implies !(#[trigger] forms@[earlier] is List) by {
+            assert(earlier == namespace + 1 || earlier == namespace + 2);
+        };
+    }
+    first
+}
+
 fn read_form_head(
     source: &str, forms: &[Form], index: usize, in_namespace: bool,
 ) -> (result: Result<(Head, usize, usize), (HeaderError, Range<usize>)>)
     requires
         index < forms@.len(),
         complete_list_indices(forms@),
+        nested_list_indices(forms@),
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
         list_source_delimiters(source, forms@, false),
     ensures
@@ -903,6 +997,7 @@ fn read_form_head(
             Ok((_, end, closing)) => {
                 &&& forms@[index as int] is List
                 &&& end == forms@[index as int]->List_end
+                &&& following_direct_form(forms@, index as int, end as int)
                 &&& closing + 1 == form_span(forms@[index as int]).end
             },
             Err((kind, span)) => form_head_error_evidence(source, forms@, index as int, in_namespace, kind, span),
@@ -954,6 +1049,7 @@ fn read_form_head(
     if !head_allowed(head, in_namespace) {
         return Err((HeaderError::MisplacedHead(head), word_span.start..word_span.end));
     }
+    proof { list_end_is_following_direct_form(forms@, index as int, end as int); }
     Ok((head, end, closing))
 }
 
