@@ -1,5 +1,6 @@
 use circuitgame2_core::project::{
-    CallInputError, CallInputReason, CircuitLiteralWidthError, ResolvedPortType, SourceSnapshot,
+    CallInputError, CallInputReason, CircuitLiteralWidthError, FuncCallInputsError, FuncWiringResult,
+    ResolvedPortType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 
@@ -90,4 +91,64 @@ fn reports_the_callee_annotation_and_caller_origin_for_struct_mismatches() {
     assert_eq!(actual.origin.source.revision, 2);
     assert_eq!(&library[required_at.span], "Word");
     assert_eq!(required_at.source.revision, 7);
+}
+
+#[test]
+fn checks_all_definitions_and_visits_calls_after_type_references() {
+    let text = concat!(
+        "(struct T (width 1)) ",
+        "(func f (in a) (out y) (def x (nor a a)) (def y (as T (nor x #x02)))) ",
+        "(func g (in a) (out y) (def x (nor a a)) (def y (as T (nor x #x01))))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 20, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let error = aliases.check_all_func_call_inputs(0, 1, 8).unwrap_err();
+    let FuncCallInputsError::Call {
+        position, error: CallInputError::Argument { index: 1, argument, .. },
+    } = error else { panic!("expected an argument error after the type reference: {error:?}"); };
+    assert_eq!((position.file, position.entry, position.definition, position.reference), (0, 1, 1, 1));
+    assert_eq!(&text[argument.span], "#x02");
+    assert_eq!(argument.source.revision, 20);
+    let accepted = aliases.check_all_func_call_inputs(0, 2, 8).unwrap();
+    assert!(matches!(accepted.literals.wiring, FuncWiringResult::Checked(_)));
+}
+
+#[test]
+fn checks_the_outer_call_before_the_inner_call() {
+    let text = "(func f (in a (b (bits 8))) (out y) (def y (nor (nor a #x02) b)))";
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 1, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    assert!(matches!(aliases.check_func_call_inputs(0, 0, 0, 1, 8),
+        Err(CallInputError::Argument { index: 1, reason: CallInputReason::LiteralWidth(_), .. })));
+    let error = aliases.check_all_func_call_inputs(0, 0, 8).unwrap_err();
+    let FuncCallInputsError::Call {
+        position, error: CallInputError::Argument { index: 1, argument, reason: CallInputReason::SignalType(_), .. },
+    } = error else { panic!("expected the outer call's argument error: {error:?}"); };
+    assert_eq!(position.reference, 0);
+    assert_eq!(&text[argument.span], "b");
+}
+
+#[test]
+fn retains_expansion_and_caller_diagnostic_priority() {
+    let text = concat!(
+        "(struct T (width 1)) ",
+        "(func waiting (in) (out y) (expand gen)) ",
+        "(func invalid (in a) (out y) (def y (nor a #x02)) (def x missing)) ",
+        "(func empty (in a) (out a))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 1, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let not_func = aliases.check_all_func_call_inputs(0, 0, 8).unwrap();
+    assert!(matches!(not_func.literals.wiring, FuncWiringResult::NotFunc));
+    let waiting = aliases.check_all_func_call_inputs(0, 1, 8).unwrap();
+    let FuncWiringResult::NeedsExpansion(site) = waiting.literals.wiring else {
+        panic!("expected an expansion site");
+    };
+    assert_eq!(&text[site.span], "(expand gen)");
+    assert!(matches!(aliases.check_all_func_call_inputs(0, 2, 8), Err(FuncCallInputsError::Caller(_))));
+    let empty = aliases.check_all_func_call_inputs(0, 3, 8).unwrap();
+    assert!(matches!(empty.literals.wiring, FuncWiringResult::Checked(_)));
 }

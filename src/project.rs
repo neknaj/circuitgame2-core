@@ -89,7 +89,7 @@ pub use use_aliases::{
     check_use_aliases,
 };
 pub use use_aliases::{
-    CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallSignature, FuncCallSignatureError,
+    CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,
     FuncCallTarget, TypedFuncCall,
 };
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};

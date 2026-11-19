@@ -4,7 +4,7 @@ mod checks;
 mod inputs;
 mod typed;
 pub use checks::FuncArityError;
-pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs};
+pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
 
 use super::{DefinitionBinding, DefinitionReferenceError, UseAliases};

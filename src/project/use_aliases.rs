@@ -11,7 +11,7 @@ mod port_types;
 mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{
-    CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallSignature, FuncCallSignatureError,
+    CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,
     FuncCallTarget, TypedFuncCall,
 };
 pub use definitions::{
