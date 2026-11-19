@@ -56,13 +56,13 @@ pub enum FuncAtomTypeError<'p, 'a> {
     },
 }
 
-fn copy_location<'p, 'a>(location: &LocatedName<'p, 'a>) -> (copy: LocatedName<'p, 'a>)
+pub(super) fn copy_location<'p, 'a>(location: &LocatedName<'p, 'a>) -> (copy: LocatedName<'p, 'a>)
     ensures copy == *location,
 {
     LocatedName { source: location.source, span: location.span.start..location.span.end }
 }
 
-spec fn signal_type_at<'p, 'a>(
+pub(super) open spec fn signal_type_at<'p, 'a>(
     wiring: &FuncWiring<'p, 'a>, types: Seq<Option<SignalType<'p, 'a>>>, origin: OutputDriver,
 ) -> Option<SignalType<'p, 'a>>
 {
@@ -75,7 +75,7 @@ spec fn signal_type_at<'p, 'a>(
     }
 }
 
-fn inherit_type<'p, 'a>(
+pub(super) fn inherit_type<'p, 'a>(
     wiring: &FuncWiring<'p, 'a>, types: &[Option<SignalType<'p, 'a>>], origin: OutputDriver,
 ) -> (ty: Option<SignalType<'p, 'a>>)
     requires match origin {
@@ -167,6 +167,19 @@ spec fn atoms_match(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn atom_types_keep_wiring(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncAtomTypes, wiring: FuncWiring,
+    )
+        requires
+            self.func_atom_type_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+        ensures
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+            typed.types@.len() == wiring.drivers.definitions@.len(),
+    {
+        self.literals_preserve_arity(file, entry, limit, typed.literals);
+        self.arity_preserves_wiring(file, entry, limit, typed.literals.wiring);
+    }
     fn check_atoms(
         &self, file: usize, entry: usize, _limit: u64, literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
     ) -> (result: Result<Vec<Option<SignalType<'p, 'a>>>, FuncAtomTypeError<'p, 'a>>)

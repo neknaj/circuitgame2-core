@@ -1,8 +1,10 @@
 //! 呼び出しを名前解決し、参照先の宣言から必要な入出力数を求める。
 
 mod checks;
+mod inputs;
 mod typed;
 pub use checks::FuncArityError;
+pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs};
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
 
 use super::{DefinitionBinding, DefinitionReferenceError, UseAliases};

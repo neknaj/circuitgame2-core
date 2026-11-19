@@ -3,7 +3,7 @@
 use super::expressions::expression_children;
 #[cfg(verus_only)]
 use super::expressions::{
-    after_form, argument_matches, expression_child_range, expression_list_error, list_head_matches,
+    after_form, argument_matches, arguments_match, expression_child_range, expression_list_error, list_head_matches,
     same_expression_head, same_expression_list_error,
 };
 use super::*;
@@ -273,6 +273,184 @@ pub(super) proof fn bare_signal_index(source: &str, forms: Seq<Form>, first: int
     ensures expression_signals(source, forms, first, end) == seq![first as usize],
 {
     reveal_with_fuel(expression_signals, 2);
+}
+
+proof fn direct_name_in_signal_index(
+    source: &str, forms: Seq<Form>, first: int, end: int, name: usize,
+)
+    requires
+        forms.len() <= usize::MAX, complete_list_indices(forms),
+        expression_region(forms, first, end),
+        direct_form_in_range(forms, first, end, name as int),
+        forms[name as int] is Atom && forms[name as int]->Atom_kind is Name,
+        expression_forest(source, forms, first, end),
+    ensures expression_signals(source, forms, first, end).contains(name),
+    decreases end - first,
+{
+    reveal(direct_form_in_range);
+    reveal(expression_region);
+    reveal(complete_list_indices);
+    reveal_with_fuel(expression_signals, 1);
+    reveal_with_fuel(expression_forest, 1);
+    let signals = expression_signals(source, forms, first, end);
+    if first == name {
+        assert(signals[0] == name);
+    } else {
+        let next = after_form(forms, first);
+        assert(first < next <= name < end);
+        assert(direct_form_in_range(forms, next, end, name as int));
+        assert(expression_region(forms, next, end));
+        direct_name_in_signal_index(source, forms, next, end, name);
+        let suffix = expression_signals(source, forms, next, end);
+        let i = choose|i: int| 0 <= i < suffix.len() && suffix[i] == name;
+        assert(signals[signals.len() - suffix.len() + i] == name);
+    }
+}
+
+proof fn same_child_interval(
+    source: &str, forms: Seq<Form>, first: int, end: int, a: int, b: int, u: int, v: int,
+)
+    requires
+        expression_child_range(source, forms, first, end, a, b),
+        expression_child_range(source, forms, first, end, u, v),
+    ensures a == u && b == v, b == end || (a < b && b == after_form(forms, a)),
+{
+    let left = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, first + 1, head)
+        && arguments_match(forms, first + 2, end, head, a, b);
+    let right = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, first + 1, head)
+        && arguments_match(forms, first + 2, end, head, u, v);
+    same_expression_head(source, forms, first + 1, left, right);
+}
+
+pub(super) proof fn call_argument_signal_index(
+    source: &str, forms: Seq<Form>, first: int, stop: int, reference: int, name: usize,
+)
+    requires
+        forms.len() <= usize::MAX, complete_list_indices(forms), nested_list_indices(forms),
+        expression_region(forms, first, stop), expression_forest(source, forms, first, stop),
+        0 <= reference < expression_references(source, forms, first, stop).len(),
+        ({
+            let indexed = expression_references(source, forms, first, stop)[reference];
+            let call = indexed.form - 1;
+            &&& indexed.kind is Callee && 0 <= call < forms.len() && forms[call] is List
+            &&& direct_form_in_range(forms, call + 2, forms[call]->List_end as int, name as int)
+            &&& name < forms.len() && forms[name as int] is Atom && forms[name as int]->Atom_kind is Name
+        }),
+    ensures expression_signals(source, forms, first, stop).contains(name),
+    decreases stop - first,
+{
+    reveal_with_fuel(expression_references, 1);
+    reveal_with_fuel(expression_signals, 1);
+    reveal_with_fuel(expression_forest, 1);
+    reveal(expression_region);
+    let refs = expression_references(source, forms, first, stop);
+    let signals = expression_signals(source, forms, first, stop);
+    assert(0 <= first < stop <= forms.len());
+    match forms[first] {
+        Form::Atom { .. } => {
+            call_argument_signal_index(source, forms, first + 1, stop, reference, name);
+            let tail = expression_signals(source, forms, first + 1, stop);
+            let i = choose|i: int| 0 <= i < tail.len() && tail[i] == name;
+            assert(signals[signals.len() - tail.len() + i] == name);
+        },
+        Form::List { end, .. } => {
+            let (a, b) = choose|a: int, b: int| first < a <= b <= end
+                && #[trigger] expression_child_range(source, forms, first, end as int, a, b);
+            let (u, v) = choose|u: int, v: int| first < u <= v <= end
+                && #[trigger] expression_child_range(source, forms, first, end as int, u, v)
+                && expression_forest(source, forms, u, v);
+            let head = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, first + 1, head);
+            same_child_interval(source, forms, first, end as int, a, b, u, v);
+            child_expression_region(forms, first, end as int, a, b);
+            let here = local_reference(forms, first, end as int, head);
+            let children = expression_references(source, forms, a, b);
+            let child_signals = expression_signals(source, forms, a, b);
+            let tail_signals = expression_signals(source, forms, end as int, stop);
+            if reference < here.len() {
+                assert(refs[reference] == here[reference]);
+                assert(head is None && refs[reference].form == first + 1);
+                let witness = choose|candidate: Option<ExpressionHead>|
+                    #[trigger] list_head_matches(source, forms, first + 1, candidate)
+                        && arguments_match(forms, first + 2, end as int, candidate, a, b);
+                same_expression_head(source, forms, first + 1, head, witness);
+                assert(a == first + 2 && b == end);
+                direct_name_in_signal_index(source, forms, a, b, name);
+                let i = choose|i: int| 0 <= i < child_signals.len() && child_signals[i] == name;
+                assert(signals[i] == name);
+            } else if reference < here.len() + children.len() {
+                let offset = reference - here.len();
+                assert(refs[reference] == children[offset]);
+                call_argument_signal_index(source, forms, a, b, offset, name);
+                let i = choose|i: int| 0 <= i < child_signals.len() && child_signals[i] == name;
+                assert(signals[i] == name);
+            } else {
+                let offset = reference - here.len() - children.len();
+                call_argument_signal_index(source, forms, end as int, stop, offset, name);
+                let i = choose|i: int| 0 <= i < tail_signals.len() && tail_signals[i] == name;
+                assert(signals[child_signals.len() + i] == name);
+            }
+        },
+    }
+}
+
+pub(super) open spec fn signal_indices_in_order(signals: Seq<usize>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < signals.len()
+        ==> (#[trigger] signals[i]) < (#[trigger] signals[j])
+}
+
+pub(super) proof fn expression_signals_in_order(source: &str, forms: Seq<Form>, first: int, stop: int)
+    requires forms.len() <= usize::MAX,
+    ensures signal_indices_in_order(expression_signals(source, forms, first, stop)),
+    decreases stop - first,
+{
+    reveal_with_fuel(expression_signals, 1);
+    if 0 <= first < stop <= forms.len() {
+        let whole = expression_signals(source, forms, first, stop);
+        match forms[first] {
+            Form::Atom { kind, .. } => {
+                let tail = expression_signals(source, forms, first + 1, stop);
+                expression_signals_in_order(source, forms, first + 1, stop);
+                assert forall|i: int, j: int| 0 <= i < j < whole.len()
+                    implies (#[trigger] whole[i]) < (#[trigger] whole[j]) by {
+                    if kind is Name {
+                        if i == 0 {
+                            assert(whole[i] == first && whole[j] == tail[j - 1]);
+                            expression_signal_evidence(source, forms, first + 1, stop, j - 1);
+                        } else {
+                            assert(whole[i] == tail[i - 1] && whole[j] == tail[j - 1]);
+                        }
+                    } else {
+                        assert(whole == tail);
+                    }
+                };
+            },
+            Form::List { end, .. } => {
+                if first < end <= stop && exists|a: int, b: int| first < a <= b <= end
+                    && #[trigger] expression_child_range(source, forms, first, end as int, a, b)
+                {
+                    let (a, b) = choose|a: int, b: int| first < a <= b <= end
+                        && #[trigger] expression_child_range(source, forms, first, end as int, a, b);
+                    let children = expression_signals(source, forms, a, b);
+                    let tail = expression_signals(source, forms, end as int, stop);
+                    expression_signals_in_order(source, forms, a, b);
+                    expression_signals_in_order(source, forms, end as int, stop);
+                    assert forall|i: int, j: int| 0 <= i < j < whole.len()
+                        implies (#[trigger] whole[i]) < (#[trigger] whole[j]) by {
+                        let cut = children.len();
+                        if j < cut {
+                            assert(whole[i] == children[i] && whole[j] == children[j]);
+                        } else if i >= cut {
+                            assert(whole[i] == tail[i - cut] && whole[j] == tail[j - cut]);
+                        } else {
+                            assert(whole[i] == children[i] && whole[j] == tail[j - cut]);
+                            expression_signal_evidence(source, forms, a, b, i);
+                            expression_signal_evidence(source, forms, end as int, stop, j - cut);
+                        }
+                    };
+                }
+            },
+        }
+    }
 }
 
 pub(super) proof fn expression_signal_evidence(

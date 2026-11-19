@@ -2,8 +2,9 @@
 
 #[cfg(verus_only)]
 use super::expression_forest::{
-    expression_callee_location, expression_forest, expression_references, expression_region,
-    expression_root_callee, ordinary_call_at,
+    call_argument_signal_index, expression_callee_location, expression_forest, expression_references,
+    expression_region, expression_root_callee, expression_signals, expression_signals_in_order,
+    ordinary_call_at, signal_indices_in_order,
 };
 #[cfg(verus_only)]
 use super::expressions::after_form;
@@ -101,6 +102,121 @@ pub closed spec fn call_argument_sequence(forms: Seq<Form>, range: Range<usize>,
         && count == argument_count(forms, range.start as int, range.end as int)
 }
 
+/// 引数列の末尾に達したなら、残りの引数はないことを示す。
+pub proof fn exhausted_call_arguments(forms: Seq<Form>, range: Range<usize>, count: int)
+    requires call_argument_sequence(forms, range, count), range.start == range.end,
+    ensures count == 0,
+{
+    reveal_with_fuel(argument_count, 1);
+}
+
+/// 添字が呼び出し直下の引数式の先頭を指すことを表す。
+pub closed spec fn direct_call_argument(forms: Seq<Form>, call: CallShape, index: int) -> bool {
+    call_arguments_match(forms, call)
+        && direct_form_in_range(forms, call.form + 2, forms[call.form as int]->List_end as int, index)
+}
+
+/// 呼び出しの引数列が空でなければ、先頭を直接の引数として扱えることを示す。
+pub proof fn first_call_argument_evidence(forms: Seq<Form>, call: CallShape, range: Range<usize>)
+    requires
+        call_arguments_match(forms, call), range.start == call.form + 2,
+        range.end == forms[call.form as int]->List_end,
+    ensures range.start < range.end ==> direct_call_argument(forms, call, range.start as int),
+{
+    reveal(direct_form_in_range);
+}
+
+/// 一つの引数の部分木を飛ばした位置が、列の末尾か次の直接の引数であることを示す。
+pub proof fn following_call_argument(
+    forms: Seq<Form>, call: CallShape, index: int, next: int,
+)
+    requires
+        direct_call_argument(forms, call, index), nested_list_indices(forms),
+        0 <= index < next <= forms[call.form as int]->List_end <= forms.len(),
+        next == if forms[index] is List { forms[index]->List_end as int } else { index + 1 },
+    ensures next < forms[call.form as int]->List_end ==> direct_call_argument(forms, call, next),
+{
+    node_end_is_following_direct_form(forms, index, next);
+    reveal(following_direct_form);
+    assert(form_region_ends_at(forms, call.form + 2, forms[call.form as int]->List_end as int));
+}
+
+/// 呼び出しの直接の裸名に対応する、ファイル全体の信号索引の添字を返す。
+///
+/// 厳格解析で得た同一ファイルの構文木と索引を渡す。定義の信号区間を二分探索する。
+///
+/// # Panics
+///
+/// 同じ解析から得た索引を渡さず、該当する信号の添字を取得できない場合はパニックする。
+pub fn indexed_call_signal(
+    _source: &str, _forms: &[Form], row: &BuildDefinition, _references: &[ExpressionReference],
+    _reference: usize, _call: &CallShape, signals: &[usize], argument: usize,
+) -> (position: usize)
+    requires
+        definition_call_index(_source, _forms@, *row, _references@),
+        row.references.start <= _reference < row.references.end,
+        call_shape_matches(_source, _forms@, *row, _references@[_reference as int], Some(*_call)),
+        row.signals.start <= row.signals.end <= signals@.len(),
+        signals@[row.signals.start as int..row.signals.end as int]
+            == expression_signals(_source, _forms@, row.expression.start as int, row.expression.end as int),
+        complete_list_indices(_forms@), nested_list_indices(_forms@),
+        direct_call_argument(_forms@, *_call, argument as int),
+        argument < _forms@.len() && _forms@[argument as int] is Atom
+            && _forms@[argument as int]->Atom_kind is Name,
+    ensures row.signals.start <= position < row.signals.end && signals@[position as int] == argument,
+{
+    let first = row.signals.start;
+    let mut lo = first;
+    let mut hi = row.signals.end;
+    let _forms_len = _forms.len();
+    let ghost indexed = signals@[first as int..hi as int];
+    proof {
+        let start = row.expression.start as int;
+        let stop = row.expression.end as int;
+        reveal(nested_list_indices);
+        reveal(expression_region);
+        assert forall|f: int| start <= f < stop && #[trigger] _forms@[f] is List
+            implies _forms@[f]->List_end <= stop by {
+            if f != start {
+                assert(_forms@[start] is List && _forms@[start]->List_end == stop);
+            }
+        };
+        let refs = _references@[row.references.start as int..row.references.end as int];
+        let offset = _reference - row.references.start;
+        assert(refs[offset] == _references@[_reference as int]);
+        call_argument_signal_index(_source, _forms@, start, stop, offset, argument);
+        expression_signals_in_order(_source, _forms@, start, stop);
+    }
+    let ghost at = choose|i: int| 0 <= i < indexed.len() && indexed[i] == argument;
+    let ghost target = (first + at) as int;
+    assert(signals@[target] == indexed[at]);
+    while lo < hi
+        invariant
+            first == row.signals.start, first <= lo <= target < hi <= row.signals.end <= signals@.len(),
+            indexed == signals@[first as int..row.signals.end as int],
+            signals@[target] == argument, signal_indices_in_order(indexed),
+        decreases hi - lo,
+    {
+        let mid = lo + (hi - lo) / 2;
+        let value = signals[mid];
+        proof {
+            assert(signals@[mid as int] == indexed[mid - first]);
+            assert(signals@[target] == indexed[target - first]);
+        }
+        if value < argument {
+            assert(mid < target);
+            lo = mid + 1;
+        } else if value > argument {
+            assert(target < mid);
+            hi = mid;
+        } else {
+            return mid;
+        }
+    }
+    proof { assert(false); }
+    unreachable!()
+}
+
 /// 検査済みの呼び出しから、引数列の構文木範囲を返す。
 ///
 /// 戻り値は半開範囲で、呼び出し名を含まない。引数がなければ空になる。
@@ -114,6 +230,7 @@ pub fn call_argument_range(forms: &[Form], call: &CallShape) -> (range: Range<us
         call_argument_sequence(forms@, range, call.arguments as int),
         expression_region(forms@, range.start as int, range.end as int),
         range.start == call.form + 2 <= range.end <= forms@.len(),
+        call.form < forms@.len() && forms@[call.form as int] is List,
         range.end == forms@[call.form as int]->List_end,
 {
     let Form::List { end: list_end, .. } = &forms[call.form] else {

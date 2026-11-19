@@ -30,11 +30,12 @@ pub use body::{DefinitionReferences, first_routine_expansion};
 use build::BuildRows;
 pub use call_shapes::{
     CallShape, RoutineArity, call_argument_range, definition_root_is_call, indexed_call_shape,
-    next_call_argument, routine_arity,
+    indexed_call_signal, next_call_argument, routine_arity,
 };
 #[cfg(verus_only)]
 pub use call_shapes::{
     call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index,
+    direct_call_argument, exhausted_call_arguments, first_call_argument_evidence, following_call_argument,
     indexed_call_arguments, routine_arity_matches, routine_arity_port_counts,
 };
 pub use build::{
@@ -58,6 +59,8 @@ pub use expression_forest::{
 };
 #[cfg(verus_only)]
 pub use expression_forest::{expression_reference_in_source, expression_source_reference_result};
+#[cfg(verus_only)]
+pub use expression_forest::expression_region;
 #[cfg(verus_only)]
 pub use expression_forest::ordinary_call_at;
 pub use index::{

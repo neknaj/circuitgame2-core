@@ -7,7 +7,7 @@ use crate::project::{LocatedName, PortDirection, ResolvedPortType, TypedRoutineS
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
 #[cfg(verus_only)]
-use crate::syntax::circuit::{Head, RoutineArity, call_arguments_match, routine_arity_matches};
+use crate::syntax::circuit::{Head, RoutineArity, call_arguments_match, call_shape_matches, routine_arity_matches};
 #[cfg(verus_only)]
 use crate::syntax::{complete_list_indices, nested_list_indices};
 use vstd::prelude::*;
@@ -154,11 +154,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(Some(typed))),
         ensures ({
             let project = self.targets.project_model();
-            let forms = project.circuits_model()[file as int].syntax.forms@;
+            let parsed = project.circuits_model()[file as int];
+            let forms = parsed.syntax.forms@;
+            let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+            let row = parsed.definitions@[def];
+            let ref_pos = row.references.start + reference;
             &&& file < project.circuits_model().len()
+            &&& entry < parsed.entry_ranges@.len() && entry < parsed.syntax.entries@.len()
+            &&& definition < parsed.entry_ranges@[entry as int].definitions.end
+                - parsed.entry_ranges@[entry as int].definitions.start
+            &&& reference < row.references.end - row.references.start
             &&& *typed.call.source == project.sources_model()[file as int]
             &&& call_arguments_match(forms, typed.call.call)
+            &&& call_shape_matches(typed.call.source.text, forms, row, parsed.references@[ref_pos], Some(typed.call.call))
             &&& complete_list_indices(forms) && nested_list_indices(forms)
+            &&& match (typed.call.target, typed.signature) {
+                (FuncCallTarget::Nor, FuncCallSignature::Nor) => true,
+                (FuncCallTarget::Function { arity, .. }, FuncCallSignature::Function(signature)) =>
+                    signature.inputs@.len() == arity.inputs && signature.outputs@.len() == arity.outputs,
+                _ => false,
+            }
         }),
     {
         self.targets.parsed_project_model();
