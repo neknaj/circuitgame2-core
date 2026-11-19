@@ -205,3 +205,93 @@ fn validates_collection_before_parsing_and_parses_in_first_occurrence_order() {
         matches!(error, CircuitProjectError::Syntax { id, .. } if id.components() == ["bad.ncg2"])
     );
 }
+
+#[test]
+fn recovers_the_first_failed_circuit_snapshot_at_its_original_revision() {
+    use circuitgame2_core::project::{
+        CircuitProjectError, parse_circuit_project, parse_circuit_project_with_recovery,
+    };
+    use circuitgame2_core::syntax::circuit::{
+        CircuitFormError, CircuitRecovery, Head, RecoveredFormOutcome,
+    };
+
+    let invalid = "; 日本語のコメント\n(unknown) (using nor)";
+    let inputs = [
+        snapshot("before.ncg2", 3, "(using nor)"),
+        snapshot("./lib/temp/../bad.ncg2", 12, invalid),
+        snapshot("lib/bad.ncg2", 12, invalid),
+        snapshot("later.ncg2", 19, ")"),
+    ];
+    let strict = parse_circuit_project(&inputs).unwrap_err();
+    let failure = parse_circuit_project_with_recovery(&inputs).unwrap_err();
+    let CircuitProjectError::Syntax {
+        id,
+        revision,
+        error,
+    } = failure.error
+    else {
+        panic!("expected a circuit syntax error");
+    };
+    assert_eq!(id.components(), ["lib", "bad.ncg2"]);
+    assert_eq!(revision, 12);
+    assert!(matches!(
+        strict,
+        CircuitProjectError::Syntax { error: strict_error, .. } if strict_error == error
+    ));
+    let CircuitFormError::Header { span, .. } = error else {
+        panic!("expected a circuit form violation");
+    };
+    assert_eq!(&invalid[span.clone()], "unknown");
+    let Some(CircuitRecovery::Inspected { checked, .. }) = failure.recovery else {
+        panic!("expected the recovered circuit forms");
+    };
+    assert_eq!(checked.len(), 2);
+    assert!(matches!(
+        &checked[0].outcome,
+        RecoveredFormOutcome::Rejected { span: recovered_span, .. } if recovered_span == &span
+    ));
+    assert!(matches!(
+        checked[1].outcome,
+        RecoveredFormOutcome::Valid(Head::Using)
+    ));
+}
+
+#[test]
+fn recovers_only_when_the_first_violation_is_circuit_syntax() {
+    use circuitgame2_core::project::{
+        CircuitProjectError, parse_circuit_project, parse_circuit_project_with_recovery,
+    };
+    use circuitgame2_core::syntax::circuit::CircuitRecovery;
+
+    let broken = || snapshot("bad.ncg2", 7, "(namespace app (export value)");
+    let failure = parse_circuit_project_with_recovery(&[broken()]).unwrap_err();
+    assert!(matches!(
+        failure.error,
+        CircuitProjectError::Syntax { revision: 7, .. }
+    ));
+    assert!(matches!(
+        failure.recovery,
+        Some(CircuitRecovery::WithSyntaxRepairs(_))
+    ));
+
+    let escaped = snapshot("../bad-path.ncg2", 9, "");
+    let failure = parse_circuit_project_with_recovery(&[broken(), escaped]).unwrap_err();
+    assert!(matches!(failure.error, CircuitProjectError::Sources(_)));
+    assert!(failure.recovery.is_none());
+
+    let functional = snapshot("macros.ncg2m", 8, "");
+    let failure = parse_circuit_project_with_recovery(&[functional, broken()]).unwrap_err();
+    assert!(matches!(
+        failure.error,
+        CircuitProjectError::UnsupportedLanguage { .. }
+    ));
+    assert!(failure.recovery.is_none());
+
+    let valid = snapshot("main.ncg2", 11, "(using nor)");
+    let inputs = [valid];
+    let strict = parse_circuit_project(&inputs).unwrap();
+    let project = parse_circuit_project_with_recovery(&inputs).unwrap();
+    assert_eq!(project.sources()[0].revision, 11);
+    assert_eq!(project.circuits().len(), 1);
+    assert_eq!(project.circuits()[0].syntax, strict.circuits()[0].syntax);
+}

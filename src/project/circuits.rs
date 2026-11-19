@@ -16,11 +16,14 @@ use super::{
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::circuit::NameSite;
-use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit, index_named_build_forms};
+use crate::syntax::circuit::{
+    CircuitFormError, CircuitRecovery, NamedBuildCircuit, index_named_build_forms,
+    recover_circuit_forms,
+};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    build_index_matches, circuit_index_matches, circuit_source_error, circuit_source_matches,
-    name_site_matches, named_form_matches, named_forms_match,
+    build_index_matches, circuit_index_matches, circuit_recovery_matches, circuit_source_error,
+    circuit_source_matches, name_site_matches, named_form_matches, named_forms_match,
 };
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, bare_atom_kind, form_span, form_spans_valid};
@@ -66,6 +69,15 @@ pub enum CircuitProjectError<'a> {
         /// 元ソース上の範囲を持つ構文診断。
         error: CircuitFormError,
     },
+}
+
+/// 厳格なプロジェクト解析のエラーと、対象ファイルの回復結果。
+#[derive(Debug)]
+pub struct CircuitProjectFailure<'a> {
+    /// 解析を打ち切った最初の違反。
+    pub error: CircuitProjectError<'a>,
+    /// 構文違反があったファイルの回復結果。ソース収集の失敗や未対応言語では `None`。
+    pub recovery: Option<CircuitRecovery>,
 }
 
 /// 構文木と名前索引が、指定した回路ソースを解析した結果に対応することを表す。
@@ -114,6 +126,25 @@ pub closed spec fn circuit_project_error(inputs: Seq<SourceSnapshot>, error: Cir
                     && inputs[i].revision == revision
                     && !circuit_source_matches(inputs[i].text)
                     && circuit_source_error(inputs[i].text, error)),
+    }
+}
+
+/// 厳格解析の診断と回復結果が、一つのファイル識別子と文書バージョンに対応することを表す。
+pub closed spec fn circuit_project_failure(
+    inputs: Seq<SourceSnapshot>, failure: CircuitProjectFailure,
+) -> bool {
+    &&& circuit_project_error(inputs, failure.error)
+    &&& match (failure.error, failure.recovery) {
+        (CircuitProjectError::Syntax { id, revision, error }, Some(recovery)) =>
+            (exists|i: int| first_source_input(inputs, i)
+                && normalized_path((#[trigger] inputs[i]).path) == Ok(id.components_model())
+                && circuit_inputs_before(inputs, i)
+                && inputs[i].revision == revision
+                && !circuit_source_matches(inputs[i].text)
+                && circuit_source_error(inputs[i].text, error)
+                && circuit_recovery_matches(inputs[i].text, recovery)) && !(recovery is Complete),
+        (CircuitProjectError::Syntax { .. }, None) => false,
+        (_, recovery) => recovery.is_none(),
     }
 }
 
@@ -277,9 +308,50 @@ pub fn parse_circuit_project<'a>(
             Err(error) => circuit_project_error(inputs@, error),
         },
 {
+    match parse_circuit_project_internal(inputs, false) {
+        Ok(project) => Ok(project),
+        Err(failure) => Err(failure.error),
+    }
+}
+
+/// ビルド用の厳格解析を行い、構文違反で失敗したファイルだけを回復解析する。
+///
+/// # Errors
+///
+/// 最初の違反を返す。構文違反の場合は、診断が示すファイル識別子と文書バージョンに
+/// 対応する回復結果を添える。ソース収集の失敗や未対応言語の場合は、違反だけを返す。
+pub fn parse_circuit_project_with_recovery<'a>(
+    inputs: &[SourceSnapshot<'a>],
+) -> (result: Result<CircuitProject<'a>, CircuitProjectFailure<'a>>)
+    ensures
+        result.is_ok() <==> circuit_project_accepts(inputs@),
+        match result {
+            Ok(project) => project.matches(inputs@),
+            Err(failure) => circuit_project_failure(inputs@, failure),
+        },
+{
+    parse_circuit_project_internal(inputs, true)
+}
+
+fn parse_circuit_project_internal<'a>(
+    inputs: &[SourceSnapshot<'a>],
+    recover: bool,
+) -> (result: Result<CircuitProject<'a>, CircuitProjectFailure<'a>>)
+    ensures
+        result.is_ok() <==> circuit_project_accepts(inputs@),
+        match result {
+            Ok(project) => project.matches(inputs@),
+            Err(failure) => circuit_project_error(inputs@, failure.error)
+                && (if recover { circuit_project_failure(inputs@, failure) }
+                    else { failure.recovery.is_none() }),
+        },
+{
     let sources = match collect_sources(inputs) {
         Ok(sources) => sources,
-        Err(error) => return Err(CircuitProjectError::Sources(error)),
+        Err(error) => return Err(CircuitProjectFailure {
+            error: CircuitProjectError::Sources(error),
+            recovery: None,
+        }),
     };
     let mut circuits: Vec<NamedBuildCircuit> = Vec::new();
     let mut index = 0;
@@ -297,7 +369,12 @@ pub fn parse_circuit_project<'a>(
             let id = source.id.copy_for_diagnostic();
             proof { parsed_sources_cover_prefix(inputs@, sources@, circuits@, index as int, source.first_input as int); }
             assert(!circuit_project_accepts(inputs@));
-            return Err(CircuitProjectError::UnsupportedLanguage { id, revision: source.revision, kind: source.kind });
+            return Err(CircuitProjectFailure {
+                error: CircuitProjectError::UnsupportedLanguage {
+                    id, revision: source.revision, kind: source.kind,
+                },
+                recovery: None,
+            });
         }
         let parsed = match index_named_build_forms(source.text) {
             Ok(parsed) => parsed,
@@ -305,7 +382,11 @@ pub fn parse_circuit_project<'a>(
                 let id = source.id.copy_for_diagnostic();
                 proof { parsed_sources_cover_prefix(inputs@, sources@, circuits@, index as int, source.first_input as int); }
                 assert(!circuit_project_accepts(inputs@));
-                return Err(CircuitProjectError::Syntax { id, revision: source.revision, error });
+                let recovery = if recover { Some(recover_circuit_forms(source.text)) } else { None };
+                return Err(CircuitProjectFailure {
+                    error: CircuitProjectError::Syntax { id, revision: source.revision, error },
+                    recovery,
+                });
             }
         };
         assert(parsed_circuit_matches(*source, parsed));

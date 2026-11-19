@@ -20,9 +20,14 @@ pub use analysis::{
 pub use basis::{CircuitBasisError, validate_circuit_basis};
 #[cfg(verus_only)]
 pub use basis::{basis_result_evidence, circuit_basis_valid};
-pub use circuits::{CircuitProject, CircuitProjectError, parse_circuit_project};
+pub use circuits::{
+    CircuitProject, CircuitProjectError, CircuitProjectFailure, parse_circuit_project,
+    parse_circuit_project_with_recovery,
+};
 #[cfg(verus_only)]
-pub use circuits::{circuit_project_accepts, circuit_project_error, parsed_circuit_matches};
+pub use circuits::{
+    circuit_project_accepts, circuit_project_error, circuit_project_failure, parsed_circuit_matches,
+};
 pub use declarations::{
     DeclarationTable, LocatedName, NameConflict, NameConflictKind, index_declarations,
 };

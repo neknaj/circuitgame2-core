@@ -147,7 +147,9 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
 /// 名前空間のヘッダーが正しければ、その直下も同じ順序で検査する。
 /// 字句や S 式の修復が必要なソースでは、回復した構文木と修復記録を暫定結果として返す。
 pub fn recover_circuit_forms(source: &str) -> (result: CircuitRecovery)
-    ensures circuit_recovery_matches(source, result),
+    ensures
+        circuit_recovery_matches(source, result),
+        result is Complete <==> circuit_source_matches(source),
 {
     let forms = match parse(source) {
         Ok(forms) => forms,
