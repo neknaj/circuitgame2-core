@@ -1,8 +1,8 @@
 //! 厳格索引にある別名指定を読み取り、参照先を解決する。
 
-#[cfg(verus_only)]
-use super::circuits::parsed_index_evidence;
 use super::circuits::read_indexed_atom;
+#[cfg(verus_only)]
+use super::circuits::{parsed_index_evidence, parsed_name_span};
 #[cfg(verus_only)]
 use super::declarations::located_name_evidence;
 use super::{
@@ -14,9 +14,9 @@ use super::{
     absolute_resolution_evidence, export_error_evidence, export_table_matches, location_in_source,
     parsed_circuit_matches,
 };
-#[cfg(verus_only)]
-use crate::syntax::circuit::use_entry_evidence;
 use crate::syntax::circuit::{Head, NameSite, NamedCircuit};
+#[cfg(verus_only)]
+use crate::syntax::circuit::{name_site_matches, use_entry_evidence};
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, bare_atom_kind, form_span};
 use alloc::vec::Vec;
@@ -55,6 +55,7 @@ pub struct ResolvedUse<'p, 'a> {
 /// 参照先を解決した別名指定の一覧と、解決に使った公開表。
 #[derive(Debug)]
 pub struct UseTargets<'p, 'a> {
+    project: &'p CircuitProject<'a>,
     exports: ExportTable<'p, 'a>,
     directives: Vec<ResolvedUse<'p, 'a>>,
 }
@@ -228,8 +229,58 @@ fn read_use<'p, 'a>(
 
 /// 解決結果が、厳格索引の全 `use` と出現順に対応することを表す。
 pub closed spec fn use_targets_match(project: &CircuitProject, targets: UseTargets) -> bool {
-    export_table_matches(project, targets.exports)
+    *targets.project == *project
+        && export_table_matches(project, targets.exports)
         && resolved_before(project, &targets.exports, targets.directives@, project.circuits_model().len() as int, 0)
+}
+
+pub(super) proof fn resolved_use_evidence(
+    targets: &UseTargets, index: int, namespace: Option<&str>,
+)
+    requires
+        targets.covers_project(),
+        0 <= index < targets.directives_model().len(),
+        ({
+            let item = targets.directives_model()[index];
+            let circuits = targets.project_model().circuits_model();
+            &&& item._file < circuits.len()
+            &&& match (item.site.block, namespace) {
+                (None, None) => true,
+                (Some(form), Some(path)) => {
+                    let names = circuits[item._file as int].names@;
+                    exists|i: int| 0 <= i < names.len() && (#[trigger] names[i]).form == form
+                        && names[i].name.word == path
+                },
+                _ => false,
+            }
+        }),
+    ensures
+        ({
+            let item = targets.directives_model()[index];
+            let from = item.site.namespace;
+            (match (namespace, from) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.spec_bytes() == right.spec_bytes(),
+                _ => false,
+            }) && absolute_resolution_evidence(&targets.exports_model(),
+                item.site.reference.word, from, Ok(item.target))
+        }),
+{
+    let item = targets.directives@[index];
+    let file = item._file as int;
+    let project = targets.project;
+    reveal(resolved_before);
+    assert(resolved_at(project, &targets.exports, item));
+    if let Some(form) = item.site.block {
+        let parsed = project.circuits_model()[file];
+        let source = project.sources_model()[file];
+        let names = parsed.names@;
+        let path = namespace->Some_0;
+        let i = choose|i: int| 0 <= i < names.len() && (#[trigger] names[i]).form == form
+            && names[i].name.word == path;
+        parsed_name_span(source, parsed, i);
+        reveal(name_site_matches);
+    }
 }
 
 spec fn rejection(
@@ -254,6 +305,22 @@ pub closed spec fn use_target_error_evidence(project: &CircuitProject, error: Us
 }
 
 impl<'p, 'a> UseTargets<'p, 'a> {
+    /// 参照位置の特定に使う構文済みプロジェクトを返す。
+    pub(super) fn project(&self) -> (project: &'p CircuitProject<'a>)
+        ensures *project == self.project_model(),
+    {
+        self.project
+    }
+
+    pub(super) closed spec fn project_model(&self) -> CircuitProject<'a> {
+        *self.project
+    }
+
+    /// 全 `use` が、構文済みプロジェクトにある指定と対応することを表す。
+    pub closed spec fn covers_project(&self) -> bool {
+        self.project.has_parsed_sources() && use_targets_match(self.project, *self)
+    }
+
     /// 解決に使った公開表を返す。
     pub fn exports(&self) -> (exports: &ExportTable<'p, 'a>)
         ensures *exports == self.exports_model(),
@@ -294,7 +361,8 @@ pub fn index_use_targets<'p, 'a>(
     ensures
         match result {
             Ok(targets) => use_targets_match(project, targets)
-                && targets.exports_model().declarations_model().well_formed(),
+                && targets.exports_model().declarations_model().well_formed()
+                && targets.covers_project(),
             Err(error) => use_target_error_evidence(project, error),
         },
 {
@@ -355,7 +423,7 @@ pub fn index_use_targets<'p, 'a>(
         }
         index += 1;
     }
-    Ok(UseTargets { exports, directives })
+    Ok(UseTargets { project, exports, directives })
 }
 
 } // verus!

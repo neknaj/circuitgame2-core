@@ -212,7 +212,10 @@ pub(super) proof fn parsed_name_span(
     requires
         parsed_circuit_matches(source, parsed),
         0 <= index < parsed.names@.len(),
-    ensures name_in_source(source.text, parsed.names@[index].name),
+    ensures
+        name_in_source(source.text, parsed.names@[index].name),
+        name_site_matches(source.text, parsed.syntax.forms@,
+            parsed.names@[index].form + 2, parsed.names@[index].name),
 {
     let named = parsed.names@[index];
     let forms = parsed.syntax.forms@;

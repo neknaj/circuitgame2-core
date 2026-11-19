@@ -1,7 +1,8 @@
 use circuitgame2_core::project::{
-    AbsoluteTarget, AliasDisposition, SourceSnapshot, UseAliasConflict, check_use_aliases,
-    index_use_targets, parse_circuit_project,
+    AbsoluteTarget, AliasDisposition, ReferenceScopeError, SourceSnapshot, UnqualifiedTarget,
+    UseAliasConflict, check_use_aliases, index_use_targets, parse_circuit_project,
 };
+use circuitgame2_core::syntax::circuit::Head;
 
 #[test]
 fn warns_on_every_repeat_and_keeps_scopes_and_distinct_aliases_separate() {
@@ -150,4 +151,101 @@ fn checks_implicit_child_namespaces_from_other_blocks() {
             assert_eq!(&text[introduced_at.span], "gate");
         }
     }
+}
+
+#[test]
+fn resolves_names_from_the_indexed_file_and_block() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot {
+            path: "app.ncg2",
+            revision: 2,
+            text: concat!(
+                "(use ::logic gates) ",
+                "(namespace app ",
+                "  (module main (in x) (out y) (def y (alias x))) ",
+                "  (use ::app::cell alias) (use ::app::cell alias) (use ::app::cell cell)) ",
+                "(namespace app (func cell (in x) (out x))) ",
+            ),
+        },
+        SourceSnapshot {
+            path: "lib.ncg2",
+            revision: 3,
+            text: "(namespace app) (namespace logic::inner)",
+        },
+    ])
+    .unwrap();
+    let first = &project.circuits()[0];
+    let mut blocks = first
+        .names
+        .iter()
+        .filter(|entry| entry.head == Head::Namespace);
+    let active = blocks.next().unwrap().form;
+    let adjacent = blocks.next().unwrap().form;
+    let foreign = project.circuits()[1].names[0].form;
+    let module = first
+        .names
+        .iter()
+        .find(|entry| entry.head == Head::Module)
+        .unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let names = check_use_aliases(&targets).unwrap();
+
+    let Some(UnqualifiedTarget::Alias(alias)) =
+        names.resolve_unqualified(0, Some(active), "alias").unwrap()
+    else {
+        panic!("expected an alias from the whole namespace block");
+    };
+    assert!(alias.site.alias.span.start < names.directives()[2].site.alias.span.start);
+    let Some(UnqualifiedTarget::Alias(coalesced)) =
+        names.resolve_unqualified(0, Some(active), "cell").unwrap()
+    else {
+        panic!("expected a reference with alias provenance");
+    };
+    let Some(UnqualifiedTarget::Direct(direct)) =
+        names.resolve_unqualified(1, Some(foreign), "cell").unwrap()
+    else {
+        panic!("expected a shared declaration in a different file");
+    };
+    assert!(alias.target.is_same_target(&direct));
+    assert!(coalesced.target.is_same_target(&direct));
+    assert!(
+        names
+            .resolve_unqualified(0, Some(adjacent), "alias")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        names
+            .resolve_unqualified(1, Some(foreign), "alias")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        names
+            .resolve_unqualified(0, Some(active), "gates")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        names
+            .resolve_unqualified(1, None, "gates")
+            .unwrap()
+            .is_none()
+    );
+    let Some(UnqualifiedTarget::Alias(namespace)) =
+        names.resolve_unqualified(0, None, "gates").unwrap()
+    else {
+        panic!("expected the file-level namespace alias");
+    };
+    assert!(
+        matches!(namespace.target, AbsoluteTarget::Namespace { key, .. } if key.name == "logic")
+    );
+    assert!(matches!(
+        names.resolve_unqualified(0, Some(module.form), "alias"),
+        Err(ReferenceScopeError::UnknownBlock)
+    ));
+    assert!(matches!(
+        names.resolve_unqualified(usize::MAX, None, "alias"),
+        Err(ReferenceScopeError::UnknownFile)
+    ));
 }

@@ -4,9 +4,14 @@
 use super::name_keys::key_bytes;
 #[cfg(verus_only)]
 use super::resolution::direct_targets_agree;
+#[cfg(verus_only)]
+use super::use_targets::resolved_use_evidence;
 use super::{AbsoluteTarget, NameKey, ResolvedUse, UseTargets};
 #[cfg(verus_only)]
-use super::{DeclarationTable, direct_target_matches, same_target};
+use super::{DeclarationTable, absolute_resolution_evidence, direct_target_matches, same_target};
+#[cfg(verus_only)]
+use crate::syntax::circuit::NamedForm;
+use crate::syntax::circuit::{Head, NamedCircuit};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -48,6 +53,24 @@ pub enum UseAliasConflict<'t, 'p, 'a> {
 pub struct UseAliases<'t, 'p, 'a> {
     targets: &'t UseTargets<'p, 'a>,
     dispositions: Vec<AliasDisposition>,
+}
+
+/// 無修飾名が指す直接の束縛、または別名を作った指定。
+#[derive(Debug)]
+pub enum UnqualifiedTarget<'t, 'p, 'a, 'q> {
+    /// 現在の名前空間に属する独立宣言または子名前空間。
+    Direct(AbsoluteTarget<'p, 'a, 'q>),
+    /// 現在のファイルとブロックで別名を最初に指定した `use`。
+    Alias(&'t ResolvedUse<'p, 'a>),
+}
+
+/// 無修飾名の検索で指定した参照元が、構文済みプロジェクトに存在しない。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReferenceScopeError {
+    /// 構文済みプロジェクトに指定したファイルの添字がない。
+    UnknownFile,
+    /// 指定したファイルのフォームは名前空間ブロックを指さない。
+    UnknownBlock,
 }
 
 spec fn alias_key<'a>(item: ResolvedUse<'_, 'a>) -> NameKey<'a> {
@@ -92,6 +115,80 @@ fn find_first(items: &[ResolvedUse], at: usize) -> (first: Option<usize>)
     {
         if scope_and_alias_match(&items[i], &items[at]) {
             return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+spec fn alias_in_scope(item: ResolvedUse, file: usize, block: Option<usize>, name: &str) -> bool {
+    &&& item._file == file
+    &&& item.site.block == block
+    &&& key_bytes(NameKey { parent: None, name: item.site.alias.word })
+        == key_bytes(NameKey { parent: None, name })
+}
+
+spec fn alias_lookup_matches(
+    items: Seq<ResolvedUse>, file: usize, block: Option<usize>, name: &str, found: Option<&ResolvedUse>,
+) -> bool {
+    match found {
+        Some(item) => exists|i: int| 0 <= i < items.len()
+            && #[trigger] alias_in_scope(items[i], file, block, name)
+            && items[i] == *item
+            && (forall|j: int| 0 <= j < i ==> !alias_in_scope(#[trigger] items[j], file, block, name)),
+        None => forall|i: int| 0 <= i < items.len() ==> !alias_in_scope(#[trigger] items[i], file, block, name),
+    }
+}
+
+fn first_binding<'t, 'p, 'a>(
+    items: &'t [ResolvedUse<'p, 'a>], file: usize, block: Option<usize>, name: &str,
+) -> (found: Option<&'t ResolvedUse<'p, 'a>>)
+    ensures alias_lookup_matches(items@, file, block, name, found),
+{
+    let mut i = 0;
+    while i < items.len()
+        invariant
+            i <= items@.len(),
+            forall|j: int| 0 <= j < i ==> !alias_in_scope(#[trigger] items@[j], file, block, name),
+        decreases items@.len() - i,
+    {
+        let item = &items[i];
+        if item._file == file && item.site.block == block
+            && (NameKey { parent: None, name: item.site.alias.word })
+                .same_name(NameKey { parent: None, name })
+        {
+            assert(alias_in_scope(*item, file, block, name));
+            return Some(item);
+        }
+        i += 1;
+    }
+    None
+}
+
+spec fn is_namespace_block(form: NamedForm, block: usize) -> bool {
+    form.head is Namespace && form.form == block && form.block is None
+}
+
+fn find_namespace<'a>(parsed: &NamedCircuit<'a>, block: usize) -> (path: Option<&'a str>)
+    ensures match path {
+        Some(path) => exists|i: int| 0 <= i < parsed.names@.len()
+            && #[trigger] is_namespace_block(parsed.names@[i], block)
+            && parsed.names@[i].name.word == path,
+        None => forall|i: int| 0 <= i < parsed.names@.len() ==>
+            !is_namespace_block(#[trigger] parsed.names@[i], block),
+    },
+{
+    let mut i = 0;
+    while i < parsed.names.len()
+        invariant
+            i <= parsed.names@.len(),
+            forall|j: int| 0 <= j < i ==> !is_namespace_block(#[trigger] parsed.names@[j], block),
+        decreases parsed.names@.len() - i,
+    {
+        let form = &parsed.names[i];
+        if matches!(form.head, Head::Namespace) && form.form == block && form.block.is_none() {
+            assert(is_namespace_block(*form, block));
+            return Some(form.name.word);
         }
         i += 1;
     }
@@ -199,6 +296,115 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub closed spec fn dispositions_model(&self) -> Seq<AliasDisposition> {
         self.dispositions@
     }
+
+    /// 名前の検索に使う宣言表と別名が、構文済みプロジェクトに対応することを表す。
+    pub closed spec fn can_resolve(&self) -> bool {
+        &&& self.targets.covers_project()
+        &&& self.targets.exports_model().declarations_model().well_formed()
+        &&& use_aliases_match(self.targets, *self)
+    }
+
+    /// 無修飾名の検索結果と参照元スコープ、別名、共有宣言表との対応を表す。
+    pub closed spec fn unqualified_resolution_matches(
+        &self, file: usize, block: Option<usize>, name: &str,
+        result: Result<Option<UnqualifiedTarget>, ReferenceScopeError>,
+    ) -> bool {
+        let circuits = self.targets.project_model().circuits_model();
+        let items = self.targets.directives_model();
+        let table = self.targets.exports_model().declarations_model();
+        match result {
+            Err(ReferenceScopeError::UnknownFile) => file >= circuits.len(),
+            Err(ReferenceScopeError::UnknownBlock) =>
+                file < circuits.len() && (block matches Some(index) && {
+                    let names = circuits[file as int].names@;
+                    forall|i: int| 0 <= i < names.len() ==> !is_namespace_block(#[trigger] names[i], index)
+                }),
+            Ok(found) => file < circuits.len() && {
+                let names = circuits[file as int].names@;
+                exists|namespace: Option<&str>| #[trigger] scope_namespace_matches(names, block, namespace)
+                    && match found {
+                        Some(UnqualifiedTarget::Alias(item)) => {
+                            &&& alias_lookup_matches(items, file, block, name, Some(item))
+                            &&& key_bytes(alias_key(*item)) == key_bytes(NameKey { parent: namespace, name })
+                            &&& allows_direct(&table, *item)
+                            &&& absolute_resolution_evidence(&self.targets.exports_model(),
+                                item.site.reference.word, item.site.namespace, Ok(item.target))
+                        },
+                        Some(UnqualifiedTarget::Direct(target)) => alias_lookup_matches(items, file, block, name, None)
+                            && direct_target_matches(&table, NameKey { parent: namespace, name }, Some(target)),
+                        None => alias_lookup_matches(items, file, block, name, None)
+                            && direct_target_matches(&table, NameKey { parent: namespace, name }, None),
+                    }
+            },
+        }
+    }
+
+    /// 無修飾名が指す独立宣言または子名前空間を検索する。
+    ///
+    /// `file` は解析済みプロジェクトのソース一覧での添字で、`block` は同じファイルの構文木で
+    /// 名前空間フォームを指す添字である。ファイル直下では `None` を渡す。
+    /// `name` には字句解析で無修飾名と判定した綴りを渡す。
+    /// 別名はブロック全体で有効であり、指定と参照の出現順に依存しない。
+    /// 別名があれば最初の `use` を返す。どちらの束縛もなければ `Ok(None)` を返す。
+    /// 組み込みの探索と使用位置で許される宣言種別の判定は、呼び出し側で行う。
+    ///
+    /// # Errors
+    ///
+    /// ファイルまたは名前空間ブロックが構文済みプロジェクトに存在しない場合はエラーを返す。
+    pub fn resolve_unqualified<'q>(
+        &'q self, file: usize, block: Option<usize>, name: &'q str,
+    ) -> (result: Result<Option<UnqualifiedTarget<'t, 'p, 'a, 'q>>, ReferenceScopeError>)
+        requires self.can_resolve(),
+        ensures self.unqualified_resolution_matches(file, block, name, result),
+    {
+        let circuits = self.targets.project().circuits();
+        if file >= circuits.len() {
+            return Err(ReferenceScopeError::UnknownFile);
+        }
+        let parsed = &circuits[file];
+        let namespace = if let Some(index) = block {
+            let Some(path) = find_namespace(parsed, index) else {
+                return Err(ReferenceScopeError::UnknownBlock);
+            };
+            Some(path)
+        } else {
+            None
+        };
+        assert(scope_namespace_matches(parsed.names@, block, namespace));
+        if let Some(item) = first_binding(self.directives(), file, block, name) {
+            proof {
+                let items = self.directives_model();
+                let i = choose|i: int| 0 <= i < items.len()
+                    && #[trigger] alias_in_scope(items[i], file, block, name)
+                    && items[i] == *item
+                    && (forall|j: int| 0 <= j < i ==> !alias_in_scope(#[trigger] items[j], file, block, name));
+                if let Some(index) = block {
+                    let names = parsed.names@;
+                    let path = namespace->Some_0;
+                    let j = choose|j: int| 0 <= j < names.len()
+                        && #[trigger] is_namespace_block(names[j], index) && names[j].name.word == path;
+                    assert(names[j].form == index);
+                }
+                resolved_use_evidence(self.targets, i, namespace);
+                assert(disposition_matches(items, i, self.dispositions@[i]));
+            }
+            return Ok(Some(UnqualifiedTarget::Alias(item)));
+        }
+        let table = self.targets.exports().declarations();
+        match table.direct_target(NameKey { parent: namespace, name }) {
+            Some(target) => Ok(Some(UnqualifiedTarget::Direct(target))),
+            None => Ok(None),
+        }
+    }
+}
+
+spec fn scope_namespace_matches(names: Seq<NamedForm>, block: Option<usize>, namespace: Option<&str>) -> bool {
+    match (block, namespace) {
+        (None, None) => true,
+        (Some(block), Some(path)) => exists|i: int| 0 <= i < names.len()
+            && #[trigger] is_namespace_block(names[i], block) && names[i].name.word == path,
+        _ => false,
+    }
 }
 
 /// 解決済みの `use` を照合し、別名の束縛と重複警告を返す。
@@ -213,11 +419,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 /// 一つの指定で両方の衝突が起きた場合は、直接宣言または子名前空間との衝突を返す。
 pub fn check_use_aliases<'t, 'p, 'a>(targets: &'t UseTargets<'p, 'a>)
     -> (result: Result<UseAliases<'t, 'p, 'a>, UseAliasConflict<'t, 'p, 'a>>)
-    requires targets.exports_model().declarations_model().well_formed(),
+    requires targets.covers_project(), targets.exports_model().declarations_model().well_formed(),
     ensures
         result.is_ok() <==> use_aliases_acceptable(targets),
         match result {
-            Ok(aliases) => use_aliases_match(targets, aliases),
+            Ok(aliases) => use_aliases_match(targets, aliases) && aliases.can_resolve(),
             Err(error) => alias_conflict_evidence(targets, error),
         },
 {
