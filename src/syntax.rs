@@ -209,7 +209,8 @@ pub struct Recovered {
 pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
     ensures
         match result {
-            Ok(forms) => complete_list_indices(forms@),
+            Ok(forms) => complete_list_indices(forms@)
+                && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
         },
 {
@@ -222,7 +223,9 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
 /// Recovers S-expressions for editor analysis. Missing closes are inserted at
 /// EOF, and unresolved nesting is preserved in the provisional forest.
 pub fn parse_recovering(source: &str) -> (result: Recovered)
-    ensures complete_list_indices(result.forms@),
+    ensures
+        complete_list_indices(result.forms@),
+        form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
         Ok((forms, repairs)) => Recovered { forms, repairs },
@@ -248,6 +251,87 @@ spec fn pending_lists(forms: Seq<Form>, open: Seq<usize>) -> bool {
         let index = #[trigger] open[i] as int;
         0 <= index < forms.len() && forms[index] is List
     }
+}
+
+pub open spec fn form_span(form: Form) -> Range<usize> {
+    match form {
+        Form::Atom { span, .. } | Form::List { span, .. } => span,
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn form_spans_valid(source: &str, forms: Seq<Form>, consumed: int) -> bool {
+    &&& 0 <= consumed <= source.spec_bytes().len()
+    &&& forall|i: int| 0 <= i < forms.len() ==> {
+        let span = form_span(#[trigger] forms[i]);
+        &&& span.start < span.end <= consumed
+        &&& is_char_boundary(source.spec_bytes(), span.start as int)
+        &&& is_char_boundary(source.spec_bytes(), span.end as int)
+        &&& (i > 0 ==> form_span(forms[i - 1]).start < span.start)
+    }
+}
+
+proof fn advance_form_spans(source: &str, forms: Seq<Form>, before: int, after: int)
+    requires
+        form_spans_valid(source, forms, before),
+        before <= after <= source.spec_bytes().len(),
+    ensures form_spans_valid(source, forms, after),
+{
+    reveal(form_spans_valid);
+}
+
+proof fn append_form_span(source: &str, forms: Seq<Form>, form: Form, before: int, after: int)
+    requires
+        form_spans_valid(source, forms, before),
+        before == form_span(form).start,
+        before < form_span(form).end <= after <= source.spec_bytes().len(),
+        is_char_boundary(source.spec_bytes(), before),
+        is_char_boundary(source.spec_bytes(), form_span(form).end as int),
+    ensures form_spans_valid(source, forms.push(form), after),
+{
+    reveal(form_spans_valid);
+    let extended = forms.push(form);
+    assert forall|i: int| 0 <= i < extended.len() implies {
+        let span = form_span(#[trigger] extended[i]);
+        &&& span.start < span.end <= after
+        &&& is_char_boundary(source.spec_bytes(), span.start as int)
+        &&& is_char_boundary(source.spec_bytes(), span.end as int)
+        &&& (i > 0 ==> form_span(extended[i - 1]).start < span.start)
+    } by {
+        if i < forms.len() {
+            assert(extended[i] == forms[i]);
+        } else if i > 0 {
+            assert(extended[i - 1] == forms[i - 1]);
+        }
+    };
+}
+
+proof fn close_form_span(source: &str, forms: Seq<Form>, updated: Seq<Form>, index: int,
+    before: int, after: int)
+    requires
+        form_spans_valid(source, forms, before),
+        0 <= index < forms.len(),
+        updated.len() == forms.len(),
+        before <= after <= source.spec_bytes().len(),
+        is_char_boundary(source.spec_bytes(), after),
+        form_span(updated[index]).start == form_span(forms[index]).start,
+        form_span(updated[index]).end == after,
+        forall|i: int| 0 <= i < forms.len() && i != index ==> #[trigger] updated[i] == forms[i],
+    ensures form_spans_valid(source, updated, after),
+{
+    reveal(form_spans_valid);
+    assert forall|i: int| 0 <= i < updated.len() implies {
+        let span = form_span(#[trigger] updated[i]);
+        &&& span.start < span.end <= after
+        &&& is_char_boundary(source.spec_bytes(), span.start as int)
+        &&& is_char_boundary(source.spec_bytes(), span.end as int)
+        &&& (i > 0 ==> form_span(updated[i - 1]).start < span.start)
+    } by {
+        assert(form_span(updated[i]).start == form_span(forms[i]).start);
+        if i > 0 {
+            assert(form_span(updated[i - 1]).start == form_span(forms[i - 1]).start);
+        }
+    };
 }
 
 pub open spec fn complete_list_indices(forms: Seq<Form>) -> bool {
@@ -330,7 +414,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     ensures
         recovering ==> result.is_ok(),
         match result {
-            Ok((forms, _)) => complete_list_indices(forms@),
+            Ok((forms, _)) => complete_list_indices(forms@)
+                && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
         },
 {
@@ -340,7 +425,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     let mut lexer = Lexer::new(source);
     let length = source.as_bytes().len();
     let ghost mut spans: Seq<(int, int)> = Seq::empty();
-    proof { encode_utf8_valid_utf8(source@); }
+    proof {
+        encode_utf8_valid_utf8(source@);
+        reveal(form_spans_valid);
+        assert(form_spans_valid(source, forms@, 0));
+    }
 
     loop
         invariant
@@ -349,6 +438,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             length == source.spec_bytes().len(),
             valid_utf8(source.spec_bytes()),
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
+            form_spans_valid(source, forms@, lexer.cursor.position()),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
         decreases length - lexer.cursor.position(),
@@ -357,6 +447,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             assert(covers(source.spec_bytes(), spans, length as int));
             break;
         };
+        let ghost previous_position = lexer.cursor.position();
+        let ghost old_forms = forms@;
         let kind = segment.kind;
         let span = segment.span;
         let missing_separator = segment.missing_separator;
@@ -376,6 +468,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             };
         }
         lexer = next;
+        proof { advance_form_spans(source, forms@, previous_position, lexer.cursor.position()); }
         assert(covers(source.spec_bytes(), spans, lexer.cursor.position()));
         if missing_separator {
             if recovering {
@@ -415,6 +508,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         assert(open@[j] == value);
                     };
                     indices_after_append(before, previous, added, open@);
+                    append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
                 }
             }
             SegmentKind::Close => {
@@ -422,7 +516,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 if let Some(index) = open.pop() {
                     let ghost before = forms@;
                     finish_list(&mut forms, index, span.end);
-                    proof { indices_after_finish(before, forms@, previous, open@, index); }
+                    proof {
+                        indices_after_finish(before, forms@, previous, open@, index);
+                        close_form_span(source, before, forms@, index as int, previous_position, lexer.cursor.position());
+                    }
                 } else {
                     let error = Error {
                         kind: ErrorKind::UnexpectedClose,
@@ -441,13 +538,20 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 let ghost added = form;
                 forms.push(form);
                 assert(forms.len() == before.len() + 1);
-                proof { indices_after_append(before, open@, added, open@); }
+                proof {
+                    indices_after_append(before, open@, added, open@);
+                    append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
+                }
             }
         }
     }
 
+    proof { is_char_boundary_start_end_of_seq(source.spec_bytes()); }
     while open.len() > 0
         invariant
+            length == source.spec_bytes().len(),
+            is_char_boundary(source.spec_bytes(), length as int),
+            form_spans_valid(source, forms@, length as int),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
         decreases open@.len(),
@@ -468,7 +572,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             });
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
-            proof { indices_after_finish(before, forms@, previous, open@, index); }
+            proof {
+                indices_after_finish(before, forms@, previous, open@, index);
+                close_form_span(source, before, forms@, index as int, length as int, length as int);
+            }
         } else {
             return Err(Error {
                 kind: ErrorKind::UnclosedList { eof: length },
