@@ -86,6 +86,57 @@ fn reports_head_errors_with_exact_ranges_and_preserves_validation_order() {
 }
 
 #[test]
+fn reports_the_first_invalid_or_missing_directive_argument() {
+    for (source, expected) in [
+        ("(using)", HeaderError::ExpectedNor),
+        ("(namespace)", HeaderError::ExpectedNamespacePath),
+        ("(use)", HeaderError::ExpectedAbsolutePath),
+        ("(use ::a)", HeaderError::ExpectedName),
+        ("(export)", HeaderError::ExpectedName),
+    ] {
+        let closing = source.len() - 1;
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind: expected,
+                span: closing..closing
+            }),
+            "{source:?}",
+        );
+    }
+    for (source, kind, text) in [
+        ("(using NOR extra)", HeaderError::ExpectedNor, "NOR"),
+        (
+            "(use a (bad) extra)",
+            HeaderError::ExpectedAbsolutePath,
+            "a",
+        ),
+        ("(use ::a (bad) extra)", HeaderError::ExpectedName, "(bad)"),
+        (
+            "(use ::a alias (extra))",
+            HeaderError::UnexpectedArgument,
+            "(extra)",
+        ),
+        ("(export a (bad) b)", HeaderError::ExpectedName, "(bad)"),
+        (
+            "(namespace ::a (using))",
+            HeaderError::ExpectedNamespacePath,
+            "::a",
+        ),
+    ] {
+        let start = source.find(text).unwrap();
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: start..start + text.len()
+            }),
+            "{source:?}",
+        );
+    }
+}
+
+#[test]
 fn validates_routine_and_storage_signatures() {
     let source = concat!(
         "(func f (in (x (bits 0008)) plain) (out (y ::ns::Word))) ",

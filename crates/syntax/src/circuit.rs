@@ -231,68 +231,9 @@ fn read_header(
         .map_err(|(kind, span)| header_error(kind, span))?;
     let argument = index + 2;
     match head {
-        Head::Using => {
-            let nor = require_atom(
-                forms,
-                argument,
-                end,
-                closing,
-                HeaderError::ExpectedNor,
-                |kind| kind == AtomKind::Name,
-            )?;
-            if &source[nor.clone()] != "nor" {
-                return Err(header_error(HeaderError::ExpectedNor, nor));
-            }
-            require_end(forms, argument + 1, end)?;
-        }
-        Head::Namespace => {
-            require_atom(
-                forms,
-                argument,
-                end,
-                closing,
-                HeaderError::ExpectedNamespacePath,
-                |kind| matches!(kind, AtomKind::Name | AtomKind::RelativePath),
-            )?;
-        }
-        Head::Use => {
-            require_atom(
-                forms,
-                argument,
-                end,
-                closing,
-                HeaderError::ExpectedAbsolutePath,
-                |kind| kind == AtomKind::AbsolutePath,
-            )?;
-            require_atom(
-                forms,
-                argument + 1,
-                end,
-                closing,
-                HeaderError::ExpectedName,
-                |kind| kind == AtomKind::Name,
-            )?;
-            require_end(forms, argument + 2, end)?;
-        }
-        Head::Export => {
-            require_atom(
-                forms,
-                argument,
-                end,
-                closing,
-                HeaderError::ExpectedName,
-                |kind| kind == AtomKind::Name,
-            )?;
-            for item in argument + 1..end {
-                require_atom(
-                    forms,
-                    item,
-                    end,
-                    closing,
-                    HeaderError::ExpectedName,
-                    |kind| kind == AtomKind::Name,
-                )?;
-            }
+        Head::Using | Head::Namespace | Head::Use | Head::Export => {
+            validate_directive(source, forms, argument, end, closing, head)
+                .map_err(|(kind, span)| header_error(kind, span))?;
         }
         Head::Test => {
             require_atom(
@@ -1014,6 +955,208 @@ fn read_form_head(
         return Err((HeaderError::MisplacedHead(head), word_span.start..word_span.end));
     }
     Ok((head, end, closing))
+}
+
+/// 対象フォームの引数に許される字句種別と綴りを表す。
+pub open spec fn directive_word_matches(source: &str, form: Form, expected: HeaderError) -> bool {
+    let span = form_span(form);
+    &&& form is Atom
+    &&& match expected {
+        HeaderError::ExpectedNor => form->Atom_kind == AtomKind::Name
+            && source.spec_bytes()[span.start as int..span.end as int] == "nor".spec_bytes(),
+        HeaderError::ExpectedNamespacePath =>
+            form->Atom_kind == AtomKind::Name || form->Atom_kind == AtomKind::RelativePath,
+        HeaderError::ExpectedAbsolutePath => form->Atom_kind == AtomKind::AbsolutePath,
+        HeaderError::ExpectedName => form->Atom_kind == AtomKind::Name,
+        _ => false,
+    }
+}
+
+/// フォームの引数の範囲内に、指定された字句があることを表す。
+pub open spec fn directive_word_at(
+    source: &str, forms: Seq<Form>, index: int, end: int, expected: HeaderError,
+) -> bool {
+    0 <= index < end <= forms.len() && directive_word_matches(source, forms[index], expected)
+}
+
+/// 基底・別名・公開名の引数列と、名前空間の先頭パスの構文を定める。名前空間の配下は別の走査で検査する。
+pub open spec fn directive_arguments_match(
+    source: &str, forms: Seq<Form>, first: int, end: int, head: Head,
+) -> bool {
+    let name = HeaderError::ExpectedName;
+    match head {
+        Head::Using => end == first + 1
+            && directive_word_at(source, forms, first, end, HeaderError::ExpectedNor),
+        Head::Namespace => directive_word_at(source, forms, first, end, HeaderError::ExpectedNamespacePath),
+        Head::Use => end == first + 2
+            && directive_word_at(source, forms, first, end, HeaderError::ExpectedAbsolutePath)
+            && directive_word_at(source, forms, first + 1, end, name),
+        Head::Export => first < end && (forall|i: int| first <= i < end
+            ==> #[trigger] directive_word_at(source, forms, i, end, name)),
+        _ => false,
+    }
+}
+
+/// 引数があればその範囲、引数が欠けていれば閉じ括弧上の長さ0の範囲を表す。
+pub open spec fn directive_argument_error_span(
+    forms: Seq<Form>, index: int, end: int, closing: usize, span: Range<usize>,
+) -> bool {
+    if index == end {
+        span.start == closing && span.end == closing
+    } else {
+        0 <= index < end <= forms.len() && span == form_span(forms[index])
+    }
+}
+
+/// 対象フォームの引数を順に検査したとき、最初の違反が診断の種別と範囲に対応することを表す。
+pub open spec fn directive_error_evidence(
+    source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
+    kind: HeaderError, span: Range<usize>,
+) -> bool {
+    let nor = HeaderError::ExpectedNor;
+    let path = HeaderError::ExpectedAbsolutePath;
+    let name = HeaderError::ExpectedName;
+    let namespace_path = HeaderError::ExpectedNamespacePath;
+    &&& closing < source.spec_bytes().len()
+    &&& source.spec_bytes()[closing as int] == 41
+    &&& match head {
+        Head::Using =>
+            (kind == nor && !directive_word_at(source, forms, first, end, nor)
+                && directive_argument_error_span(forms, first, end, closing, span))
+            || (kind == HeaderError::UnexpectedArgument && first + 1 < end
+                && directive_word_at(source, forms, first, end, nor)
+                && span == form_span(forms[first + 1])),
+        Head::Namespace => kind == namespace_path
+            && !directive_word_at(source, forms, first, end, namespace_path)
+            && directive_argument_error_span(forms, first, end, closing, span),
+        Head::Use =>
+            (kind == path && !directive_word_at(source, forms, first, end, path)
+                && directive_argument_error_span(forms, first, end, closing, span))
+            || (directive_word_at(source, forms, first, end, path) && (
+                (kind == name && !directive_word_at(source, forms, first + 1, end, name)
+                    && directive_argument_error_span(forms, first + 1, end, closing, span))
+                || (kind == HeaderError::UnexpectedArgument && first + 2 < end
+                    && directive_word_at(source, forms, first + 1, end, name)
+                    && span == form_span(forms[first + 2])))),
+        Head::Export => kind == name && (exists|i: int| first <= i <= end
+            && (i < end || i == first)
+            && !#[trigger] directive_word_at(source, forms, i, end, name)
+            && directive_argument_error_span(forms, i, end, closing, span)
+            && (forall|j: int| first <= j < i ==> #[trigger] directive_word_at(source, forms, j, end, name))),
+        _ => false,
+    }
+}
+
+fn check_directive_word(
+    source: &str, forms: &[Form], index: usize, end: usize, closing: usize, expected: HeaderError,
+) -> (result: Result<(), (HeaderError, Range<usize>)>)
+    requires
+        index <= end <= forms@.len(),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        expected is ExpectedNor || expected is ExpectedNamespacePath
+            || expected is ExpectedAbsolutePath || expected is ExpectedName,
+    ensures
+        result.is_ok() == directive_word_at(source, forms@, index as int, end as int, expected),
+        result matches Err((kind, span)) ==> kind == expected
+            && directive_argument_error_span(forms@, index as int, end as int, closing, span),
+{
+    if index == end {
+        return Err((expected, closing..closing));
+    }
+    let form = &forms[index];
+    let Form::Atom { kind: atom_kind, span: word_span } = form else {
+        return Err((expected, form_span_exec(form)));
+    };
+    let accepted = match expected {
+        HeaderError::ExpectedNor => {
+            if !matches!(atom_kind, AtomKind::Name) {
+                false
+            } else {
+                proof { encode_utf8_valid_utf8(source@); }
+                assert(word_span.start < word_span.end <= source.spec_bytes().len()
+                    && is_char_boundary(source.spec_bytes(), word_span.start as int)
+                    && is_char_boundary(source.spec_bytes(), word_span.end as int)) by {
+                    reveal(form_spans_valid);
+                    assert(form_span(*form) == *word_span);
+                };
+                let word = source_span(source, word_span.start, word_span.end);
+                assert(word@ == "nor"@ <==> word.spec_bytes() == "nor".spec_bytes()) by {
+                    encode_utf8_decode_utf8(word@);
+                    encode_utf8_decode_utf8("nor"@);
+                };
+                word == "nor"
+            }
+        }
+        HeaderError::ExpectedNamespacePath => matches!(atom_kind, AtomKind::Name | AtomKind::RelativePath),
+        HeaderError::ExpectedAbsolutePath => matches!(atom_kind, AtomKind::AbsolutePath),
+        HeaderError::ExpectedName => matches!(atom_kind, AtomKind::Name),
+        _ => false,
+    };
+    if accepted { Ok(()) } else { Err((expected, word_span.start..word_span.end)) }
+}
+
+fn validate_directive(
+    source: &str, forms: &[Form], first: usize, end: usize, closing: usize, head: Head,
+) -> (result: Result<(), (HeaderError, Range<usize>)>)
+    requires
+        first <= end <= forms@.len(),
+        closing < source.spec_bytes().len(),
+        source.spec_bytes()[closing as int] == 41,
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        head is Using || head is Namespace || head is Use || head is Export,
+    ensures
+        result.is_ok() == directive_arguments_match(source, forms@, first as int, end as int, head),
+        result matches Err((kind, span)) ==>
+            directive_error_evidence(source, forms@, first as int, end as int, closing, head, kind, span),
+{
+    let after = match head {
+        Head::Using => {
+            check_directive_word(source, forms, first, end, closing, HeaderError::ExpectedNor)?;
+            first + 1
+        }
+        Head::Namespace => {
+            return check_directive_word(source, forms, first, end, closing, HeaderError::ExpectedNamespacePath);
+        }
+        Head::Use => {
+            check_directive_word(source, forms, first, end, closing, HeaderError::ExpectedAbsolutePath)?;
+            check_directive_word(source, forms, first + 1, end, closing, HeaderError::ExpectedName)?;
+            first + 2
+        }
+        Head::Export => {
+            check_directive_word(source, forms, first, end, closing, HeaderError::ExpectedName)?;
+            let mut index = first + 1;
+            while index < end
+                invariant
+                    first < index <= end <= forms@.len(),
+                    head == Head::Export,
+                    closing < source.spec_bytes().len(),
+                    source.spec_bytes()[closing as int] == 41,
+                    form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+                    forall|i: int| first <= i < index ==>
+                        #[trigger] directive_word_at(source, forms@, i, end as int, HeaderError::ExpectedName),
+                decreases end - index,
+            {
+                if let Err(error) = check_directive_word(
+                    source, forms, index, end, closing, HeaderError::ExpectedName,
+                ) {
+                    assert(exists|i: int| first <= i < end
+                        && !#[trigger] directive_word_at(source, forms@, i, end as int, HeaderError::ExpectedName)
+                        && directive_argument_error_span(forms@, i, end as int, closing, error.1)
+                        && (forall|j: int| first <= j < i ==> #[trigger]
+                            directive_word_at(source, forms@, j, end as int, HeaderError::ExpectedName)));
+                    return Err(error);
+                }
+                index += 1;
+            }
+            return Ok(());
+        }
+        _ => unreachable!(),
+    };
+    if after < end {
+        Err((HeaderError::UnexpectedArgument, form_span_exec(&forms[after])))
+    } else {
+        Ok(())
+    }
 }
 
 fn recognize_head(word: &str) -> (head: Option<Head>)
