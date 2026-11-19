@@ -10,7 +10,7 @@ use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::{
     encode_utf8_valid_utf8, is_char_boundary, is_char_boundary_iff_not_is_continuation_byte,
-    is_char_boundary_start_end_of_seq, is_continuation_byte, valid_utf8,
+    is_char_boundary_start_end_of_seq, is_continuation_byte, length_of_first_scalar, valid_utf8,
 };
 
 verus! {
@@ -1148,6 +1148,29 @@ spec fn string_error_kind(kind: ErrorKind) -> bool {
     kind is InvalidEscape || kind is NewlineInString || kind is UnterminatedString
 }
 
+spec fn string_error_site(bytes: Seq<u8>, start: int, error: Error) -> bool {
+    let at = error.span.start - start;
+    let end = error.span.end - start;
+    &&& bytes.len() > 0 && bytes[0] == 34
+    &&& 0 <= at < end <= bytes.len()
+    &&& match error.kind {
+        ErrorKind::InvalidEscape { opening } => {
+            &&& opening == start
+            &&& at > 0 && at + 1 < end
+            &&& bytes[at] == 92
+            &&& bytes[at + 1] != 34 && bytes[at + 1] != 92
+            &&& end == at + 1 + length_of_first_scalar(bytes[(at + 1)..])
+        },
+        ErrorKind::NewlineInString { opening } => {
+            &&& opening == start && at > 0
+            &&& end == at + 1
+            &&& (bytes[at] == 10 || bytes[at] == 13)
+        },
+        ErrorKind::UnterminatedString => at == 0 && end == bytes.len(),
+        _ => false,
+    }
+}
+
 fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
     requires
         input.spec_bytes().len() > 0,
@@ -1159,7 +1182,8 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         is_char_boundary(input.spec_bytes(), input.spec_bytes().len() - result.0.spec_bytes().len()),
         match result.1 {
             Some(error) => string_error_kind(error.kind)
-                && start <= error.span.start < error.span.end <= start + input.spec_bytes().len(),
+                && string_error_site(input.spec_bytes(), start as int, error)
+                && (error.kind is UnterminatedString ==> result.0.spec_bytes().len() == 0),
             None => true,
         },
 {
@@ -1169,14 +1193,17 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
     loop
         invariant
             length == input.spec_bytes().len(),
+            length > 0,
+            input.spec_bytes()[0] == 34,
             start + length <= usize::MAX,
             is_suffix(input.spec_bytes(), remaining.spec_bytes()),
             remaining.spec_bytes().len() < length,
             match error {
-                Some(error) => string_error_kind(error.kind)
-                    && start <= error.span.start < error.span.end <= start + length,
+                Some(error) => error.kind is InvalidEscape
+                    && string_error_site(input.spec_bytes(), start as int, error),
                 None => true,
             },
+        ensures remaining.spec_bytes().len() == 0,
         decreases remaining.spec_bytes().len(),
     {
         let ghost before = remaining.spec_bytes();
@@ -1184,9 +1211,11 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         proof { suffix_transitive(input.spec_bytes(), before, remaining.spec_bytes()); }
         let bytes = remaining.as_bytes();
         let position = start + (length - bytes.len());
+        let ghost relative = position - start;
         if bytes.len() == 0 {
             break;
         }
+        assert(input.spec_bytes()[relative] == bytes@[0]);
         match bytes[0] {
             b'"' => {
                 let tail = after_ascii(remaining);
@@ -1210,6 +1239,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 if escaped_bytes.len() == 0 {
                     break;
                 }
+                assert(escaped_bytes@ =~= input.spec_bytes()[(relative + 1)..]);
                 let escaped = escaped_bytes[0];
                 let (scalar, suffix) = split_first_scalar(remaining);
                 if !matches!(escaped, b'"' | b'\\') && error.is_none() {
