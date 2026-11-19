@@ -1,5 +1,6 @@
 //! プロジェクトに渡すソースの識別子と種別を扱う。
 
+mod basis;
 mod circuits;
 mod declarations;
 mod exports;
@@ -10,6 +11,9 @@ mod sources;
 mod use_aliases;
 mod use_targets;
 
+pub use basis::{CircuitBasisError, validate_circuit_basis};
+#[cfg(verus_only)]
+pub use basis::{basis_result_evidence, circuit_basis_valid};
 pub use circuits::{CircuitProject, CircuitProjectError, parse_circuit_project};
 #[cfg(verus_only)]
 pub use circuits::{circuit_project_accepts, circuit_project_error, parsed_circuit_matches};

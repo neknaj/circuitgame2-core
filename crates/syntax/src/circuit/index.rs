@@ -105,6 +105,25 @@ pub(super) proof fn namespace_entry_for(
     names::namespace_head_is_unique(source, forms[parent + 1], entries[i].head);
 }
 
+/// 基底指定の引数が元ソースの `nor` を指すことを示す。
+pub proof fn basis_entry_evidence(source: &str, forms: Seq<Form>, entries: Seq<Entry>, index: int)
+    requires circuit_index_matches(source, forms, entries),
+        0 <= index < entries.len(), entries[index].head is Using,
+    ensures entries[index].namespace is None, ({
+        let arg = entries[index].form + 2;
+        &&& 0 <= arg < forms.len()
+        &&& forms[arg] is Atom
+        &&& {
+            let span = form_span(forms[arg]);
+            source.spec_bytes()[span.start as int..span.end as int] == "nor".spec_bytes()
+        }
+    }),
+{
+    indexed_entry_evidence(source, forms, entries, index);
+    reveal(header_arguments_match);
+    reveal(directive_word_matches);
+}
+
 /// 索引に含まれる公開指定の引数と、所属名前空間のパスの位置を示す。
 pub proof fn export_entry_evidence(
     source: &str, forms: Seq<Form>, entries: Seq<Entry>, entry: int,

@@ -37,8 +37,8 @@ pub use expression_forest::{expression_reference_in_source, expression_source_re
 pub use index::index_headers;
 #[cfg(verus_only)]
 pub use index::{
-    circuit_index_matches, circuit_source_error, circuit_source_matches, export_entry_evidence,
-    indexed_location, use_entry_evidence,
+    basis_entry_evidence, circuit_index_matches, circuit_source_error, circuit_source_matches,
+    export_entry_evidence, indexed_location, use_entry_evidence,
 };
 pub use names::{NameSite, NamedCircuit, NamedForm, index_named_forms};
 #[cfg(verus_only)]
