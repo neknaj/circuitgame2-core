@@ -190,6 +190,86 @@ fn validates_routine_and_storage_signatures() {
 }
 
 #[test]
+fn validates_clause_shape_before_checking_values_and_extra_arguments() {
+    use circuitgame2_core::syntax::circuit::Clause;
+
+    for (source, kind, text) in [
+        (
+            "(memory m (data T) (address 1))",
+            HeaderError::ExpectedClause(Clause::Address),
+            "data",
+        ),
+        (
+            "(memory m (address 1) (data (wrong 1)))",
+            HeaderError::ExpectedClause(Clause::Bits),
+            "wrong",
+        ),
+        (
+            "(latch l (width -1 extra))",
+            HeaderError::ExpectedNatural,
+            "-1",
+        ),
+        (
+            "(latch l (width 0001 (extra)))",
+            HeaderError::UnexpectedArgument,
+            "(extra)",
+        ),
+        (
+            "(memory m (address 1) (data T (inner)) (outer))",
+            HeaderError::UnexpectedArgument,
+            "(inner)",
+        ),
+        (
+            "(memory m (address 1) (data (bits 2)) (outer))",
+            HeaderError::UnexpectedArgument,
+            "(outer)",
+        ),
+    ] {
+        let start = source.find(text).unwrap();
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: start..start + text.len()
+            }),
+            "{source:?}",
+        );
+    }
+
+    for (source, kind, closing_from_end) in [
+        ("(latch l)", HeaderError::ExpectedClause(Clause::Width), 1),
+        (
+            "(latch l ())",
+            HeaderError::ExpectedClause(Clause::Width),
+            2,
+        ),
+        (
+            "(memory m (address 1) (data))",
+            HeaderError::ExpectedType,
+            2,
+        ),
+        (
+            "(memory m (address 1) (data (bits)))",
+            HeaderError::ExpectedNatural,
+            3,
+        ),
+    ] {
+        let closing = source.len() - closing_from_end;
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: closing..closing
+            }),
+            "{source:?}",
+        );
+    }
+
+    let wide = format!("(memory m (address {}) (data ::T))", "9".repeat(96));
+    assert!(index_headers(&wide).is_ok());
+}
+
+#[test]
 fn reports_malformed_declaration_arguments() {
     use circuitgame2_core::syntax::circuit::Clause;
 

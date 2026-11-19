@@ -9,6 +9,18 @@ use crate::{
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
+
+mod clauses;
+#[cfg(verus_only)]
+pub use clauses::{
+    clause_fits_region, clause_spelling, clause_word_matches, named_clause_error_span,
+    named_clause_matches, natural_argument_at, natural_clause_error_evidence,
+    natural_clause_matches, reference_atom, storage_arguments_match, storage_error_evidence,
+    type_error_evidence, type_matches,
+};
+use clauses::{
+    is_reference, read_named_clause, read_natural_clause, read_type, validate_storage_arguments,
+};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
@@ -142,21 +154,6 @@ pub enum Clause {
 }
 
 } // verus!
-
-impl Clause {
-    fn spelling(self) -> &'static str {
-        match self {
-            Self::In => "in",
-            Self::Out => "out",
-            Self::Expect => "expect",
-            Self::Bits => "bits",
-            Self::Width => "width",
-            Self::Address => "address",
-            Self::Data => "data",
-            Self::At => "at",
-        }
-    }
-}
 
 /// S 式解析または回路フォームの構文検査で失敗した理由。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -399,11 +396,8 @@ fn declaration_signature(
             routine_body(source, forms, first_body, end, closing)?;
         }
         Head::ModulePart => routine_body(source, forms, argument, end, closing)?,
-        Head::Struct | Head::Latch => {
+        Head::Struct => {
             let mut field = natural_clause(source, forms, argument, end, closing, Clause::Width)?;
-            if head == Head::Latch {
-                return require_end(forms, field, end);
-            }
             while field < end {
                 let (field_end, field_close) =
                     list_at(forms, field, end, closing, HeaderError::ExpectedList)?;
@@ -414,13 +408,9 @@ fn declaration_signature(
                 field = field_end;
             }
         }
-        Head::Memory => {
-            let data = natural_clause(source, forms, argument, end, closing, Clause::Address)?;
-            let (data_end, data_close) =
-                named_clause(source, forms, data, end, closing, Clause::Data)?;
-            let next = type_at(source, forms, data + 2, data_end, data_close)?;
-            require_end(forms, next, data_end)?;
-            require_end(forms, data_end, end)?;
+        Head::Latch | Head::Memory => {
+            validate_storage_arguments(source, forms, argument, end, closing, head)
+                .map_err(|(kind, span)| header_error(kind, span))?;
         }
         _ => {}
     }
@@ -668,14 +658,7 @@ fn type_at(
     end: usize,
     closing: usize,
 ) -> Result<usize, CircuitFormError> {
-    if index >= end {
-        return Err(header_error(HeaderError::ExpectedType, closing..closing));
-    }
-    match &forms[index] {
-        Form::Atom { kind, .. } if is_reference(*kind) => Ok(index + 1),
-        Form::List { .. } => natural_clause(source, forms, index, end, closing, Clause::Bits),
-        form => Err(header_error(HeaderError::ExpectedType, span(form))),
-    }
+    read_type(source, forms, index, end, closing).map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn natural_clause(
@@ -686,10 +669,8 @@ fn natural_clause(
     closing: usize,
     clause: Clause,
 ) -> Result<usize, CircuitFormError> {
-    let (clause_end, clause_close) = named_clause(source, forms, index, end, closing, clause)?;
-    let next = natural_at(forms, index + 2, clause_end, clause_close)?;
-    require_end(forms, next, clause_end)?;
-    Ok(clause_end)
+    read_natural_clause(source, forms, index, end, closing, clause)
+        .map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn named_clause(
@@ -700,20 +681,8 @@ fn named_clause(
     closing: usize,
     clause: Clause,
 ) -> Result<(usize, usize), CircuitFormError> {
-    let expected = HeaderError::ExpectedClause(clause);
-    let (clause_end, clause_close) = list_at(forms, index, end, closing, expected)?;
-    let head = require_atom(
-        forms,
-        index + 1,
-        clause_end,
-        clause_close,
-        expected,
-        |kind| kind == AtomKind::Name,
-    )?;
-    if &source[head.clone()] != clause.spelling() {
-        return Err(header_error(expected, head));
-    }
-    Ok((clause_end, clause_close))
+    read_named_clause(source, forms, index, end, closing, clause)
+        .map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn list_at(
@@ -747,13 +716,6 @@ fn require_name(
         |kind| kind == AtomKind::Name,
     )?;
     Ok(())
-}
-
-fn is_reference(kind: AtomKind) -> bool {
-    matches!(
-        kind,
-        AtomKind::Name | AtomKind::RelativePath | AtomKind::AbsolutePath
-    )
 }
 
 fn require_atom(
