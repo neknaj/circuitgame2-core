@@ -29,7 +29,9 @@ pub closed spec fn bare_atom_kind(bytes: Seq<u8>) -> Option<AtomKind> {
 }
 
 pub(crate) fn classify(atom: &str) -> (result: Option<AtomKind>)
-    ensures result == bare_atom_kind(atom.spec_bytes()),
+    ensures
+        result == bare_atom_kind(atom.spec_bytes()),
+        result != Some(AtomKind::String),
 {
     let bytes = atom.as_bytes();
     if bytes.len() >= 2 && bytes[0] == b'#' && matches!(bytes[1], b'b' | b'x') {

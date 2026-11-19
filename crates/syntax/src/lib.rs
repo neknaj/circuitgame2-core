@@ -19,6 +19,7 @@ use vstd::string::StringSliceAdditionalSpecFns;
 use vstd::utf8::{
     encode_utf8_valid_utf8, is_char_boundary, is_char_boundary_iff_not_is_continuation_byte,
     is_char_boundary_start_end_of_seq, is_continuation_byte, length_of_first_scalar, valid_utf8,
+    valid_utf8_split,
 };
 
 verus! {
@@ -136,7 +137,7 @@ impl<'a> Lexer<'a> {
                         && self.cursor.source.spec_bytes()[segment.span.start as int] == 41)
                     &&& (segment.kind is Malformed ==> syntax_error_evidence(
                         self.cursor.source, segment.kind->Malformed_0))
-                    &&& (segment.kind is Atom ==> bare_form_matches(self.cursor.source,
+                    &&& (segment.kind is Atom ==> form_atom_matches(self.cursor.source,
                         Form::Atom { kind: segment.kind->Atom_0, span: segment.span }))
                     &&& next.needs_separator == segment.kind.is_atom()
                     &&& segment.missing_separator == (self.needs_separator && segment.kind.is_atom())
@@ -293,6 +294,17 @@ pub open spec fn bare_form_matches(source: &str, form: Form) -> bool {
     }
 }
 
+pub open spec fn form_atom_matches(source: &str, form: Form) -> bool {
+    &&& bare_form_matches(source, form)
+    &&& match form {
+        Form::Atom { kind: AtomKind::String, span } => {
+            &&& span.start < span.end <= source.spec_bytes().len()
+            &&& quoted_atom(source.spec_bytes()[span.start as int..span.end as int])
+        },
+        _ => true,
+    }
+}
+
 #[verifier::opaque]
 pub open spec fn form_spans_valid(source: &str, forms: Seq<Form>, consumed: int) -> bool {
     &&& 0 <= consumed <= source.spec_bytes().len()
@@ -302,7 +314,7 @@ pub open spec fn form_spans_valid(source: &str, forms: Seq<Form>, consumed: int)
         &&& is_char_boundary(source.spec_bytes(), span.start as int)
         &&& is_char_boundary(source.spec_bytes(), span.end as int)
         &&& (i > 0 ==> form_span(forms[i - 1]).start < span.start)
-        &&& bare_form_matches(source, forms[i])
+        &&& form_atom_matches(source, forms[i])
     }
 }
 
@@ -318,7 +330,7 @@ proof fn advance_form_spans(source: &str, forms: Seq<Form>, before: int, after: 
 proof fn append_form_span(source: &str, forms: Seq<Form>, form: Form, before: int, after: int)
     requires
         form_spans_valid(source, forms, before),
-        bare_form_matches(source, form),
+        form_atom_matches(source, form),
         before == form_span(form).start,
         before < form_span(form).end <= after <= source.spec_bytes().len(),
         is_char_boundary(source.spec_bytes(), before),
@@ -333,7 +345,7 @@ proof fn append_form_span(source: &str, forms: Seq<Form>, form: Form, before: in
         &&& is_char_boundary(source.spec_bytes(), span.start as int)
         &&& is_char_boundary(source.spec_bytes(), span.end as int)
         &&& (i > 0 ==> form_span(extended[i - 1]).start < span.start)
-        &&& bare_form_matches(source, extended[i])
+        &&& form_atom_matches(source, extended[i])
     } by {
         if i < forms.len() {
             assert(extended[i] == forms[i]);
@@ -364,7 +376,7 @@ proof fn close_form_span(source: &str, forms: Seq<Form>, updated: Seq<Form>, ind
         &&& is_char_boundary(source.spec_bytes(), span.start as int)
         &&& is_char_boundary(source.spec_bytes(), span.end as int)
         &&& (i > 0 ==> form_span(updated[i - 1]).start < span.start)
-        &&& bare_form_matches(source, updated[i])
+        &&& form_atom_matches(source, updated[i])
     } by {
         assert(form_span(updated[i]).start == form_span(forms[i]).start);
         if i > 0 {
@@ -1139,6 +1151,8 @@ impl<'a> SourceCursor<'a> {
                     &&& span.start < span.end
                     &&& span.end == next.position()
                     &&& span.end <= self.source.spec_bytes().len()
+                    &&& (kind is Quoted && kind->Quoted_0 is None
+                        ==> quoted_atom(self.source.spec_bytes()[span.start as int..span.end as int]))
                     &&& (kind is Quoted && kind->Quoted_0 is Some
                         ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0))
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
@@ -1175,6 +1189,10 @@ impl<'a> SourceCursor<'a> {
                     assert(string_error_opening(error.kind, error.span) == Some(start));
                 };
             }
+            if kind is Quoted && kind->Quoted_0 is None {
+                assert(self.remaining.spec_bytes()[..(end - start)]
+                    =~= self.source.spec_bytes()[start as int..end as int]);
+            }
             if kind is Bare {
                 assert(kind->Bare_0.spec_bytes() =~= self.remaining.spec_bytes()[..(end - start)]);
                 assert(kind->Bare_0.spec_bytes() =~= self.source.spec_bytes()[start as int..end as int]);
@@ -1209,6 +1227,7 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
             RawSegment::Close => input.spec_bytes()[0] == 41
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
+            RawSegment::Quoted(None) => quoted_atom(input.spec_bytes()[..input.spec_bytes().len() - result.1.spec_bytes().len()]),
             RawSegment::Quoted(Some(error)) => string_error_kind(error.kind)
                 && string_error_site(input.spec_bytes(), start as int, error),
             _ => true,
@@ -1263,6 +1282,42 @@ pub open spec fn string_error_site(bytes: Seq<u8>, start: int, error: Error) -> 
     }
 }
 
+spec fn string_body_piece(bytes: Seq<u8>) -> bool {
+    (forall|i: int| 0 <= i < bytes.len() ==> {
+        let byte = #[trigger] bytes[i];
+        byte != 34 && byte != 92 && byte != 10 && byte != 13
+    })
+        || (bytes.len() == 2 && bytes[0] == 92 && (bytes[1] == 34 || bytes[1] == 92))
+}
+
+spec fn string_body_pieces(pieces: Seq<Seq<u8>>) -> bool {
+    forall|i: int| 0 <= i < pieces.len() ==> string_body_piece(#[trigger] pieces[i])
+}
+
+pub closed spec fn quoted_atom(bytes: Seq<u8>) -> bool {
+    &&& valid_utf8(bytes)
+    &&& bytes.len() >= 2
+    &&& bytes[0] == 34
+    &&& bytes[bytes.len() - 1] == 34
+    &&& exists|pieces: Seq<Seq<u8>>| #[trigger] pieces.flatten() == bytes[1..bytes.len() - 1]
+        && string_body_pieces(pieces)
+}
+
+proof fn extend_body(bytes: Seq<u8>, pieces: Seq<Seq<u8>>, piece: Seq<u8>, from: int, to: int)
+    requires
+        1 <= from <= to <= bytes.len(),
+        string_body_pieces(pieces),
+        pieces.flatten() == bytes[1..from],
+        piece == bytes[from..to],
+        string_body_piece(piece),
+    ensures
+        string_body_pieces(pieces.push(piece)),
+        pieces.push(piece).flatten() == bytes[1..to],
+{
+    pieces.lemma_flatten_push(piece);
+    assert(pieces.flatten() + piece =~= bytes[1..to]);
+}
+
 fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
     requires
         input.spec_bytes().len() > 0,
@@ -1276,13 +1331,18 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             Some(error) => string_error_kind(error.kind)
                 && string_error_site(input.spec_bytes(), start as int, error)
                 && (error.kind is UnterminatedString ==> result.0.spec_bytes().len() == 0),
-            None => true,
+            None => quoted_atom(input.spec_bytes()[..input.spec_bytes().len() - result.0.spec_bytes().len()]),
         },
 {
     let length = input.as_bytes().len();
     let mut remaining = after_ascii(input);
     let mut error: Option<Error> = None;
+    let ghost mut pieces: Seq<Seq<u8>> = Seq::empty();
+    assert(pieces.flatten() =~= input.spec_bytes()[1..1]);
     loop
+        invariant_except_break
+            error.is_none() ==> string_body_pieces(pieces)
+                && pieces.flatten() == input.spec_bytes()[1..length - remaining.spec_bytes().len()],
         invariant
             length == input.spec_bytes().len(),
             length > 0,
@@ -1299,7 +1359,19 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         decreases remaining.spec_bytes().len(),
     {
         let ghost before = remaining.spec_bytes();
-        remaining = split_at_boundary(remaining, Boundary::StringSpecial).1;
+        let (_ordinary, rest) = split_at_boundary(remaining, Boundary::StringSpecial);
+        remaining = rest;
+        proof {
+            if error.is_none() {
+                let from = length - before.len();
+                let to = length - remaining.spec_bytes().len();
+                let piece = _ordinary.spec_bytes();
+                assert(piece =~= input.spec_bytes()[from..to]);
+                assert(string_body_piece(piece));
+                extend_body(input.spec_bytes(), pieces, piece, from, to);
+                pieces = pieces.push(piece);
+            }
+        }
         proof { suffix_transitive(input.spec_bytes(), before, remaining.spec_bytes()); }
         let bytes = remaining.as_bytes();
         let position = start + (length - bytes.len());
@@ -1312,7 +1384,19 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             b'"' => {
                 let tail = after_ascii(remaining);
                 proof { suffix_transitive(input.spec_bytes(), remaining.spec_bytes(), tail.spec_bytes()); }
-                proof { suffix_boundary(input, tail); }
+                proof {
+                    suffix_boundary(input, tail);
+                    if error.is_none() {
+                        encode_utf8_valid_utf8(input@);
+                        valid_utf8_split(input.spec_bytes(), relative + 1);
+                        let literal = input.spec_bytes()[..(relative + 1)];
+                        assert(literal[0] == 34 && literal[relative] == 34);
+                        assert(pieces.flatten() =~= literal[1..relative]);
+                        assert(exists|p: Seq<Seq<u8>>| #[trigger] p.flatten() == literal[1..relative]
+                            && string_body_pieces(p));
+                        assert(quoted_atom(literal));
+                    }
+                }
                 return (tail, error);
             }
             b'\r' | b'\n' => {
@@ -1342,7 +1426,17 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                     });
                 }
                 if !matches!(escaped, b'\r' | b'\n') {
-                    proof { suffix_transitive(input.spec_bytes(), remaining.spec_bytes(), suffix.spec_bytes()); }
+                    proof {
+                        suffix_transitive(input.spec_bytes(), remaining.spec_bytes(), suffix.spec_bytes());
+                        if error.is_none() {
+                            assert(escaped == 34 || escaped == 92);
+                            assert(scalar.spec_bytes().len() == 1);
+                            let piece = input.spec_bytes()[relative..relative + 2];
+                            assert(string_body_piece(piece));
+                            extend_body(input.spec_bytes(), pieces, piece, relative, relative + 2);
+                            pieces = pieces.push(piece);
+                        }
+                    }
                     remaining = suffix;
                 }
             }
