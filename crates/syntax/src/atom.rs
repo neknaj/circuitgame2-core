@@ -6,6 +6,8 @@ use crate::digits::{Radix, matches_digits};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
+#[cfg(verus_only)]
+use vstd::utf8::{encode_utf8_valid_utf8, is_char_boundary_iff_not_is_continuation_byte};
 
 verus! {
 
@@ -214,6 +216,126 @@ fn classify_path(atom: &str) -> (result: Option<AtomKind>)
         remaining = tail;
         qualified = true;
     }
+}
+
+/// 親パスと末尾の名前が、完全修飾名の元のバイト列を復元することを表す。
+pub closed spec fn absolute_path_parts(path: &str, parent: Option<&str>, name: &str) -> bool {
+    let bytes = path.spec_bytes();
+    &&& bare_atom_kind(bytes) == Some(AtomKind::AbsolutePath)
+    &&& name_component(name.spec_bytes())
+    &&& match parent {
+        None => name.spec_bytes() == bytes.skip(2),
+        Some(parent) => {
+            let prefix = parent.spec_bytes();
+            let separator = prefix.len() + 2;
+            &&& prefix.len() > 0
+            &&& separator + 2 < bytes.len()
+            &&& prefix == bytes[2..separator]
+            &&& colon_pair(bytes, separator as int)
+            &&& name.spec_bytes() == bytes.skip((separator + 2) as int)
+        },
+    }
+}
+
+spec fn last_colon_at(bytes: Seq<u8>, at: int) -> bool {
+    &&& -1 <= at < bytes.len()
+    &&& (at >= 0 ==> bytes[at] == b':')
+    &&& forall|later: int| at < later < bytes.len() ==> #[trigger] bytes[later] != b':'
+}
+
+fn last_colon(bytes: &[u8]) -> (found: Option<usize>)
+    ensures last_colon_at(bytes@, if let Some(index) = found { index as int } else { -1 }),
+{
+    let mut cursor = bytes.len();
+    while cursor > 0
+        invariant
+            cursor <= bytes@.len(),
+            forall|i: int| cursor <= i < bytes@.len() ==> #[trigger] bytes@[i] != b':',
+        decreases cursor,
+    {
+        cursor -= 1;
+        if bytes[cursor] == b':' {
+            return Some(cursor);
+        }
+    }
+    None
+}
+
+proof fn last_path_component(bytes: Seq<u8>, last: int)
+    requires path_body(bytes), last_colon_at(bytes, last),
+    ensures
+        if last < 0 {
+            name_component(bytes)
+        } else {
+            0 < last - 1 && colon_pair(bytes, last - 1)
+                && name_component(bytes.skip(last + 1))
+        },
+    decreases bytes.len(),
+{
+    reveal_with_fuel(path_body, 1);
+    let first = choose|first: int| first_colon(bytes, first);
+    path_body_at(bytes, first);
+    if first == bytes.len() {
+        assert(last == -1);
+        assert(bytes.take(first) =~= bytes);
+    } else {
+        assert(first + 1 <= last);
+        assert(first > 0);
+        let tail = bytes.skip(first + 2);
+        assert(tail =~= bytes[(first + 2)..]);
+        let at = last - first - 2;
+        assert(last_colon_at(tail, at)) by {
+            assert forall|i: int| at < i < tail.len() implies #[trigger] tail[i] != b':' by {
+                assert(tail[i] == bytes[i + first + 2]);
+            };
+        };
+        last_path_component(tail, at);
+        if at < 0 {
+            assert(last == first + 1);
+        } else {
+            assert(colon_pair(bytes, last - 1));
+            assert(tail.skip(at + 1) =~= bytes.skip(last + 1));
+        }
+    }
+}
+
+/// 完全修飾名を、先頭の `::` を除いた親パスと末尾の名前に分ける。
+///
+/// ルート直下の名前には親パスがない。字句規則に従う完全修飾名を受理する。
+pub fn split_absolute_path(path: &str) -> (result: Option<(Option<&str>, &str)>)
+    ensures
+        result.is_some() == (bare_atom_kind(path.spec_bytes()) == Some(AtomKind::AbsolutePath)),
+        result matches Some((parent, name)) ==> absolute_path_parts(path, parent, name),
+{
+    if !matches!(classify(path), Some(AtomKind::AbsolutePath)) {
+        return None;
+    }
+    assert(colon_pair(path.spec_bytes(), 0));
+    let body = after_ascii(after_ascii(path));
+    assert(body.spec_bytes() =~= path.spec_bytes().skip(2));
+    let Some(last) = last_colon(body.as_bytes()) else {
+        proof { last_path_component(body.spec_bytes(), -1); }
+        return Some((None, body));
+    };
+    proof { last_path_component(body.spec_bytes(), last as int); }
+    let separator = last - 1;
+    proof {
+        encode_utf8_valid_utf8(body@);
+        is_char_boundary_iff_not_is_continuation_byte(body.spec_bytes(), separator as int);
+    }
+    let (parent, tail) = body.split_at(separator);
+    let name = after_ascii(after_ascii(tail));
+    assert(absolute_path_parts(path, Some(parent), name)) by {
+        let offset = separator as int;
+        assert(parent.spec_bytes().len() == offset);
+        assert(name.spec_bytes() =~= body.spec_bytes().skip(last + 1));
+        assert(name_component(name.spec_bytes()));
+        assert(offset + 4 < path.spec_bytes().len());
+        assert(parent.spec_bytes() =~= path.spec_bytes()[2..offset + 2]);
+        assert(name.spec_bytes() =~= path.spec_bytes().skip(offset + 4));
+        assert(colon_pair(path.spec_bytes(), offset + 2));
+    };
+    Some((Some(parent), name))
 }
 
 } // verus!

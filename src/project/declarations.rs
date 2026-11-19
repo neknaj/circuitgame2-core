@@ -291,6 +291,22 @@ pub closed spec fn project_declares(project: &CircuitProject, key: NameKey) -> b
         }
 }
 
+pub(super) proof fn declaration_location_evidence(
+    table: &DeclarationTable, key: NameKey, source: &ProjectSource, form: &NamedForm,
+)
+    requires table.well_formed(), table.declaration_at(key, source, form),
+    ensures location_in_source(LocatedName { source, span: form.name.span }),
+{
+    let items = table.occurrences@;
+    let i = choose|i: int| 0 <= i < items.len() && {
+        let item = #[trigger] items[i];
+        &&& !(item.form.head is Namespace)
+        &&& *item.source == *source && *item.form == *form
+        &&& key_view(form_key(*item.form)) == key_view(key)
+    };
+    assert(name_in_source(items[i].source.text, items[i].form.name));
+}
+
 pub(super) proof fn declaration_key_equivalence(project: &CircuitProject, left: NameKey, right: NameKey)
     requires key_view(left) == key_view(right),
     ensures project_declares(project, left) <==> project_declares(project, right),

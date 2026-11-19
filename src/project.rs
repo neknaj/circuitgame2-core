@@ -5,6 +5,7 @@ mod declarations;
 mod exports;
 mod name_keys;
 mod path;
+mod resolution;
 mod sources;
 
 pub use circuits::{CircuitProject, CircuitProjectError, parse_circuit_project};
@@ -25,6 +26,9 @@ pub use name_keys::NameKey;
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
+pub use resolution::{AbsoluteResolutionError, AbsoluteTarget};
+#[cfg(verus_only)]
+pub use resolution::{absolute_resolution_evidence, declaration_visible_from};
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
