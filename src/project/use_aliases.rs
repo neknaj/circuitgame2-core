@@ -8,6 +8,7 @@ mod function_atoms;
 mod function_literals;
 mod function_types;
 mod function_wiring;
+mod local_signal_index;
 mod port_types;
 mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};

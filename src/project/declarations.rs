@@ -1,7 +1,7 @@
 //! 名前空間の導入箇所と独立宣言を集め、完全修飾名の衝突を検査する。
 
 mod collision_index;
-mod path_index;
+pub(super) mod path_index;
 
 #[cfg(verus_only)]
 use super::circuits::{name_in_source, parsed_name_span};

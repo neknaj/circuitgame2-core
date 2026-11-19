@@ -1,15 +1,15 @@
 //! 組み合わせ回路の右辺で使う信号を、入力または先行する定義に結び付ける。
 
-use super::function_drivers::{find_driver, name_location, typed_port_names};
+use super::function_drivers::{lookup_local_name, name_location};
+use super::local_signal_index::LocalSignalIndex;
 #[cfg(verus_only)]
-use super::function_drivers::{disjoint_input, is_location, names_match_ports, same_word};
+use super::function_drivers::{disjoint_input, is_location, names_match_ports, optional_local_index, same_word};
 #[cfg(verus_only)]
 use super::function_drivers::{expected_output_context, indexed_driver_site};
 use super::{DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver, UseAliases};
 use crate::project::circuits::read_indexed_atom;
 #[cfg(verus_only)]
 use crate::project::circuits::{name_in_source, parsed_circuit_matches, parsed_index_evidence};
-use crate::project::signatures::first_matching_name;
 use crate::project::{LocatedName, ProjectSource};
 #[cfg(verus_only)]
 use crate::project::location_in_source;
@@ -113,24 +113,24 @@ spec fn unavailable_signal(
 
 fn bind_signal<'p, 'a>(
     source: &'p ProjectSource<'a>, inputs: &[NameSite], definitions: &[DefinitionDriver],
-    current: usize, name: &NameSite,
+    current: usize, name: &NameSite, index: Option<&LocalSignalIndex>,
 ) -> (result: Result<OutputDriver, FuncSignalReason<'p, 'a>>)
     requires
         forall|i: int| 0 <= i < definitions@.len()
             ==> name_in_source(source.text, (#[trigger] definitions@[i]).name),
+        optional_local_index(index, inputs@, definitions@, definitions@.len() as int),
     ensures
         match result {
             Ok(driver) => local_binding(inputs@, definitions@, current, *name, driver),
             Err(reason) => unavailable_signal(source, inputs@, definitions@, current, *name, reason),
         },
 {
-    if let Some(i) = first_matching_name(inputs, inputs.len(), name.word) {
-        return Ok(OutputDriver::Input(i));
-    }
-    assert(disjoint_input(inputs@, *name));
-    let Some(i) = find_driver(definitions, definitions.len(), name.word) else {
-        return Err(FuncSignalReason::Undefined);
+    let i = match lookup_local_name(index, inputs, definitions, definitions.len(), name.word) {
+        Some(OutputDriver::Input(i)) => return Ok(OutputDriver::Input(i)),
+        Some(OutputDriver::Definition(i)) => i,
+        None => return Err(FuncSignalReason::Undefined),
     };
+    assert(disjoint_input(inputs@, *name));
     let driver = &definitions[i];
     if driver.definition < current {
         return Ok(OutputDriver::Definition(i));
@@ -206,11 +206,12 @@ spec fn signal_sequence_result(
 
 fn bind_signals<'p, 'a>(
     source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, entry: usize,
-    inputs: &[NameSite], definitions: &[DefinitionDriver],
+    inputs: &[NameSite], definitions: &[DefinitionDriver], index: Option<&LocalSignalIndex>,
 ) -> (result: Result<Vec<BoundFuncSignal<'p, 'a>>, FuncWiringError<'p, 'a>>)
     requires
         parsed_circuit_matches(*source, *parsed),
         entry < parsed.syntax.entries@.len(),
+        optional_local_index(index, inputs@, definitions@, definitions@.len() as int),
         forall|i: int| 0 <= i < definitions@.len()
             ==> name_in_source(source.text, (#[trigger] definitions@[i]).name),
     ensures signal_sequence_result(source, parsed, entry as int, inputs@, definitions@, result),
@@ -234,6 +235,7 @@ fn bind_signals<'p, 'a>(
     while current < frame.definitions.end
         invariant
             parsed_circuit_matches(*source, *parsed),
+            optional_local_index(index, inputs@, definitions@, definitions@.len() as int),
             model == parsed.build_model(),
             frame == &parsed.entry_ranges@[entry as int],
             entry < parsed.syntax.entries@.len(), entry < parsed.entry_ranges@.len(),
@@ -270,7 +272,7 @@ fn bind_signals<'p, 'a>(
         assert(name_in_source(source.text, name));
         assert(signal_site(source, parsed, entry as int, position as int, current, name));
         let site = name_location(source, &name);
-        let result = bind_signal(source, inputs, definitions, current, &name);
+        let result = bind_signal(source, inputs, definitions, current, &name, index);
         let driver = match result {
             Ok(driver) => driver,
             Err(reason) => {
@@ -422,10 +424,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.func_wiring_evidence(file, entry, max_width, result),
     {
-        let drivers = match self.check_func_drivers(file, entry, max_width) {
-            Ok(FuncDriverResult::NotFunc) => return Ok(FuncWiringResult::NotFunc),
-            Ok(FuncDriverResult::NeedsExpansion(site)) => return Ok(FuncWiringResult::NeedsExpansion(site)),
-            Ok(FuncDriverResult::Checked(drivers)) => drivers,
+        self.check_func_wiring_mode(file, entry, max_width, None)
+    }
+
+    fn check_func_wiring_mode(
+        &self, file: usize, entry: usize, max_width: u64, index_override: Option<bool>,
+    ) -> (result: Result<FuncWiringResult<'p, 'a>, FuncWiringError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures self.func_wiring_evidence(file, entry, max_width, result),
+    {
+        let (drivers, inputs, index) = match self.prepare_func_drivers(file, entry, max_width, index_override) {
+            Ok((FuncDriverResult::NotFunc, _, _)) => return Ok(FuncWiringResult::NotFunc),
+            Ok((FuncDriverResult::NeedsExpansion(site), _, _)) => return Ok(FuncWiringResult::NeedsExpansion(site)),
+            Ok((FuncDriverResult::Checked(drivers), inputs, index)) => (drivers, inputs, index),
             Err(error) => return Err(FuncWiringError::Driver(error)),
         };
         proof { self.checked_driver_sources(file, entry, max_width, drivers); }
@@ -436,8 +447,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(parsed_circuit_matches(*source, *parsed));
             parsed_index_evidence(*source, *parsed);
         }
-        let inputs = typed_port_names(source.text, parsed.syntax.forms.as_slice(), drivers.signature.inputs.as_slice());
-        let result = bind_signals(source, parsed, entry, inputs.as_slice(), drivers.definitions.as_slice());
+        let result = bind_signals(source, parsed, entry, inputs.as_slice(), drivers.definitions.as_slice(), index.as_ref());
         match result {
             Ok(signals) => Ok(FuncWiringResult::Checked(FuncWiring { drivers, signals })),
             Err(error) => Err(error),
@@ -446,3 +456,43 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use super::{FuncDriverError, FuncSignalReason, FuncWiringError, FuncWiringResult};
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+    use alloc::format;
+
+    #[test]
+    fn indexed_wiring_matches_linear_wiring_at_source_boundaries() {
+        for (source, expected) in [
+            ("(func f (in a) (out x) (def xy a))", &["MissingOutput"][..]),
+            ("(func f (in a) (out y) (def xy a) (def y x))", &["Undefined"][..]),
+            ("(func f (in a) (out x X xy) (def x a) (def X x) (def xy X))", &["Checked"][..]),
+            ("(func f (in a) (out a) (def x a) (def x a) (def a x))", &["MultipleDrivers"][..]),
+            ("(func f (in a) (out a) (def x y) (def y a))", &["ForwardReference"][..]),
+            ("(func f (in a) (out a) (def (x y) (pair a y)))", &["SelfReference"][..]),
+            ("(func a (in x) (out local) (def local x)) (func b (in) (out y) (def y local))", &["Checked", "Undefined"][..]),
+        ] {
+            let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 7, text: source }]).unwrap();
+            let targets = index_use_targets(&project).unwrap();
+            let aliases = check_use_aliases(&targets).unwrap();
+            assert_eq!(project.circuits()[0].syntax.entries.len(), expected.len());
+            for (entry, expected) in expected.iter().enumerate() {
+                let linear = aliases.check_func_wiring_mode(0, entry, 64, Some(false));
+                let indexed = aliases.check_func_wiring_mode(0, entry, 64, Some(true));
+                assert_eq!(format!("{linear:?}"), format!("{indexed:?}"), "{source}");
+                let outcome = match indexed {
+                    Ok(FuncWiringResult::Checked(_)) => "Checked",
+                    Err(FuncWiringError::Driver(FuncDriverError::MissingOutput(_))) => "MissingOutput",
+                    Err(FuncWiringError::Driver(FuncDriverError::MultipleDrivers { .. })) => "MultipleDrivers",
+                    Err(FuncWiringError::Signal { reason: FuncSignalReason::Undefined, .. }) => "Undefined",
+                    Err(FuncWiringError::Signal { reason: FuncSignalReason::ForwardReference(_), .. }) => "ForwardReference",
+                    Err(FuncWiringError::Signal { reason: FuncSignalReason::SelfReference(_), .. }) => "SelfReference",
+                    other => panic!("unexpected wiring outcome: {other:?}"),
+                };
+                assert_eq!(outcome, *expected, "{source}");
+            }
+        }
+    }
+}

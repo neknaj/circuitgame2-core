@@ -15,7 +15,7 @@ verus! {
 
 type Edge = (usize, u8);
 
-pub(super) struct PathIndex {
+pub(in crate::project) struct PathIndex {
     edges: BTreeMap<Edge, usize>,
     next: usize,
     paths: Ghost<Seq<Seq<u8>>>,
@@ -24,11 +24,11 @@ pub(super) struct PathIndex {
 
 // BTreeMap の検索・挿入と整数の比較には、固定版 vstd の標準ライブラリ契約を使う。
 impl PathIndex {
-    pub(super) closed spec fn paths(&self) -> Seq<Seq<u8>> {
+    pub(in crate::project) closed spec fn paths(&self) -> Seq<Seq<u8>> {
         self.paths@
     }
 
-    pub(super) closed spec fn valid(&self) -> bool {
+    pub(in crate::project) closed spec fn valid(&self) -> bool {
         &&& self.next == self.paths@.len()
         &&& self.parents@.len() == self.paths@.len()
         &&& self.next >= 1
@@ -48,7 +48,7 @@ impl PathIndex {
         }
     }
 
-    pub(super) fn new() -> (index: Self)
+    pub(in crate::project) fn new() -> (index: Self)
         ensures index.valid(), index.paths() == seq![Seq::<u8>::empty()],
     {
         let ghost initial = seq![Seq::<u8>::empty()];
@@ -56,9 +56,16 @@ impl PathIndex {
         Self { edges: BTreeMap::new(), next: 1, paths: Ghost(initial), parents: Ghost(root_parent) }
     }
 
-    pub(super) proof fn same_path(&self, first: int, second: int)
+    pub(in crate::project) proof fn same_path(&self, first: int, second: int)
         requires self.valid(), 0 <= first < self.paths().len(), 0 <= second < self.paths().len(),
         ensures self.paths()[first] == self.paths()[second] <==> first == second,
+    {
+        reveal(PathIndex::valid);
+    }
+
+    pub(in crate::project) proof fn empty_root(&self)
+        requires self.valid(),
+        ensures self.paths().len() >= 1, self.paths()[0] == Seq::<u8>::empty(),
     {
         reveal(PathIndex::valid);
     }
@@ -111,7 +118,7 @@ impl PathIndex {
         }
     }
 
-    fn follow(&self, parent: usize, bytes: &[u8]) -> (result: Option<usize>)
+    pub(in crate::project) fn follow(&self, parent: usize, bytes: &[u8]) -> (result: Option<usize>)
         requires self.valid(), parent < self.paths().len(),
         ensures
             result matches Some(node) ==> node < self.paths().len()
@@ -237,36 +244,49 @@ impl PathIndex {
         Some(child)
     }
 
-    pub(super) fn extend_bytes(&mut self, parent: usize, bytes: &[u8]) -> (child: Option<usize>)
+    pub(in crate::project) fn extend_bytes(&mut self, parent: usize, bytes: &[u8]) -> (child: Option<usize>)
         requires old(self).valid(), parent < old(self).paths().len(),
         ensures
             final(self).valid(),
-            child matches Some(child) ==> old(self).paths().is_prefix_of(final(self).paths())
-                && child < final(self).paths().len()
+            old(self).paths().is_prefix_of(final(self).paths()),
+            child matches Some(child) ==> child < final(self).paths().len()
                 && final(self).paths()[child as int] == old(self).paths()[parent as int] + bytes@,
             child.is_none() ==> final(self).paths().len() == usize::MAX,
     {
         let ghost initial = self.paths();
         let mut node = parent;
         let mut at = 0;
+        let mut exhausted = false;
         assert(bytes@.take(0) =~= Seq::<u8>::empty());
-        while at < bytes.len()
+        while at < bytes.len() && !exhausted
             invariant
                 self.valid(),
+                initial == old(self).paths(),
                 initial.is_prefix_of(self.paths()),
+                exhausted ==> self.paths().len() == usize::MAX,
                 parent < initial.len(),
                 node < self.paths().len(),
                 at <= bytes@.len(),
                 self.paths()[node as int] == initial[parent as int] + bytes@.take(at as int),
-            decreases bytes@.len() - at,
+            decreases bytes@.len() - at, if exhausted { 0int } else { 1int },
         {
-            let next = self.extend(node, bytes[at])?;
-            assert(bytes@.take(at as int).push(bytes@[at as int]) =~= bytes@.take(at + 1));
-            node = next;
-            at += 1;
+            match self.extend(node, bytes[at]) {
+                Some(next) => {
+                    assert(bytes@.take(at as int).push(bytes@[at as int]) =~= bytes@.take(at + 1));
+                    node = next;
+                    at += 1;
+                },
+                None => {
+                    exhausted = true;
+                },
+            }
         }
-        assert(bytes@.take(at as int) =~= bytes@);
-        Some(node)
+        if exhausted {
+            None
+        } else {
+            assert(bytes@.take(at as int) =~= bytes@);
+            Some(node)
+        }
     }
 
     pub(super) fn declaration(&mut self, key: NameKey) -> (node: Option<usize>)

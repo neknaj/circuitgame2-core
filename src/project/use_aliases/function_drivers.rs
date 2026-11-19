@@ -1,6 +1,7 @@
 //! 組み合わせ回路の明示的な定義から、信号と出力の駆動元を求める。
 
 use super::UseAliases;
+use super::local_signal_index::LocalSignalIndex;
 #[cfg(verus_only)]
 use super::port_types::typed_name_sites;
 use crate::project::circuits::read_indexed_atom;
@@ -314,6 +315,89 @@ pub(super) open spec fn disjoint_input(inputs: Seq<NameSite>, name: NameSite) ->
     forall|i: int| 0 <= i < inputs.len() ==> !same_word(#[trigger] inputs[i], name)
 }
 
+#[verifier::opaque]
+// 入力は同名の先頭を指す。検査を通った左辺はすべて登録し、索引に余分な名前がないことも示す。
+pub(super) open spec fn local_names_indexed(
+    index: &LocalSignalIndex, inputs: Seq<NameSite>, input_stop: int, defs: Seq<DefinitionDriver>, stop: int,
+) -> bool {
+    let map = index.bindings();
+    &&& index.valid()
+    &&& 0 <= input_stop <= inputs.len()
+    &&& 0 <= stop <= defs.len()
+    &&& forall|i: int| 0 <= i < input_stop ==> {
+        let key = (#[trigger] inputs[i]).word.spec_bytes();
+        map.contains_key(key) && (map[key] matches OutputDriver::Input(first) && first <= i)
+    }
+    &&& forall|i: int| 0 <= i < stop ==> {
+        let key = (#[trigger] defs[i]).name.word.spec_bytes();
+        map.contains_key(key) && map[key] == OutputDriver::Definition(i as usize)
+    }
+    &&& forall|key: Seq<u8>| #[trigger] map.contains_key(key) ==> match map[key] {
+        OutputDriver::Input(i) => i < input_stop && inputs[i as int].word.spec_bytes() == key,
+        OutputDriver::Definition(i) => i < stop && defs[i as int].name.word.spec_bytes() == key,
+    }
+}
+
+pub(super) open spec fn local_lookup_matches(
+    inputs: Seq<NameSite>, defs: Seq<DefinitionDriver>, stop: int, key: Seq<u8>, result: Option<OutputDriver>,
+) -> bool {
+    &&& match result {
+        Some(OutputDriver::Input(i)) => i < inputs.len() && inputs[i as int].word.spec_bytes() == key,
+        Some(OutputDriver::Definition(i)) => i < stop && defs[i as int].name.word.spec_bytes() == key,
+        None => true,
+    }
+    &&& forall|i: int| 0 <= i < inputs.len()
+        && (match result { Some(OutputDriver::Input(first)) => i < first, _ => true })
+        ==> (#[trigger] inputs[i]).word.spec_bytes() != key
+    &&& forall|i: int| 0 <= i < stop && (result is None
+        || (result matches Some(OutputDriver::Definition(first)) && i < first))
+        ==> (#[trigger] defs[i]).name.word.spec_bytes() != key
+}
+
+pub(super) open spec fn optional_local_index(
+    index: Option<&LocalSignalIndex>, inputs: Seq<NameSite>, defs: Seq<DefinitionDriver>, stop: int,
+) -> bool {
+    index matches Some(index) ==> local_names_indexed(index, inputs, inputs.len() as int, defs, stop)
+}
+
+/// 入力、先行する左辺の順に名前を探す。索引があれば同じ優先順で検索する。
+pub(super) fn lookup_local_name(
+    index: Option<&LocalSignalIndex>, inputs: &[NameSite], defs: &[DefinitionDriver], stop: usize, name: &str,
+) -> (found: Option<OutputDriver>)
+    requires stop <= defs@.len(), optional_local_index(index, inputs@, defs@, stop as int),
+    ensures local_lookup_matches(inputs@, defs@, stop as int, name.spec_bytes(), found),
+{
+    if let Some(index) = index {
+        proof { reveal(local_names_indexed); }
+        let found = index.lookup(name);
+        proof {
+            let key = name.spec_bytes();
+            assert forall|i: int| 0 <= i < inputs@.len()
+                && (match found { Some(OutputDriver::Input(first)) => i < first, _ => true })
+                implies (#[trigger] inputs@[i]).word.spec_bytes() != key by {
+                if inputs@[i].word.spec_bytes() == key {
+                    assert(index.bindings().contains_key(key));
+                }
+            };
+            assert forall|i: int| 0 <= i < stop && (found is None
+                || (found matches Some(OutputDriver::Definition(first)) && i < first))
+                implies (#[trigger] defs@[i]).name.word.spec_bytes() != key by {
+                if defs@[i].name.word.spec_bytes() == key {
+                    assert(index.bindings().contains_key(key));
+                }
+            };
+        }
+        found
+    } else if let Some(input) = first_matching_name(inputs, inputs.len(), name) {
+        Some(OutputDriver::Input(input))
+    } else {
+        match find_driver(defs, stop, name) {
+            Some(definition) => Some(OutputDriver::Definition(definition)),
+            None => None,
+        }
+    }
+}
+
 spec fn single_drivers_before(inputs: Seq<NameSite>, drivers: Seq<DefinitionDriver>, stop: int) -> bool {
     &&& forall|i: int| 0 <= i < stop ==> disjoint_input(inputs, (#[trigger] drivers[i]).name)
     &&& forall|i: int, j: int| 0 <= i < j < stop
@@ -341,17 +425,72 @@ spec fn drive_error(
         }
 }
 
+fn index_local_inputs(inputs: &[NameSite], enabled: bool) -> (result: Option<LocalSignalIndex>)
+    ensures result matches Some(index) ==> local_names_indexed(&index, inputs@, inputs@.len() as int, Seq::empty(), 0),
+{
+    if !enabled {
+        return None;
+    }
+    let mut index = LocalSignalIndex::new();
+    let mut i = 0;
+    proof { reveal(local_names_indexed); }
+    while i < inputs.len()
+        invariant
+            i <= inputs@.len(),
+            local_names_indexed(&index, inputs@, i as int, Seq::empty(), 0),
+        decreases inputs@.len() - i,
+    {
+        proof { reveal(local_names_indexed); }
+        let name = inputs[i].word;
+        let ghost before = index.bindings();
+        let Some(_previous) = index.insert_if_absent(name, OutputDriver::Input(i)) else {
+            return None;
+        };
+        proof {
+            reveal(local_names_indexed);
+            let key = name.spec_bytes();
+            assert forall|j: int| 0 <= j <= i implies {
+                let bytes = (#[trigger] inputs@[j]).word.spec_bytes();
+                index.bindings().contains_key(bytes)
+                    && (index.bindings()[bytes] matches OutputDriver::Input(first) && first <= j)
+            } by {
+                if j < i {
+                    assert(before.contains_key(inputs@[j].word.spec_bytes()));
+                }
+            };
+            assert forall|bytes: Seq<u8>| #[trigger] index.bindings().contains_key(bytes)
+                implies match index.bindings()[bytes] {
+                    OutputDriver::Input(j) => j <= i && inputs@[j as int].word.spec_bytes() == bytes,
+                    OutputDriver::Definition(_) => false,
+                } by {
+                if bytes != key || _previous is Some {
+                    assert(before.contains_key(bytes));
+                }
+            };
+        }
+        i += 1;
+    }
+    Some(index)
+}
+
 fn check_definitions<'p, 'a>(
-    source: &'p ProjectSource<'a>, inputs: &[NameSite], drivers: &[DefinitionDriver],
-) -> (result: Result<(), FuncDriverError<'p, 'a>>)
+    source: &'p ProjectSource<'a>, inputs: &[NameSite], drivers: &[DefinitionDriver], indexed: bool,
+) -> (result: Result<Option<LocalSignalIndex>, FuncDriverError<'p, 'a>>)
     requires
         forall|i: int| 0 <= i < inputs@.len() ==> name_in_source(source.text, #[trigger] inputs@[i]),
         forall|i: int| 0 <= i < drivers@.len() ==> name_in_source(source.text, (#[trigger] drivers@[i]).name),
     ensures match result {
-        Ok(()) => single_drivers_before(inputs@, drivers@, drivers@.len() as int),
+        Ok(index) => single_drivers_before(inputs@, drivers@, drivers@.len() as int)
+            && (index matches Some(index) ==> local_names_indexed(
+                &index, inputs@, inputs@.len() as int, drivers@, drivers@.len() as int)),
         Err(error) => drive_error(source, inputs@, drivers@, error),
     },
 {
+    let mut index = index_local_inputs(inputs, indexed);
+    proof {
+        reveal(local_names_indexed);
+        assert(index matches Some(names) ==> local_names_indexed(&names, inputs@, inputs@.len() as int, drivers@, 0));
+    }
     let mut at = 0;
     while at < drivers.len()
         invariant
@@ -359,29 +498,52 @@ fn check_definitions<'p, 'a>(
             forall|i: int| 0 <= i < inputs@.len() ==> name_in_source(source.text, #[trigger] inputs@[i]),
             forall|i: int| 0 <= i < drivers@.len() ==> name_in_source(source.text, (#[trigger] drivers@[i]).name),
             single_drivers_before(inputs@, drivers@, at as int),
+            index matches Some(names) ==> local_names_indexed(&names, inputs@, inputs@.len() as int, drivers@, at as int),
         decreases drivers@.len() - at,
     {
         let name = &drivers[at].name;
-        if let Some(input) = first_matching_name(inputs, inputs.len(), name.word) {
-            let error = FuncDriverError::DrivesInput {
-                target: name_location(source, name),
-                input: name_location(source, &inputs[input]),
+        let found = lookup_local_name(index.as_ref(), inputs, drivers, at, name.word);
+        if let Some(previous) = found {
+            let error = match previous {
+                OutputDriver::Input(input) => FuncDriverError::DrivesInput {
+                    target: name_location(source, name), input: name_location(source, &inputs[input]),
+                },
+                OutputDriver::Definition(first) => FuncDriverError::MultipleDrivers {
+                    later: name_location(source, name), first: name_location(source, &drivers[first].name),
+                },
             };
             assert(drive_error(source, inputs@, drivers@, error));
             return Err(error);
         }
-        assert(disjoint_input(inputs@, *name));
-        if let Some(first) = find_driver(drivers, at, name.word) {
-            let error = FuncDriverError::MultipleDrivers {
-                later: name_location(source, name),
-                first: name_location(source, &drivers[first].name),
-            };
-            assert(drive_error(source, inputs@, drivers@, error));
-            return Err(error);
+        if let Some(ref mut names) = index {
+            proof { reveal(local_names_indexed); }
+            let ghost before = names.bindings();
+            if names.insert_if_absent(name.word, OutputDriver::Definition(at)).is_some() {
+                proof {
+                    let key = name.word.spec_bytes();
+                    assert(!before.contains_key(key));
+                    assert forall|i: int| 0 <= i <= at implies {
+                        let bytes = (#[trigger] drivers@[i]).name.word.spec_bytes();
+                        names.bindings().contains_key(bytes) && names.bindings()[bytes] == OutputDriver::Definition(i as usize)
+                    } by {
+                        if i < at { assert(before.contains_key(drivers@[i].name.word.spec_bytes())); }
+                    };
+                    assert forall|bytes: Seq<u8>| #[trigger] names.bindings().contains_key(bytes)
+                        implies match names.bindings()[bytes] {
+                            OutputDriver::Input(i) => i < inputs@.len() && inputs@[i as int].word.spec_bytes() == bytes,
+                            OutputDriver::Definition(i) => i <= at && drivers@[i as int].name.word.spec_bytes() == bytes,
+                        } by {
+                        if bytes != key { assert(before.contains_key(bytes)); }
+                    };
+                }
+            } else {
+                // 現在の左辺まで重複検査を済ませているので、次の左辺から線形検索に戻れる。
+                index = None;
+            }
         }
         at += 1;
     }
-    Ok(())
+    Ok(index)
 }
 
 spec fn output_drivers_before(
@@ -412,9 +574,11 @@ spec fn missing_output_error(
 
 fn check_outputs<'p, 'a>(
     source: &'p ProjectSource<'a>, shared: &[Option<usize>], outputs: &[NameSite], definitions: &[DefinitionDriver],
+    _inputs: &[NameSite], index: Option<&LocalSignalIndex>,
 ) -> (result: Result<Vec<OutputDriver>, FuncDriverError<'p, 'a>>)
     requires
         shared@.len() == outputs@.len(),
+        optional_local_index(index, _inputs@, definitions@, definitions@.len() as int),
         forall|i: int| 0 <= i < outputs@.len() ==> name_in_source(source.text, #[trigger] outputs@[i]),
     ensures match result {
         Ok(drivers) => drivers@.len() == outputs@.len() && output_drivers_before(shared@, outputs@, definitions@, drivers@),
@@ -426,6 +590,7 @@ fn check_outputs<'p, 'a>(
     while at < outputs.len()
         invariant
             shared@.len() == outputs@.len(), at == drivers@.len() <= outputs@.len(),
+            optional_local_index(index, _inputs@, definitions@, definitions@.len() as int),
             forall|i: int| 0 <= i < outputs@.len() ==> name_in_source(source.text, #[trigger] outputs@[i]),
             output_drivers_before(shared@, outputs@, definitions@, drivers@),
         decreases outputs@.len() - at,
@@ -433,7 +598,7 @@ fn check_outputs<'p, 'a>(
         let name = &outputs[at];
         let driver = if let Some(input) = shared[at] {
             OutputDriver::Input(input)
-        } else if let Some(definition) = find_driver(definitions, definitions.len(), name.word) {
+        } else if let Some(definition) = lookup_output_definition(index, definitions, name.word, Ghost(_inputs@)) {
             OutputDriver::Definition(definition)
         } else {
             let error = FuncDriverError::MissingOutput(name_location(source, name));
@@ -444,6 +609,33 @@ fn check_outputs<'p, 'a>(
         at += 1;
     }
     Ok(drivers)
+}
+
+fn lookup_output_definition(
+    index: Option<&LocalSignalIndex>, defs: &[DefinitionDriver], name: &str, Ghost(inputs): Ghost<Seq<NameSite>>,
+) -> (found: Option<usize>)
+    requires optional_local_index(index, inputs, defs@, defs@.len() as int),
+    ensures
+        found matches Some(i) ==> i < defs@.len() && defs@[i as int].name.word.spec_bytes() == name.spec_bytes(),
+        found is None ==> forall|i: int| 0 <= i < defs@.len()
+            ==> (#[trigger] defs@[i]).name.word.spec_bytes() != name.spec_bytes(),
+{
+    let Some(index) = index else {
+        return find_driver(defs, defs.len(), name);
+    };
+    proof { reveal(local_names_indexed); }
+    let value = index.lookup(name);
+    if let Some(OutputDriver::Definition(i)) = value {
+        Some(i)
+    } else {
+        assert forall|i: int| 0 <= i < defs@.len()
+            implies (#[trigger] defs@[i]).name.word.spec_bytes() != name.spec_bytes() by {
+            if defs@[i].name.word.spec_bytes() == name.spec_bytes() {
+                assert(index.bindings().contains_key(name.spec_bytes()));
+            }
+        };
+        None
+    }
 }
 
 spec fn func_at(circuits: Seq<NamedBuildCircuit>, file: usize, entry: usize) -> bool {
@@ -606,12 +798,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.func_driver_evidence(file, entry, max_width, result),
     {
+        match self.prepare_func_drivers(file, entry, max_width, None) {
+            Ok((result, _, _)) => Ok(result),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn prepare_func_drivers(
+        &self, file: usize, entry: usize, max_width: u64, index_override: Option<bool>,
+    ) -> (prepared: Result<(FuncDriverResult<'p, 'a>, Vec<NameSite<'a>>, Option<LocalSignalIndex>), FuncDriverError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures match prepared {
+            Ok((result, inputs, index)) =>
+                self.func_driver_evidence(file, entry, max_width, Ok(result))
+                && (result matches FuncDriverResult::Checked(drivers) ==> {
+                    let project = self.targets.project_model();
+                    let source = &project.sources_model()[file as int];
+                    let parsed = &project.circuits_model()[file as int];
+                    &&& inputs@.len() == drivers.signature.inputs@.len()
+                    &&& names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs@)
+                    &&& (index matches Some(names) ==> local_names_indexed(
+                        &names, inputs@, inputs@.len() as int, drivers.definitions@, drivers.definitions@.len() as int))
+                }),
+            Err(error) => self.func_driver_evidence(file, entry, max_width, Err(error)),
+        },
+    {
         let project = self.targets.project();
         let circuits = project.circuits();
-        if file >= circuits.len() { return Ok(FuncDriverResult::NotFunc); }
+        if file >= circuits.len() { return Ok((FuncDriverResult::NotFunc, Vec::new(), None)); }
         let parsed = &circuits[file];
         if entry >= parsed.syntax.entries.len() || !matches!(parsed.syntax.entries[entry].head, Head::Func) {
-            return Ok(FuncDriverResult::NotFunc);
+            return Ok((FuncDriverResult::NotFunc, Vec::new(), None));
         }
         let signature = match self.resolve_routine_signature(file, entry, max_width) {
             Ok(Some(signature)) => signature,
@@ -632,22 +849,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if let Some(span) = expansion {
             let location = LocatedName { source, span };
             proof { located_name_evidence(location); }
-            return Ok(FuncDriverResult::NeedsExpansion(location));
+            return Ok((FuncDriverResult::NeedsExpansion(location), Vec::new(), None));
         }
         let inputs = typed_port_names(source.text, forms, signature.inputs.as_slice());
         let outputs = typed_port_names(source.text, forms, signature.outputs.as_slice());
         let definitions = collect_drivers(source.text, parsed, entry);
+        // 共通接頭辞の少ない名前でも索引が有利になった計測点を採用する。
+        const MIN_INDEXED_DEFINITIONS: usize = 1024;
+        let indexed = match index_override {
+            Some(enabled) => enabled,
+            None => definitions.len() >= MIN_INDEXED_DEFINITIONS,
+        };
         let ghost definitions_model = definitions@;
         let ghost signature_model = signature;
-        let result = match check_definitions(source, inputs.as_slice(), definitions.as_slice()) {
-            Err(error) => Err(error),
-            Ok(()) => match check_outputs(source, signature.output_inputs.as_slice(), outputs.as_slice(), definitions.as_slice()) {
-                Ok(outputs) => Ok(FuncDriverResult::Checked(FuncDrivers { signature, definitions, outputs })),
-                Err(error) => Err(error),
-            },
+        let index = match check_definitions(source, inputs.as_slice(), definitions.as_slice(), indexed) {
+            Ok(index) => index,
+            Err(error) => {
+                assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Err(error)));
+                return Err(error);
+            }
         };
-        assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, result));
-        result
+        let bound = match check_outputs(source, signature.output_inputs.as_slice(), outputs.as_slice(),
+            definitions.as_slice(), inputs.as_slice(), index.as_ref()) {
+            Ok(bound) => bound,
+            Err(error) => {
+                assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Err(error)));
+                return Err(error);
+            }
+        };
+        let result = FuncDriverResult::Checked(FuncDrivers { signature, definitions, outputs: bound });
+        assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Ok(result)));
+        Ok((result, inputs, index))
     }
 }
 
