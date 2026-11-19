@@ -2,7 +2,7 @@ use circuitgame2_core::syntax::circuit::{CircuitFormError, Head, HeaderError, in
 
 #[test]
 fn indexes_direct_headers_and_namespace_members() {
-    let source = "(using nor) (namespace lib::gates (use ::other alias) (export reset) (module reset (in) (out reset))) (test reset)";
+    let source = "(using nor) (namespace lib::gates (use ::other alias) (export reset) (module reset (in) (out reset))) (test reset (reset))";
     let indexed = index_headers(source).unwrap();
     let heads: Vec<_> = indexed
         .entries
@@ -70,7 +70,7 @@ fn validates_routine_and_storage_signatures() {
         "(module-part m) (latch l (width 0)) ",
         "(memory mem (address 16) (data (bits 8))) ",
         "(struct Pair (width 16) (lo (bits 8) (at 0)) (hi ns::Byte (at 8))) ",
-        "(test ::ns::f)"
+        "(test ::ns::f (case (in) (expect)))"
     );
     assert_eq!(index_headers(source).unwrap().entries.len(), 6);
 }
@@ -201,4 +201,112 @@ fn validates_deep_expressions_with_pending_siblings() {
         " 1)".repeat(depth),
     );
     assert_eq!(index_headers(&source).unwrap().entries.len(), 1);
+}
+
+#[test]
+fn accepts_test_cases_and_action_sequences() {
+    let source = concat!(
+        "(test ::gates::f ",
+        "(case (in 0 1 #b01 (as ::Word #xF)) (expect any (as Word 0) #b1)) ",
+        "(case (in) (expect))) ",
+        "(test device (reset) (drive) (drive (as n::Word 1)) (tick 0) (tick 0012) ",
+        "(expect any 0) (expect))",
+    );
+    assert_eq!(index_headers(source).unwrap().entries.len(), 2);
+}
+
+#[test]
+fn reports_test_syntax_errors_at_the_offending_element_or_insertion_point() {
+    use circuitgame2_core::syntax::circuit::Clause;
+
+    for (body, kind, text) in [
+        ("", HeaderError::ExpectedTestItem, ""),
+        (" reset", HeaderError::ExpectedTestItem, "reset"),
+        (" ()", HeaderError::ExpectedTestItem, ""),
+        (" (::reset)", HeaderError::ExpectedTestItem, "::reset"),
+        (" (Reset)", HeaderError::ExpectedTestItem, "Reset"),
+        (" (reset 0)", HeaderError::UnexpectedArgument, "0"),
+        (" (tick)", HeaderError::ExpectedNatural, ""),
+        (" (tick -1)", HeaderError::ExpectedNatural, "-1"),
+        (" (tick 0 1)", HeaderError::UnexpectedArgument, "1"),
+        (" (drive any)", HeaderError::ExpectedTestValue, "any"),
+        (" (drive 00)", HeaderError::ExpectedTestValue, "00"),
+        (" (drive x)", HeaderError::ExpectedTestValue, "x"),
+        (
+            " (expect ns::any)",
+            HeaderError::ExpectedTestValueOrAny,
+            "ns::any",
+        ),
+        (
+            " (expect (raw 1))",
+            HeaderError::ExpectedTestValueOrAny,
+            "raw",
+        ),
+        (
+            " (expect (as T any))",
+            HeaderError::ExpectedTestValue,
+            "any",
+        ),
+        (
+            " (expect (as T (as T 0)))",
+            HeaderError::ExpectedTestValue,
+            "(as T 0)",
+        ),
+        (" (drive (as 1 0))", HeaderError::ExpectedReference, "1"),
+        (" (drive (as T))", HeaderError::ExpectedTestValue, ""),
+        (" (drive (as T 1 0))", HeaderError::UnexpectedArgument, "0"),
+        (
+            " (case (expect) (in))",
+            HeaderError::ExpectedClause(Clause::In),
+            "expect",
+        ),
+        (
+            " (case (in any) (expect))",
+            HeaderError::ExpectedTestValue,
+            "any",
+        ),
+        (
+            " (case (in))",
+            HeaderError::ExpectedClause(Clause::Expect),
+            "",
+        ),
+        (
+            " (case (in) (expect) (in))",
+            HeaderError::UnexpectedArgument,
+            "(in)",
+        ),
+    ] {
+        let source = format!("(test f{body})");
+        let CircuitFormError::Header { kind: actual, span } = index_headers(&source).unwrap_err()
+        else {
+            panic!("expected test form error for {source:?}");
+        };
+        assert_eq!(actual, kind, "{source:?}");
+        assert_eq!(&source[span.clone()], text, "{source:?}");
+        if text.is_empty() {
+            assert_eq!(source.as_bytes()[span.start], b')', "{source:?}");
+        }
+    }
+}
+
+#[test]
+fn reports_both_heads_when_cases_and_actions_are_mixed() {
+    for (body, first, unexpected) in [
+        ("(case (in) (expect)) (tick)", "case", "tick"),
+        ("(reset) (drive) (case)", "reset", "case"),
+    ] {
+        let source = format!("(test f {body})");
+        let CircuitFormError::Header {
+            kind:
+                HeaderError::MixedTestItems {
+                    first_head: (start, end),
+                },
+            span,
+        } = index_headers(&source).unwrap_err()
+        else {
+            panic!("expected mixed test item error for {source:?}");
+        };
+        assert_eq!(&source[start..end], first);
+        assert_eq!(&source[span], unexpected);
+    }
 }

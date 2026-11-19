@@ -52,6 +52,10 @@ pub enum HeaderError {
     ExpectedBodyItem,
     ExpectedTarget,
     ExpectedExpression,
+    ExpectedTestItem,
+    MixedTestItems { first_head: (usize, usize) },
+    ExpectedTestValue,
+    ExpectedTestValueOrAny,
     ExpectedClause(Clause),
     UnexpectedArgument,
 }
@@ -60,6 +64,7 @@ pub enum HeaderError {
 pub enum Clause {
     In,
     Out,
+    Expect,
     Bits,
     Width,
     Address,
@@ -72,6 +77,7 @@ impl Clause {
         match self {
             Self::In => "in",
             Self::Out => "out",
+            Self::Expect => "expect",
             Self::Bits => "bits",
             Self::Width => "width",
             Self::Address => "address",
@@ -92,12 +98,13 @@ pub enum CircuitFormError {
 
 /// 回路フォームの宣言位置を構文木の添字で返す。
 ///
-/// 宣言のシグネチャと回路本体の構文を検査する。テスト本体の構文検査、名前解決、型と結線の検査は後続の処理に委ねる。
+/// 宣言のシグネチャ、回路本体、テスト本体の構文を検査する。名前解決、型と結線の検査は後続の処理に委ねる。
 ///
 /// # Errors
 ///
 /// 字句、S 式、検査対象の回路フォームに誤りがあれば、元入力の UTF-8 バイト範囲をエラーに含める。
 /// 回路フォームに必須の要素がなければ、挿入位置を長さ0の範囲で示す。
+/// テストで `case` と操作が混在すると、最初と種類が異なる項目の先頭語を主範囲とする。最初の項目についても先頭語の範囲をエラーに含める。
 pub fn index_headers(source: &str) -> Result<CircuitForms, CircuitFormError> {
     let forms = parse(source).map_err(CircuitFormError::Syntax)?;
     let mut entries = Vec::new();
@@ -230,6 +237,7 @@ fn read_header(
                 HeaderError::ExpectedReference,
                 is_reference,
             )?;
+            test_body(source, forms, argument + 1, end, closing)?;
         }
         Head::Func
         | Head::Module
@@ -242,6 +250,130 @@ fn read_header(
         }
     }
     Ok((head, end))
+}
+
+fn test_body(
+    source: &str,
+    forms: &[Form],
+    mut item: usize,
+    end: usize,
+    closing: usize,
+) -> Result<(), CircuitFormError> {
+    if item == end {
+        return Err(header_error(
+            HeaderError::ExpectedTestItem,
+            closing..closing,
+        ));
+    }
+
+    let mut first: Option<(TestHead, Range<usize>)> = None;
+    while item < end {
+        let expected = HeaderError::ExpectedTestItem;
+        let (item_end, item_close) = list_at(forms, item, end, closing, expected)?;
+        let name = require_atom(forms, item + 1, item_end, item_close, expected, |kind| {
+            kind == AtomKind::Name
+        })?;
+        let Some(head) = recognize_test_head(&source[name.clone()]) else {
+            return Err(header_error(expected, name));
+        };
+        if let Some((first_head, first_span)) = &first {
+            if !same_test_item_kind(*first_head, head) {
+                return Err(header_error(
+                    HeaderError::MixedTestItems {
+                        first_head: (first_span.start, first_span.end),
+                    },
+                    name,
+                ));
+            }
+        } else {
+            first = Some((head, name));
+        }
+
+        let argument = item + 2;
+        match head {
+            TestHead::Case => {
+                let (inputs_end, _) =
+                    named_clause(source, forms, argument, item_end, item_close, Clause::In)?;
+                test_values(source, forms, argument + 2, inputs_end, false)?;
+                let (expects_end, _) = named_clause(
+                    source,
+                    forms,
+                    inputs_end,
+                    item_end,
+                    item_close,
+                    Clause::Expect,
+                )?;
+                test_values(source, forms, inputs_end + 2, expects_end, true)?;
+                require_end(forms, expects_end, item_end)?;
+            }
+            TestHead::Reset => require_end(forms, argument, item_end)?,
+            TestHead::Drive => test_values(source, forms, argument, item_end, false)?,
+            TestHead::Tick => {
+                let next = natural_at(forms, argument, item_end, item_close)?;
+                require_end(forms, next, item_end)?;
+            }
+            TestHead::Expect => test_values(source, forms, argument, item_end, true)?,
+        }
+        item = item_end;
+    }
+
+    Ok(())
+}
+
+fn test_values(
+    source: &str,
+    forms: &[Form],
+    mut index: usize,
+    end: usize,
+    allow_any: bool,
+) -> Result<(), CircuitFormError> {
+    let expected = if allow_any {
+        HeaderError::ExpectedTestValueOrAny
+    } else {
+        HeaderError::ExpectedTestValue
+    };
+
+    while index < end {
+        index = match &forms[index] {
+            Form::Atom { kind, span } if test_atom(*kind, &source[span.clone()], allow_any) => {
+                index + 1
+            }
+            Form::List {
+                span: list_span,
+                end,
+            } => {
+                let closing = list_span.end - 1;
+                let head = require_atom(forms, index + 1, *end, closing, expected, |kind| {
+                    kind == AtomKind::Name
+                })?;
+                if recognize_expression_head(&source[head.clone()]) != Some(ExpressionHead::As) {
+                    return Err(header_error(expected, head));
+                }
+                require_atom(
+                    forms,
+                    index + 2,
+                    *end,
+                    closing,
+                    HeaderError::ExpectedReference,
+                    is_reference,
+                )?;
+                let value = index + 3;
+                let error = HeaderError::ExpectedTestValue;
+                if value >= *end {
+                    return Err(header_error(error, closing..closing));
+                }
+                match &forms[value] {
+                    Form::Atom { kind, span } if circuit_value(*kind, &source[span.clone()]) => {}
+                    form => return Err(header_error(error, span(form))),
+                }
+                require_end(forms, value + 1, *end)?;
+                *end
+            }
+            form => return Err(header_error(expected, span(form))),
+        };
+    }
+
+    Ok(())
 }
 
 fn declaration_signature(
@@ -772,16 +904,78 @@ fn recognize_expression_head(word: &str) -> (head: Option<ExpressionHead>)
     head
 }
 
-spec fn is_expression_atom(kind: AtomKind, word: &str) -> bool {
-    kind is Name || kind is Binary || kind is Hexadecimal
+#[derive(Clone, Copy)]
+enum TestHead {
+    Case,
+    Reset,
+    Drive,
+    Tick,
+    Expect,
+}
+
+spec fn test_head_spelling(head: TestHead) -> &'static str {
+    match head {
+        TestHead::Case => "case",
+        TestHead::Reset => "reset",
+        TestHead::Drive => "drive",
+        TestHead::Tick => "tick",
+        TestHead::Expect => "expect",
+    }
+}
+
+fn recognize_test_head(word: &str) -> (head: Option<TestHead>)
+    ensures
+        forall|candidate: TestHead| #[trigger] test_head_spelling(candidate)@ == word@
+            <==> head == Some(candidate),
+{
+    let head = if word == "case" { Some(TestHead::Case) }
+        else if word == "reset" { Some(TestHead::Reset) }
+        else if word == "drive" { Some(TestHead::Drive) }
+        else if word == "tick" { Some(TestHead::Tick) }
+        else if word == "expect" { Some(TestHead::Expect) }
+        else { None };
+    assert forall|candidate: TestHead| #[trigger] test_head_spelling(candidate)@ == word@
+        <==> head == Some(candidate) by {
+    };
+    head
+}
+
+fn same_test_item_kind(first: TestHead, next: TestHead) -> (same: bool)
+    ensures same == ((first is Case) == (next is Case)),
+{
+    matches!(first, TestHead::Case) == matches!(next, TestHead::Case)
+}
+
+spec fn is_circuit_value(kind: AtomKind, word: &str) -> bool {
+    kind is Binary || kind is Hexadecimal
         || (kind is Natural && (word@ == "0"@ || word@ == "1"@))
+}
+
+fn circuit_value(kind: AtomKind, word: &str) -> (accepted: bool)
+    ensures accepted == is_circuit_value(kind, word),
+{
+    matches!(kind, AtomKind::Binary | AtomKind::Hexadecimal)
+        || (matches!(kind, AtomKind::Natural) && (word == "0" || word == "1"))
+}
+
+spec fn is_expression_atom(kind: AtomKind, word: &str) -> bool {
+    kind is Name || is_circuit_value(kind, word)
 }
 
 fn expression_atom(kind: AtomKind, word: &str) -> (accepted: bool)
     ensures accepted == is_expression_atom(kind, word),
 {
-    matches!(kind, AtomKind::Name | AtomKind::Binary | AtomKind::Hexadecimal)
-        || (matches!(kind, AtomKind::Natural) && (word == "0" || word == "1"))
+    matches!(kind, AtomKind::Name) || circuit_value(kind, word)
+}
+
+spec fn is_test_atom(kind: AtomKind, word: &str, allow_any: bool) -> bool {
+    is_circuit_value(kind, word) || (allow_any && kind is Name && word@ == "any"@)
+}
+
+fn test_atom(kind: AtomKind, word: &str, allow_any: bool) -> (accepted: bool)
+    ensures accepted == is_test_atom(kind, word, allow_any),
+{
+    circuit_value(kind, word) || (allow_any && matches!(kind, AtomKind::Name) && word == "any")
 }
 
 } // verus!
