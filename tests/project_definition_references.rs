@@ -99,10 +99,16 @@ fn resolves_real_references_and_keeps_diagnostic_ranges() {
         Err(DefinitionReferenceError::Rejected { reason: DefinitionReferenceReason::WrongDeclaration { form, .. }, .. })
             if form.head == Head::Module
     ));
-    assert!(matches!(
-        aliases.resolve_definition_reference(0, main, 0, usize::MAX),
-        Err(DefinitionReferenceError::UnknownPosition)
-    ));
+    for (entry, definition, reference) in [
+        (usize::MAX, 0, 0),
+        (main, usize::MAX, 0),
+        (main, 0, usize::MAX),
+    ] {
+        assert!(matches!(
+            aliases.resolve_definition_reference(0, entry, definition, reference),
+            Err(DefinitionReferenceError::UnknownPosition)
+        ));
+    }
 }
 
 #[test]

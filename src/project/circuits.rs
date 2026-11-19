@@ -16,10 +16,10 @@ use super::{
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::circuit::NameSite;
-use crate::syntax::circuit::{CircuitFormError, NamedCircuit, index_named_forms};
+use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit, index_named_build_forms};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    circuit_index_matches, circuit_source_error, circuit_source_matches, definition_rows_match,
+    build_index_matches, circuit_index_matches, circuit_source_error, circuit_source_matches,
     name_site_matches, named_form_matches, named_forms_match,
 };
 #[cfg(verus_only)]
@@ -40,7 +40,7 @@ verus! {
 #[derive(Debug)]
 pub struct CircuitProject<'a> {
     sources: Vec<ProjectSource<'a>>,
-    circuits: Vec<NamedCircuit<'a>>,
+    circuits: Vec<NamedBuildCircuit<'a>>,
 }
 
 /// 回路プロジェクトの構文解析で失敗した理由。
@@ -69,14 +69,15 @@ pub enum CircuitProjectError<'a> {
 }
 
 /// 構文木と名前索引が、指定した回路ソースを解析した結果に対応することを表す。
-pub closed spec fn parsed_circuit_matches(source: ProjectSource, parsed: NamedCircuit) -> bool {
+pub closed spec fn parsed_circuit_matches(source: ProjectSource, parsed: NamedBuildCircuit) -> bool {
     &&& source.kind is Circuit
     &&& circuit_source_matches(source.text)
     &&& circuit_index_matches(source.text, parsed.syntax.forms@, parsed.syntax.entries@)
     &&& form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int)
     &&& named_forms_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
         parsed.names@, parsed.syntax.entries@.len() as int)
-    &&& definition_rows_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@, parsed.definitions_by_entry@)
+    &&& build_index_matches(source.text, parsed.build_model())
+    &&& parsed.entry_ranges@.len() == parsed.syntax.entries@.len()
 }
 
 spec fn circuit_inputs_before(inputs: Seq<SourceSnapshot>, stop: int) -> bool {
@@ -125,7 +126,7 @@ impl<'a> CircuitProject<'a> {
     }
 
     /// `sources()` と同じ順に並ぶ構文木と名前索引を返す。
-    pub fn circuits(&self) -> (circuits: &[NamedCircuit<'a>])
+    pub fn circuits(&self) -> (circuits: &[NamedBuildCircuit<'a>])
         ensures circuits@ == self.circuits_model(),
     {
         self.circuits.as_slice()
@@ -137,7 +138,7 @@ impl<'a> CircuitProject<'a> {
     }
 
     /// ソースの列に対応する構文木と名前索引の列を表す。
-    pub closed spec fn circuits_model(&self) -> Seq<NamedCircuit<'a>> {
+    pub closed spec fn circuits_model(&self) -> Seq<NamedBuildCircuit<'a>> {
         self.circuits@
     }
 
@@ -199,20 +200,20 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
     (prefix.split_at(start).1, start..end)
 }
 
-pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedCircuit)
+pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedBuildCircuit)
     requires parsed_circuit_matches(source, parsed),
     ensures
         circuit_index_matches(source.text, parsed.syntax.forms@, parsed.syntax.entries@),
         form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int),
         named_forms_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@, parsed.names@,
             parsed.syntax.entries@.len() as int),
-        definition_rows_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
-            parsed.definitions_by_entry@),
+        build_index_matches(source.text, parsed.build_model()),
+        parsed.entry_ranges@.len() == parsed.syntax.entries@.len(),
 {
 }
 
 pub(super) proof fn parsed_name_span(
-    source: ProjectSource, parsed: NamedCircuit, index: int,
+    source: ProjectSource, parsed: NamedBuildCircuit, index: int,
 )
     requires
         parsed_circuit_matches(source, parsed),
@@ -234,7 +235,7 @@ pub(super) proof fn parsed_name_span(
 }
 
 proof fn parsed_sources_cover_prefix(
-    inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, circuits: Seq<NamedCircuit>, count: int, stop: int,
+    inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, circuits: Seq<NamedBuildCircuit>, count: int, stop: int,
 )
     requires
         project_sources_match(inputs, sources),
@@ -280,7 +281,7 @@ pub fn parse_circuit_project<'a>(
         Ok(sources) => sources,
         Err(error) => return Err(CircuitProjectError::Sources(error)),
     };
-    let mut circuits: Vec<NamedCircuit> = Vec::new();
+    let mut circuits: Vec<NamedBuildCircuit> = Vec::new();
     let mut index = 0;
     while index < sources.len()
         invariant
@@ -298,7 +299,7 @@ pub fn parse_circuit_project<'a>(
             assert(!circuit_project_accepts(inputs@));
             return Err(CircuitProjectError::UnsupportedLanguage { id, revision: source.revision, kind: source.kind });
         }
-        let parsed = match index_named_forms(source.text) {
+        let parsed = match index_named_build_forms(source.text) {
             Ok(parsed) => parsed,
             Err(error) => {
                 let id = source.id.copy_for_diagnostic();

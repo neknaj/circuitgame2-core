@@ -164,7 +164,10 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
     ensures
         result.is_ok() <==> circuit_source_matches(source),
         match result {
-            Ok(index) => build_index_matches(source, index),
+            Ok(index) => build_index_matches(source, index)
+                && circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@)
+                && form_spans_valid(source, index.syntax.forms@, source.spec_bytes().len() as int)
+                && index.entry_ranges@.len() == index.syntax.entries@.len(),
             Err(error) => circuit_source_error(source, error),
         },
 {
@@ -177,6 +180,7 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
     };
     let mut rows = BuildRows::new();
     let entries = index_parsed_headers_into(source, forms.as_slice(), true, &mut rows)?;
+    proof { reveal(build_rows_match); }
     Ok(BuildCircuitIndex {
         syntax: CircuitForms { forms, entries },
         entry_ranges: rows.entry_ranges,

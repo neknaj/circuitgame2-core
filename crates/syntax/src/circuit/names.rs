@@ -41,6 +41,29 @@ pub struct NamedCircuit<'a> {
     pub definitions_by_entry: Vec<Vec<DefinitionReferences>>,
 }
 
+/// ビルドの構文・参照索引と、同じ構文木に対応する宣言名の一覧。
+#[derive(Debug)]
+pub struct NamedBuildCircuit<'a> {
+    /// フォームと厳格索引。名前と参照はこの構文木を指す。
+    pub syntax: CircuitForms,
+    /// 名前空間、独立した宣言、モジュール断片を入力順に並べた一覧。
+    pub names: Vec<NamedForm<'a>>,
+    /// 厳格索引の各項目に対応する、定義と参照の配列範囲。
+    pub entry_ranges: Vec<BuildEntryRanges>,
+    /// ファイルの定義を元ソース順に並べた配列。
+    pub definitions: Vec<BuildDefinition>,
+    /// 各定義の参照を元ソース順に連結した配列。
+    pub references: Vec<ExpressionReference>,
+}
+
+impl NamedBuildCircuit<'_> {
+    /// 名前一覧と構文木を共有するビルド索引の論理上の値を返す。
+    pub open spec fn build_model(&self) -> BuildCircuitIndex {
+        BuildCircuitIndex { syntax: self.syntax, entry_ranges: self.entry_ranges,
+            definitions: self.definitions, references: self.references }
+    }
+}
+
 /// 参照を囲む名前空間ブロックが名前索引にも含まれることを示す。
 pub proof fn indexed_namespace_name(
     source: &str, parsed: &NamedCircuit, form: int, parent: usize,
@@ -53,9 +76,20 @@ pub proof fn indexed_namespace_name(
     ensures exists|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]).form == parent
         && parsed.names@[i].head is Namespace && parsed.names@[i].block is None,
 {
-    let entries = parsed.syntax.entries@;
-    let forms = parsed.syntax.forms@;
-    let names = parsed.names@;
+    namespace_name_evidence(source, parsed.syntax.forms@, parsed.syntax.entries@, parsed.names@, form, parent);
+}
+
+/// 構文索引の所属と、元ソースから取り出した名前空間の名前を結び付ける。
+pub proof fn namespace_name_evidence(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, names: Seq<NamedForm>, form: int, parent: usize,
+)
+    requires
+        circuit_index_matches(source, forms, entries),
+        named_forms_match(source, forms, entries, names, entries.len() as int),
+        indexed_location(source, forms, form, Some(parent)),
+    ensures exists|i: int| 0 <= i < names.len() && (#[trigger] names[i]).form == parent
+        && names[i].head is Namespace && names[i].block is None,
+{
     super::index::namespace_entry_for(source, forms, entries, form, parent);
     let i = choose|i: int| 0 <= i < entries.len() && (#[trigger] entries[i]).form == parent
         && entries[i].head is Namespace && entries[i].namespace is None;
@@ -282,6 +316,46 @@ pub fn index_named_forms(source: &str) -> (result: Result<NamedCircuit<'_>, Circ
 {
     let syntax = index_headers(source)?;
     let definitions_by_entry = super::definitions::collect_definition_rows(source, &syntax);
+    let names = collect_named_forms(source, &syntax);
+    Ok(NamedCircuit { syntax, names, definitions_by_entry })
+}
+
+/// ビルド用の定義・参照配列と、名前解決に使う一覧を同じ構文木から作る。
+///
+/// # Errors
+///
+/// [`index_headers`] と同じ回路構文の診断を返す。
+pub fn index_named_build_forms(source: &str) -> (result: Result<NamedBuildCircuit<'_>, CircuitFormError>)
+    ensures
+        result.is_ok() <==> circuit_source_matches(source),
+        match result {
+            Ok(named) => build_index_matches(source, named.build_model())
+                && named.entry_ranges@.len() == named.syntax.entries@.len()
+                && circuit_index_matches(source, named.syntax.forms@, named.syntax.entries@)
+                && form_spans_valid(source, named.syntax.forms@, source.spec_bytes().len() as int)
+                && named_forms_match(source, named.syntax.forms@, named.syntax.entries@,
+                    named.names@, named.syntax.entries@.len() as int),
+            Err(error) => circuit_source_error(source, error),
+        },
+{
+    let built = index_build_forms(source)?;
+    let names = collect_named_forms(source, &built.syntax);
+    Ok(NamedBuildCircuit {
+        syntax: built.syntax,
+        names,
+        entry_ranges: built.entry_ranges,
+        definitions: built.definitions,
+        references: built.references,
+    })
+}
+
+fn collect_named_forms<'a>(source: &'a str, syntax: &CircuitForms) -> (names: Vec<NamedForm<'a>>)
+    requires
+        circuit_index_matches(source, syntax.forms@, syntax.entries@),
+        form_spans_valid(source, syntax.forms@, source.spec_bytes().len() as int),
+    ensures
+        named_forms_match(source, syntax.forms@, syntax.entries@, names@, syntax.entries@.len() as int),
+{
     let mut names: Vec<NamedForm> = Vec::new();
     let mut index = 0;
     let count = syntax.entries.len();
@@ -291,18 +365,17 @@ pub fn index_named_forms(source: &str) -> (result: Result<NamedCircuit<'_>, Circ
             index <= count == syntax.entries@.len(),
             circuit_index_matches(source, syntax.forms@, syntax.entries@),
             form_spans_valid(source, syntax.forms@, source.spec_bytes().len() as int),
-            circuit_source_matches(source),
             named_forms_match(source, syntax.forms@, syntax.entries@, names@, index as int),
         decreases count - index,
     {
-        let candidate = read_named_form(source, &syntax, index);
+        let candidate = read_named_form(source, syntax, index);
         proof { record_named_form(source, syntax.forms@, syntax.entries@, names@, index as int, candidate); }
         if let Some(named) = candidate {
             names.push(named);
         }
         index += 1;
     }
-    Ok(NamedCircuit { syntax, names, definitions_by_entry })
+    names
 }
 
 } // verus!

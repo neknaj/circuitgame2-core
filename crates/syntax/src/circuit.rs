@@ -50,10 +50,14 @@ pub use index::{
     basis_entry_evidence, circuit_index_matches, circuit_recovery_matches, circuit_source_error,
     circuit_source_matches, export_entry_evidence, indexed_location, use_entry_evidence,
 };
-pub use names::{NameSite, NamedCircuit, NamedForm, index_named_forms};
+pub use names::{
+    NameSite, NamedBuildCircuit, NamedCircuit, NamedForm, index_named_build_forms,
+    index_named_forms,
+};
 #[cfg(verus_only)]
 pub use names::{
     indexed_namespace_name, name_site_matches, named_form_matches, named_forms_match, named_head,
+    namespace_name_evidence,
 };
 #[cfg(verus_only)]
 pub use ports::{

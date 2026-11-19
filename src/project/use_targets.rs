@@ -14,7 +14,7 @@ use super::{
     absolute_resolution_evidence, export_error_evidence, export_table_matches, location_in_source,
     parsed_circuit_matches,
 };
-use crate::syntax::circuit::{Head, NameSite, NamedCircuit};
+use crate::syntax::circuit::{Head, NameSite, NamedBuildCircuit};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{name_site_matches, use_entry_evidence};
 #[cfg(verus_only)]
@@ -115,7 +115,7 @@ spec fn atom_site(source: &ProjectSource, site: NameSite) -> bool {
     &&& site.word.spec_bytes() == source.text.spec_bytes()[site.span.start as int..site.span.end as int]
 }
 
-spec fn indexed_site(source: &ProjectSource, parsed: &NamedCircuit, index: int, site: UseSite) -> bool {
+spec fn indexed_site(source: &ProjectSource, parsed: &NamedBuildCircuit, index: int, site: UseSite) -> bool {
     &&& 0 <= index < parsed.syntax.entries@.len()
     &&& {
         let item = parsed.syntax.entries@[index];
@@ -217,7 +217,7 @@ proof fn finish_file(
 }
 
 fn read_use<'p, 'a>(
-    source: &'p ProjectSource<'a>, parsed: &NamedCircuit, index: usize,
+    source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit, index: usize,
 ) -> (site: UseSite<'p, 'a>)
     requires
         parsed_circuit_matches(*source, *parsed),

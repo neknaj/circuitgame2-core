@@ -12,7 +12,8 @@ use crate::syntax::bare_atom_kind;
 use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite, NamedForm};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    definition_row_evidence, expression_reference_in_source, indexed_namespace_name,
+    NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence,
+    expression_reference_in_source, namespace_name_evidence,
 };
 use crate::syntax::{AtomKind, Form};
 use vstd::prelude::*;
@@ -20,6 +21,23 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
+
+pub(super) open spec fn definition_count(parsed: &NamedBuildCircuit, entry: int) -> int {
+    if 0 <= entry < parsed.entry_ranges@.len() {
+        let defs = parsed.entry_ranges@[entry].definitions;
+        defs.end - defs.start
+    } else { 0 }
+}
+
+pub(super) open spec fn reference_count(parsed: &NamedBuildCircuit, entry: int, definition: int) -> int {
+    if 0 <= entry < parsed.entry_ranges@.len() && 0 <= definition < definition_count(parsed, entry) {
+        let position = parsed.entry_ranges@[entry].definitions.start + definition;
+        if 0 <= position < parsed.definitions@.len() {
+            let refs = parsed.definitions@[position].references;
+            refs.end - refs.start
+        } else { 0 }
+    } else { 0 }
+}
 
 /// 定義の右辺で名前を参照した位置と、その用途。
 #[derive(Debug)]
@@ -289,10 +307,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let circuits = self.targets.project_model().circuits_model();
         &&& file < circuits.len()
         &&& {
-            let rows = circuits[file as int].definitions_by_entry@;
-            &&& entry < rows.len()
-            &&& definition < rows[entry as int]@.len()
-            &&& reference < rows[entry as int]@[definition as int].references@.len()
+            let parsed = &circuits[file as int];
+            &&& entry < parsed.entry_ranges@.len()
+            &&& definition < definition_count(parsed, entry as int)
+            &&& reference < reference_count(parsed, entry as int, definition as int)
         }
     }
 
@@ -316,7 +334,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& {
             let parsed = project.circuits_model()[file as int];
             let item = parsed.syntax.entries@[entry as int];
-            let reference = parsed.definitions_by_entry@[entry as int]@[definition as int].references@[reference as int];
+            let definition_index = parsed.entry_ranges@[entry as int].definitions.start + definition;
+            let ref_index = parsed.definitions@[definition_index].references.start + reference;
+            let reference = parsed.references@[ref_index];
             &&& expression_reference_in_source(site.source.text, parsed.syntax.forms@, reference)
             &&& site.owner == item.head && site.block == item.namespace && site.role == reference.kind
             &&& site.name.span == reference.span
@@ -351,7 +371,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// 定義の右辺にある回路名または型名を、その定義のスコープで解決する。
     ///
-    /// 添字はプロジェクトのファイル一覧と、各ファイルの厳格索引、定義一覧、参照一覧に対応する。
+    /// `file` はソース一覧、`entry` は各ファイルの厳格索引の添字。
+    /// `definition` は索引項目内、`reference` は定義内の相対添字。
     /// `nor` は無修飾の呼び出しで同名の束縛がない場合に選ぶ。基底の指定回数はプロジェクト全体の検査で扱う。
     ///
     /// # Errors
@@ -369,24 +390,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             return Err(DefinitionReferenceError::UnknownPosition);
         }
         let parsed = &circuits[file];
-        let rows = &parsed.definitions_by_entry;
-        if entry >= rows.len() || definition >= rows[entry].len()
-            || reference >= rows[entry][definition].references.len()
-        {
+        if entry >= parsed.entry_ranges.len() {
             return Err(DefinitionReferenceError::UnknownPosition);
         }
         let source = &project.sources()[file];
         proof {
             parsed_index_evidence(*source, *parsed);
-            definition_row_evidence(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
-                parsed.definitions_by_entry@, entry as int, definition as int);
+            build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
         }
+        let defs = &parsed.entry_ranges[entry].definitions;
+        if definition >= defs.end - defs.start {
+            return Err(DefinitionReferenceError::UnknownPosition);
+        }
+        let _definition_count = parsed.definitions.len();
+        assert(defs.start + definition < _definition_count);
+        let definition_index = defs.start + definition;
+        let refs = &parsed.definitions[definition_index].references;
+        proof {
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, definition_index as int);
+        }
+        if reference >= refs.end - refs.start {
+            return Err(DefinitionReferenceError::UnknownPosition);
+        }
+        let _reference_count = parsed.references.len();
+        assert(refs.start + reference < _reference_count);
         let owner = &parsed.syntax.entries[entry];
-        let indexed = &rows[entry][definition].references[reference];
+        let indexed = &parsed.references[refs.start + reference];
         let forms = &parsed.syntax.forms;
         proof {
             if let Some(parent) = owner.namespace {
-                indexed_namespace_name(source.text, parsed, owner.form as int, parent);
+                namespace_name_evidence(source.text, forms@, parsed.syntax.entries@, parsed.names@, owner.form as int, parent);
                 let i = choose|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]).form == parent
                     && parsed.names@[i].head is Namespace && parsed.names@[i].block is None;
                 assert(super::is_namespace_block(parsed.names@[i], parent));

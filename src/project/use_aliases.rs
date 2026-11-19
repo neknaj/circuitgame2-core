@@ -21,7 +21,7 @@ use super::{AbsoluteTarget, NameKey, ResolvedUse, UseTargets};
 use super::{DeclarationTable, absolute_resolution_evidence, direct_target_matches, same_target};
 #[cfg(verus_only)]
 use crate::syntax::circuit::NamedForm;
-use crate::syntax::circuit::{Head, NamedCircuit};
+use crate::syntax::circuit::{Head, NamedBuildCircuit};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -208,7 +208,7 @@ spec fn is_namespace_block(form: NamedForm, block: usize) -> bool {
     form.head is Namespace && form.form == block && form.block is None
 }
 
-fn find_namespace<'a>(parsed: &NamedCircuit<'a>, block: usize) -> (path: Option<&'a str>)
+fn find_namespace<'a>(parsed: &NamedBuildCircuit<'a>, block: usize) -> (path: Option<&'a str>)
     ensures match path {
         Some(path) => exists|i: int| 0 <= i < parsed.names@.len()
             && #[trigger] is_namespace_block(parsed.names@[i], block)

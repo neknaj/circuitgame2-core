@@ -1,5 +1,12 @@
 //! 構文索引の全定義参照をファイルと元ソースの順序で解決する。
 
+#[cfg(verus_only)]
+use super::definitions::{definition_count, reference_count};
+#[cfg(verus_only)]
+use crate::project::circuits::parsed_index_evidence;
+#[cfg(verus_only)]
+use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
+
 use super::{
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,
     ResolvedDefinitionReference, UseAliases,
@@ -144,7 +151,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => self.definition_batch_error_evidence(error),
         },
     {
-        let circuits = self.targets.project().circuits();
+        let project = self.targets.project();
+        let circuits = project.circuits();
         let mut found = Vec::new();
         let mut at = DefinitionPosition { file: 0, entry: 0, definition: 0, reference: 0 };
         assert(self.resolutions_before(at, found@)) by { reveal(UseAliases::resolutions_before); }
@@ -152,35 +160,46 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 self.can_resolve(),
                 circuits@ == self.targets.project_model().circuits_model(),
+                *project == self.targets.project_model(),
+                project.has_parsed_sources(),
                 at.file <= circuits@.len(),
                 at.file == circuits@.len() ==> at.entry == 0 && at.definition == 0 && at.reference == 0,
                 self.resolutions_before(at, found@),
             decreases
                 circuits@.len() - at.file,
-                if at.file < circuits@.len() { circuits@[at.file as int].definitions_by_entry@.len() - at.entry } else { 0 },
-                if at.file < circuits@.len() && at.entry < circuits@[at.file as int].definitions_by_entry@.len() {
-                    circuits@[at.file as int].definitions_by_entry@[at.entry as int]@.len() - at.definition
+                if at.file < circuits@.len() { circuits@[at.file as int].entry_ranges@.len() - at.entry } else { 0 },
+                if at.file < circuits@.len() && at.entry < circuits@[at.file as int].entry_ranges@.len() {
+                    definition_count(&circuits@[at.file as int], at.entry as int) - at.definition
                 } else { 0 },
                 if self.valid_reference(at) {
-                    circuits@[at.file as int].definitions_by_entry@[at.entry as int]@[at.definition as int].references@.len() - at.reference
+                    reference_count(&circuits@[at.file as int], at.entry as int, at.definition as int) - at.reference
                 } else { 0 },
         {
-            let rows = &circuits[at.file].definitions_by_entry;
-            if at.entry >= rows.len() {
+            let parsed = &circuits[at.file];
+            if at.entry >= parsed.entry_ranges.len() {
                 let next = DefinitionPosition { file: at.file + 1, entry: 0, definition: 0, reference: 0 };
                 proof { self.advance_empty(at, next, found@); }
                 at = next;
                 continue;
             }
-            let definitions = &rows[at.entry];
-            if at.definition >= definitions.len() {
+            let ghost source = project.sources_model()[at.file as int];
+            proof {
+                parsed_index_evidence(source, *parsed);
+                build_entry_ranges_evidence(source.text, &parsed.build_model(), at.entry as int);
+            }
+            let definitions = &parsed.entry_ranges[at.entry].definitions;
+            if at.definition >= definitions.end - definitions.start {
                 let next = DefinitionPosition { entry: at.entry + 1, definition: 0, reference: 0, ..at };
                 proof { self.advance_empty(at, next, found@); }
                 at = next;
                 continue;
             }
-            let references = &definitions[at.definition].references;
-            if at.reference >= references.len() {
+            let _definition_count = parsed.definitions.len();
+            assert(definitions.start + at.definition < _definition_count);
+            let position = definitions.start + at.definition;
+            let references = &parsed.definitions[position].references;
+            proof { build_definition_scope_evidence(source.text, &parsed.build_model(), at.entry as int, position as int); }
+            if at.reference >= references.end - references.start {
                 let next = DefinitionPosition { definition: at.definition + 1, reference: 0, ..at };
                 proof { self.advance_empty(at, next, found@); }
                 at = next;
