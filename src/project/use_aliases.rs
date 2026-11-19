@@ -8,7 +8,7 @@ mod function_wiring;
 mod port_types;
 mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
-pub use call_arity::{FuncCallArity, FuncCallTarget};
+pub use call_arity::{FuncArityError, FuncCallArity, FuncCallTarget};
 pub use definitions::{
     DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
     DefinitionReferenceSite, ResolvedDefinitionReference,

@@ -75,7 +75,7 @@ pub use use_aliases::{
     RelativeTarget, ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
     check_use_aliases,
 };
-pub use use_aliases::{FuncCallArity, FuncCallTarget};
+pub use use_aliases::{FuncArityError, FuncCallArity, FuncCallTarget};
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };

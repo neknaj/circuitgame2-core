@@ -298,6 +298,21 @@ fn bind_signals<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn checked_wiring_is_func(
+        &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiring,
+    )
+        requires self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(wiring))),
+        ensures ({
+            let project = self.targets.project_model();
+            let circuits = project.circuits_model();
+            &&& file < circuits.len() && file < project.sources_model().len()
+            &&& entry < circuits[file as int].syntax.entries@.len()
+            &&& circuits[file as int].syntax.entries@[entry as int].head is Func
+        }),
+    {
+        self.checked_driver_sources(file, entry, max_width, wiring.drivers);
+    }
+
     /// 束縛の結果または最初の診断が、同じ関数の駆動元と右辺の参照順に対応することを表す。
     pub closed spec fn func_wiring_evidence(
         &self, file: usize, entry: usize, max_width: u64,

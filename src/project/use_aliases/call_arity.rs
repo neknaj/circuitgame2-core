@@ -1,5 +1,8 @@
 //! 呼び出しを名前解決し、参照先の宣言から必要な入出力数を求める。
 
+mod checks;
+pub use checks::FuncArityError;
+
 use super::{DefinitionBinding, DefinitionReferenceError, UseAliases};
 #[cfg(verus_only)]
 use super::ResolvedDefinitionReference;
@@ -7,7 +10,7 @@ use super::ResolvedDefinitionReference;
 use crate::project::circuits::{parsed_index_evidence, parsed_circuit_matches};
 use crate::project::declarations::key_of;
 #[cfg(verus_only)]
-use crate::project::declarations::declaration_location_evidence;
+use crate::project::declarations::{declaration_location_evidence, located_name_evidence};
 use crate::project::{LocatedName, ProjectSource};
 #[cfg(verus_only)]
 use crate::project::{CircuitProject, location_in_source};
@@ -41,12 +44,17 @@ pub enum FuncCallTarget<'p, 'a> {
 }
 
 impl FuncCallTarget<'_, '_> {
-    /// 呼び出し先が受け取る入力と返す出力のポート数を返す。
-    pub fn ports(&self) -> (ports: RoutineArity)
-        ensures ports == match self {
+    /// 名前解決で選んだ参照先の入出力数を表す。
+    pub open spec fn port_counts(&self) -> RoutineArity {
+        match self {
             FuncCallTarget::Nor => RoutineArity { inputs: 2, outputs: 1 },
             FuncCallTarget::Function { arity, .. } => *arity,
-        },
+        }
+    }
+
+    /// 呼び出し先が受け取る入力と返す出力のポート数を返す。
+    pub fn ports(&self) -> (ports: RoutineArity)
+        ensures ports == self.port_counts(),
     {
         match self {
             Self::Nor => RoutineArity { inputs: 2, outputs: 1 },
@@ -110,6 +118,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             match result {
                 Ok(Some(call)) =>
                     *call.source == *source
+                        && call.call.form + 1 == indexed.form
+                        && location_in_source(LocatedName { source: call.source, span: call.call.span })
                         && call_shape_matches(source.text, parsed.syntax.forms@, row, indexed, Some(call.call))
                         && exists|resolved: ResolvedDefinitionReference|
                             #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
@@ -159,6 +169,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let position = row.references.start + reference;
         let shape = indexed_call_shape(source.text, parsed.syntax.forms.as_slice(), row, parsed.references.as_slice(), position);
         let Some(call) = shape else { return Ok(None); };
+        proof { located_name_evidence(LocatedName { source, span: call.span }); }
         assert(self.func_call_at(file, entry, definition, reference));
         let resolved = match self.resolve_definition_reference(file, entry, definition, reference) {
             Ok(resolved) => resolved,
