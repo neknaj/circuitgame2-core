@@ -7,7 +7,7 @@ use super::expression_forest::{
     expression_forest, expression_forest_error, expression_index_region,
     expression_reference_in_source, expression_references, expression_region,
 };
-use super::expression_forest::{inspect_expressions, validate_expressions};
+use super::expression_forest::{inspect_expressions, inspect_expressions_into};
 #[cfg(verus_only)]
 use super::expressions::{after_form, argument_error, argument_matches};
 use super::expressions::{check_argument, read_expression_form};
@@ -172,15 +172,16 @@ proof fn single_expression_region(forms: Seq<Form>, index: int, after: int)
     };
 }
 
-/// 本体項目の先頭語に応じて、残りの引数を検査する。
+/// 本体項目の残りの引数を検査し、定義なら右辺の範囲を返す。
 ///
 /// # Errors
 ///
 /// 引数の配置に違反があれば、その種別と UTF-8 バイト範囲を返す。
-/// 定義の引数がそろっている場合は、式内の最初の違反を返す。
-fn validate_body_arguments(
+/// 右辺の検査に失敗した場合、違反より前に収集した参照は配列の末尾に残る。
+fn inspect_body_arguments(
     source: &str, forms: &[Form], first: usize, end: usize, closing: usize, kind: BodyHead,
-) -> (result: Result<(), (HeaderError, Range<usize>)>)
+    collect: bool, references: &mut Vec<ExpressionReference>,
+) -> (result: Result<Option<Range<usize>>, (HeaderError, Range<usize>)>)
     requires
         first <= end <= forms@.len(),
         form_region_ends_at(forms@, first as int, end as int),
@@ -194,16 +195,30 @@ fn validate_body_arguments(
         result matches Err(error) ==> body_arguments_error(
             source, forms@, first as int, end as int, closing, kind, error,
         ),
+        final(references)@.len() >= old(references)@.len(),
+        final(references)@.take(old(references)@.len() as int) == old(references)@,
+        !collect ==> final(references)@ == old(references)@,
+        result matches Ok(None) ==> kind is Expand && final(references)@ == old(references)@,
+        result matches Ok(Some(rhs)) ==> kind is Def
+            && targets_match(forms@, first as int, end as int, rhs.start as int)
+            && rhs.start < rhs.end == end && after_form(forms@, rhs.start as int) == rhs.end
+            && expression_forest(source, forms@, rhs.start as int, rhs.end as int)
+            && (collect ==> final(references)@ == old(references)@
+                + expression_references(source, forms@, rhs.start as int, rhs.end as int)),
+        forall|i: int| old(references)@.len() <= i < final(references)@.len()
+            ==> expression_reference_in_source(source, forms@, #[trigger] final(references)@[i]),
 {
     if matches!(kind, BodyHead::Expand) {
-        return check_argument(forms, first, end, closing, HeaderError::ExpectedReference);
+        check_argument(forms, first, end, closing, HeaderError::ExpectedReference)?;
+        return Ok(None);
     }
     let value = read_targets(source, forms, first, end, closing)?;
     assert(targets_match(forms@, first as int, end as int, value as int));
     let after = read_expression_form(forms, first, value, end, closing)?;
     check_argument(forms, after, end, closing, HeaderError::UnexpectedArgument)?;
     proof { single_expression_region(forms@, value as int, after as int); }
-    validate_expressions(source, forms, value..after)
+    inspect_expressions_into(source, forms, value..after, collect, references)?;
+    Ok(Some(value..after))
 }
 
 /// 本体項目の先頭に、指定した綴りが無修飾の名前として現れることを表す。
@@ -321,7 +336,8 @@ fn read_body_item(
     assert(body_head_at(source, forms@, index + 1, end as int, kind));
     let first = index + 2;
     assert(form_region_ends_at(forms@, first as int, end as int));
-    validate_body_arguments(source, forms, first, end, closing, kind)?;
+    let mut references = Vec::new();
+    inspect_body_arguments(source, forms, first, end, closing, kind, false, &mut references)?;
     proof { node_end_is_following_direct_form(forms@, index as int, end as int); }
     Ok(end)
 }
@@ -602,3 +618,105 @@ pub(super) fn collect_definitions(
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_inspection_appends_references_to_the_shared_buffer() {
+        let source = "(def y (call x)) (expand ::macro (def y (ignore x))) (def (a b) (as ::lib::T (next x)))";
+        let forms = parse(source).unwrap();
+        let mut root = 0;
+        let mut references = Vec::new();
+        for (kind, expected) in [
+            (BodyHead::Def, 1),
+            (BodyHead::Expand, 1),
+            (BodyHead::Def, 3),
+        ] {
+            let Form::List { span, end } = &forms[root] else {
+                panic!("expected a body item");
+            };
+            let rhs = inspect_body_arguments(
+                source,
+                &forms,
+                root + 2,
+                *end,
+                span.end - 1,
+                kind,
+                true,
+                &mut references,
+            )
+            .unwrap();
+            if let Some(rhs) = rhs {
+                assert_eq!(rhs.end, *end);
+            }
+            assert_eq!(references.len(), expected);
+            root = *end;
+        }
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| &source[reference.span.clone()])
+                .collect::<Vec<_>>(),
+            ["call", "::lib::T", "next"]
+        );
+    }
+
+    #[test]
+    fn definition_inspection_rejects_extra_arguments_before_visiting_the_rhs() {
+        let source = "(def y (as T) extra)";
+        let forms = parse(source).unwrap();
+        let mut references = Vec::new();
+        let (kind, span) = inspect_body_arguments(
+            source,
+            &forms,
+            2,
+            forms.len(),
+            source.len() - 1,
+            BodyHead::Def,
+            true,
+            &mut references,
+        )
+        .unwrap_err();
+        assert_eq!(kind, HeaderError::UnexpectedArgument);
+        assert_eq!(&source[span], "extra");
+        assert!(references.is_empty());
+    }
+
+    #[test]
+    fn definition_inspection_preserves_the_prefix_when_a_nested_expression_fails() {
+        let source = "(def y (first x)) (def z (outer (as T)))";
+        let forms = parse(source).unwrap();
+        let Form::List { span, end } = &forms[0] else {
+            panic!("expected a definition list");
+        };
+        let mut references = Vec::new();
+        inspect_body_arguments(
+            source,
+            &forms,
+            2,
+            *end,
+            span.end - 1,
+            BodyHead::Def,
+            true,
+            &mut references,
+        )
+        .unwrap();
+        let (kind, _) = inspect_body_arguments(
+            source,
+            &forms,
+            *end + 2,
+            forms.len(),
+            source.len() - 1,
+            BodyHead::Def,
+            true,
+            &mut references,
+        )
+        .unwrap_err();
+        assert_eq!(kind, HeaderError::ExpectedExpression);
+        assert_eq!(&source[references[0].span.clone()], "first");
+        assert_eq!(&source[references[1].span.clone()], "outer");
+        assert_eq!(references.len(), 2);
+    }
+}

@@ -318,32 +318,6 @@ spec fn pending_expression_width(pending: Seq<Range<usize>>) -> nat
     else { (pending.last().end - pending.last().start) as nat + pending_expression_width(pending.drop_last()) }
 }
 
-/// 式列を左から調べ、リストの子式を処理してから後続の式に戻る。
-///
-/// # Errors
-///
-/// 有効な式の並びを構成できない場合は、違反の種別と入力上の範囲を返す。
-pub(super) fn validate_expressions(
-    source: &str, forms: &[Form], roots: Range<usize>,
-) -> (result: Result<(), (HeaderError, Range<usize>)>)
-    requires
-        expression_region(forms@, roots.start as int, roots.end as int),
-        complete_list_indices(forms@),
-        nested_list_indices(forms@),
-        list_source_delimiters(source, forms@, false),
-        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-    ensures
-        result.is_ok() <==> expression_forest(source, forms@, roots.start as int, roots.end as int),
-        forall|error: (HeaderError, Range<usize>)| #[trigger] expression_forest_error(
-            source, forms@, roots.start as int, roots.end as int, error,
-        ) <==> result == Err(error),
-{
-    match inspect_expressions(source, forms, roots, false) {
-        Ok(_) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 /// 入力全体を回路式の列として読み、呼び出し名と型参照を元ソース順で取り出す。
 ///
 /// 各添字は、同じ入力に [`parse`] を適用して得た構文木を指す。
@@ -415,13 +389,43 @@ pub(super) fn inspect_expressions(
             source, forms@, roots.start as int, roots.end as int, error,
         ) <==> result == Err(error),
 {
+    let mut references = Vec::new();
+    inspect_expressions_into(source, forms, roots, collect, &mut references)?;
+    Ok(references)
+}
+
+/// 式を検査し、収集を指定した場合は参照を既存の配列の末尾に加える。
+///
+/// # Errors
+///
+/// 最初の違反を返す。違反より前に加えた参照は配列に残る。
+pub(super) fn inspect_expressions_into(
+    source: &str, forms: &[Form], roots: Range<usize>, collect: bool,
+    references: &mut Vec<ExpressionReference>,
+) -> (result: Result<(), (HeaderError, Range<usize>)>)
+    requires expression_index_region(source, forms@, roots),
+    ensures
+        result.is_ok() <==> expression_forest(source, forms@, roots.start as int, roots.end as int),
+        !collect ==> final(references)@ == old(references)@,
+        collect && result.is_ok() ==>
+            final(references)@ == old(references)@
+                + expression_references(source, forms@, roots.start as int, roots.end as int),
+        final(references)@.len() >= old(references)@.len(),
+        final(references)@.take(old(references)@.len() as int) == old(references)@,
+        forall|i: int| old(references)@.len() <= i < final(references)@.len()
+            ==> expression_reference_in_source(source, forms@, #[trigger] final(references)@[i]),
+        forall|error: (HeaderError, Range<usize>)| #[trigger] expression_forest_error(
+            source, forms@, roots.start as int, roots.end as int, error,
+        ) <==> result == Err(error),
+{
     let mut sequence = roots.start..roots.end;
     let mut pending: Vec<Range<usize>> = Vec::new();
-    let mut references: Vec<ExpressionReference> = Vec::new();
+    let ghost initial = references@;
     proof { reveal(pending_references); }
     // 式を処理すると未処理区間の合計長が減る。空区間からの復帰では保留数が減る。
     while sequence.start < sequence.end || pending.len() > 0
         invariant
+            initial == old(references)@,
             complete_list_indices(forms@),
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, false),
@@ -438,8 +442,11 @@ pub(super) fn inspect_expressions(
             collect ==> references@
                 + expression_references(source, forms@, sequence.start as int, sequence.end as int)
                 + pending_references(source, forms@, pending@)
-                =~= expression_references(source, forms@, roots.start as int, roots.end as int),
-            forall|i: int| 0 <= i < references@.len()
+                =~= initial + expression_references(source, forms@, roots.start as int, roots.end as int),
+            !collect ==> references@ == initial,
+            initial.len() <= references@.len(),
+            references@.take(initial.len() as int) == initial,
+            forall|i: int| initial.len() <= i < references@.len()
                 ==> expression_reference_in_source(source, forms@, #[trigger] references@[i]),
         decreases pending_expression_width(pending@) + sequence.end - sequence.start, pending@.len(),
     {
@@ -458,7 +465,7 @@ pub(super) fn inspect_expressions(
             }
             let Some(next) = pending.pop() else {
                 proof { assert(false); }
-                return Ok(references);
+                return Ok(());
             };
             assert(before == pending@.push(next));
             assert(pending_references(source, forms@, before) ==
@@ -607,7 +614,7 @@ pub(super) fn inspect_expressions(
         !#[trigger] expression_forest_error(source, forms@, roots.start as int, roots.end as int, error) by {
         assert(!expression_work_error(source, forms@, sequence.start as int, sequence.end as int, pending@, error));
     };
-    Ok(references)
+    Ok(())
 }
 
 
