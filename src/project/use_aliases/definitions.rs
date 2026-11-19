@@ -285,7 +285,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    spec fn position_exists(&self, file: usize, entry: usize, definition: usize, reference: usize) -> bool {
+    pub(super) open spec fn position_exists(&self, file: usize, entry: usize, definition: usize, reference: usize) -> bool {
         let circuits = self.targets.project_model().circuits_model();
         &&& file < circuits.len()
         &&& {
@@ -337,6 +337,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.positioned_binding(file, entry, definition, reference, site, Err(reason)),
             Err(DefinitionReferenceError::UnknownPosition) => !self.position_exists(file, entry, definition, reference),
         }
+    }
+
+    pub(super) proof fn valid_position_is_not_unknown(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+    )
+        requires
+            self.position_exists(file, entry, definition, reference),
+            self.definition_resolution_evidence(file, entry, definition, reference, Err(DefinitionReferenceError::UnknownPosition)),
+        ensures false,
+    {
     }
 
     /// 定義の右辺にある回路名または型名を、その定義のスコープで解決する。

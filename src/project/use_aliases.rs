@@ -1,7 +1,9 @@
 //! 解決済みの `use` をスコープごとに照合し、別名の束縛と重複警告を求める。
 
+mod batch;
 mod definitions;
 mod relative;
+pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use definitions::{
     DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
     DefinitionReferenceSite, ResolvedDefinitionReference,
@@ -39,21 +41,50 @@ pub enum AliasDisposition {
 
 /// 別名に異なる対象を割り当てたときの診断。
 #[derive(Debug)]
-pub enum UseAliasConflict<'t, 'p, 'a> {
+pub enum AliasConflict<Directive, Target> {
     /// 同じスコープの二つの `use` が、同じ別名で異なる対象を指す。
     BetweenUses {
         /// 後から別名を指定した箇所と、その参照先。
-        later: &'t ResolvedUse<'p, 'a>,
+        later: Directive,
         /// 同じ別名を最初に指定した箇所と、その参照先。
-        first: &'t ResolvedUse<'p, 'a>,
+        first: Directive,
     },
     /// 別名と同じ名前の直接宣言または子名前空間が、異なる対象を指す。
     Direct {
         /// 衝突を起こした別名の指定と、その参照先。
-        directive: &'t ResolvedUse<'p, 'a>,
+        directive: Directive,
         /// 元から存在した宣言または子名前空間と、その位置。
-        existing: AbsoluteTarget<'p, 'a, 'a>,
+        existing: Target,
     },
+}
+
+/// 解決済み索引にある `use` を借用する衝突診断。
+pub type UseAliasConflict<'t, 'p, 'a> = AliasConflict<&'t ResolvedUse<'p, 'a>, AbsoluteTarget<'p, 'a, 'a>>;
+
+/// 一時的な解決済み索引から切り離した衝突診断。
+pub type OwnedUseAliasConflict<'p, 'a> = AliasConflict<ResolvedUse<'p, 'a>, AbsoluteTarget<'p, 'a, 'a>>;
+
+pub(super) open spec fn owned_conflict_matches(error: UseAliasConflict, owned: OwnedUseAliasConflict) -> bool {
+    match (error, owned) {
+        (AliasConflict::BetweenUses { later, first }, AliasConflict::BetweenUses { later: copy_later, first: copy_first }) =>
+            *later == copy_later && *first == copy_first,
+        (AliasConflict::Direct { directive, existing }, AliasConflict::Direct { directive: copy, existing: other }) =>
+            *directive == copy && existing == other,
+        _ => false,
+    }
+}
+
+pub(super) fn own_conflict<'t, 'p, 'a>(error: UseAliasConflict<'t, 'p, 'a>) -> (owned: OwnedUseAliasConflict<'p, 'a>)
+    ensures owned_conflict_matches(error, owned),
+{
+    match error {
+        AliasConflict::BetweenUses { later, first } => AliasConflict::BetweenUses {
+            later: later.copy_for_diagnostic(), first: first.copy_for_diagnostic(),
+        },
+        AliasConflict::Direct { directive, existing } => AliasConflict::Direct {
+            directive: directive.copy_for_diagnostic(), existing,
+        },
+    }
 }
 
 /// 解決済みの各 `use` に対応する別名の束縛と警告。
@@ -303,6 +334,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 束縛と重複警告の論理上の列を返す。
     pub closed spec fn dispositions_model(&self) -> Seq<AliasDisposition> {
         self.dispositions@
+    }
+
+    pub(super) fn into_dispositions(self) -> (dispositions: Vec<AliasDisposition>)
+        ensures dispositions@ == self.dispositions_model(),
+    {
+        self.dispositions
     }
 
     /// 名前の検索に使う宣言表と別名が、構文済みプロジェクトに対応することを表す。

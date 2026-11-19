@@ -52,6 +52,29 @@ pub struct ResolvedUse<'p, 'a> {
     pub(super) _entry: usize,
 }
 
+impl<'p, 'a> ResolvedUse<'p, 'a> {
+    /// 索引を借りずに返せる診断に、指定位置と参照先を写す。
+    pub(super) fn copy_for_diagnostic(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        let site = &self.site;
+        let target = match &self.target {
+            AbsoluteTarget::Declaration { source, form } => AbsoluteTarget::Declaration { source, form },
+            AbsoluteTarget::Namespace { key, introduced_at } => AbsoluteTarget::Namespace {
+                key: *key,
+                introduced_at: LocatedName {
+                    source: introduced_at.source,
+                    span: introduced_at.span.start..introduced_at.span.end,
+                },
+            },
+        };
+        let reference = NameSite { word: site.reference.word, span: site.reference.span.start..site.reference.span.end };
+        let alias = NameSite { word: site.alias.word, span: site.alias.span.start..site.alias.span.end };
+        let site = UseSite { source: site.source, block: site.block, namespace: site.namespace, reference, alias };
+        Self { site, target, _file: self._file, _entry: self._entry }
+    }
+}
+
 /// 参照先を解決した別名指定の一覧と、解決に使った公開表。
 #[derive(Debug)]
 pub struct UseTargets<'p, 'a> {

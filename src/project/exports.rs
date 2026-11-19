@@ -474,6 +474,13 @@ pub fn index_exports<'p, 'a>(
             names.push(site.key);
             assert(names@[previous.len() as int] == site.key);
         }
+        assert forall|i: int| 0 <= i < names@.len() implies #[trigger] indicated(project, names@[i])
+            && project_declares(project, names@[i]) by {
+            if i < previous.len() {
+                assert(names@[i] == previous[i]);
+                assert(indicated(project, previous[i]));
+            }
+        };
         assert(published(names@, site.key));
         assert forall|i: int| 0 <= i < index + 1 implies #[trigger] published(names@, sites@[i].key) by {
             if i < index {

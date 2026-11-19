@@ -1,5 +1,6 @@
 //! プロジェクトに渡すソースの識別子と種別を扱う。
 
+mod analysis;
 mod basis;
 mod circuits;
 mod declarations;
@@ -11,6 +12,11 @@ mod sources;
 mod use_aliases;
 mod use_targets;
 
+#[cfg(verus_only)]
+pub use analysis::definition_analysis_evidence;
+pub use analysis::{
+    DefinitionAnalysis, DefinitionAnalysisError, UseAliasReport, analyze_definitions,
+};
 pub use basis::{CircuitBasisError, validate_circuit_basis};
 #[cfg(verus_only)]
 pub use basis::{basis_result_evidence, circuit_basis_valid};
@@ -41,9 +47,10 @@ pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
 pub use use_aliases::{
-    AliasDisposition, DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
-    DefinitionReferenceSite, ReferenceScopeError, RelativeResolutionError, RelativeTarget,
-    ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
+    AliasConflict, AliasDisposition, DefinitionBatchError, DefinitionBinding, DefinitionPosition,
+    DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,
+    IndexedDefinitionBinding, OwnedUseAliasConflict, ReferenceScopeError, RelativeResolutionError,
+    RelativeTarget, ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
     check_use_aliases,
 };
 #[cfg(verus_only)]
