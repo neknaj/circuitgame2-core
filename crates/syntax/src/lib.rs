@@ -136,6 +136,8 @@ impl<'a> Lexer<'a> {
                         && self.cursor.source.spec_bytes()[segment.span.start as int] == 41)
                     &&& (segment.kind is Malformed ==> syntax_error_evidence(
                         self.cursor.source, segment.kind->Malformed_0))
+                    &&& (segment.kind is Atom ==> bare_form_matches(self.cursor.source,
+                        Form::Atom { kind: segment.kind->Atom_0, span: segment.span }))
                     &&& next.needs_separator == segment.kind.is_atom()
                     &&& segment.missing_separator == (self.needs_separator && segment.kind.is_atom())
                 },
@@ -281,6 +283,16 @@ pub open spec fn form_span(form: Form) -> Range<usize> {
     }
 }
 
+pub open spec fn bare_form_matches(source: &str, form: Form) -> bool {
+    match form {
+        Form::Atom { kind, span } => kind != AtomKind::String ==> (
+            span.start < span.end <= source.spec_bytes().len()
+            && bare_atom_kind(source.spec_bytes()[span.start as int..span.end as int]) == Some(kind)
+        ),
+        Form::List { .. } => true,
+    }
+}
+
 #[verifier::opaque]
 pub open spec fn form_spans_valid(source: &str, forms: Seq<Form>, consumed: int) -> bool {
     &&& 0 <= consumed <= source.spec_bytes().len()
@@ -290,6 +302,7 @@ pub open spec fn form_spans_valid(source: &str, forms: Seq<Form>, consumed: int)
         &&& is_char_boundary(source.spec_bytes(), span.start as int)
         &&& is_char_boundary(source.spec_bytes(), span.end as int)
         &&& (i > 0 ==> form_span(forms[i - 1]).start < span.start)
+        &&& bare_form_matches(source, forms[i])
     }
 }
 
@@ -305,6 +318,7 @@ proof fn advance_form_spans(source: &str, forms: Seq<Form>, before: int, after: 
 proof fn append_form_span(source: &str, forms: Seq<Form>, form: Form, before: int, after: int)
     requires
         form_spans_valid(source, forms, before),
+        bare_form_matches(source, form),
         before == form_span(form).start,
         before < form_span(form).end <= after <= source.spec_bytes().len(),
         is_char_boundary(source.spec_bytes(), before),
@@ -319,6 +333,7 @@ proof fn append_form_span(source: &str, forms: Seq<Form>, form: Form, before: in
         &&& is_char_boundary(source.spec_bytes(), span.start as int)
         &&& is_char_boundary(source.spec_bytes(), span.end as int)
         &&& (i > 0 ==> form_span(extended[i - 1]).start < span.start)
+        &&& bare_form_matches(source, extended[i])
     } by {
         if i < forms.len() {
             assert(extended[i] == forms[i]);
@@ -336,6 +351,7 @@ proof fn close_form_span(source: &str, forms: Seq<Form>, updated: Seq<Form>, ind
         updated.len() == forms.len(),
         before <= after <= source.spec_bytes().len(),
         is_char_boundary(source.spec_bytes(), after),
+        updated[index] is List,
         form_span(updated[index]).start == form_span(forms[index]).start,
         form_span(updated[index]).end == after,
         forall|i: int| 0 <= i < forms.len() && i != index ==> #[trigger] updated[i] == forms[i],
@@ -348,6 +364,7 @@ proof fn close_form_span(source: &str, forms: Seq<Form>, updated: Seq<Form>, ind
         &&& is_char_boundary(source.spec_bytes(), span.start as int)
         &&& is_char_boundary(source.spec_bytes(), span.end as int)
         &&& (i > 0 ==> form_span(updated[i - 1]).start < span.start)
+        &&& bare_form_matches(source, updated[i])
     } by {
         assert(form_span(updated[i]).start == form_span(forms[i]).start);
         if i > 0 {
