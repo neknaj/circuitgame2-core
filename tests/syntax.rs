@@ -66,6 +66,35 @@ fn requires_valid_complete_input() {
 }
 
 #[test]
+fn balances_only_parenthesis_tokens() {
+    for (source, count) in [
+        ("", 0),
+        (";", 0),
+        ("a(b)c", 4),
+        ("(; )\r\n)", 1),
+        (r#"("[)]")"#, 2),
+        ("a; 日\r\n\"b\"", 2),
+    ] {
+        assert_eq!(parse(source).unwrap().len(), count, "{source:?}");
+    }
+
+    assert_eq!(
+        parse(")(").unwrap_err(),
+        Error {
+            kind: ErrorKind::UnexpectedClose,
+            span: 0..1
+        },
+    );
+    assert_eq!(
+        parse(r#""a""b""#).unwrap_err(),
+        Error {
+            kind: ErrorKind::MissingSeparator,
+            span: 3..3
+        },
+    );
+}
+
+#[test]
 fn recovering_parser_matches_strict_on_valid_source() {
     use circuitgame2_core::syntax::parse_recovering;
     let source = "(namespace logic (func invert (in x) (out y)))\r\n(\"日\")";

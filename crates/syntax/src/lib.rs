@@ -9,7 +9,10 @@ mod digits;
 #[cfg(verus_only)]
 mod lexical;
 #[cfg(verus_only)]
-pub use lexical::{LexemeKind, lexeme_at};
+pub use lexical::{
+    InputDerivation, Lexeme, LexemeKind, input_lexeme_valid, lexeme_at, sexpr_input_derivation,
+    well_formed_sexpr,
+};
 #[cfg(verus_only)]
 mod projection;
 #[cfg(verus_only)]
@@ -329,6 +332,7 @@ pub struct Recovered {
 /// complete subtree. All source spans are half-open UTF-8 byte ranges.
 pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
     ensures
+        well_formed_sexpr(source) == result.is_ok(),
         match result {
             Ok(forms) => complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, false)
@@ -1587,10 +1591,72 @@ proof fn strict_prefix_close_list(
     append_represented_piece(source, after, spans, piece);
 }
 
+#[cfg(verus_only)]
+spec fn segment_parenthesis_delta(kind: SegmentKind) -> int {
+    match kind {
+        SegmentKind::Open => 1,
+        SegmentKind::Close => -1,
+        _ => 0,
+    }
+}
+
+#[cfg(verus_only)]
+proof fn follow_input_derivation(
+    bytes: Seq<u8>, witness: InputDerivation, i: int, position: int,
+    needs_separator: bool, depth: int, segment: Segment, next_needs_separator: bool,
+)
+    requires
+        lexical::input_progress(bytes, witness, i, position, needs_separator, depth),
+        position == segment.span.start < segment.span.end <= bytes.len(),
+        lexical_step_agrees(bytes, position, segment.span.end as int, segment_lexeme(segment.kind)),
+        segment.missing_separator == (needs_separator && segment.kind.is_atom()),
+        next_needs_separator == segment.kind.is_atom(),
+    ensures
+        !(segment.kind is Malformed),
+        !segment.missing_separator,
+        segment.kind is Close ==> depth > 0,
+        lexical::input_progress(bytes, witness, i + 1, segment.span.end as int, next_needs_separator,
+            depth + segment_parenthesis_delta(segment.kind)),
+{
+    let lexeme = lexical::input_next(bytes, witness, i, position, needs_separator, depth);
+    reveal(lexical_step_agrees);
+    assert(segment_lexeme(segment.kind) == Some(lexeme.kind));
+    assert(segment.kind.is_atom() == (lexeme.kind is Atom));
+    assert(segment_parenthesis_delta(segment.kind) == lexical::parenthesis_delta(lexeme.kind));
+}
+
+#[cfg(verus_only)]
+proof fn record_input_segment(
+    bytes: Seq<u8>, prefix: InputDerivation, segment: Segment,
+    needed_separator: bool, old_depth: int, next_needs_separator: bool, new_depth: int,
+) -> (next: InputDerivation)
+    requires
+        lexical::scanned_input_prefix(bytes, prefix, segment.span.start as int, needed_separator, old_depth),
+        lexical_step_agrees(bytes, segment.span.start as int, segment.span.end as int, segment_lexeme(segment.kind)),
+        !(segment.kind is Malformed),
+        !segment.missing_separator,
+        segment.missing_separator == (needed_separator && segment.kind.is_atom()),
+        next_needs_separator == segment.kind.is_atom(),
+        new_depth == old_depth + segment_parenthesis_delta(segment.kind),
+        new_depth >= 0,
+    ensures lexical::scanned_input_prefix(bytes, next, segment.span.end as int, next_needs_separator, new_depth),
+{
+    reveal(lexical_step_agrees);
+    let observed = segment_lexeme(segment.kind);
+    assert(observed is Some);
+    let kind = observed->Some_0;
+    assert(segment.kind.is_atom() == (kind is Atom));
+    assert(segment_parenthesis_delta(segment.kind) == lexical::parenthesis_delta(kind));
+    lexical::record_scanned_input(bytes, prefix,
+        Lexeme { start: segment.span.start as int, end: segment.span.end as int, kind },
+        needed_separator, old_depth)
+}
+
 #[verifier::rlimit(30)]
 fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>), Error>)
     ensures
-        recovering ==> result.is_ok(),
+        recovering || well_formed_sexpr(source) ==> result.is_ok(),
+        !recovering && result.is_ok() ==> well_formed_sexpr(source),
         match result {
             Ok((forms, repairs)) => inserted_closes_match(source, forms@, repairs@)
                 && repair_input_spans_valid(source, repairs@, source.spec_bytes().len() as int)
@@ -1607,7 +1673,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     let mut lexer = Lexer::new(source);
     let length = source.as_bytes().len();
     let ghost mut spans: Seq<(int, int)> = Seq::empty();
+    let ghost derivation;
+    let ghost mut input_prefix;
     proof {
+        input_prefix = lexical::empty_scanned_input(source.spec_bytes());
+        derivation = lexical::choose_input_derivation(source);
+        if derivation is Some {
+            lexical::input_starts(source.spec_bytes(), derivation->Some_0);
+        }
+
         encode_utf8_valid_utf8(source@);
         reveal(form_spans_valid);
         assert(form_spans_valid(source, forms@, 0));
@@ -1631,6 +1705,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
 
     loop
         invariant
+            derivation.is_some() == well_formed_sexpr(source),
+            derivation is Some ==> lexical::input_progress(source.spec_bytes(),
+                derivation->Some_0, spans.len() as int, lexer.cursor.position(),
+                lexer.needs_separator, open@.len() as int),
             lexer.cursor.source == source,
             lexer.cursor.valid(),
             length == source.spec_bytes().len(),
@@ -1638,6 +1716,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
             !recovering ==> strict_prefix_evidence(source, forms@, spans,
                 lexer.cursor.position(), lexer.needs_separator),
+            !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
+                lexer.cursor.position(), lexer.needs_separator, open@.len() as int),
             no_inserted_closes(repairs@),
             repair_input_spans_valid(source, repairs@, lexer.cursor.position()),
             form_spans_valid(source, forms@, lexer.cursor.position()),
@@ -1646,12 +1726,22 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, recovering),
             open_order(open@),
-        ensures !recovering ==> strict_source_covered(source, forms@),
+        ensures
+            !recovering ==> strict_source_covered(source, forms@),
+            well_formed_sexpr(source) ==> open@.len() == 0,
+            !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
         decreases length - lexer.cursor.position(),
     {
         let Some((segment, next)) = lexer.next_segment() else {
             proof {
+                if derivation is Some {
+                    lexical::input_ends(source.spec_bytes(), derivation->Some_0,
+                        spans.len() as int, lexer.needs_separator, open@.len() as int);
+                }
                 if !recovering {
+                    if open@.len() == 0 {
+                        lexical::seal_scanned_input(source, input_prefix, lexer.needs_separator);
+                    }
                     reveal(strict_prefix_evidence);
                     preorder_ranges_have_distinct_closes(source, forms@, length as int);
                     source_coverage_from_pieces(source, forms@, spans);
@@ -1659,6 +1749,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             }
             break;
         };
+        proof {
+            if derivation is Some {
+                follow_input_derivation(source.spec_bytes(), derivation->Some_0, spans.len() as int,
+                    lexer.cursor.position(), lexer.needs_separator, open@.len() as int,
+                    segment, next.needs_separator);
+            }
+        }
+        let ghost previous_open = open@.len();
+        let ghost scanned_segment = segment;
         let ghost previous_position = lexer.cursor.position();
         let ghost old_forms = forms@;
         let ghost previous_needs_separator = lexer.needs_separator;
@@ -1792,6 +1891,13 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             }
         }
         proof {
+            if derivation is Some || !recovering {
+                assert(open@.len() == previous_open + segment_parenthesis_delta(scanned_segment.kind));
+            }
+            if !recovering {
+                input_prefix = record_input_segment(source.spec_bytes(), input_prefix, scanned_segment,
+                    previous_needs_separator, previous_open as int, lexer.needs_separator, open@.len() as int);
+            }
             if repairs@ == repairs_before_segment {
                 repair_spans_advance(source, repairs@, previous_position, lexer.cursor.position());
             }
@@ -1803,6 +1909,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     while open.len() > 0
         invariant
             !recovering ==> strict_source_covered(source, forms@),
+            well_formed_sexpr(source) ==> open@.len() == 0,
+            !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
             length == source.spec_bytes().len(),
             is_char_boundary(source.spec_bytes(), length as int),
             form_spans_valid(source, forms@, length as int),

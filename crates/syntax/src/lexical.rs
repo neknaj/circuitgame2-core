@@ -3,6 +3,7 @@ use super::{
     trivia_extent,
 };
 use vstd::prelude::*;
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -100,6 +101,202 @@ pub(super) proof fn raw_bare_matches(
         assert(!bare_atom_delimiter(bytes[expected]));
     }
     kind->Atom_0
+}
+
+pub ghost struct Lexeme {
+    pub start: int,
+    pub end: int,
+    pub kind: LexemeKind,
+}
+
+pub ghost struct InputDerivation {
+    pub lexemes: Seq<Lexeme>,
+    pub depths: Seq<int>,
+}
+
+pub open spec fn parenthesis_delta(kind: LexemeKind) -> int {
+    match kind {
+        LexemeKind::Open => 1,
+        LexemeKind::Close => -1,
+        _ => 0,
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn input_lexeme_valid(bytes: Seq<u8>, witness: InputDerivation, i: int) -> bool {
+    let lexeme = witness.lexemes[i];
+    &&& lexeme_at(bytes, lexeme.start, lexeme.end, lexeme.kind)
+    &&& lexeme.start == if i == 0 { 0 } else { witness.lexemes[i - 1].end }
+    &&& (i > 0 && lexeme.kind is Atom ==> !(witness.lexemes[i - 1].kind is Atom))
+    &&& witness.depths[i + 1] == witness.depths[i] + parenthesis_delta(lexeme.kind)
+    &&& witness.depths[i + 1] >= 0
+}
+
+#[verifier::opaque]
+pub open spec fn sexpr_input_derivation(bytes: Seq<u8>, witness: InputDerivation) -> bool {
+    let lexemes = witness.lexemes;
+    let depths = witness.depths;
+    &&& depths.len() == lexemes.len() + 1
+    &&& depths[0] == 0
+    &&& depths[lexemes.len() as int] == 0
+    &&& (lexemes.len() == 0 ==> bytes.len() == 0)
+    &&& (lexemes.len() > 0 ==> lexemes[lexemes.len() - 1].end == bytes.len())
+    &&& forall|i: int| 0 <= i < lexemes.len() ==> #[trigger] input_lexeme_valid(bytes, witness, i)
+}
+
+#[verifier::opaque]
+pub open spec fn well_formed_sexpr(source: &str) -> bool {
+    exists|witness: InputDerivation| #[trigger] sexpr_input_derivation(source.spec_bytes(), witness)
+}
+
+pub(super) proof fn choose_input_derivation(source: &str) -> (witness: Option<InputDerivation>)
+    ensures
+        witness.is_some() == well_formed_sexpr(source),
+        witness is Some ==> sexpr_input_derivation(source.spec_bytes(), witness->Some_0),
+{
+    reveal(well_formed_sexpr);
+    let bytes = source.spec_bytes();
+    if exists|witness: InputDerivation| #[trigger] sexpr_input_derivation(bytes, witness) {
+        Some(choose|witness: InputDerivation| #[trigger] sexpr_input_derivation(bytes, witness))
+    } else {
+        None
+    }
+}
+
+#[verifier::opaque]
+pub(super) open spec fn input_progress(
+    bytes: Seq<u8>, witness: InputDerivation, i: int, position: int, needs_separator: bool, depth: int,
+) -> bool {
+    let lexemes = witness.lexemes;
+    &&& sexpr_input_derivation(bytes, witness)
+    &&& 0 <= i <= lexemes.len()
+    &&& position == if i < lexemes.len() { lexemes[i].start } else { bytes.len() as int }
+    &&& needs_separator == (i > 0 && lexemes[i - 1].kind is Atom)
+    &&& depth == witness.depths[i]
+}
+
+pub(super) proof fn input_starts(bytes: Seq<u8>, witness: InputDerivation)
+    requires sexpr_input_derivation(bytes, witness),
+    ensures input_progress(bytes, witness, 0, 0, false, 0),
+{
+    reveal(input_progress);
+    reveal(sexpr_input_derivation);
+    if witness.lexemes.len() == 0 {
+        assert(bytes.len() == 0);
+    } else {
+        assert(input_lexeme_valid(bytes, witness, 0));
+        reveal(input_lexeme_valid);
+        assert(witness.lexemes[0].start == 0);
+    }
+}
+
+pub(super) proof fn input_ends(
+    bytes: Seq<u8>, witness: InputDerivation, i: int, needs_separator: bool, depth: int,
+)
+    requires input_progress(bytes, witness, i, bytes.len() as int, needs_separator, depth),
+    ensures depth == 0,
+{
+    reveal(input_progress);
+    reveal(sexpr_input_derivation);
+    if i < witness.lexemes.len() {
+        let lexeme = witness.lexemes[i];
+        assert(input_lexeme_valid(bytes, witness, i));
+        reveal(input_lexeme_valid);
+        assert(lexeme_at(bytes, lexeme.start, lexeme.end, lexeme.kind));
+        reveal(lexeme_at);
+    }
+}
+
+pub(super) proof fn input_next(
+    bytes: Seq<u8>, witness: InputDerivation, i: int, position: int, needs_separator: bool, depth: int,
+) -> (lexeme: Lexeme)
+    requires
+        input_progress(bytes, witness, i, position, needs_separator, depth),
+        position < bytes.len(),
+    ensures
+        lexeme.start == position,
+        lexeme_at(bytes, lexeme.start, lexeme.end, lexeme.kind),
+        !(needs_separator && lexeme.kind is Atom),
+        lexeme.kind is Close ==> depth > 0,
+        input_progress(bytes, witness, i + 1, lexeme.end, lexeme.kind is Atom,
+            depth + parenthesis_delta(lexeme.kind)),
+{
+    reveal(input_progress);
+    reveal(sexpr_input_derivation);
+    let lexeme = witness.lexemes[i];
+    assert(input_lexeme_valid(bytes, witness, i));
+    reveal(input_lexeme_valid);
+    if i + 1 < witness.lexemes.len() {
+        assert(input_lexeme_valid(bytes, witness, i + 1));
+        assert(witness.lexemes[i + 1].start == lexeme.end);
+    } else {
+        assert(lexeme.end == bytes.len());
+    }
+    lexeme
+}
+
+#[verifier::opaque]
+pub(super) open spec fn scanned_input_prefix(
+    bytes: Seq<u8>, prefix: InputDerivation, position: int, needs_separator: bool, depth: int,
+) -> bool {
+    let count = prefix.lexemes.len() as int;
+    &&& prefix.depths.len() == count + 1
+    &&& prefix.depths[0] == 0
+    &&& prefix.depths[count] == depth
+    &&& position == if count == 0 { 0 } else { prefix.lexemes[count - 1].end }
+    &&& needs_separator == (count > 0 && prefix.lexemes[count - 1].kind is Atom)
+    &&& forall|i: int| 0 <= i < count ==> #[trigger] input_lexeme_valid(bytes, prefix, i)
+}
+
+pub(super) proof fn empty_scanned_input(bytes: Seq<u8>) -> (prefix: InputDerivation)
+    ensures scanned_input_prefix(bytes, prefix, 0, false, 0),
+{
+    reveal(scanned_input_prefix);
+    InputDerivation { lexemes: Seq::empty(), depths: seq![0int] }
+}
+
+pub(super) proof fn record_scanned_input(
+    bytes: Seq<u8>, prefix: InputDerivation, lexeme: Lexeme, needed_separator: bool, old_depth: int,
+) -> (next: InputDerivation)
+    requires
+        scanned_input_prefix(bytes, prefix, lexeme.start, needed_separator, old_depth),
+        lexeme_at(bytes, lexeme.start, lexeme.end, lexeme.kind),
+        !(needed_separator && lexeme.kind is Atom),
+        0 <= old_depth + parenthesis_delta(lexeme.kind),
+    ensures
+        scanned_input_prefix(bytes, next, lexeme.end, lexeme.kind is Atom,
+            old_depth + parenthesis_delta(lexeme.kind)),
+{
+    reveal(scanned_input_prefix);
+    let count = prefix.lexemes.len() as int;
+    let new_depth = old_depth + parenthesis_delta(lexeme.kind);
+    let next = InputDerivation { lexemes: prefix.lexemes.push(lexeme), depths: prefix.depths.push(new_depth) };
+    assert forall|i: int| 0 <= i < next.lexemes.len()
+        implies #[trigger] input_lexeme_valid(bytes, next, i) by {
+        if i < count {
+            assert(input_lexeme_valid(bytes, prefix, i));
+            assert(next.lexemes[i] == prefix.lexemes[i]);
+            if i > 0 {
+                assert(next.lexemes[i - 1] == prefix.lexemes[i - 1]);
+            }
+            assert(next.depths[i] == prefix.depths[i] && next.depths[i + 1] == prefix.depths[i + 1]);
+            reveal(input_lexeme_valid);
+        } else {
+            reveal(input_lexeme_valid);
+        }
+    };
+    next
+}
+
+pub(super) proof fn seal_scanned_input(source: &str, prefix: InputDerivation, needs_separator: bool)
+    requires scanned_input_prefix(source.spec_bytes(), prefix,
+        source.spec_bytes().len() as int, needs_separator, 0),
+    ensures well_formed_sexpr(source),
+{
+    reveal(scanned_input_prefix);
+    reveal(sexpr_input_derivation);
+    reveal(well_formed_sexpr);
+    assert(sexpr_input_derivation(source.spec_bytes(), prefix));
 }
 
 } // verus!
