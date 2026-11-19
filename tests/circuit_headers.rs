@@ -467,6 +467,21 @@ fn reports_malformed_routine_body_items_and_expressions() {
         ("(def y 00)", HeaderError::ExpectedExpression, "00"),
         ("(def y ns::x)", HeaderError::ExpectedExpression, "ns::x"),
         ("(def y 1 extra)", HeaderError::UnexpectedArgument, "extra"),
+        (
+            "(def y \"invalid child\" extra)",
+            HeaderError::UnexpectedArgument,
+            "extra",
+        ),
+        (
+            "(def (y (bad) ns::z) 1)",
+            HeaderError::ExpectedName,
+            "(bad)",
+        ),
+        (
+            "(expand ::m () (bit) \"arg\") (def y (raw 00)) (bad-head)",
+            HeaderError::ExpectedExpression,
+            "00",
+        ),
         ("(def y ())", HeaderError::ExpectedReference, ""),
         ("(def y (bit))", HeaderError::ExpectedExpression, ""),
         ("(def y (bit x -1))", HeaderError::ExpectedNatural, "-1"),

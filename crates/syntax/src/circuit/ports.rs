@@ -187,7 +187,8 @@ fn read_ports_clause(
     ensures
         forall|after: int| #[trigger] ports_clause_matches(
             source, forms@, index as int, limit as int, after, clause)
-            <==> result == Ok(after as usize) && 0 <= after <= usize::MAX,
+            <==> (result matches Ok(next) && after == next),
+        result matches Ok(after) ==> index + 2 <= after <= limit,
         result matches Err((kind, span)) ==> ports_error_evidence(
             source, forms@, index as int, limit as int, closing, clause, kind, span),
 {
@@ -288,7 +289,8 @@ pub(super) fn read_routine_signature(
     ensures
         forall|after: int| #[trigger] routine_signature_matches(
             source, forms@, first as int, limit as int, head, after)
-            <==> result == Ok(after as usize) && 0 <= after <= usize::MAX,
+            <==> (result matches Ok(next) && after == next),
+        result matches Ok(after) ==> first < after <= limit,
         result matches Err((kind, span)) ==> routine_signature_error_evidence(
             source, forms@, first as int, limit as int, closing, head, kind, span),
 {

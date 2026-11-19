@@ -101,7 +101,12 @@ pub(super) open spec fn argument_shape_error(
     }
 }
 
-fn check_argument(
+/// 指定した引数の種別または引数列の終端を検査する。
+///
+/// # Errors
+///
+/// 種別違反や余剰引数はそのフォームの範囲で、欠落は閉じ括弧の位置で報告する。
+pub(super) fn check_argument(
     forms: &[Form], index: usize, end: usize, closing: usize, expected: HeaderError,
 ) -> (result: Result<(), (HeaderError, Range<usize>)>)
     requires
@@ -136,7 +141,14 @@ fn check_argument(
     if accepted { Ok(()) } else { Err((expected, form_span_exec(form))) }
 }
 
-fn read_expression_form(
+/// 式の位置にあるフォームを一つ取り、その直後の添字を返す。
+///
+/// 式の内容は呼び出し側が検査する。
+///
+/// # Errors
+///
+/// フォームがなければ閉じ括弧の位置を長さ 0 の範囲で返す。
+pub(super) fn read_expression_form(
     forms: &[Form], _first: usize, index: usize, end: usize, closing: usize,
 ) -> (result: Result<usize, (HeaderError, Range<usize>)>)
     requires

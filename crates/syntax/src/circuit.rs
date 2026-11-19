@@ -10,13 +10,13 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
 
+mod body;
 mod clauses;
 mod expression_forest;
 mod expressions;
 mod ports;
 mod structure;
-use expression_forest::validate_expressions;
-use ports::read_routine_signature;
+use body::validate_routine_arguments;
 #[cfg(verus_only)]
 pub use ports::{
     port_error_evidence, port_matches, ports_clause_matches, ports_error_evidence,
@@ -264,9 +264,8 @@ fn read_header(
             test_body(source, forms, argument + 1, end, closing)?;
         }
         Head::Func | Head::Module | Head::ModulePart => {
-            let body = read_routine_signature(source, forms, argument, end, closing, head)
+            validate_routine_arguments(source, forms, argument, end, closing, head)
                 .map_err(|(kind, span)| header_error(kind, span))?;
-            routine_body(source, forms, body, end, closing)?;
         }
         Head::Latch | Head::Memory => {
             require_name(forms, argument, end, closing)?;
@@ -399,98 +398,6 @@ fn test_values(
     }
 
     Ok(())
-}
-
-fn routine_body(
-    source: &str,
-    forms: &[Form],
-    mut item: usize,
-    end: usize,
-    closing: usize,
-) -> Result<(), CircuitFormError> {
-    while item < end {
-        let (item_end, item_close) =
-            list_at(forms, item, end, closing, HeaderError::ExpectedBodyItem)?;
-        let head = require_atom(
-            forms,
-            item + 1,
-            item_end,
-            item_close,
-            HeaderError::ExpectedBodyItem,
-            |kind| kind == AtomKind::Name,
-        )?;
-        let first = item + 2;
-        match recognize_body_head(&source[head.clone()]) {
-            Some(BodyHead::Expand) => {
-                require_atom(
-                    forms,
-                    first,
-                    item_end,
-                    item_close,
-                    HeaderError::ExpectedReference,
-                    is_reference,
-                )?;
-            }
-            Some(BodyHead::Def) => {
-                let value = targets(forms, first, item_end, item_close)?;
-                let after_value = expression_end(forms, value, item_end, item_close)?;
-                require_end(forms, after_value, item_end)?;
-                expressions(source, forms, value..after_value)?;
-            }
-            None => return Err(header_error(HeaderError::ExpectedBodyItem, head)),
-        }
-        item = item_end;
-    }
-    Ok(())
-}
-
-fn targets(
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-) -> Result<usize, CircuitFormError> {
-    if index >= end {
-        return Err(header_error(HeaderError::ExpectedTarget, closing..closing));
-    }
-    match &forms[index] {
-        Form::Atom {
-            kind: AtomKind::Name,
-            ..
-        } => Ok(index + 1),
-        Form::List { span, end } => {
-            let closing = span.end - 1;
-            let first = index + 1;
-            require_name(forms, first, *end, closing)?;
-            for name in first + 1..*end {
-                require_name(forms, name, *end, closing)?;
-            }
-            Ok(*end)
-        }
-        form => Err(header_error(HeaderError::ExpectedTarget, span(form))),
-    }
-}
-
-fn expression_end(
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-) -> Result<usize, CircuitFormError> {
-    if index >= end {
-        return Err(header_error(
-            HeaderError::ExpectedExpression,
-            closing..closing,
-        ));
-    }
-    Ok(match &forms[index] {
-        Form::Atom { .. } => index + 1,
-        Form::List { end, .. } => *end,
-    })
-}
-
-fn expressions(source: &str, forms: &[Form], roots: Range<usize>) -> Result<(), CircuitFormError> {
-    validate_expressions(source, forms, roots).map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn natural_at(
