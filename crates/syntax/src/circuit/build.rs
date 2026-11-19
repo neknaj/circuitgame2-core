@@ -166,6 +166,7 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
         match result {
             Ok(index) => build_index_matches(source, index)
                 && circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@)
+                && complete_list_indices(index.syntax.forms@) && nested_list_indices(index.syntax.forms@)
                 && form_spans_valid(source, index.syntax.forms@, source.spec_bytes().len() as int)
                 && index.entry_ranges@.len() == index.syntax.entries@.len(),
             Err(error) => circuit_source_error(source, error),

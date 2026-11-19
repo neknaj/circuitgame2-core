@@ -11,6 +11,12 @@ mod atom;
 mod boundary;
 pub mod circuit;
 mod digits;
+mod natural;
+#[cfg(verus_only)]
+pub use atom::natural_atom_has_value;
+pub use natural::{NaturalRangeError, read_natural_u64};
+#[cfg(verus_only)]
+pub use natural::{decimal_natural_value, natural_u64_matches};
 #[cfg(verus_only)]
 mod form_model;
 #[cfg(verus_only)]

@@ -332,6 +332,7 @@ pub fn index_named_build_forms(source: &str) -> (result: Result<NamedBuildCircui
             Ok(named) => build_index_matches(source, named.build_model())
                 && named.entry_ranges@.len() == named.syntax.entries@.len()
                 && circuit_index_matches(source, named.syntax.forms@, named.syntax.entries@)
+                && complete_list_indices(named.syntax.forms@) && nested_list_indices(named.syntax.forms@)
                 && form_spans_valid(source, named.syntax.forms@, source.spec_bytes().len() as int)
                 && named_forms_match(source, named.syntax.forms@, named.syntax.entries@,
                     named.names@, named.syntax.entries@.len() as int),

@@ -1,10 +1,17 @@
 use super::clauses::{read_named_clause, read_type};
-use super::{AtomKind, Clause, Form, Head, HeaderError, check_directive_word, form_span_exec};
+use super::{
+    AtomKind, CircuitForms, Clause, Form, Head, HeaderError, check_directive_word, form_span_exec,
+};
+use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
-use super::clauses::enclosing_region_bounds_form;
+use super::clauses::{enclosing_region_bounds_form, natural_clause_matches, reference_atom};
+#[cfg(verus_only)]
+use super::index::indexed_entry_evidence;
+#[cfg(verus_only)]
+use super::{circuit_index_matches, header_arguments_match, header_matches};
 #[cfg(verus_only)]
 use super::{
     direct_form_in_range, directive_argument_error_span, directive_word_at, following_direct_form,
@@ -20,6 +27,82 @@ use crate::{
 use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
+
+/// ポート宣言が指定した型の構文上の位置。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PortTypeSite {
+    /// 型を省略した裸のポート名。1 ビットとして扱う。
+    ImplicitBit,
+    /// ビット幅を指定する型。
+    Bits {
+        /// 元の構文木で自然数の字句を指す添字。
+        width: usize,
+    },
+    /// 名前で参照する型。
+    Named {
+        /// 元の構文木で型名の字句を指す添字。
+        form: usize,
+    },
+}
+
+/// 検査済みの署名にある一つのポートの構文位置。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PortSite {
+    /// このポートの先頭を指す構文木の添字。
+    pub form: usize,
+    /// ポート名の字句を指す構文木の添字。
+    pub name: usize,
+    /// ポート型の指定。
+    pub ty: PortTypeSite,
+}
+
+/// `func` または `module` の入力ポートと出力ポート。
+#[derive(Debug, Eq, PartialEq)]
+pub struct RoutinePorts {
+    /// 宣言の `in` 節に並ぶポート。
+    pub inputs: Vec<PortSite>,
+    /// 宣言の `out` 節に並ぶポート。
+    pub outputs: Vec<PortSite>,
+}
+
+spec fn port_site_matches(source: &str, forms: Seq<Form>, site: PortSite) -> bool {
+    &&& site.form < forms.len()
+    &&& site.name < forms.len()
+    &&& forms[site.name as int] is Atom && forms[site.name as int]->Atom_kind is Name
+    &&& match site.ty {
+        PortTypeSite::ImplicitBit => site.name == site.form,
+        PortTypeSite::Bits { width } => forms[site.form as int] is List && site.name == site.form + 1
+            && width == site.form + 4 && width < forms.len()
+            && forms[width as int] is Atom && forms[width as int]->Atom_kind is Natural
+            && natural_clause_matches(source, forms, site.form + 2,
+                forms[site.form as int]->List_end as int, forms[site.form as int]->List_end as int, Clause::Bits),
+        PortTypeSite::Named { form } => forms[site.form as int] is List && site.name == site.form + 1
+            && form == site.form + 2 && form < forms.len()
+            && forms[form as int] is Atom && reference_atom(forms[form as int]->Atom_kind),
+    }
+}
+
+/// 索引で取得したポート名と型指定が、元の構文木の字句を指すことを示す。
+pub proof fn port_site_evidence(
+    source: &str, syntax: &CircuitForms, entry: int, ports: RoutinePorts, input: bool, at: int,
+)
+    requires
+        routine_ports_match(source, syntax, entry, Some(ports)),
+        0 <= at < (if input { ports.inputs@.len() } else { ports.outputs@.len() }),
+    ensures ({
+        let site = if input { ports.inputs@[at] } else { ports.outputs@[at] };
+        &&& site.name < syntax.forms@.len()
+        &&& syntax.forms@[site.name as int] is Atom && syntax.forms@[site.name as int]->Atom_kind is Name
+        &&& site.ty matches PortTypeSite::Bits { width } ==>
+            width < syntax.forms@.len() && syntax.forms@[width as int] is Atom
+                && syntax.forms@[width as int]->Atom_kind is Natural
+        &&& site.ty matches PortTypeSite::Named { form } ==>
+            form < syntax.forms@.len() && syntax.forms@[form as int] is Atom
+                && reference_atom(syntax.forms@[form as int]->Atom_kind)
+    }),
+{
+    reveal(routine_ports_match);
+}
 
 /// 無修飾名、または名前と型を並べたリストをポートとして認識する関係。
 pub open spec fn port_matches(source: &str, forms: Seq<Form>, index: int, limit: int) -> bool {
@@ -302,6 +385,151 @@ pub(super) fn read_routine_signature(
     let out = read_ports_clause(source, forms, next, limit, closing, Clause::In)?;
     assert(ports_clause_matches(source, forms@, next as int, limit as int, out as int, Clause::In));
     read_ports_clause(source, forms, out, limit, closing, Clause::Out)
+}
+
+spec fn port_sites_before(source: &str, forms: Seq<Form>, first: int, stop: int, at: int, sites: Seq<PortSite>) -> bool {
+    &&& forall|i: int| 0 <= i < sites.len() ==> {
+        let site = #[trigger] sites[i];
+        &&& port_site_matches(source, forms, site)
+        &&& site.form < at
+        &&& direct_form_in_range(forms, first, stop, site.form as int)
+    }
+    &&& forall|i: int, j: int| 0 <= i < j < sites.len() ==> (#[trigger] sites[i]).form < (#[trigger] sites[j]).form
+    &&& forall|index: int| #[trigger] direct_form_in_range(forms, first, stop, index) && index < at
+        ==> exists|i: int| 0 <= i < sites.len() && (#[trigger] sites[i]).form == index
+}
+
+proof fn add_port_site(source: &str, forms: Seq<Form>, first: int, stop: int, sites: Seq<PortSite>, site: PortSite, next: int)
+    requires
+        port_sites_before(source, forms, first, stop, site.form as int, sites),
+        port_site_matches(source, forms, site),
+        direct_form_in_range(forms, first, stop, site.form as int),
+        following_direct_form(forms, site.form as int, next),
+        form_region_ends_at(forms, first, stop),
+    ensures port_sites_before(source, forms, first, stop, next, sites.push(site)),
+{
+    reveal(following_direct_form);
+    let all = sites.push(site);
+    assert forall|index: int| #[trigger] direct_form_in_range(forms, first, stop, index) && index < next implies
+        exists|i: int| 0 <= i < all.len() && (#[trigger] all[i]).form == index by {
+        if index < site.form {
+            let i = choose|i: int| 0 <= i < sites.len() && (#[trigger] sites[i]).form == index;
+            assert(all[i] == sites[i]);
+        } else {
+            assert(index == site.form);
+            assert(all[sites.len() as int] == site);
+        }
+    };
+}
+
+fn collect_port_sites(_source: &str, forms: &[Form], clause: usize, stop: usize, _limit: usize, _direction: Clause)
+    -> (sites: Vec<PortSite>)
+    requires
+        ports_clause_matches(_source, forms@, clause as int, _limit as int, stop as int, _direction),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+    ensures port_sites_before(_source, forms@, clause + 2, stop as int, stop as int, sites@),
+{
+    let first = clause + 2;
+    let mut at = first;
+    let mut sites: Vec<PortSite> = Vec::new();
+    proof {
+        reveal(direct_form_in_range);
+        assert(at < stop ==> direct_form_in_range(forms@, first as int, stop as int, at as int));
+    }
+    while at < stop
+        invariant
+            ports_clause_matches(_source, forms@, clause as int, _limit as int, stop as int, _direction),
+            complete_list_indices(forms@), nested_list_indices(forms@),
+            first == clause + 2 <= at <= stop,
+            at < stop ==> direct_form_in_range(forms@, first as int, stop as int, at as int),
+            port_sites_before(_source, forms@, first as int, stop as int, at as int, sites@),
+        decreases stop - at,
+    {
+        proof {
+            reveal(ports_match_before);
+            assert(port_matches(_source, forms@, at as int, stop as int));
+        }
+        let (name, ty, next) = match &forms[at] {
+            Form::List { end, .. } => {
+                let type_form = at + 2;
+                if matches!(forms[type_form], Form::List { .. }) {
+                    assert(natural_clause_matches(_source, forms@, type_form as int, *end as int, *end as int, Clause::Bits));
+                    (at + 1, PortTypeSite::Bits { width: at + 4 }, *end)
+                } else {
+                    (at + 1, PortTypeSite::Named { form: type_form }, *end)
+                }
+            },
+            _ => (at, PortTypeSite::ImplicitBit, at + 1),
+        };
+        let site = PortSite { form: at, name, ty };
+        proof {
+            reveal(super::directive_word_at);
+            reveal(super::directive_word_matches);
+            node_end_is_following_direct_form(forms@, at as int, next as int);
+            assert(form_region_ends_at(forms@, first as int, stop as int));
+            add_port_site(_source, forms@, first as int, stop as int, sites@, site, next as int);
+            reveal(following_direct_form);
+        }
+        sites.push(site);
+        at = next;
+    }
+    sites
+}
+
+/// 入出力の一覧が、厳格索引の署名に現れるポートを順番どおりに含むことを表す。
+pub closed spec fn routine_ports_match(
+    source: &str, syntax: &CircuitForms, entry: int, ports: Option<RoutinePorts>,
+) -> bool {
+    if 0 <= entry < syntax.entries@.len()
+        && (syntax.entries@[entry].head is Func || syntax.entries@[entry].head is Module) {
+        let forms = syntax.forms@;
+        let form = syntax.entries@[entry].form as int;
+        let first = form + 3;
+        let out = forms[first]->List_end as int;
+        let end = forms[out]->List_end as int;
+        ports matches Some(ports) && port_sites_before(source, forms, first + 2, out, out, ports.inputs@)
+            && port_sites_before(source, forms, out + 2, end, end, ports.outputs@)
+    } else {
+        ports.is_none()
+    }
+}
+
+/// 厳格索引の一項目から `func` または `module` の署名を取り出す。
+///
+/// `syntax` には同じ `source` を厳格に解析して得た索引を渡す。
+/// 一覧は宣言順に並ぶ。項目が対象外の種別または範囲外なら `None` を返す。
+///
+/// # Panics
+///
+/// 構文木と索引を手動で組み立て、互いに対応しない添字を渡すとパニックすることがある。
+pub fn routine_ports(source: &str, syntax: &CircuitForms, entry: usize) -> (ports: Option<RoutinePorts>)
+    requires circuit_index_matches(source, syntax.forms@, syntax.entries@),
+        complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
+    ensures routine_ports_match(source, syntax, entry as int, ports),
+{
+    if entry >= syntax.entries.len() { return None; }
+    let item = &syntax.entries[entry];
+    if !matches!(item.head, Head::Func | Head::Module) { return None; }
+    let forms = syntax.forms.as_slice();
+    proof {
+        indexed_entry_evidence(source, forms@, syntax.entries@, entry as int);
+        reveal(super::form_has_head);
+        reveal(header_arguments_match);
+    }
+    let Form::List { end: last, .. } = &forms[item.form] else { proof { assert(false); } return None; };
+    let first = item.form + 3;
+    proof {
+        let body = choose|body: int| #[trigger] routine_signature_matches(source, forms@, item.form + 2, *last as int, item.head, body)
+            && super::body::body_items_before(source, forms@, body, *last as int, *last as int);
+        let out = choose|out: int| #[trigger] ports_clause_matches(source, forms@, first as int, *last as int, out, Clause::In)
+            && ports_clause_matches(source, forms@, out, *last as int, body, Clause::Out);
+        assert(forms@[first as int] is List && forms@[out] is List);
+    }
+    let Form::List { end: out, .. } = &forms[first] else { proof { assert(false); } return None; };
+    let Form::List { end: output_end, .. } = &forms[*out] else { proof { assert(false); } return None; };
+    let inputs = collect_port_sites(source, forms, first, *out, *last, Clause::In);
+    let outputs = collect_port_sites(source, forms, *out, *output_end, *last, Clause::Out);
+    Some(RoutinePorts { inputs, outputs })
 }
 
 } // verus!

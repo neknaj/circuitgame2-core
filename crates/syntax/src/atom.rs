@@ -30,6 +30,14 @@ pub closed spec fn bare_atom_kind(bytes: Seq<u8>) -> Option<AtomKind> {
     }
 }
 
+/// 自然数として分類されたアトムが十進の値を持つことを示す。
+pub proof fn natural_atom_has_value(bytes: Seq<u8>)
+    requires bare_atom_kind(bytes) == Some(AtomKind::Natural),
+    ensures crate::decimal_natural_value(bytes).is_some(),
+{
+    crate::natural::digits_admit_value(bytes);
+}
+
 pub(crate) fn classify(atom: &str) -> (result: Option<AtomKind>)
     ensures
         result == bare_atom_kind(atom.spec_bytes()),

@@ -11,6 +11,14 @@ mod resolution;
 mod sources;
 mod use_aliases;
 mod use_targets;
+mod widths;
+
+#[cfg(verus_only)]
+pub use widths::routine_port_widths_evidence;
+pub use widths::{
+    CheckedPort, DeclaredPortType, PortWidthError, PortWidthErrorKind, RoutinePortWidths,
+    check_routine_port_widths,
+};
 
 #[cfg(verus_only)]
 pub use analysis::definition_analysis_evidence;

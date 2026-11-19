@@ -59,11 +59,14 @@ pub use names::{
     indexed_namespace_name, name_site_matches, named_form_matches, named_forms_match, named_head,
     namespace_name_evidence,
 };
+pub use ports::{PortSite, PortTypeSite, RoutinePorts, routine_ports};
 #[cfg(verus_only)]
 pub use ports::{
     port_error_evidence, port_matches, ports_clause_matches, ports_error_evidence,
     routine_signature_error_evidence, routine_signature_matches,
 };
+#[cfg(verus_only)]
+pub use ports::{port_site_evidence, routine_ports_match};
 use structure::validate_structure_arguments;
 #[cfg(verus_only)]
 pub use structure::{

@@ -26,7 +26,10 @@ use crate::syntax::circuit::{
     circuit_source_matches, name_site_matches, named_form_matches, named_forms_match,
 };
 #[cfg(verus_only)]
-use crate::syntax::{AtomKind, bare_atom_kind, form_span, form_spans_valid};
+use crate::syntax::{
+    AtomKind, bare_atom_kind, complete_list_indices, form_span, form_spans_valid,
+    nested_list_indices,
+};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
@@ -85,6 +88,7 @@ pub closed spec fn parsed_circuit_matches(source: ProjectSource, parsed: NamedBu
     &&& source.kind is Circuit
     &&& circuit_source_matches(source.text)
     &&& circuit_index_matches(source.text, parsed.syntax.forms@, parsed.syntax.entries@)
+    &&& complete_list_indices(parsed.syntax.forms@) && nested_list_indices(parsed.syntax.forms@)
     &&& form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int)
     &&& named_forms_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
         parsed.names@, parsed.syntax.entries@.len() as int)
@@ -235,6 +239,7 @@ pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedBu
     requires parsed_circuit_matches(source, parsed),
     ensures
         circuit_index_matches(source.text, parsed.syntax.forms@, parsed.syntax.entries@),
+        complete_list_indices(parsed.syntax.forms@), nested_list_indices(parsed.syntax.forms@),
         form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int),
         named_forms_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@, parsed.names@,
             parsed.syntax.entries@.len() as int),
