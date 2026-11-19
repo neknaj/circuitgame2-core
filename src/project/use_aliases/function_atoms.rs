@@ -62,6 +62,15 @@ pub(super) fn copy_location<'p, 'a>(location: &LocatedName<'p, 'a>) -> (copy: Lo
     LocatedName { source: location.source, span: location.span.start..location.span.end }
 }
 
+fn copy_signal_type<'p, 'a>(signal: &Option<SignalType<'p, 'a>>) -> (copy: Option<SignalType<'p, 'a>>)
+    ensures copy == *signal,
+{
+    match signal {
+        Some(known) => Some(SignalType { ty: known.ty, origin: copy_location(&known.origin) }),
+        None => None,
+    }
+}
+
 pub(super) open spec fn signal_type_at<'p, 'a>(
     wiring: &FuncWiring<'p, 'a>, types: Seq<Option<SignalType<'p, 'a>>>, origin: OutputDriver,
 ) -> Option<SignalType<'p, 'a>>
@@ -89,17 +98,15 @@ pub(super) fn inherit_type<'p, 'a>(
             let port = &wiring.drivers.signature.inputs[i];
             Some(SignalType { ty: port.ty, origin: copy_location(&port.annotation) })
         },
-        OutputDriver::Definition(i) => match &types[i] {
-            Some(known) => Some(SignalType { ty: known.ty, origin: copy_location(&known.origin) }),
-            None => None,
-        },
+        OutputDriver::Definition(i) => copy_signal_type(&types[i]),
     }
 }
 
 #[verifier::opaque]
 spec fn atom_type_step(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
-    widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, prior: Seq<Option<SignalType>>, i: int,
+    widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, roots: Seq<Option<SignalType>>,
+    prior: Seq<Option<SignalType>>, i: int,
     result: Result<Option<SignalType>, FuncAtomTypeError>,
 ) -> bool {
     let driver = wiring.drivers.definitions@[i];
@@ -138,31 +145,31 @@ spec fn atom_type_step(
             _ => result == Ok(actual),
         }
     } else {
-        result == Ok(None)
+        result == Ok(if roots.len() == 0 { None } else { roots[i] })
     }
 }
 
 #[verifier::opaque]
 spec fn typed_prefix(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
-    widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, types: Seq<Option<SignalType>>,
+    widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, roots: Seq<Option<SignalType>>, types: Seq<Option<SignalType>>,
 ) -> bool {
     &&& types.len() <= wiring.drivers.definitions@.len()
     &&& forall|i: int| 0 <= i < types.len() ==>
-        #[trigger] atom_type_step(source, parsed, entry, wiring, widths, outputs, types.take(i), i, Ok(types[i]))
+        #[trigger] atom_type_step(source, parsed, entry, wiring, widths, outputs, roots, types.take(i), i, Ok(types[i]))
 }
 
-spec fn atoms_match(
+pub(super) closed spec fn atoms_match(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
-    widths: Seq<Option<u64>>, result: Result<Vec<Option<SignalType>>, FuncAtomTypeError>,
+    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, result: Result<Vec<Option<SignalType>>, FuncAtomTypeError>,
 ) -> bool {
     exists|outputs: Seq<Option<usize>>| #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs)
         && match result {
             Ok(types) => types@.len() == wiring.drivers.definitions@.len()
-                && typed_prefix(source, parsed, entry, wiring, widths, outputs, types@),
+                && typed_prefix(source, parsed, entry, wiring, widths, outputs, roots, types@),
             Err(error) => exists|prior: Seq<Option<SignalType>>| prior.len() < wiring.drivers.definitions@.len()
-                && #[trigger] typed_prefix(source, parsed, entry, wiring, widths, outputs, prior)
-                && atom_type_step(source, parsed, entry, wiring, widths, outputs, prior, prior.len() as int, Err(error)),
+                && #[trigger] typed_prefix(source, parsed, entry, wiring, widths, outputs, roots, prior)
+                && atom_type_step(source, parsed, entry, wiring, widths, outputs, roots, prior, prior.len() as int, Err(error)),
         }
 }
 
@@ -180,8 +187,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.literals_preserve_arity(file, entry, limit, typed.literals);
         self.arity_preserves_wiring(file, entry, limit, typed.literals.wiring);
     }
-    fn check_atoms(
+    pub(super) fn check_atoms(
         &self, file: usize, entry: usize, _limit: u64, literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
+        roots: &[Option<SignalType<'p, 'a>>],
     ) -> (result: Result<Vec<Option<SignalType<'p, 'a>>>, FuncAtomTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
@@ -194,12 +202,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &project.circuits_model()[file as int], entry as int, wiring.drivers)
             }),
             literals.widths@.len() == wiring.drivers.definitions@.len(),
+            roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
         ensures
             ({
                 let project = self.targets.project_model();
                 atoms_match(&project.sources_model()[file as int], &project.circuits_model()[file as int],
-                    entry as int, wiring, literals.widths@, result)
+                    entry as int, wiring, literals.widths@, roots@, result)
             }),
+            result matches Ok(types) ==> types@.len() == wiring.drivers.definitions@.len(),
             result matches Err(error) ==> !(error is Literal),
     {
         let project = self.targets.project();
@@ -219,8 +229,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 expected_output_context(source, parsed, entry as int, wiring.drivers),
                 output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs@),
                 literals.widths@.len() == wiring.drivers.definitions@.len(),
+                roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
                 i == types@.len() <= wiring.drivers.definitions@.len(),
-                typed_prefix(source, parsed, entry as int, wiring, literals.widths@, outputs@, types@),
+                typed_prefix(source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
             decreases wiring.drivers.definitions@.len() - i,
         {
             let driver = &wiring.drivers.definitions[i];
@@ -262,20 +273,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             actual: SignalType { ty: resolved.ty, origin: copy_location(&resolved.origin) },
                         };
                         assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
-                            outputs@, types@, i as int, Err(error)));
+                            outputs@, roots@, types@, i as int, Err(error)));
                         return Err(error);
                     }
                 }
                 actual
-            } else { None };
-            assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@, outputs@, types@, i as int, Ok(next)));
+            } else if roots.is_empty() {
+                None
+            } else {
+                copy_signal_type(&roots[i])
+            };
+            assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@, i as int, Ok(next)));
             let ghost before = types@;
             types.push(next);
             proof {
                 reveal(typed_prefix);
                 assert forall|j: int| 0 <= j < types@.len() implies
                     #[trigger] atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
-                        outputs@, types@.take(j), j, Ok(types@[j])) by {
+                        outputs@, roots@, types@.take(j), j, Ok(types@[j])) by {
                     if j < i {
                         assert(types@.take(j) =~= before.take(j));
                         assert(types@[j] == before[j]);
@@ -302,12 +317,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(typed) => self.func_literal_evidence(file, entry, limit, Ok(typed.literals))
                 && match typed.literals.wiring {
                     FuncWiringResult::Checked(wiring) => atoms_match(source, parsed, entry as int, &wiring,
-                        typed.literals.widths@, Ok(typed.types)),
+                        typed.literals.widths@, Seq::empty(), Ok(typed.types)),
                     _ => typed.types@.len() == 0,
                 },
             Err(error) => exists|literals: FuncLiteralWidths| literals.wiring is Checked
                 && #[trigger] self.func_literal_evidence(file, entry, limit, Ok(literals))
-                && atoms_match(source, parsed, entry as int, &literals.wiring->Checked_0, literals.widths@, Err(error)),
+                && atoms_match(source, parsed, entry as int, &literals.wiring->Checked_0, literals.widths@, Seq::empty(), Err(error)),
         }
     }
 
@@ -337,7 +352,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.arity_preserves_wiring(file, entry, max_width, literals.wiring);
             self.checked_wiring_is_func(file, entry, max_width, *wiring);
         }
-        match self.check_atoms(file, entry, max_width, &literals, wiring) {
+        let roots: &[Option<SignalType>] = &[];
+        assert(roots@ =~= Seq::empty());
+        match self.check_atoms(file, entry, max_width, &literals, wiring, roots) {
             Ok(types) => Ok(FuncAtomTypes { literals, types }),
             Err(error) => {
                 assert(self.func_atom_type_evidence(file, entry, max_width, Err(error))) by {

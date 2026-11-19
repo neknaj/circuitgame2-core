@@ -295,6 +295,14 @@ fn check_literals<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn literal_widths_fit_wiring(
+        &self, file: usize, entry: usize, limit: u64, literals: &FuncLiteralWidths, wiring: &crate::project::FuncWiring,
+    )
+        requires self.func_literal_evidence(file, entry, limit, Ok(*literals)),
+            literals.wiring == FuncWiringResult::Checked(*wiring),
+        ensures literals.widths@.len() == wiring.drivers.definitions@.len(),
+    {}
+
     pub(super) proof fn literals_preserve_arity(
         &self, file: usize, entry: usize, limit: u64, literals: FuncLiteralWidths,
     )

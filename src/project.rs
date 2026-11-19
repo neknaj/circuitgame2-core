@@ -95,6 +95,7 @@ pub use use_aliases::{
 };
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
+pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };

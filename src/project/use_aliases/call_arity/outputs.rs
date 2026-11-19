@@ -226,7 +226,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    spec fn call_output_failure(
+    pub(in crate::project::use_aliases) closed spec fn call_output_failure(
         &self, file: usize, entry: usize, limit: u64, drivers: &FuncDrivers, error: FuncCallOutputError,
     ) -> bool {
         exists|map: Seq<Option<usize>>, prefix: Seq<Option<SignalType>>|
@@ -248,6 +248,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.call_output_step(file, entry, limit, &scope.drivers, outlets, prior.len() as int, Err(error)),
             !(error is Caller),
         ensures self.func_call_outputs_evidence(file, entry, limit, Err(error)),
+            self.call_output_failure(file, entry, limit, &scope.drivers, error),
     {
         assert(exists|map: Seq<Option<usize>>, prefix: Seq<Option<SignalType>>|
             #[trigger] output_indices(&scope.drivers, scope.drivers.outputs@.len() as int, map)
@@ -284,6 +285,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(wiring) => wiring,
             Err(error) => return Err(FuncCallOutputError::Caller(error)),
         };
+        self.check_call_outputs_with_arity(file, entry, max_width, wiring)
+    }
+
+    pub(in crate::project::use_aliases) fn check_call_outputs_with_arity(
+        &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiringResult<'p, 'a>,
+    ) -> (result: Result<FuncCallOutputTypes<'p, 'a>, FuncCallOutputError<'p, 'a>>)
+        requires self.can_resolve(), self.func_arity_evidence(file, entry, max_width, Ok(wiring)),
+        ensures
+            self.func_call_outputs_evidence(file, entry, max_width, result),
+            result matches Ok(outputs) ==> outputs.wiring == wiring,
+            result matches Err(error) ==> !(error is Caller),
+            result matches Err(error) ==> wiring matches FuncWiringResult::Checked(scope)
+                && self.call_output_failure(file, entry, max_width, &scope.drivers, error),
+    {
         let FuncWiringResult::Checked(ref scope) = wiring else {
             return Ok(FuncCallOutputTypes { wiring, types: Vec::new() });
         };
@@ -397,6 +412,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         Ok(FuncCallOutputTypes { wiring, types })
     }
+
+    pub(in crate::project::use_aliases) proof fn call_outputs_fit_wiring(
+        &self, file: usize, entry: usize, limit: u64, outputs: &FuncCallOutputTypes, wiring: &FuncWiring,
+    )
+        requires self.func_call_outputs_evidence(file, entry, limit, Ok(*outputs)),
+            outputs.wiring == FuncWiringResult::Checked(*wiring),
+        ensures outputs.types@.len() == wiring.drivers.definitions@.len(),
+    {}
 }
 
 } // verus!

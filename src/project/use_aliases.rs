@@ -6,6 +6,7 @@ mod definitions;
 mod function_drivers;
 mod function_atoms;
 mod function_literals;
+mod function_types;
 mod function_wiring;
 mod port_types;
 mod relative;
@@ -24,6 +25,7 @@ pub use function_drivers::{
 };
 pub use function_literals::{FuncLiteralError, FuncLiteralWidths};
 pub use function_atoms::{FuncAtomTypeError, FuncAtomTypes, SignalType};
+pub use function_types::{FuncSignalTypeError, FuncSignalTypes};
 pub use function_wiring::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };

@@ -258,7 +258,7 @@ spec fn arguments_match(
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn scoped_input_result(
         &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
-        typed: &FuncAtomTypes, scope: &FuncWiring, collect: bool,
+        types: Seq<Option<SignalType>>, scope: &FuncWiring, collect: bool,
         result: Result<Option<CheckedCallInputs>, CallInputError>,
     ) -> bool {
         match result {
@@ -272,7 +272,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             _ => exists|call: TypedFuncCall|
                 #[trigger] self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
                     && arguments_match(&self.targets.project_model().circuits_model()[file as int], entry,
-                        definition, scope, typed.types@, &call, limit, collect, result),
+                        definition, scope, types, &call, limit, collect, result),
         }
     }
 
@@ -285,7 +285,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(CallInputError::Caller(error)) => self.func_atom_type_evidence(file, entry, limit, Err(error)),
             _ => exists|typed: FuncAtomTypes| #[trigger] self.func_atom_type_evidence(file, entry, limit, Ok(typed))
                 && if let FuncWiringResult::Checked(scope) = typed.literals.wiring {
-                    self.scoped_input_result(file, entry, definition, reference, limit, &typed, &scope, true, result)
+                    self.scoped_input_result(file, entry, definition, reference, limit, typed.types@, &scope, true, result)
                 } else { result == Ok(None) },
         }
     }
@@ -309,18 +309,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(CallInputError::Caller(error)),
         };
         let FuncWiringResult::Checked(ref wiring) = typed.literals.wiring else { return Ok(None); };
-        self.check_call_inputs_with_types(file, entry, definition, reference, max_width, &typed, wiring, true)
+        proof { self.atom_types_keep_wiring(file, entry, max_width, typed, *wiring); }
+        self.check_call_inputs_with_types(file, entry, definition, reference, max_width, typed.types.as_slice(), wiring, true)
     }
 
     /// 呼び出し元の配線と型を再利用し、必要な場合だけ引数の型を実行時の配列に残す。
     fn check_call_inputs_with_types(
         &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64,
-        typed: &FuncAtomTypes<'p, 'a>, wiring: &FuncWiring<'p, 'a>, collect: bool,
+        types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>, collect: bool,
     ) -> (result: Result<Option<CheckedCallInputs<'p, 'a>>, CallInputError<'p, 'a>>)
         requires
-            self.can_resolve(), self.func_atom_type_evidence(file, entry, max_width, Ok(*typed)),
-            typed.literals.wiring == FuncWiringResult::Checked(*wiring),
-        ensures self.scoped_input_result(file, entry, definition, reference, max_width, typed, wiring, collect, result),
+            self.can_resolve(), self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
+            types@.len() == wiring.drivers.definitions@.len(),
+        ensures self.scoped_input_result(file, entry, definition, reference, max_width, types@, wiring, collect, result),
     {
         let call = match self.resolve_func_call_signature(file, entry, definition, reference, max_width) {
             Ok(Some(call)) => call,
@@ -333,7 +334,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let project = self.targets.project();
         proof {
-            self.atom_types_keep_wiring(file, entry, max_width, *typed, *wiring);
             self.checked_wiring_is_func(file, entry, max_width, *wiring);
             self.typed_call_arguments_ready(file, entry, definition, reference, max_width, call);
         }
@@ -378,9 +378,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 start == row.signals.start - frame.signals.start,
                 self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
                 self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(Some(call))),
-                self.func_atom_type_evidence(file, entry, max_width, Ok(*typed)),
-                typed.literals.wiring == FuncWiringResult::Checked(*wiring),
-                typed.types@.len() == wiring.drivers.definitions@.len(),
+                types@.len() == wiring.drivers.definitions@.len(),
                 ordinal == values.len() <= count == call.call.call.arguments,
                 if collect { values == inputs@ } else { inputs@.len() == 0 },
                 count == call.call.target.port_counts().inputs,
@@ -390,7 +388,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 expression_region(forms@, remaining.start as int, remaining.end as int),
                 call_argument_sequence(forms@, remaining, count - ordinal),
                 remaining.start < remaining.end ==> direct_call_argument(forms@, call.call.call, remaining.start as int),
-                argument_prefix(&call, forms@, wiring, typed.types@, slots, start, max_width, visited, values, remaining.start),
+                argument_prefix(&call, forms@, wiring, types@, slots, start, max_width, visited, values, remaining.start),
             decreases remaining.end - remaining.start,
         {
             proof {
@@ -415,11 +413,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 proof { self.checked_signal_driver(file, entry, max_width, *wiring, absolute, pos); }
                 let bound = &wiring.signals[pos - frame.signals.start];
                 assert(slots[pos - row.signals.start] == root);
-                let ty = inherit_type(wiring, typed.types.as_slice(), bound.driver);
-                assert(known_argument(forms@, wiring, typed.types@, slots, start, root, ty)) by {
+                let ty = inherit_type(wiring, types, bound.driver);
+                assert(known_argument(forms@, wiring, types@, slots, start, root, ty)) by {
                     let s = pos - row.signals.start;
                     assert(slots[s] == root);
-                    assert(ty == signal_type_at(wiring, typed.types@, wiring.signals@[start + s].driver));
+                    assert(ty == signal_type_at(wiring, types@, wiring.signals@[start + s].driver));
                 };
                 ty
             } else { None };
@@ -436,19 +434,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         reason,
                     };
                     proof {
-                        self::record_argument(&call, forms@, wiring, typed.types@, slots, start,
+                        self::record_argument(&call, forms@, wiring, types@, slots, start,
                             root, ordinal, max_width, port, input, checked, Err(error));
                         reveal(argument_prefix);
                         assert(visited.len() == ordinal && ordinal < count);
-                        assert(argument_prefix(&call, forms@, wiring, typed.types@, slots, start,
+                        assert(argument_prefix(&call, forms@, wiring, types@, slots, start,
                             max_width, visited, values, root));
-                        assert(arguments_match(parsed, entry, definition, wiring, typed.types@, &call, max_width, collect, Err(error)));
+                        assert(arguments_match(parsed, entry, definition, wiring, types@, &call, max_width, collect, Err(error)));
                     }
                     return Err(error);
                 }
             };
             proof {
-                self::record_argument(&call, forms@, wiring, typed.types@, slots, start,
+                self::record_argument(&call, forms@, wiring, types@, slots, start,
                     root, ordinal, max_width, port, input, checked, Ok(value));
             }
             let ghost before = values;
@@ -466,7 +464,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert forall|i: int| 0 <= i < visited.len() implies {
                     let this = #[trigger] visited[i] as int;
                     &&& this == if i == 0 { call.call.call.form + 2 } else { after_argument(forms@, visited[i - 1] as int) }
-                    &&& argument_result(&call, forms@, wiring, typed.types@, slots, start, this as usize,
+                    &&& argument_result(&call, forms@, wiring, types@, slots, start, this as usize,
                         i as usize, max_width, Ok(values[i]))
                 } by {
                     if i < ordinal { assert(visited[i] == prior[i] && values[i] == before[i]); }
@@ -478,7 +476,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let result = Ok(Some(CheckedCallInputs { call, inputs }));
         proof {
             exhausted_call_arguments(forms@, remaining, count - ordinal);
-            assert(arguments_match(parsed, entry, definition, wiring, typed.types@, &call, max_width, collect, result));
+            assert(arguments_match(parsed, entry, definition, wiring, types@, &call, max_width, collect, result));
         }
         result
     }
