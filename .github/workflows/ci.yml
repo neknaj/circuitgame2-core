@@ -1,0 +1,50 @@
+name: core checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Find verification assumptions for review
+        run: |
+          pattern='assume|external_body|external_fn_specification|external|exec_allows_no_decreases_clause'
+          if git grep -n -w -E "$pattern" -- '*.rs'; then
+            echo '::warning::Review the verification assumption candidates in this step log.'
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+          fi
+
+      - name: Run native tests and doctests
+        run: cargo test --workspace --locked
+
+      - name: Install Verus 0.2026.11.02.8bf68ee
+        working-directory: ${{ runner.temp }}
+        run: |
+          version=0.2026.11.02.8bf68ee
+          archive="verus-$version-x86-linux.zip"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/verus-lang/verus/releases/download/release/$version/$archive"
+          echo "f3a0119292df8855e4435da8130bee1873b0e6a60c306accf81a08ea687bba3c  $archive" | sha256sum --check
+          unzip -q "$archive"
+          echo "$RUNNER_TEMP/verus-x86-linux" >> "$GITHUB_PATH"
+
+      - name: Verify the workspace with Verus
+        run: cargo verus verify --workspace --locked
+
+      - name: Build for WebAssembly
+        run: cargo build --workspace --locked --target wasm32-unknown-unknown

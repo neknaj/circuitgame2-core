@@ -31,6 +31,15 @@ fn main() {
 
 Rust のバージョンは [rust-toolchain.toml](rust-toolchain.toml) に固定している。以下のコマンドはリポジトリのルートで実行する。
 
+変更箇所に対応するテストターゲットを指定できる。例えば、回復パーサーを変更したときは次を実行する。
+
+```sh
+cargo check --workspace --locked
+cargo test --locked -p circuitgame2-syntax --test circuit_recovery
+```
+
+[CI](.github/workflows/ci.yml) では生成入力を使う差分テストとドキュメントテストを含む全テスト、形式検証、WASM 向けビルドを実行する。ローカルで全体を確認する場合は、次のコマンドと下記の形式検証を実行する。
+
 ```sh
 cargo test --workspace --locked
 cargo build --workspace --locked --target wasm32-unknown-unknown
