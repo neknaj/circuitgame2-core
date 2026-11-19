@@ -10,6 +10,15 @@ mod digits;
 mod projection;
 #[cfg(verus_only)]
 pub use projection::{forest_terminals, significant_pieces};
+#[cfg(verus_only)]
+mod quoted_prefix;
+#[cfg(verus_only)]
+pub use quoted_prefix::quoted_prefix_at;
+#[cfg(verus_only)]
+use quoted_prefix::{
+    advance_quoted_prefixes_over_ordinary, escape_at_quoted_prefixes, initialize_quoted_prefixes,
+    quoted_prefix_starts_with_quote, quoted_prefixes_viable, quoted_stop,
+};
 
 use crate::boundary::{Boundary, after_ascii, split_at_boundary, split_first_scalar};
 use alloc::vec::Vec;
@@ -134,6 +143,9 @@ impl<'a> Lexer<'a> {
                     &&& segment.span.start < segment.span.end
                     &&& segment.span.end == next.cursor.position()
                     &&& segment.span.end <= self.cursor.source.spec_bytes().len()
+                    &&& (forall|close: int| #[trigger] quoted_prefix_at(self.cursor.remaining.spec_bytes(), close)
+                        ==> segment.kind is Atom && segment.kind->Atom_0 == AtomKind::String
+                            && segment.span.end == segment.span.start + close + 1)
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.start as int)
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.end as int)
                     &&& (segment.kind is Whitespace || segment.kind is Comment ==> trivia_extent(
@@ -1872,6 +1884,8 @@ impl<'a> SourceCursor<'a> {
                     &&& span.start < span.end
                     &&& span.end == next.position()
                     &&& span.end <= self.source.spec_bytes().len()
+                    &&& (forall|close: int| #[trigger] quoted_prefix_at(self.remaining.spec_bytes(), close)
+                        ==> kind is Quoted && kind->Quoted_0 is None && span.end == span.start + close + 1)
                     &&& (kind is Quoted && kind->Quoted_0 is None
                         ==> quoted_atom(self.source.spec_bytes()[span.start as int..span.end as int]))
                     &&& (kind is Quoted && kind->Quoted_0 is Some
@@ -1904,6 +1918,12 @@ impl<'a> SourceCursor<'a> {
             );
             suffix_boundary(self.source, self.remaining);
             suffix_boundary(self.source, remaining);
+            assert forall|close: int| #[trigger] quoted_prefix_at(self.remaining.spec_bytes(), close)
+                implies kind is Quoted && kind->Quoted_0 is None && end == start + close + 1 by {
+                reveal(quoted_prefix_at);
+                assert(remaining.spec_bytes() == self.remaining.spec_bytes()[(close + 1)..]);
+                assert(remaining.spec_bytes().len() == length - (close + 1));
+            };
             if kind is Quoted && kind->Quoted_0 is Some {
                 let error = kind->Quoted_0->Some_0;
                 assert(syntax_error_evidence(self.source, error)) by {
@@ -1946,6 +1966,9 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         input.spec_bytes().len() > 0,
         start + input.spec_bytes().len() <= usize::MAX,
     ensures
+        forall|close: int| #[trigger] quoted_prefix_at(input.spec_bytes(), close)
+            ==> result.0 is Quoted && result.0->Quoted_0 is None
+                && result.1.spec_bytes() == input.spec_bytes()[(close + 1)..],
         is_suffix(input.spec_bytes(), result.1.spec_bytes()),
         result.1.spec_bytes().len() < input.spec_bytes().len(),
         is_char_boundary(input.spec_bytes(), input.spec_bytes().len() - result.1.spec_bytes().len()),
@@ -1965,6 +1988,7 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         },
 {
     let first = input.as_bytes()[0];
+    proof { quoted_prefix_starts_with_quote(input.spec_bytes()); }
     let (kind, remaining) = match first {
         b' ' | b'\t' | b'\r' | b'\n' => (
             RawSegment::Whitespace,
@@ -2068,6 +2092,8 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         input.spec_bytes()[0] == 34,
         start + input.spec_bytes().len() <= usize::MAX,
     ensures
+        forall|close: int| #[trigger] quoted_prefix_at(input.spec_bytes(), close)
+            ==> result.1.is_none() && result.0.spec_bytes() == input.spec_bytes()[(close + 1)..],
         is_suffix(input.spec_bytes(), result.0.spec_bytes()),
         result.0.spec_bytes().len() < input.spec_bytes().len(),
         is_char_boundary(input.spec_bytes(), input.spec_bytes().len() - result.0.spec_bytes().len()),
@@ -2083,8 +2109,11 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
     let mut error: Option<Error> = None;
     let ghost mut pieces: Seq<Seq<u8>> = Seq::empty();
     assert(pieces.flatten() =~= input.spec_bytes()[1..1]);
+    proof { initialize_quoted_prefixes(input.spec_bytes()); }
     loop
         invariant_except_break
+            quoted_prefixes_viable(input.spec_bytes(),
+                length - remaining.spec_bytes().len(), error.is_none()),
             error.is_none() ==> string_body_pieces(pieces)
                 && pieces.flatten() == input.spec_bytes()[1..length - remaining.spec_bytes().len()],
         invariant
@@ -2099,18 +2128,25 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                     && string_error_site(input.spec_bytes(), start as int, error),
                 None => true,
             },
-        ensures remaining.spec_bytes().len() == 0,
+        ensures
+            remaining.spec_bytes().len() == 0,
+            forall|close: int| !#[trigger] quoted_prefix_at(input.spec_bytes(), close),
         decreases remaining.spec_bytes().len(),
     {
         let ghost before = remaining.spec_bytes();
         let (_ordinary, rest) = split_at_boundary(remaining, Boundary::StringSpecial);
         remaining = rest;
         proof {
+            let from = length - before.len();
+            let to = length - remaining.spec_bytes().len();
+            let piece = _ordinary.spec_bytes();
+            assert(piece =~= input.spec_bytes()[from..to]);
+            assert forall|i: int| from <= i < to
+                implies !boundary::stops(Boundary::StringSpecial, #[trigger] input.spec_bytes()[i]) by {
+                assert(input.spec_bytes()[i] == piece[i - from]);
+            };
+            advance_quoted_prefixes_over_ordinary(input.spec_bytes(), from, to, error.is_none());
             if error.is_none() {
-                let from = length - before.len();
-                let to = length - remaining.spec_bytes().len();
-                let piece = _ordinary.spec_bytes();
-                assert(piece =~= input.spec_bytes()[from..to]);
                 assert(string_body_piece(piece));
                 extend_body(input.spec_bytes(), pieces, piece, from, to);
                 pieces = pieces.push(piece);
@@ -2121,6 +2157,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         let position = start + (length - bytes.len());
         let ghost relative = position - start;
         if bytes.len() == 0 {
+            proof { quoted_stop(input.spec_bytes(), relative, error.is_none()); }
             break;
         }
         assert(input.spec_bytes()[relative] == bytes@[0]);
@@ -2129,6 +2166,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 let tail = after_ascii(remaining);
                 proof { suffix_transitive(input.spec_bytes(), remaining.spec_bytes(), tail.spec_bytes()); }
                 proof {
+                    quoted_stop(input.spec_bytes(), relative, error.is_none());
                     suffix_boundary(input, tail);
                     if error.is_none() {
                         encode_utf8_valid_utf8(input@);
@@ -2144,6 +2182,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 return (tail, error);
             }
             b'\r' | b'\n' => {
+                proof { quoted_stop(input.spec_bytes(), relative, error.is_none()); }
                 if error.is_none() {
                     error = Some(Error { kind: ErrorKind::NewlineInString { opening: start }, span: position..position + 1 });
                 }
@@ -2153,6 +2192,8 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             _ => {
                 assert(bytes[0] == b'\\');
                 let ghost before_slash = remaining.spec_bytes();
+                let ghost clean = error.is_none();
+                proof { escape_at_quoted_prefixes(input.spec_bytes(), relative, clean); }
                 remaining = after_ascii(remaining);
                 proof { suffix_transitive(input.spec_bytes(), before_slash, remaining.spec_bytes()); }
                 let escaped_bytes = remaining.as_bytes();
@@ -2182,6 +2223,20 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                         }
                     }
                     remaining = suffix;
+                }
+                proof {
+                    if escaped == 34 || escaped == 92 {
+                        assert(length - remaining.spec_bytes().len() == relative + 2);
+                        assert(error.is_none() == clean);
+                    } else {
+                        reveal(quoted_prefixes_viable);
+                        assert forall|close: int| !#[trigger] quoted_prefix_at(input.spec_bytes(), close) by {
+                            if quoted_prefix_at(input.spec_bytes(), close) {
+                                assert(input.spec_bytes()[relative + 1] == 34
+                                    || input.spec_bytes()[relative + 1] == 92);
+                            }
+                        };
+                    }
                 }
             }
         }
@@ -2284,14 +2339,17 @@ mod tests {
     }
 
     #[test]
-    fn string_ordinary_parts_and_escaped_quote_preserve_the_true_end() {
-        let source = r#""日); \"本"()"#;
-        let segments: Vec<_> = Lexer::new(source).collect();
-        assert_eq!(segments.len(), 3);
-        assert_eq!(segments[0].kind, SegmentKind::Atom(AtomKind::String));
-        assert_eq!(&source[segments[0].span.clone()], r#""日); \"本""#);
-        assert_eq!(segments[1].kind, SegmentKind::Open);
-        assert_eq!(segments[2].kind, SegmentKind::Close);
+    fn string_atoms_end_at_the_unescaped_quote() {
+        for literal in [r#""""#, r#""日); \"本""#, r#""\\\"""#] {
+            let source = alloc::format!("{literal}()");
+            let segments: Vec<_> = Lexer::new(&source).collect();
+            assert_eq!(segments.len(), 3, "{source:?}");
+            assert_eq!(segments[0].kind, SegmentKind::Atom(AtomKind::String));
+            assert_eq!(segments[0].span, 0..literal.len());
+            assert_eq!(&source[segments[0].span.clone()], literal);
+            assert_eq!(segments[1].kind, SegmentKind::Open);
+            assert_eq!(segments[2].kind, SegmentKind::Close);
+        }
     }
 
     #[test]
