@@ -8,8 +8,8 @@ use super::clauses::enclosing_region_bounds_form;
 #[cfg(verus_only)]
 use super::{
     direct_form_in_range, directive_argument_error_span, directive_word_at, following_direct_form,
-    form_region_ends_at, list_end_is_following_direct_form, natural_clause_error_evidence,
-    natural_clause_matches, type_error_evidence, type_matches,
+    form_region_ends_at, natural_clause_error_evidence, natural_clause_matches,
+    node_end_is_following_direct_form, type_error_evidence, type_matches,
 };
 #[cfg(verus_only)]
 use crate::{
@@ -119,7 +119,7 @@ fn read_field(source: &str, forms: &[Form], index: usize, _limit: usize)
     if next < end {
         return Err((HeaderError::UnexpectedArgument, form_span_exec(&forms[next])));
     }
-    proof { list_end_is_following_direct_form(forms@, index as int, end as int); }
+    proof { node_end_is_following_direct_form(forms@, index as int, end as int); }
     Ok(end)
 }
 

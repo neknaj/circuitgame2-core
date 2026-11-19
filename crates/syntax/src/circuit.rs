@@ -11,7 +11,14 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod clauses;
+mod ports;
 mod structure;
+use ports::read_routine_signature;
+#[cfg(verus_only)]
+pub use ports::{
+    port_error_evidence, port_matches, ports_clause_matches, ports_error_evidence,
+    routine_signature_error_evidence, routine_signature_matches,
+};
 use structure::validate_structure_arguments;
 #[cfg(verus_only)]
 pub use structure::{
@@ -25,7 +32,7 @@ pub use clauses::{
     natural_clause_matches, reference_atom, storage_arguments_match, storage_error_evidence,
     type_error_evidence, type_matches,
 };
-use clauses::{is_reference, read_named_clause, read_type, validate_storage_arguments};
+use clauses::{is_reference, read_named_clause, validate_storage_arguments};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
@@ -253,9 +260,15 @@ fn read_header(
             )?;
             test_body(source, forms, argument + 1, end, closing)?;
         }
-        Head::Func | Head::Module | Head::ModulePart | Head::Latch | Head::Memory => {
+        Head::Func | Head::Module | Head::ModulePart => {
+            let body = read_routine_signature(source, forms, argument, end, closing, head)
+                .map_err(|(kind, span)| header_error(kind, span))?;
+            routine_body(source, forms, body, end, closing)?;
+        }
+        Head::Latch | Head::Memory => {
             require_name(forms, argument, end, closing)?;
-            declaration_signature(source, forms, head, argument + 1, end, closing)?;
+            validate_storage_arguments(source, forms, argument + 1, end, closing, head)
+                .map_err(|(kind, span)| header_error(kind, span))?;
         }
     }
     Ok((head, end))
@@ -382,30 +395,6 @@ fn test_values(
         };
     }
 
-    Ok(())
-}
-
-fn declaration_signature(
-    source: &str,
-    forms: &[Form],
-    head: Head,
-    argument: usize,
-    end: usize,
-    closing: usize,
-) -> Result<(), CircuitFormError> {
-    match head {
-        Head::Func | Head::Module => {
-            let out = ports(source, forms, argument, end, closing, Clause::In)?;
-            let first_body = ports(source, forms, out, end, closing, Clause::Out)?;
-            routine_body(source, forms, first_body, end, closing)?;
-        }
-        Head::ModulePart => routine_body(source, forms, argument, end, closing)?,
-        Head::Latch | Head::Memory => {
-            validate_storage_arguments(source, forms, argument, end, closing, head)
-                .map_err(|(kind, span)| header_error(kind, span))?;
-        }
-        _ => {}
-    }
     Ok(())
 }
 
@@ -605,52 +594,6 @@ fn natural_at(
         |kind| kind == AtomKind::Natural,
     )?;
     Ok(index + 1)
-}
-
-fn ports(
-    source: &str,
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-    clause: Clause,
-) -> Result<usize, CircuitFormError> {
-    let (port_end, port_close) = named_clause(source, forms, index, end, closing, clause)?;
-    let mut port = index + 2;
-    if clause == Clause::Out && port == port_end {
-        return Err(header_error(
-            HeaderError::ExpectedPort,
-            port_close..port_close,
-        ));
-    }
-    while port < port_end {
-        port = match &forms[port] {
-            Form::Atom {
-                kind: AtomKind::Name,
-                ..
-            } => port + 1,
-            Form::List { .. } => {
-                let (typed_end, typed_close) =
-                    list_at(forms, port, port_end, port_close, HeaderError::ExpectedPort)?;
-                require_name(forms, port + 1, typed_end, typed_close)?;
-                let next = type_at(source, forms, port + 2, typed_end, typed_close)?;
-                require_end(forms, next, typed_end)?;
-                typed_end
-            }
-            form => return Err(header_error(HeaderError::ExpectedPort, span(form))),
-        };
-    }
-    Ok(port_end)
-}
-
-fn type_at(
-    source: &str,
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-) -> Result<usize, CircuitFormError> {
-    read_type(source, forms, index, end, closing).map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn named_clause(
@@ -859,10 +802,10 @@ pub open spec fn following_direct_form(forms: Seq<Form>, index: int, next: int) 
     }
 }
 
-proof fn list_end_is_following_direct_form(forms: Seq<Form>, index: int, next: int)
+proof fn node_end_is_following_direct_form(forms: Seq<Form>, index: int, next: int)
     requires
         0 <= index < next <= forms.len(),
-        forms[index] is List && forms[index]->List_end == next,
+        if forms[index] is List { forms[index]->List_end == next } else { next == index + 1 },
         nested_list_indices(forms),
     ensures following_direct_form(forms, index, next),
 {
@@ -876,7 +819,7 @@ proof fn list_end_is_following_direct_form(forms: Seq<Form>, index: int, next: i
     } by {
         reveal(direct_form_in_range);
         reveal(nested_list_indices);
-        if limit < forms.len() {
+        if limit < forms.len() && forms[index] is List {
             let parent = choose|parent: int| 0 <= parent < first
                 && #[trigger] forms[parent] is List && forms[parent]->List_end == limit;
             assert(parent < index < forms[parent]->List_end);
@@ -888,7 +831,8 @@ proof fn list_end_is_following_direct_form(forms: Seq<Form>, index: int, next: i
                 if earlier < index {
                     assert(forms[earlier]->List_end <= index);
                 } else if earlier > index {
-                    assert(earlier < forms[index]->List_end);
+                    assert(index + 1 < next);
+                    assert(forms[index] is List && earlier < forms[index]->List_end);
                 }
             };
         }
@@ -896,7 +840,8 @@ proof fn list_end_is_following_direct_form(forms: Seq<Form>, index: int, next: i
             implies !#[trigger] direct_form_in_range(forms, first, limit, skipped) by {
             reveal(direct_form_in_range);
             assert(first <= index < skipped);
-            assert(forms[index]->List_end > skipped);
+            assert(index + 1 < next);
+            assert(forms[index] is List && forms[index]->List_end > skipped);
         };
     };
 }
@@ -991,7 +936,7 @@ fn read_form_head(
     if !head_allowed(head, in_namespace) {
         return Err((HeaderError::MisplacedHead(head), word_span.start..word_span.end));
     }
-    proof { list_end_is_following_direct_form(forms@, index as int, end as int); }
+    proof { node_end_is_following_direct_form(forms@, index as int, end as int); }
     Ok((head, end, closing))
 }
 

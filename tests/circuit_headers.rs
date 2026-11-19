@@ -335,6 +335,58 @@ fn validates_structure_fields_in_source_order() {
 }
 
 #[test]
+fn validates_routine_ports_before_the_body() {
+    use circuitgame2_core::syntax::circuit::Clause;
+
+    let valid = concat!(
+        "(func f (in) (out (a (bits 8)) (b ::T)) (def (a b) (call))) ",
+        "(module m (in x) (out x)) (module-part m)",
+    );
+    assert_eq!(index_headers(valid).unwrap().entries.len(), 3);
+
+    for (source, kind, before_close) in [
+        ("(func f (in))", HeaderError::ExpectedClause(Clause::Out), 1),
+        ("(func f (in) (out))", HeaderError::ExpectedPort, 2),
+        ("(func f (in) (out ()))", HeaderError::ExpectedName, 3),
+    ] {
+        let closing = source.len() - before_close;
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: closing..closing
+            }),
+            "{source:?}",
+        );
+    }
+
+    for (source, kind, text) in [
+        (
+            "(func f (in (x (bits 1 (extra)))) (wrong))",
+            HeaderError::UnexpectedArgument,
+            "(extra)",
+        ),
+        (
+            "(module m (in) (out (x ::T (extra))) broken)",
+            HeaderError::UnexpectedArgument,
+            "(extra)",
+        ),
+        ("(module-part m (in))", HeaderError::ExpectedBodyItem, "in"),
+        ("(module ::m (out 1))", HeaderError::ExpectedName, "::m"),
+    ] {
+        let start = source.find(text).unwrap();
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: start..start + text.len()
+            }),
+            "{source:?}",
+        );
+    }
+}
+
+#[test]
 fn reports_malformed_declaration_arguments() {
     use circuitgame2_core::syntax::circuit::Clause;
 
