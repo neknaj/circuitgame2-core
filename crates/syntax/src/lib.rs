@@ -6,6 +6,10 @@ mod atom;
 mod boundary;
 pub mod circuit;
 mod digits;
+#[cfg(verus_only)]
+mod projection;
+#[cfg(verus_only)]
+pub use projection::{forest_terminals, significant_pieces};
 
 use crate::boundary::{Boundary, after_ascii, split_at_boundary, split_first_scalar};
 use alloc::vec::Vec;
@@ -1036,6 +1040,7 @@ pub open spec fn strict_sexpr_derivation(source: &str, forms: Seq<Form>) -> bool
         covers(source.spec_bytes(), pieces, source.spec_bytes().len() as int)
         && #[trigger] pieces_represented(source, forms, pieces)
         && sexpr_forest(source, forms, pieces, 0, forms.len() as int, 0, source.spec_bytes().len() as int)
+        && significant_pieces(source, pieces) == forest_terminals(forms, 0, forms.len() as int)
 }
 
 proof fn derive_strict_forest(source: &str, forms: Seq<Form>)
@@ -1056,6 +1061,7 @@ proof fn derive_strict_forest(source: &str, forms: Seq<Form>)
         && #[trigger] pieces_represented(source, forms, pieces)
         && all_form_pieces_present(forms, pieces);
     derive_forest_region(source, forms, pieces, 0, forms.len() as int, 0, upper);
+    projection::derive_projection(source, forms, pieces);
 }
 
 spec fn open_order(open: Seq<usize>) -> bool {
