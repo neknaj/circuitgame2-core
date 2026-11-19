@@ -45,7 +45,37 @@ pub enum HeaderError {
     ExpectedNor,
     ExpectedAbsolutePath,
     ExpectedName,
+    ExpectedReference,
+    ExpectedNatural,
+    ExpectedPort,
+    ExpectedType,
+    ExpectedClause(Clause),
     UnexpectedArgument,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Clause {
+    In,
+    Out,
+    Bits,
+    Width,
+    Address,
+    Data,
+    At,
+}
+
+impl Clause {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::Out => "out",
+            Self::Bits => "bits",
+            Self::Width => "width",
+            Self::Address => "address",
+            Self::Data => "data",
+            Self::At => "at",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -182,9 +212,206 @@ fn read_header(
                 )?;
             }
         }
-        _ => {}
+        Head::Test => {
+            require_atom(
+                forms,
+                argument,
+                end,
+                closing,
+                HeaderError::ExpectedReference,
+                is_reference,
+            )?;
+        }
+        Head::Func
+        | Head::Module
+        | Head::ModulePart
+        | Head::Struct
+        | Head::Latch
+        | Head::Memory => {
+            require_name(forms, argument, end, closing)?;
+            declaration_signature(source, forms, head, argument + 1, end, closing)?;
+        }
     }
     Ok((head, end))
+}
+
+fn declaration_signature(
+    source: &str,
+    forms: &[Form],
+    head: Head,
+    argument: usize,
+    end: usize,
+    closing: usize,
+) -> Result<(), CircuitFormError> {
+    match head {
+        Head::Func | Head::Module => {
+            let out = ports(source, forms, argument, end, closing, Clause::In)?;
+            ports(source, forms, out, end, closing, Clause::Out)?;
+        }
+        Head::Struct | Head::Latch => {
+            let mut field = natural_clause(source, forms, argument, end, closing, Clause::Width)?;
+            if head == Head::Latch {
+                return require_end(forms, field, end);
+            }
+            while field < end {
+                let (field_end, field_close) =
+                    list_at(forms, field, end, closing, HeaderError::ExpectedList)?;
+                require_name(forms, field + 1, field_end, field_close)?;
+                let at = type_at(source, forms, field + 2, field_end, field_close)?;
+                let next = natural_clause(source, forms, at, field_end, field_close, Clause::At)?;
+                require_end(forms, next, field_end)?;
+                field = field_end;
+            }
+        }
+        Head::Memory => {
+            let data = natural_clause(source, forms, argument, end, closing, Clause::Address)?;
+            let (data_end, data_close) =
+                named_clause(source, forms, data, end, closing, Clause::Data)?;
+            let next = type_at(source, forms, data + 2, data_end, data_close)?;
+            require_end(forms, next, data_end)?;
+            require_end(forms, data_end, end)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ports(
+    source: &str,
+    forms: &[Form],
+    index: usize,
+    end: usize,
+    closing: usize,
+    clause: Clause,
+) -> Result<usize, CircuitFormError> {
+    let (port_end, port_close) = named_clause(source, forms, index, end, closing, clause)?;
+    let mut port = index + 2;
+    if clause == Clause::Out && port == port_end {
+        return Err(header_error(
+            HeaderError::ExpectedPort,
+            port_close..port_close,
+        ));
+    }
+    while port < port_end {
+        port = match &forms[port] {
+            Form::Atom {
+                kind: AtomKind::Name,
+                ..
+            } => port + 1,
+            Form::List { .. } => {
+                let (typed_end, typed_close) =
+                    list_at(forms, port, port_end, port_close, HeaderError::ExpectedPort)?;
+                require_name(forms, port + 1, typed_end, typed_close)?;
+                let next = type_at(source, forms, port + 2, typed_end, typed_close)?;
+                require_end(forms, next, typed_end)?;
+                typed_end
+            }
+            form => return Err(header_error(HeaderError::ExpectedPort, span(form))),
+        };
+    }
+    Ok(port_end)
+}
+
+fn type_at(
+    source: &str,
+    forms: &[Form],
+    index: usize,
+    end: usize,
+    closing: usize,
+) -> Result<usize, CircuitFormError> {
+    if index >= end {
+        return Err(header_error(HeaderError::ExpectedType, closing..closing));
+    }
+    match &forms[index] {
+        Form::Atom { kind, .. } if is_reference(*kind) => Ok(index + 1),
+        Form::List { .. } => natural_clause(source, forms, index, end, closing, Clause::Bits),
+        form => Err(header_error(HeaderError::ExpectedType, span(form))),
+    }
+}
+
+fn natural_clause(
+    source: &str,
+    forms: &[Form],
+    index: usize,
+    end: usize,
+    closing: usize,
+    clause: Clause,
+) -> Result<usize, CircuitFormError> {
+    let (clause_end, clause_close) = named_clause(source, forms, index, end, closing, clause)?;
+    require_atom(
+        forms,
+        index + 2,
+        clause_end,
+        clause_close,
+        HeaderError::ExpectedNatural,
+        |kind| kind == AtomKind::Natural,
+    )?;
+    require_end(forms, index + 3, clause_end)?;
+    Ok(clause_end)
+}
+
+fn named_clause(
+    source: &str,
+    forms: &[Form],
+    index: usize,
+    end: usize,
+    closing: usize,
+    clause: Clause,
+) -> Result<(usize, usize), CircuitFormError> {
+    let expected = HeaderError::ExpectedClause(clause);
+    let (clause_end, clause_close) = list_at(forms, index, end, closing, expected)?;
+    let head = require_atom(
+        forms,
+        index + 1,
+        clause_end,
+        clause_close,
+        expected,
+        |kind| kind == AtomKind::Name,
+    )?;
+    if &source[head.clone()] != clause.spelling() {
+        return Err(header_error(expected, head));
+    }
+    Ok((clause_end, clause_close))
+}
+
+fn list_at(
+    forms: &[Form],
+    index: usize,
+    end: usize,
+    closing: usize,
+    expected: HeaderError,
+) -> Result<(usize, usize), CircuitFormError> {
+    if index >= end {
+        return Err(header_error(expected, closing..closing));
+    }
+    match &forms[index] {
+        Form::List { span, end } => Ok((*end, span.end - 1)),
+        form => Err(header_error(expected, span(form))),
+    }
+}
+
+fn require_name(
+    forms: &[Form],
+    index: usize,
+    end: usize,
+    closing: usize,
+) -> Result<(), CircuitFormError> {
+    require_atom(
+        forms,
+        index,
+        end,
+        closing,
+        HeaderError::ExpectedName,
+        |kind| kind == AtomKind::Name,
+    )?;
+    Ok(())
+}
+
+fn is_reference(kind: AtomKind) -> bool {
+    matches!(
+        kind,
+        AtomKind::Name | AtomKind::RelativePath | AtomKind::AbsolutePath
+    )
 }
 
 fn require_atom(
