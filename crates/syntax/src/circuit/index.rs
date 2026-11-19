@@ -121,6 +121,20 @@ pub proof fn export_entry_evidence(
     assert forall|i: int| root + 2 <= i < end implies #[trigger] forms[i] is Atom by {
         assert(directive_word_at(source, forms, i, end, HeaderError::ExpectedName));
     };
+    owner_path_evidence(source, forms, entries, entry);
+}
+
+proof fn owner_path_evidence(source: &str, forms: Seq<Form>, entries: Seq<Entry>, entry: int)
+    requires
+        circuit_index_matches(source, forms, entries),
+        0 <= entry < entries.len(),
+    ensures
+        entries[entry].namespace matches Some(parent) ==>
+            (parent + 2 < forms.len() && forms[parent + 2] is Atom),
+{
+    indexed_entry_evidence(source, forms, entries, entry);
+    reveal(header_arguments_match);
+    let item = entries[entry];
     if let Some(parent) = item.namespace {
         let head = choose|head: Head| #[trigger] header_matches(source, forms, parent as int, false, head);
         names::namespace_head_is_unique(source, forms[parent + 1], head);
@@ -128,6 +142,35 @@ pub proof fn export_entry_evidence(
         assert(directive_word_at(source, forms, parent + 2, forms[parent as int]->List_end as int,
             HeaderError::ExpectedNamespacePath));
     }
+}
+
+/// 索引に含まれる `use` の参照先、別名、所属名前空間のパスの位置を示す。
+pub proof fn use_entry_evidence(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, entry: int,
+)
+    requires
+        circuit_index_matches(source, forms, entries),
+        0 <= entry < entries.len(),
+        entries[entry].head is Use,
+    ensures
+        ({
+            let item = entries[entry];
+            let root = item.form as int;
+            &&& 0 <= root < root + 3 < forms.len()
+            &&& forms[root + 2] is Atom && forms[root + 2]->Atom_kind is AbsolutePath
+            &&& forms[root + 3] is Atom && forms[root + 3]->Atom_kind is Name
+        }),
+        entries[entry].namespace matches Some(parent) ==>
+            (parent + 2 < forms.len() && forms[parent + 2] is Atom),
+{
+    indexed_entry_evidence(source, forms, entries, entry);
+    owner_path_evidence(source, forms, entries, entry);
+    let item = entries[entry];
+    let root = item.form as int;
+    let limit = forms[root]->List_end as int;
+    reveal(header_arguments_match);
+    assert(header_matches(source, forms, root, item.namespace.is_some(), Head::Use));
+    assert(directive_arguments_match(source, forms, root + 2, limit, Head::Use));
 }
 
 proof fn indexed_subtree_location(

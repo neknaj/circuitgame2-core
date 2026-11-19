@@ -7,6 +7,7 @@ mod name_keys;
 mod path;
 mod resolution;
 mod sources;
+mod use_targets;
 
 pub use circuits::{CircuitProject, CircuitProjectError, parse_circuit_project};
 #[cfg(verus_only)]
@@ -32,3 +33,6 @@ pub use resolution::{absolute_resolution_evidence, declaration_visible_from};
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
+pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};
+#[cfg(verus_only)]
+pub use use_targets::{use_target_error_evidence, use_targets_match};

@@ -13,6 +13,7 @@ use super::{
     normalized_path, project_sources_match, source_kind_of, source_set_error,
     valid_source_snapshots,
 };
+use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::circuit::NameSite;
 use crate::syntax::circuit::{CircuitFormError, NamedCircuit, index_named_forms};
@@ -22,13 +23,16 @@ use crate::syntax::circuit::{
     named_form_matches, named_forms_match,
 };
 #[cfg(verus_only)]
-use crate::syntax::form_spans_valid;
+use crate::syntax::{AtomKind, bare_atom_kind, form_span, form_spans_valid};
 use alloc::vec::Vec;
+use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
-use vstd::utf8::is_char_boundary;
+use vstd::utf8::{
+    encode_utf8_valid_utf8, is_char_boundary, is_char_boundary_iff_not_is_continuation_byte,
+};
 
 verus! {
 
@@ -157,6 +161,41 @@ pub(super) open spec fn name_in_source(text: &str, name: NameSite) -> bool {
     &&& is_char_boundary(text.spec_bytes(), name.span.start as int)
     &&& is_char_boundary(text.spec_bytes(), name.span.end as int)
     &&& text.spec_bytes()[name.span.start as int..name.span.end as int] == name.word.spec_bytes()
+}
+
+/// 構文木のアトムに対応する原文と UTF-8 のバイト範囲を返す。
+pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize) -> (out: (&'a str, Range<usize>))
+    requires
+        index < forms@.len(), forms@[index as int] is Atom,
+        form_spans_valid(text, forms@, text.spec_bytes().len() as int),
+    ensures
+        out.1 == form_span(forms@[index as int]),
+        out.0.spec_bytes() == text.spec_bytes()[out.1.start as int..out.1.end as int],
+        out.1.start < out.1.end <= text.spec_bytes().len(),
+        is_char_boundary(text.spec_bytes(), out.1.start as int),
+        is_char_boundary(text.spec_bytes(), out.1.end as int),
+        !(forms@[index as int]->Atom_kind is String) ==>
+            bare_atom_kind(out.0.spec_bytes()) == Some(forms@[index as int]->Atom_kind),
+{
+    let Form::Atom { span: word_span, .. } = &forms[index] else {
+        proof { assert(false); }
+        return ("", 0..0);
+    };
+    let start = word_span.start;
+    let end = word_span.end;
+    proof {
+        reveal(form_spans_valid);
+        encode_utf8_valid_utf8(text@);
+        assert(form_span(forms@[index as int]) == (start..end));
+    }
+    let (prefix, _) = text.split_at(end);
+    proof {
+        encode_utf8_valid_utf8(prefix@);
+        assert(prefix.spec_bytes()[start as int] == text.spec_bytes()[start as int]);
+        is_char_boundary_iff_not_is_continuation_byte(text.spec_bytes(), start as int);
+        is_char_boundary_iff_not_is_continuation_byte(prefix.spec_bytes(), start as int);
+    }
+    (prefix.split_at(start).1, start..end)
 }
 
 pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedCircuit)

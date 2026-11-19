@@ -2,6 +2,7 @@
 
 #[cfg(verus_only)]
 use super::circuits::parsed_index_evidence;
+use super::circuits::read_indexed_atom;
 #[cfg(verus_only)]
 use super::declarations::{
     declaration_key_equivalence, declaration_lookup_agrees, located_name_evidence,
@@ -22,16 +23,12 @@ use crate::syntax::circuit::Head;
 #[cfg(verus_only)]
 use crate::syntax::circuit::export_entry_evidence;
 #[cfg(verus_only)]
-use crate::syntax::{form_span, form_spans_valid};
+use crate::syntax::form_span;
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
-#[cfg(verus_only)]
-use vstd::utf8::{
-    encode_utf8_valid_utf8, is_char_boundary, is_char_boundary_iff_not_is_continuation_byte,
-};
 
 verus! {
 
@@ -180,38 +177,6 @@ proof fn next_file(project: &CircuitProject, sites: Seq<ExportSite>, file: int, 
         implies before(f, e, a, file, entry, 0) by {};
 }
 
-fn read_name<'a>(text: &'a str, forms: &[Form], index: usize) -> (out: (&'a str, Range<usize>))
-    requires
-        index < forms@.len(), forms@[index as int] is Atom,
-        form_spans_valid(text, forms@, text.spec_bytes().len() as int),
-    ensures
-        out.1 == form_span(forms@[index as int]),
-        out.0.spec_bytes() == text.spec_bytes()[out.1.start as int..out.1.end as int],
-        out.1.start < out.1.end <= text.spec_bytes().len(),
-        is_char_boundary(text.spec_bytes(), out.1.start as int),
-        is_char_boundary(text.spec_bytes(), out.1.end as int),
-{
-    let Form::Atom { span: word_span, .. } = &forms[index] else {
-        proof { assert(false); }
-        return ("", 0..0);
-    };
-    let start = word_span.start;
-    let end = word_span.end;
-    proof {
-        reveal(form_spans_valid);
-        encode_utf8_valid_utf8(text@);
-        assert(form_span(forms@[index as int]) == (start..end));
-    }
-    let (prefix, _) = text.split_at(end);
-    proof {
-        encode_utf8_valid_utf8(prefix@);
-        assert(prefix.spec_bytes()[start as int] == text.spec_bytes()[start as int]);
-        is_char_boundary_iff_not_is_continuation_byte(text.spec_bytes(), start as int);
-        is_char_boundary_iff_not_is_continuation_byte(prefix.spec_bytes(), start as int);
-    }
-    (prefix.split_at(start).1, start..end)
-}
-
 spec fn left_in_entry(project: &CircuitProject, file: int, entry: int, arg: int) -> nat {
     let circuits = project.circuits_model();
     if 0 <= file < circuits.len() && 0 <= entry < circuits[file].syntax.entries@.len() {
@@ -286,11 +251,11 @@ fn read_exports<'p, 'a>(project: &'p CircuitProject<'a>) -> (sites: Vec<ExportSi
             assert(entries@[entry as int].namespace == Some(parent));
             let _length = forms.len();
             assert(parent + 2 < _length);
-            Some(read_name(source.text, forms, parent + 2).0)
+            Some(read_indexed_atom(source.text, forms, parent + 2).0)
         } else {
             None
         };
-        let (name, span) = read_name(source.text, forms, position);
+        let (name, span) = read_indexed_atom(source.text, forms, position);
         let site = ExportSite { _file: file, _entry: entry, _arg: arg, source, key: NameKey { parent, name }, span };
         proof {
             located_name_evidence(LocatedName { source, span: site.span });
@@ -417,6 +382,8 @@ pub closed spec fn export_error_evidence(project: &CircuitProject, error: Export
 
 /// 各宣言の公開状態が、元の公開指定と一致することを表す。
 pub closed spec fn export_table_matches(project: &CircuitProject, table: ExportTable) -> bool {
+    &&& !project_names_conflict(project)
+    &&& project_exports_valid(project)
     &&& declaration_table_matches(project, table.declarations)
     &&& table.declarations.well_formed()
     &&& forall|i: int, j: int| 0 <= i < j < table.names@.len() ==>
