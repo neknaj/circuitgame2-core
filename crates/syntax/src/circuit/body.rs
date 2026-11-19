@@ -5,7 +5,7 @@ use super::clauses::enclosing_region_bounds_form;
 #[cfg(verus_only)]
 use super::expression_forest::{
     expression_forest, expression_forest_error, expression_index_region,
-    expression_reference_in_source, expression_references, expression_region,
+    expression_reference_in_source, expression_references, expression_region, expression_signals,
 };
 use super::expression_forest::{inspect_expressions, inspect_expressions_into};
 #[cfg(verus_only)]
@@ -183,6 +183,7 @@ proof fn single_expression_region(forms: Seq<Form>, index: int, after: int)
 fn inspect_body_arguments(
     source: &str, forms: &[Form], first: usize, end: usize, closing: usize, kind: BodyHead,
     collect: bool, references: &mut Vec<ExpressionReference>,
+    signals: &mut Vec<usize>,
 ) -> (result: Result<Option<Range<usize>>, (HeaderError, Range<usize>)>)
     requires
         first <= end <= forms@.len(),
@@ -200,13 +201,19 @@ fn inspect_body_arguments(
         final(references)@.len() >= old(references)@.len(),
         final(references)@.take(old(references)@.len() as int) == old(references)@,
         !collect ==> final(references)@ == old(references)@,
-        result matches Ok(None) ==> kind is Expand && final(references)@ == old(references)@,
+        !collect ==> final(signals)@ == old(signals)@,
+        final(signals)@.len() >= old(signals)@.len(),
+        final(signals)@.take(old(signals)@.len() as int) == old(signals)@,
+        result matches Ok(None) ==> kind is Expand && final(references)@ == old(references)@
+            && final(signals)@ == old(signals)@,
         result matches Ok(Some(rhs)) ==> kind is Def
             && targets_match(forms@, first as int, end as int, rhs.start as int)
             && rhs.start < rhs.end == end && after_form(forms@, rhs.start as int) == rhs.end
             && expression_forest(source, forms@, rhs.start as int, rhs.end as int)
             && (collect ==> final(references)@ == old(references)@
-                + expression_references(source, forms@, rhs.start as int, rhs.end as int)),
+                + expression_references(source, forms@, rhs.start as int, rhs.end as int))
+            && (collect ==> final(signals)@ == old(signals)@
+                + expression_signals(source, forms@, rhs.start as int, rhs.end as int)),
         forall|i: int| old(references)@.len() <= i < final(references)@.len()
             ==> expression_reference_in_source(source, forms@, #[trigger] final(references)@[i]),
 {
@@ -219,7 +226,7 @@ fn inspect_body_arguments(
     let after = read_expression_form(forms, first, value, end, closing)?;
     check_argument(forms, after, end, closing, HeaderError::UnexpectedArgument)?;
     proof { single_expression_region(forms@, value as int, after as int); }
-    inspect_expressions_into(source, forms, value..after, collect, references)?;
+    inspect_expressions_into(source, forms, value..after, collect, references, collect, signals)?;
     Ok(Some(value..after))
 }
 
@@ -310,6 +317,7 @@ pub(super) open spec fn body_item_error(
 fn read_body_item(
     source: &str, forms: &[Form], index: usize, _limit: usize,
     collect: bool, references: &mut Vec<ExpressionReference>,
+    signals: &mut Vec<usize>,
 ) -> (result: Result<(usize, Option<Range<usize>>), (HeaderError, Range<usize>)>)
     requires
         index < _limit <= forms@.len(),
@@ -323,6 +331,9 @@ fn read_body_item(
         final(references)@.len() >= old(references)@.len(),
         final(references)@.take(old(references)@.len() as int) == old(references)@,
         !collect ==> final(references)@ == old(references)@,
+        !collect ==> final(signals)@ == old(signals)@,
+        final(signals)@.len() >= old(signals)@.len(),
+        final(signals)@.take(old(signals)@.len() as int) == old(signals)@,
         forall|i: int| old(references)@.len() <= i < final(references)@.len()
             ==> expression_reference_in_source(source, forms@, #[trigger] final(references)@[i]),
         result matches Ok((next, rhs)) ==> index < next <= _limit
@@ -333,9 +344,12 @@ fn read_body_item(
                     && targets_match(forms@, index + 2, next as int, rhs.start as int)
                     && rhs.start < rhs.end == next && after_form(forms@, rhs.start as int) == next
                     && (collect ==> final(references)@ == old(references)@ +
-                        expression_references(source, forms@, rhs.start as int, rhs.end as int)),
+                        expression_references(source, forms@, rhs.start as int, rhs.end as int))
+                    && (collect ==> final(signals)@ == old(signals)@
+                        + expression_signals(source, forms@, rhs.start as int, rhs.end as int)),
                 None => !body_head_at(source, forms@, index + 1, next as int, BodyHead::Def)
-                    && final(references)@ == old(references)@,
+                    && final(references)@ == old(references)@
+                    && final(signals)@ == old(signals)@,
             },
         result matches Err(error) ==> body_item_error(source, forms@, index as int, _limit as int, error),
 {
@@ -354,7 +368,7 @@ fn read_body_item(
     assert(body_head_at(source, forms@, index + 1, end as int, kind));
     let first = index + 2;
     assert(form_region_ends_at(forms@, first as int, end as int));
-    let rhs = inspect_body_arguments(source, forms, first, end, closing, kind, collect, references)?;
+    let rhs = inspect_body_arguments(source, forms, first, end, closing, kind, collect, references, signals)?;
     proof { node_end_is_following_direct_form(forms@, index as int, end as int); }
     Ok((end, rhs))
 }
@@ -498,7 +512,7 @@ proof fn record_body_item(
 #[verifier::opaque]
 pub(super) open spec fn flat_definition_matches(
     source: &str, forms: Seq<Form>, start: int, end: int, row: BuildDefinition,
-    references: Seq<ExpressionReference>,
+    references: Seq<ExpressionReference>, signals: Seq<usize>,
 ) -> bool {
     let item = row.form as int;
     let first = row.references.start as int;
@@ -510,6 +524,8 @@ pub(super) open spec fn flat_definition_matches(
     &&& targets_match(forms, item + 2, stop, value)
     &&& value < stop && after_form(forms, value) == stop
     &&& 0 <= first <= last <= references.len()
+    &&& 0 <= row.signals.start <= row.signals.end <= signals.len()
+    &&& signals[row.signals.start as int..row.signals.end as int] == expression_signals(source, forms, value, stop)
     &&& references[first..last] == expression_references(source, forms, value, stop)
     &&& forall|i: int| first <= i < last
         ==> expression_reference_in_source(source, forms, #[trigger] references[i])
@@ -519,14 +535,19 @@ pub(super) open spec fn flat_definition_matches(
 #[verifier::opaque]
 pub(super) open spec fn flat_body_matches(
     source: &str, forms: Seq<Form>, start: int, end: int, cursor: int,
-    rows: Seq<BuildDefinition>, references: Seq<ExpressionReference>, first: int, stop: int,
+    rows: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>, first: int, stop: int,
+    first_signal: int, stop_signal: int,
 ) -> bool {
     &&& 0 <= first <= stop <= references.len()
     &&& stop == if rows.len() == 0 { first } else { rows.last().references.end as int }
+    &&& 0 <= first_signal <= stop_signal <= signals.len()
+    &&& stop_signal == if rows.len() == 0 { first_signal } else { rows.last().signals.end as int }
     &&& forall|i: int| 0 <= i < rows.len() ==> {
         let row = #[trigger] rows[i];
-        &&& flat_definition_matches(source, forms, start, end, row, references)
+        &&& flat_definition_matches(source, forms, start, end, row, references, signals)
         &&& row.form < cursor
+        &&& first_signal <= row.signals.start <= row.signals.end <= stop_signal
+        &&& row.signals.start == if i == 0 { first_signal } else { rows[i - 1].signals.end as int }
         &&& first <= row.references.start <= row.references.end <= stop
         &&& row.references.start == if i == 0 { first } else { rows[i - 1].references.end as int }
     }
@@ -539,14 +560,17 @@ pub(super) open spec fn flat_body_matches(
 /// 平坦な本体の一行から、参照範囲と元ソースの根拠を取り出す。
 pub(super) proof fn flat_body_row_evidence(
     source: &str, forms: Seq<Form>, start: int, end: int,
-    definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>,
-    first: int, stop: int, index: int,
+    definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
+    first: int, stop: int, first_signal: int, stop_signal: int, index: int,
 )
     requires
-        flat_body_matches(source, forms, start, end, end, definitions, references, first, stop),
+        flat_body_matches(source, forms, start, end, end, definitions, references, signals, first, stop, first_signal, stop_signal),
         0 <= index < definitions.len(),
     ensures
         first <= definitions[index].references.start <= definitions[index].references.end <= stop,
+        first_signal <= definitions[index].signals.start <= definitions[index].signals.end <= stop_signal,
+        signals[definitions[index].signals.start as int..definitions[index].signals.end as int]
+            == expression_signals(source, forms, definitions[index].expression.start as int, definitions[index].expression.end as int),
         targets_match(forms, definitions[index].form + 2, definitions[index].expression.end as int,
             definitions[index].expression.start as int),
         forall|i: int| definitions[index].references.start <= i < definitions[index].references.end
@@ -554,7 +578,7 @@ pub(super) proof fn flat_body_row_evidence(
 {
     reveal(flat_body_matches);
     let row = definitions[index];
-    assert(flat_definition_matches(source, forms, start, end, row, references));
+    assert(flat_definition_matches(source, forms, start, end, row, references, signals));
     reveal(flat_definition_matches);
 }
 
@@ -562,17 +586,22 @@ pub(super) proof fn flat_body_row_evidence(
 proof fn keep_flat_definition(
     source: &str, forms: Seq<Form>, start: int, end: int, row: BuildDefinition,
     before: Seq<ExpressionReference>, references: Seq<ExpressionReference>,
+    old_signals: Seq<usize>, signals: Seq<usize>,
 )
     requires
-        flat_definition_matches(source, forms, start, end, row, before),
+        flat_definition_matches(source, forms, start, end, row, before, old_signals),
         before.len() <= references.len(),
         references.take(before.len() as int) == before,
-    ensures flat_definition_matches(source, forms, start, end, row, references),
+        old_signals.len() <= signals.len(),
+        signals.take(old_signals.len() as int) == old_signals,
+    ensures flat_definition_matches(source, forms, start, end, row, references, signals),
 {
     reveal(flat_definition_matches);
     let lo = row.references.start as int;
     let hi = row.references.end as int;
     assert(before[lo..hi] =~= references[lo..hi]);
+    assert(old_signals[row.signals.start as int..row.signals.end as int]
+        =~= signals[row.signals.start as int..row.signals.end as int]);
     assert forall|j: int| lo <= j < hi
         implies expression_reference_in_source(source, forms, #[trigger] references[j]) by {
         assert(references[j] == before[j]);
@@ -582,31 +611,35 @@ proof fn keep_flat_definition(
 proof fn extend_flat_body(
     source: &str, forms: Seq<Form>, start: int, end: int, index: int, next: int,
     rows: Seq<BuildDefinition>, old_refs: Seq<ExpressionReference>, refs: Seq<ExpressionReference>,
-    first: int, new_row: Option<BuildDefinition>,
+    old_signals: Seq<usize>, signals: Seq<usize>, first: int, first_signal: int,
+    new_row: Option<BuildDefinition>,
 )
     requires
         direct_form_in_range(forms, start, end, index),
         form_region_ends_at(forms, start, end),
         following_direct_form(forms, index, next),
         index < next <= end,
-        flat_body_matches(source, forms, start, end, index, rows, old_refs, first, old_refs.len() as int),
+        flat_body_matches(source, forms, start, end, index, rows, old_refs, old_signals, first, old_refs.len() as int, first_signal, old_signals.len() as int),
         old_refs.len() <= refs.len(),
         refs.take(old_refs.len() as int) == old_refs,
+        old_signals.len() <= signals.len(),
+        signals.take(old_signals.len() as int) == old_signals,
         match new_row {
-            Some(row) => flat_definition_matches(source, forms, start, end, row, refs)
-                && row.form == index && row.references.start == old_refs.len() && row.references.end == refs.len(),
-            None => !is_definition_at(source, forms, start, end, index) && refs == old_refs,
+            Some(row) => flat_definition_matches(source, forms, start, end, row, refs, signals)
+                && row.form == index && row.references.start == old_refs.len() && row.references.end == refs.len()
+                && row.signals.start == old_signals.len() && row.signals.end == signals.len(),
+            None => !is_definition_at(source, forms, start, end, index) && refs == old_refs && signals == old_signals,
         },
     ensures
         flat_body_matches(source, forms, start, end, next,
-            if let Some(row) = new_row { rows.push(row) } else { rows }, refs, first, refs.len() as int),
+            if let Some(row) = new_row { rows.push(row) } else { rows }, refs, signals, first, refs.len() as int, first_signal, signals.len() as int),
 {
     reveal(flat_body_matches);
     reveal(following_direct_form);
     let extended = if let Some(row) = new_row { rows.push(row) } else { rows };
     assert forall|i: int| 0 <= i < rows.len()
-        implies flat_definition_matches(source, forms, start, end, #[trigger] rows[i], refs) by {
-        keep_flat_definition(source, forms, start, end, rows[i], old_refs, refs);
+        implies flat_definition_matches(source, forms, start, end, #[trigger] rows[i], refs, signals) by {
+        keep_flat_definition(source, forms, start, end, rows[i], old_refs, refs, old_signals, signals);
     };
     assert forall|i: int| #[trigger] is_definition_at(source, forms, start, end, i) && i < next
         implies exists|j: int| 0 <= j < extended.len() && (#[trigger] extended[j]).form == i by {
@@ -645,14 +678,18 @@ fn validate_body(
         final(rows).definitions@.take(old(rows).definitions@.len() as int) == old(rows).definitions@,
         final(rows).references@.len() >= old(rows).references@.len(),
         final(rows).references@.take(old(rows).references@.len() as int) == old(rows).references@,
+        final(rows).signals@.len() >= old(rows).signals@.len(),
+        final(rows).signals@.take(old(rows).signals@.len() as int) == old(rows).signals@,
         collect && result.is_ok() ==> flat_body_matches(source, forms@, start as int, end as int, end as int,
-            final(rows).definitions@.skip(old(rows).definitions@.len() as int), final(rows).references@,
-            old(rows).references@.len() as int, final(rows).references@.len() as int),
+            final(rows).definitions@.skip(old(rows).definitions@.len() as int), final(rows).references@, final(rows).signals@,
+            old(rows).references@.len() as int, final(rows).references@.len() as int,
+            old(rows).signals@.len() as int, final(rows).signals@.len() as int),
 {
     let mut index = start;
     let ghost initial = *rows;
     let ghost first_def = rows.definitions@.len() as int;
     let _ref_start = rows.references.len();
+    let _signal_start = rows.signals.len();
     proof {
         reveal(direct_form_in_range);
         reveal(body_items_before);
@@ -676,16 +713,21 @@ fn validate_body(
             rows.definitions@.take(first_def) == initial.definitions@,
             rows.references@.len() >= _ref_start,
             rows.references@.take(_ref_start as int) == initial.references@,
+            _signal_start == initial.signals@.len(),
+            rows.signals@.len() >= _signal_start,
+            rows.signals@.take(_signal_start as int) == initial.signals@,
             collect ==> flat_body_matches(source, forms@, start as int, end as int, index as int,
-                rows.definitions@.skip(first_def), rows.references@,
-                _ref_start as int, rows.references@.len() as int),
+                rows.definitions@.skip(first_def), rows.references@, rows.signals@,
+                _ref_start as int, rows.references@.len() as int, _signal_start as int, rows.signals@.len() as int),
         decreases end - index,
     {
         assert(form_region_ends_at(forms@, index as int, end as int));
         let ghost prior_rows = rows.definitions@.skip(first_def);
         let ghost prior_refs = rows.references@;
         let reference_start = rows.references.len();
-        let (next, rhs) = match read_body_item(source, forms, index, end, collect, &mut rows.references) {
+        let signal_start = rows.signals.len();
+        let ghost prior_signals = rows.signals@;
+        let (next, rhs) = match read_body_item(source, forms, index, end, collect, &mut rows.references, &mut rows.signals) {
             Ok(result) => result,
             Err(error) => {
                 assert(!body_items_before(source, forms@, start as int, end as int, end as int)) by {
@@ -696,15 +738,22 @@ fn validate_body(
         };
         if collect {
             if let Some(expression) = rhs {
-                let row = BuildDefinition { form: index, expression, references: reference_start..rows.references.len() };
+                let row = BuildDefinition {
+                    form: index,
+                    expression,
+                    references: reference_start..rows.references.len(),
+                    signals: signal_start..rows.signals.len(),
+                };
                 proof {
-                    assert(flat_definition_matches(source, forms@, start as int, end as int, row, rows.references@)) by {
+                    assert(flat_definition_matches(source, forms@, start as int, end as int, row, rows.references@, rows.signals@)) by {
                         reveal(flat_definition_matches);
                         assert(rows.references@[reference_start as int..rows.references@.len() as int]
                             =~= expression_references(source, forms@, row.expression.start as int, row.expression.end as int));
+                        assert(rows.signals@[signal_start as int..rows.signals@.len() as int]
+                            =~= expression_signals(source, forms@, row.expression.start as int, row.expression.end as int));
                     }
                     extend_flat_body(source, forms@, start as int, end as int, index as int, next as int,
-                        prior_rows, prior_refs, rows.references@, _ref_start as int, Some(row));
+                        prior_rows, prior_refs, rows.references@, prior_signals, rows.signals@, _ref_start as int, _signal_start as int, Some(row));
                 }
                 let ghost expected = prior_rows.push(row);
                 rows.definitions.push(row);
@@ -712,7 +761,7 @@ fn validate_body(
             } else {
                 proof {
                     extend_flat_body(source, forms@, start as int, end as int, index as int, next as int,
-                        prior_rows, prior_refs, rows.references@, _ref_start as int, None);
+                        prior_rows, prior_refs, rows.references@, prior_signals, rows.signals@, _ref_start as int, _signal_start as int, None);
                 }
             }
         }
@@ -768,11 +817,14 @@ pub(super) fn validate_routine_arguments(
         final(rows).definitions@.take(old(rows).definitions@.len() as int) == old(rows).definitions@,
         final(rows).references@.len() >= old(rows).references@.len(),
         final(rows).references@.take(old(rows).references@.len() as int) == old(rows).references@,
+        final(rows).signals@.len() >= old(rows).signals@.len(),
+        final(rows).signals@.take(old(rows).signals@.len() as int) == old(rows).signals@,
         collect && result.is_ok() ==>
             exists|body: int| #[trigger] routine_signature_matches(source, forms@, first as int, end as int, head, body)
                 && flat_body_matches(source, forms@, body, end as int, end as int,
-                    final(rows).definitions@.skip(old(rows).definitions@.len() as int), final(rows).references@,
-                    old(rows).references@.len() as int, final(rows).references@.len() as int),
+                    final(rows).definitions@.skip(old(rows).definitions@.len() as int), final(rows).references@, final(rows).signals@,
+                    old(rows).references@.len() as int, final(rows).references@.len() as int,
+                    old(rows).signals@.len() as int, final(rows).signals@.len() as int),
 {
     let body = read_routine_signature(source, forms, first, end, closing, head)?;
     assert(routine_signature_matches(source, forms@, first as int, end as int, head, body as int));
@@ -943,6 +995,7 @@ mod tests {
                 kind,
                 true,
                 &mut references,
+                &mut Vec::new(),
             )
             .unwrap();
             if let Some(rhs) = rhs {
@@ -974,6 +1027,7 @@ mod tests {
             BodyHead::Def,
             true,
             &mut references,
+            &mut Vec::new(),
         )
         .unwrap_err();
         assert_eq!(kind, HeaderError::UnexpectedArgument);
@@ -998,6 +1052,7 @@ mod tests {
             BodyHead::Def,
             true,
             &mut references,
+            &mut Vec::new(),
         )
         .unwrap();
         let (kind, _) = inspect_body_arguments(
@@ -1009,6 +1064,7 @@ mod tests {
             BodyHead::Def,
             true,
             &mut references,
+            &mut Vec::new(),
         )
         .unwrap_err();
         assert_eq!(kind, HeaderError::ExpectedExpression);

@@ -1,4 +1,45 @@
+use circuitgame2_syntax::Form;
 use circuitgame2_syntax::circuit::{index_build_forms, index_definition_references};
+
+#[test]
+fn indexes_only_signal_operands_in_source_order() {
+    let source = concat!(
+        "; 日本語のコメント\n",
+        "(func one (in a b c) (out y) ",
+        "  (def tmp (concat (field a member) (as ::lib::T b) ",
+        "                  (slice c 0 1) 1 (raw b)))",
+        "  (expand ::make (ignored a))",
+        "  (def y (::lib::call tmp tmp))) ",
+        "(func two (in u) (out y) (def y u)) ",
+        "(func three (in) (out y) (def y 0))",
+    );
+    let build = index_build_forms(source).unwrap();
+    let names = |range: std::ops::Range<usize>| {
+        build.signals[range]
+            .iter()
+            .map(|&index| {
+                let Form::Atom { span, .. } = &build.syntax.forms[index] else {
+                    panic!("expected a signal atom");
+                };
+                &source[span.clone()]
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected: [&[&str]; 4] = [&["a", "b", "c", "b"], &["tmp", "tmp"], &["u"], &[]];
+    assert_eq!(build.definitions.len(), expected.len());
+    for (row, expected) in build.definitions.iter().zip(expected) {
+        assert_eq!(names(row.signals.clone()), expected);
+    }
+    assert_eq!(
+        build
+            .entry_ranges
+            .iter()
+            .map(|entry| entry.signals.clone())
+            .collect::<Vec<_>>(),
+        [0..6, 6..7, 7..7]
+    );
+    assert_eq!(build.signals.len(), 7);
+}
 
 fn compare_indexes(source: &str, valid: bool) {
     match (

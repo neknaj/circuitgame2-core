@@ -34,7 +34,7 @@ pub use build::{
 #[cfg(verus_only)]
 pub use build::{
     build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
-    definition_target_range, definition_targets_match,
+    build_signal_evidence, definition_target_range, definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
@@ -357,16 +357,20 @@ fn read_header_into(
         final(rows).definitions@.take(old(rows).definitions@.len() as int) == old(rows).definitions@,
         final(rows).references@.len() >= old(rows).references@.len(),
         final(rows).references@.take(old(rows).references@.len() as int) == old(rows).references@,
+        final(rows).signals@.len() >= old(rows).signals@.len(),
+        final(rows).signals@.take(old(rows).signals@.len() as int) == old(rows).signals@,
         collect ==> (result matches Ok((head, _)) ==>
             build::build_entry_matches(source, forms@, index as int, head, BuildEntryRanges {
                 definitions: old(rows).definitions@.len() as usize..final(rows).definitions@.len() as usize,
                 references: old(rows).references@.len() as usize..final(rows).references@.len() as usize,
-            }, final(rows).definitions@, final(rows).references@)),
+                signals: old(rows).signals@.len() as usize..final(rows).signals@.len() as usize,
+            }, final(rows).definitions@, final(rows).references@, final(rows).signals@)),
 
 {
     let (head, end, closing) = read_form_head(source, forms, index, in_namespace)?;
     let _initial_definitions = rows.definitions.len();
     let _initial_references = rows.references.len();
+    let _initial_signals = rows.signals.len();
     assert(form_has_head(source, forms@, index as int, in_namespace, head));
     let first = index + 2;
     assert(form_region_ends_at(forms@, first as int, end as int));
@@ -390,14 +394,18 @@ fn read_header_into(
     if collect {
         let _final_definitions = rows.definitions.len();
         let _final_references = rows.references.len();
+        let _final_signals = rows.signals.len();
         proof {
+            reveal(build::build_entry_matches);
             assert(rows.definitions@[_initial_definitions as int.._final_definitions as int]
                 =~= rows.definitions@.skip(_initial_definitions as int));
             assert(rows.references@.take(_final_references as int) =~= rows.references@);
+            assert(rows.signals@.take(_final_signals as int) =~= rows.signals@);
             assert(build::build_entry_matches(source, forms@, index as int, head, BuildEntryRanges {
                 definitions: _initial_definitions.._final_definitions,
                 references: _initial_references.._final_references,
-            }, rows.definitions@, rows.references@));
+                signals: _initial_signals.._final_signals,
+            }, rows.definitions@, rows.references@, rows.signals@));
         }
     }
     if matches!(head, Head::Namespace) {

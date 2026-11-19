@@ -5,6 +5,8 @@ use super::body::{flat_body_matches, flat_body_row_evidence, targets_match};
 use super::index::index_parsed_headers_into;
 #[cfg(verus_only)]
 use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_syntax};
+#[cfg(verus_only)]
+use super::expression_forest::{expression_signal_evidence, expression_signals};
 use super::*;
 
 verus! {
@@ -18,6 +20,8 @@ pub struct BuildDefinition {
     pub expression: Range<usize>,
     /// ファイルの参照配列に対する半開区間。参照のない定義では空。
     pub references: Range<usize>,
+    /// ファイルの信号名配列に対する半開区間。
+    pub signals: Range<usize>,
 }
 
 /// 厳格索引の一項目に属する定義と参照の範囲。
@@ -27,6 +31,8 @@ pub struct BuildEntryRanges {
     pub definitions: Range<usize>,
     /// ファイルの参照配列に対する半開区間。
     pub references: Range<usize>,
+    /// ファイルの信号名配列に対する半開区間。
+    pub signals: Range<usize>,
 }
 
 /// 厳格な回路フォームの索引と、ビルドで使う平坦な定義・参照配列。
@@ -40,31 +46,38 @@ pub struct BuildCircuitIndex {
     pub definitions: Vec<BuildDefinition>,
     /// 各定義の参照を元ソース順に連結した配列。
     pub references: Vec<ExpressionReference>,
+    /// 右辺で値として参照される信号名の構文木添字。元ソース順に並ぶ。
+    pub signals: Vec<usize>,
 }
 
 pub(super) struct BuildRows {
     pub(super) entry_ranges: Vec<BuildEntryRanges>,
     pub(super) definitions: Vec<BuildDefinition>,
     pub(super) references: Vec<ExpressionReference>,
+    pub(super) signals: Vec<usize>,
 }
 
 impl BuildRows {
     pub(super) fn new() -> (rows: Self)
         ensures rows.entry_ranges@.len() == 0 && rows.definitions@.len() == 0
-            && rows.references@.len() == 0,
+            && rows.references@.len() == 0 && rows.signals@.len() == 0,
     {
-        Self { entry_ranges: Vec::new(), definitions: Vec::new(), references: Vec::new() }
+        Self { entry_ranges: Vec::new(), definitions: Vec::new(), references: Vec::new(), signals: Vec::new() }
     }
 }
 
+#[verifier::opaque]
 pub(super) open spec fn build_entry_matches(
     source: &str, forms: Seq<Form>, form: int, head: Head, ranges: BuildEntryRanges,
-    definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>,
+    definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
 ) -> bool {
     let first = ranges.definitions.start as int;
     let stop = ranges.definitions.end as int;
     let lo = ranges.references.start as int;
     let hi = ranges.references.end as int;
+    let signal_lo = ranges.signals.start as int;
+    let signal_hi = ranges.signals.end as int;
+    &&& 0 <= signal_lo <= signal_hi <= signals.len()
     &&& 0 <= first <= stop <= definitions.len()
     &&& 0 <= lo <= hi <= references.len()
     &&& if head is Func || head is Module || head is ModulePart {
@@ -74,18 +87,42 @@ pub(super) open spec fn build_entry_matches(
             let end = forms[form]->List_end as int;
             exists|body: int| #[trigger] routine_signature_matches(source, forms, form + 2, end, head, body)
                 && flat_body_matches(source, forms, body, end, end, definitions[first..stop],
-                    references.take(hi), lo, hi)
+                    references.take(hi), signals.take(signal_hi), lo, hi, signal_lo, signal_hi)
         }
     } else {
-        first == stop && lo == hi
+        first == stop && lo == hi && signal_lo == signal_hi
     }
+}
+
+pub(super) proof fn keep_build_entry(
+    source: &str, forms: Seq<Form>, form: int, head: Head, range: BuildEntryRanges,
+    prior: BuildRows, rows: BuildRows,
+)
+    requires
+        build_entry_matches(source, forms, form, head, range, prior.definitions@, prior.references@, prior.signals@),
+        prior.definitions@.len() <= rows.definitions@.len(),
+        rows.definitions@.take(prior.definitions@.len() as int) == prior.definitions@,
+        prior.references@.len() <= rows.references@.len(),
+        rows.references@.take(prior.references@.len() as int) == prior.references@,
+        prior.signals@.len() <= rows.signals@.len(),
+        rows.signals@.take(prior.signals@.len() as int) == prior.signals@,
+    ensures build_entry_matches(source, forms, form, head, range, rows.definitions@, rows.references@, rows.signals@),
+{
+    reveal(build_entry_matches);
+    let lo = range.definitions.start as int;
+    let hi = range.definitions.end as int;
+    let stop = range.references.end as int;
+    let signals_end = range.signals.end as int;
+    assert(prior.definitions@[lo..hi] =~= rows.definitions@[lo..hi]);
+    assert(prior.references@.take(stop) =~= rows.references@.take(stop));
+    assert(prior.signals@.take(signals_end) =~= rows.signals@.take(signals_end));
 }
 
 /// ビルド用索引の構文木、定義、参照の範囲が元入力と文法に対応することを表す。
 pub closed spec fn build_index_matches(source: &str, index: BuildCircuitIndex) -> bool {
     circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@)
         && build_rows_match(source, index.syntax.forms@, index.syntax.entries@,
-            index.entry_ranges@, index.definitions@, index.references@)
+            index.entry_ranges@, index.definitions@, index.references@, index.signals@)
 }
 
 /// 索引項目の定義範囲と参照範囲が、対応する配列内に収まることを示す。
@@ -97,12 +134,15 @@ pub proof fn build_entry_ranges_evidence(source: &str, index: &BuildCircuitIndex
             <= index.definitions@.len(),
         index.entry_ranges@[entry].references.start <= index.entry_ranges@[entry].references.end
             <= index.references@.len(),
+        index.entry_ranges@[entry].signals.start <= index.entry_ranges@[entry].signals.end
+            <= index.signals@.len(),
 {
     reveal(build_rows_match);
+    reveal(build_entry_matches);
     let range = index.entry_ranges@[entry];
     let item = index.syntax.entries@[entry];
     assert(build_entry_matches(source, index.syntax.forms@, item.form as int, item.head, range,
-        index.definitions@, index.references@));
+        index.definitions@, index.references@, index.signals@));
 }
 
 /// 定義の参照が、その索引項目の所属と元ソースの字句に対応することを示す。
@@ -124,34 +164,74 @@ pub proof fn build_definition_scope_evidence(
             &&& indexed_location(source, index.syntax.forms@, item.form as int, item.namespace)
             &&& index.entry_ranges@[entry].references.start <= row.references.start
                 <= row.references.end <= index.entry_ranges@[entry].references.end <= index.references@.len()
+            &&& index.entry_ranges@[entry].signals.start <= row.signals.start
+                <= row.signals.end <= index.entry_ranges@[entry].signals.end <= index.signals@.len()
+            &&& index.signals@[row.signals.start as int..row.signals.end as int]
+                == expression_signals(source, index.syntax.forms@,
+                    row.expression.start as int, row.expression.end as int)
             &&& definition_targets_match(index.syntax.forms@, row)
             &&& forall|i: int| row.references.start <= i < row.references.end
                 ==> expression_reference_in_source(source, index.syntax.forms@, #[trigger] index.references@[i])
         }),
 {
     reveal(build_rows_match);
+    reveal(build_entry_matches);
     build_entry_ranges_evidence(source, index, entry);
     let forms = index.syntax.forms@;
     let item = index.syntax.entries@[entry];
     let frame = index.entry_ranges@[entry];
     assert(build_entry_matches(source, forms, item.form as int, item.head, frame,
-        index.definitions@, index.references@));
+        index.definitions@, index.references@, index.signals@));
     indexed_entry_evidence(source, forms, index.syntax.entries@, entry);
     let end = forms[item.form as int]->List_end as int;
     let defs = index.definitions@[frame.definitions.start as int..frame.definitions.end as int];
     let refs = index.references@.take(frame.references.end as int);
+    let signals = index.signals@.take(frame.signals.end as int);
     let body = choose|body: int| #[trigger] routine_signature_matches(source, forms, item.form + 2, end, item.head, body)
-        && flat_body_matches(source, forms, body, end, end, defs, refs,
-            frame.references.start as int, frame.references.end as int);
+        && flat_body_matches(source, forms, body, end, end, defs, refs, signals,
+            frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int);
     let offset = definition - frame.definitions.start;
     assert(defs[offset] == index.definitions@[definition]);
-    flat_body_row_evidence(source, forms, body, end, defs, refs,
-        frame.references.start as int, frame.references.end as int, offset);
+    flat_body_row_evidence(source, forms, body, end, defs, refs, signals,
+        frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int, offset);
     let row = index.definitions@[definition];
+    assert(index.signals@[row.signals.start as int..row.signals.end as int]
+        =~= signals[row.signals.start as int..row.signals.end as int]);
     assert forall|i: int| row.references.start <= i < row.references.end
         implies expression_reference_in_source(source, forms, #[trigger] index.references@[i]) by {
         assert(refs[i] == index.references@[i]);
     };
+}
+
+/// 指定した信号名が定義の右辺にあり、構文木で無修飾の名前を指すことを示す。
+pub proof fn build_signal_evidence(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int, position: int,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(),
+        entry < index.entry_ranges@.len(),
+        0 <= definition < index.definitions@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition < index.entry_ranges@[entry].definitions.end,
+        index.definitions@[definition].signals.start <= position < index.definitions@[definition].signals.end,
+    ensures
+        0 <= position < index.signals@.len(),
+        ({
+            let row = index.definitions@[definition];
+            let form = index.signals@[position] as int;
+            row.expression.start <= form < row.expression.end <= index.syntax.forms@.len()
+                && index.syntax.forms@[form] is Atom && index.syntax.forms@[form]->Atom_kind is Name
+        }),
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    let row = index.definitions@[definition];
+    let start = row.signals.start as int;
+    let offset = position - start;
+    let signal_forms = index.signals@[start..row.signals.end as int];
+    assert(signal_forms[offset] == index.signals@[position]);
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    expression_signal_evidence(source, index.syntax.forms@, row.expression.start as int,
+        row.expression.end as int, offset);
 }
 
 /// 平坦な定義行の左辺が、元の構文木にある名前または名前のリストに対応することを表す。
@@ -231,6 +311,7 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
         entry_ranges: rows.entry_ranges,
         definitions: rows.definitions,
         references: rows.references,
+        signals: rows.signals,
     })
 }
 

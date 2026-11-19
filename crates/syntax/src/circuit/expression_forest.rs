@@ -144,6 +144,93 @@ proof fn list_reference_order(
     same_expression_head(source, forms, start + 1, builtin, witness);
 }
 
+/// 式の値として参照される無修飾の信号名を、元ソース順の構文木添字で表す。
+#[verifier::opaque]
+pub closed spec fn expression_signals(source: &str, forms: Seq<Form>, start: int, stop: int) -> Seq<usize>
+    decreases stop - start,
+{
+    if !(0 <= start < stop <= forms.len()) {
+        Seq::empty()
+    } else {
+        match forms[start] {
+            Form::Atom { kind, .. } =>
+                (if kind is Name { seq![start as usize] } else { Seq::empty() })
+                    + expression_signals(source, forms, start + 1, stop),
+            Form::List { end, .. } => {
+                if start < end <= stop && exists|a: int, b: int| start < a <= b <= end
+                    && #[trigger] expression_child_range(source, forms, start, end as int, a, b)
+                {
+                    let (a, b) = choose|a: int, b: int| start < a <= b <= end
+                        && #[trigger] expression_child_range(source, forms, start, end as int, a, b);
+                    expression_signals(source, forms, a, b)
+                        + expression_signals(source, forms, end as int, stop)
+                } else {
+                    Seq::empty()
+                }
+            },
+        }
+    }
+}
+
+pub(super) proof fn expression_signal_evidence(
+    source: &str, forms: Seq<Form>, start: int, stop: int, position: int,
+)
+    requires
+        forms.len() <= usize::MAX,
+        0 <= position < expression_signals(source, forms, start, stop).len(),
+    ensures
+        ({
+            let index = expression_signals(source, forms, start, stop)[position] as int;
+            0 <= start <= index < stop <= forms.len()
+                && forms[index] is Atom && forms[index]->Atom_kind is Name
+        }),
+    decreases stop - start,
+{
+    reveal_with_fuel(expression_signals, 1);
+    assert(0 <= start < stop <= forms.len());
+    let result = expression_signals(source, forms, start, stop);
+    match forms[start] {
+        Form::Atom { kind, .. } => {
+            let prefix = if kind is Name { seq![start as usize] } else { Seq::empty() };
+            let tail = expression_signals(source, forms, start + 1, stop);
+            assert(result == prefix + tail);
+            if position >= prefix.len() {
+                assert(result[position] == tail[position - prefix.len()]);
+                expression_signal_evidence(source, forms, start + 1, stop, position - prefix.len());
+            } else {
+                assert(kind is Name && position == 0 && result[position] == start);
+            }
+        },
+        Form::List { end, .. } => {
+            assert(start < end <= stop);
+            let (a, b) = choose|a: int, b: int| start < a <= b <= end
+                && #[trigger] expression_child_range(source, forms, start, end as int, a, b);
+            let children = expression_signals(source, forms, a, b);
+            let tail = expression_signals(source, forms, end as int, stop);
+            assert(result == children + tail);
+            if position < children.len() {
+                assert(result[position] == children[position]);
+                expression_signal_evidence(source, forms, a, b, position);
+            } else {
+                assert(result[position] == tail[position - children.len()]);
+                expression_signal_evidence(source, forms, end as int, stop, position - children.len());
+            }
+        },
+    }
+}
+
+#[verifier::opaque]
+spec fn pending_signals(source: &str, forms: Seq<Form>, pending: Seq<Range<usize>>) -> Seq<usize>
+    decreases pending.len(),
+{
+    if pending.len() == 0 {
+        Seq::empty()
+    } else {
+        expression_signals(source, forms, pending.last().start as int, pending.last().end as int)
+            + pending_signals(source, forms, pending.drop_last())
+    }
+}
+
 /// 半開区間に並ぶ式を回路文法に照らして判定する。
 ///
 /// リストでは、専用引数を除いた子式列と、そのリストの後に続く式列を判定する。
@@ -390,7 +477,7 @@ pub(super) fn inspect_expressions(
         ) <==> result == Err(error),
 {
     let mut references = Vec::new();
-    inspect_expressions_into(source, forms, roots, collect, &mut references)?;
+    inspect_expressions_into(source, forms, roots, collect, &mut references, false, &mut Vec::new())?;
     Ok(references)
 }
 
@@ -402,11 +489,17 @@ pub(super) fn inspect_expressions(
 pub(super) fn inspect_expressions_into(
     source: &str, forms: &[Form], roots: Range<usize>, collect: bool,
     references: &mut Vec<ExpressionReference>,
+    collect_signals: bool, signals: &mut Vec<usize>,
 ) -> (result: Result<(), (HeaderError, Range<usize>)>)
     requires expression_index_region(source, forms@, roots),
     ensures
         result.is_ok() <==> expression_forest(source, forms@, roots.start as int, roots.end as int),
         !collect ==> final(references)@ == old(references)@,
+        !collect_signals ==> final(signals)@ == old(signals)@,
+        final(signals)@.len() >= old(signals)@.len(),
+        final(signals)@.take(old(signals)@.len() as int) == old(signals)@,
+        collect_signals && result.is_ok() ==>
+            final(signals)@ == old(signals)@ + expression_signals(source, forms@, roots.start as int, roots.end as int),
         collect && result.is_ok() ==>
             final(references)@ == old(references)@
                 + expression_references(source, forms@, roots.start as int, roots.end as int),
@@ -421,7 +514,11 @@ pub(super) fn inspect_expressions_into(
     let mut sequence = roots.start..roots.end;
     let mut pending: Vec<Range<usize>> = Vec::new();
     let ghost initial = references@;
-    proof { reveal(pending_references); }
+    let ghost initial_signals = signals@;
+    proof {
+        reveal(pending_references);
+        reveal(pending_signals);
+    }
     // 式を処理すると未処理区間の合計長が減る。空区間からの復帰では保留数が減る。
     while sequence.start < sequence.end || pending.len() > 0
         invariant
@@ -444,6 +541,14 @@ pub(super) fn inspect_expressions_into(
                 + pending_references(source, forms@, pending@)
                 =~= initial + expression_references(source, forms@, roots.start as int, roots.end as int),
             !collect ==> references@ == initial,
+            initial_signals == old(signals)@,
+            !collect_signals ==> signals@ == initial_signals,
+            signals@.len() >= initial_signals.len(),
+            signals@.take(initial_signals.len() as int) == initial_signals,
+            collect_signals ==> signals@
+                + expression_signals(source, forms@, sequence.start as int, sequence.end as int)
+                + pending_signals(source, forms@, pending@)
+                =~= initial_signals + expression_signals(source, forms@, roots.start as int, roots.end as int),
             initial.len() <= references@.len(),
             references@.take(initial.len() as int) == initial,
             forall|i: int| initial.len() <= i < references@.len()
@@ -454,6 +559,7 @@ pub(super) fn inspect_expressions_into(
         let ghost start = sequence.start as int;
         let ghost stop = sequence.end as int;
         let ghost emitted = references@;
+        let ghost emitted_signals = signals@;
         proof {
             reveal_with_fuel(expression_forest, 2);
             reveal_with_fuel(expression_forest_error, 2);
@@ -462,6 +568,9 @@ pub(super) fn inspect_expressions_into(
         if sequence.start == sequence.end {
             assert(expression_references(source, forms@, start, stop) == Seq::empty()) by {
                 reveal_with_fuel(expression_references, 1);
+            }
+            assert(expression_signals(source, forms@, start, stop) == Seq::empty()) by {
+                reveal_with_fuel(expression_signals, 1);
             }
             let Some(next) = pending.pop() else {
                 proof { assert(false); }
@@ -483,13 +592,18 @@ pub(super) fn inspect_expressions_into(
                 assert(expression_work_error(source, forms@, start, stop, before, error)
                     == expression_work_error(source, forms@, next.start as int, next.end as int, pending@, error));
             };
+            assert(pending_signals(source, forms@, before) ==
+                expression_signals(source, forms@, next.start as int, next.end as int)
+                    + pending_signals(source, forms@, pending@)) by {
+                reveal_with_fuel(pending_signals, 1);
+            }
             sequence = next;
             continue;
         }
 
         let index = sequence.start;
         match &forms[index] {
-            Form::Atom { .. } => {
+            Form::Atom { kind, .. } => {
                 if !read_expression_atom(source, forms, index) {
                     let error = (HeaderError::ExpectedExpression, form_span_exec(&forms[index]));
                     assert forall|reported: (HeaderError, Range<usize>)| #[trigger] expression_forest_error(
@@ -509,6 +623,17 @@ pub(super) fn inspect_expressions_into(
                 assert(expression_references(source, forms@, start, stop)
                     == expression_references(source, forms@, start + 1, stop)) by {
                     reveal_with_fuel(expression_references, 1);
+                }
+                if collect_signals && matches!(kind, AtomKind::Name) {
+                    signals.push(index);
+                }
+                assert(signals@ == if collect_signals && forms@[start]->Atom_kind is Name {
+                    emitted_signals.push(index)
+                } else { emitted_signals });
+                assert(expression_signals(source, forms@, start, stop) ==
+                    (if forms@[start]->Atom_kind is Name { seq![index] } else { Seq::empty() })
+                        + expression_signals(source, forms@, start + 1, stop)) by {
+                    reveal_with_fuel(expression_signals, 1);
                 }
                 sequence.start += 1;
             }
@@ -537,6 +662,14 @@ pub(super) fn inspect_expressions_into(
                 let ghost child_stop = children.end as int;
                 proof {
                     list_reference_order(source, forms@, start, stop, next, child_start, child_stop, builtin);
+                    assert(expression_signals(source, forms@, start, stop)
+                        == expression_signals(source, forms@, child_start, child_stop)
+                            + expression_signals(source, forms@, next, stop)) by {
+                        reveal_with_fuel(expression_signals, 1);
+                        let (i, j) = choose|i: int, j: int| start < i <= j <= next
+                            && #[trigger] expression_child_range(source, forms@, start, next, i, j);
+                        assert(i == child_start && j == child_stop);
+                    };
                 }
                 if collect {
                     if builtin.is_none() {
@@ -577,9 +710,16 @@ pub(super) fn inspect_expressions_into(
                             + pending_references(source, forms@, before)) by {
                         reveal_with_fuel(pending_references, 1);
                     };
+                    assert(pending_signals(source, forms@, pending@) ==
+                        expression_signals(source, forms@, next, stop) + pending_signals(source, forms@, before)) by {
+                        reveal_with_fuel(pending_signals, 1);
+                    };
                     assert(pending_expression_width(pending@)
                         == pending_expression_width(before) + stop - next);
                 } else {
+                    assert(expression_signals(source, forms@, next, stop) == Seq::empty()) by {
+                        reveal_with_fuel(expression_signals, 1);
+                    };
                     assert(expression_references(source, forms@, next, stop) == Seq::empty()) by {
                         reveal_with_fuel(expression_references, 1);
                     }
@@ -609,6 +749,8 @@ pub(super) fn inspect_expressions_into(
         reveal(expression_region);
         reveal(expression_references);
         reveal(pending_references);
+        reveal(expression_signals);
+        reveal(pending_signals);
     }
     assert forall|error: (HeaderError, Range<usize>)|
         !#[trigger] expression_forest_error(source, forms@, roots.start as int, roots.end as int, error) by {

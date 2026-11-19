@@ -214,7 +214,7 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
         !(forms@[index as int]->Atom_kind is String) ==>
             bare_atom_kind(out.0.spec_bytes()) == Some(forms@[index as int]->Atom_kind),
 {
-    let Form::Atom { span: word_span, .. } = &forms[index] else {
+    let Form::Atom { span: word_span, kind: _kind } = &forms[index] else {
         proof { assert(false); }
         return ("", 0..0);
     };
@@ -224,6 +224,8 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
         reveal(form_spans_valid);
         encode_utf8_valid_utf8(text@);
         assert(form_span(forms@[index as int]) == (start..end));
+        assert(!(*_kind is String) ==>
+            bare_atom_kind(text.spec_bytes()[start as int..end as int]) == Some(*_kind));
     }
     let (prefix, _) = text.split_at(end);
     proof {
@@ -232,7 +234,9 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
         is_char_boundary_iff_not_is_continuation_byte(text.spec_bytes(), start as int);
         is_char_boundary_iff_not_is_continuation_byte(prefix.spec_bytes(), start as int);
     }
-    (prefix.split_at(start).1, start..end)
+    let (_, word) = prefix.split_at(start);
+    assert(word.spec_bytes() =~= text.spec_bytes()[start as int..end as int]);
+    (word, start..end)
 }
 
 pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedBuildCircuit)

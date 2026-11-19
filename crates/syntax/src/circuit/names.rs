@@ -54,13 +54,15 @@ pub struct NamedBuildCircuit<'a> {
     pub definitions: Vec<BuildDefinition>,
     /// 各定義の参照を元ソース順に連結した配列。
     pub references: Vec<ExpressionReference>,
+    /// 右辺で値として参照される信号名の構文木添字。元ソース順に並ぶ。
+    pub signals: Vec<usize>,
 }
 
 impl NamedBuildCircuit<'_> {
     /// 名前一覧と構文木を共有するビルド索引の論理上の値を返す。
     pub open spec fn build_model(&self) -> BuildCircuitIndex {
         BuildCircuitIndex { syntax: self.syntax, entry_ranges: self.entry_ranges,
-            definitions: self.definitions, references: self.references }
+            definitions: self.definitions, references: self.references, signals: self.signals }
     }
 }
 
@@ -347,6 +349,7 @@ pub fn index_named_build_forms(source: &str) -> (result: Result<NamedBuildCircui
         entry_ranges: built.entry_ranges,
         definitions: built.definitions,
         references: built.references,
+        signals: built.signals,
     })
 }
 
