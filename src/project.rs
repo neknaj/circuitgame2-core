@@ -2,9 +2,12 @@
 
 mod analysis;
 mod basis;
+mod bit_selection;
 mod circuits;
+mod concatenation;
 mod declarations;
 mod exports;
+mod literal_width;
 mod name_keys;
 mod path;
 mod resolution;
@@ -13,6 +16,16 @@ mod sources;
 mod use_aliases;
 mod use_targets;
 mod widths;
+
+pub use bit_selection::{BitSelectionError, check_bit_selection};
+#[cfg(verus_only)]
+pub use bit_selection::{bit_selection_matches, selected_bit_in_range};
+pub use concatenation::{ConcatWidthError, check_concat_width};
+#[cfg(verus_only)]
+pub use concatenation::{concat_prefix_width, concat_width_matches};
+pub use literal_width::{CircuitLiteralWidthError, check_circuit_literal_width};
+#[cfg(verus_only)]
+pub use literal_width::circuit_literal_width_matches;
 
 #[cfg(verus_only)]
 pub use signatures::routine_signature_evidence;

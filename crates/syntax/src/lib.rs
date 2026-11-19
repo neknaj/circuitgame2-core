@@ -8,10 +8,14 @@
 extern crate alloc;
 
 mod atom;
+mod bit_literal;
 mod boundary;
 pub mod circuit;
 mod digits;
 mod natural;
+pub use bit_literal::{BitLiteralSize, bit_literal_size};
+#[cfg(verus_only)]
+pub use bit_literal::bit_literal_size_matches;
 #[cfg(verus_only)]
 pub use atom::natural_atom_has_value;
 pub use natural::{NaturalRangeError, read_natural_u64};

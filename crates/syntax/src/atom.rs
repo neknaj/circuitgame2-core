@@ -38,6 +38,22 @@ pub proof fn natural_atom_has_value(bytes: Seq<u8>)
     crate::natural::digits_admit_value(bytes);
 }
 
+pub(crate) proof fn bit_atom_has_digits(bytes: Seq<u8>, kind: Option<AtomKind>)
+    requires
+        kind == bare_atom_kind(bytes),
+        kind == Some(AtomKind::Binary) || kind == Some(AtomKind::Hexadecimal),
+    ensures
+        bytes.len() > 2,
+        kind == Some(AtomKind::Binary) ==> forall|i: int| 2 <= i < bytes.len()
+            ==> #[trigger] bytes[i] == b'0' || bytes[i] == b'1',
+{
+    if kind == Some(AtomKind::Binary) {
+        assert forall|i: int| 2 <= i < bytes.len() implies #[trigger] bytes[i] == b'0' || bytes[i] == b'1' by {
+            assert(bytes[2..][i - 2] == bytes[i]);
+        };
+    }
+}
+
 pub(crate) fn classify(atom: &str) -> (result: Option<AtomKind>)
     ensures
         result == bare_atom_kind(atom.spec_bytes()),
