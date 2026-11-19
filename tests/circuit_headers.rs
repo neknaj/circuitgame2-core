@@ -580,6 +580,26 @@ fn reports_test_syntax_errors_at_the_offending_element_or_insertion_point() {
         (" (tick)", HeaderError::ExpectedNatural, ""),
         (" (tick -1)", HeaderError::ExpectedNatural, "-1"),
         (" (tick 0 1)", HeaderError::UnexpectedArgument, "1"),
+        (
+            " (case (in 00) (expect)) (tick nope)",
+            HeaderError::ExpectedTestValue,
+            "00",
+        ),
+        (
+            " (case (in) (expect)) (unknown)",
+            HeaderError::ExpectedTestItem,
+            "unknown",
+        ),
+        (
+            " (expect (as T any extra))",
+            HeaderError::ExpectedTestValue,
+            "any",
+        ),
+        (
+            " (expect (ns::as T 1))",
+            HeaderError::ExpectedTestValueOrAny,
+            "ns::as",
+        ),
         (" (drive any)", HeaderError::ExpectedTestValue, "any"),
         (" (drive 00)", HeaderError::ExpectedTestValue, "00"),
         (" (drive x)", HeaderError::ExpectedTestValue, "x"),
@@ -645,6 +665,7 @@ fn reports_both_heads_when_cases_and_actions_are_mixed() {
     for (body, first, unexpected) in [
         ("(case (in) (expect)) (tick)", "case", "tick"),
         ("(reset) (drive) (case)", "reset", "case"),
+        ("(case (in) (expect)) (tick nope)", "case", "tick"),
     ] {
         let source = format!("(test f {body})");
         let CircuitFormError::Header {

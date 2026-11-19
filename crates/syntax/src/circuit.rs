@@ -16,6 +16,8 @@ mod expression_forest;
 mod expressions;
 mod ports;
 mod structure;
+mod test_items;
+mod test_values;
 use body::validate_routine_arguments;
 #[cfg(verus_only)]
 pub use ports::{
@@ -35,7 +37,7 @@ pub use clauses::{
     natural_clause_matches, reference_atom, storage_arguments_match, storage_error_evidence,
     type_error_evidence, type_matches,
 };
-use clauses::{is_reference, read_named_clause, validate_storage_arguments};
+use clauses::{is_reference, validate_storage_arguments};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
@@ -253,15 +255,8 @@ fn read_header(
                 .map_err(|(kind, span)| header_error(kind, span))?;
         }
         Head::Test => {
-            require_atom(
-                forms,
-                argument,
-                end,
-                closing,
-                HeaderError::ExpectedReference,
-                is_reference,
-            )?;
-            test_body(source, forms, argument + 1, end, closing)?;
+            test_items::validate_test_arguments(source, forms, argument, end, closing)
+                .map_err(|(kind, span)| header_error(kind, span))?;
         }
         Head::Func | Head::Module | Head::ModulePart => {
             validate_routine_arguments(source, forms, argument, end, closing, head)
@@ -274,175 +269,6 @@ fn read_header(
         }
     }
     Ok((head, end))
-}
-
-fn test_body(
-    source: &str,
-    forms: &[Form],
-    mut item: usize,
-    end: usize,
-    closing: usize,
-) -> Result<(), CircuitFormError> {
-    if item == end {
-        return Err(header_error(
-            HeaderError::ExpectedTestItem,
-            closing..closing,
-        ));
-    }
-
-    let mut first: Option<(TestHead, Range<usize>)> = None;
-    while item < end {
-        let expected = HeaderError::ExpectedTestItem;
-        let (item_end, item_close) = list_at(forms, item, end, closing, expected)?;
-        let name = require_atom(forms, item + 1, item_end, item_close, expected, |kind| {
-            kind == AtomKind::Name
-        })?;
-        let Some(head) = recognize_test_head(&source[name.clone()]) else {
-            return Err(header_error(expected, name));
-        };
-        if let Some((first_head, first_span)) = &first {
-            if !same_test_item_kind(*first_head, head) {
-                return Err(header_error(
-                    HeaderError::MixedTestItems {
-                        first_head: (first_span.start, first_span.end),
-                    },
-                    name,
-                ));
-            }
-        } else {
-            first = Some((head, name));
-        }
-
-        let argument = item + 2;
-        match head {
-            TestHead::Case => {
-                let (inputs_end, _) =
-                    named_clause(source, forms, argument, item_end, item_close, Clause::In)?;
-                test_values(source, forms, argument + 2, inputs_end, false)?;
-                let (expects_end, _) = named_clause(
-                    source,
-                    forms,
-                    inputs_end,
-                    item_end,
-                    item_close,
-                    Clause::Expect,
-                )?;
-                test_values(source, forms, inputs_end + 2, expects_end, true)?;
-                require_end(forms, expects_end, item_end)?;
-            }
-            TestHead::Reset => require_end(forms, argument, item_end)?,
-            TestHead::Drive => test_values(source, forms, argument, item_end, false)?,
-            TestHead::Tick => {
-                let next = natural_at(forms, argument, item_end, item_close)?;
-                require_end(forms, next, item_end)?;
-            }
-            TestHead::Expect => test_values(source, forms, argument, item_end, true)?,
-        }
-        item = item_end;
-    }
-
-    Ok(())
-}
-
-fn test_values(
-    source: &str,
-    forms: &[Form],
-    mut index: usize,
-    end: usize,
-    allow_any: bool,
-) -> Result<(), CircuitFormError> {
-    let expected = if allow_any {
-        HeaderError::ExpectedTestValueOrAny
-    } else {
-        HeaderError::ExpectedTestValue
-    };
-
-    while index < end {
-        index = match &forms[index] {
-            Form::Atom { kind, span } if test_atom(*kind, &source[span.clone()], allow_any) => {
-                index + 1
-            }
-            Form::List {
-                span: list_span,
-                end,
-            } => {
-                let closing = list_span.end - 1;
-                let head = require_atom(forms, index + 1, *end, closing, expected, |kind| {
-                    kind == AtomKind::Name
-                })?;
-                if recognize_expression_head(&source[head.clone()]) != Some(ExpressionHead::As) {
-                    return Err(header_error(expected, head));
-                }
-                require_atom(
-                    forms,
-                    index + 2,
-                    *end,
-                    closing,
-                    HeaderError::ExpectedReference,
-                    is_reference,
-                )?;
-                let value = index + 3;
-                let error = HeaderError::ExpectedTestValue;
-                if value >= *end {
-                    return Err(header_error(error, closing..closing));
-                }
-                match &forms[value] {
-                    Form::Atom { kind, span } if circuit_value(*kind, &source[span.clone()]) => {}
-                    form => return Err(header_error(error, span(form))),
-                }
-                require_end(forms, value + 1, *end)?;
-                *end
-            }
-            form => return Err(header_error(expected, span(form))),
-        };
-    }
-
-    Ok(())
-}
-
-fn natural_at(
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-) -> Result<usize, CircuitFormError> {
-    require_atom(
-        forms,
-        index,
-        end,
-        closing,
-        HeaderError::ExpectedNatural,
-        |kind| kind == AtomKind::Natural,
-    )?;
-    Ok(index + 1)
-}
-
-fn named_clause(
-    source: &str,
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-    clause: Clause,
-) -> Result<(usize, usize), CircuitFormError> {
-    read_named_clause(source, forms, index, end, closing, clause)
-        .map_err(|(kind, span)| header_error(kind, span))
-}
-
-fn list_at(
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-    expected: HeaderError,
-) -> Result<(usize, usize), CircuitFormError> {
-    if index >= end {
-        return Err(header_error(expected, closing..closing));
-    }
-    match &forms[index] {
-        Form::List { span, end } => Ok((*end, span.end - 1)),
-        form => Err(header_error(expected, span(form))),
-    }
 }
 
 fn require_name(
@@ -476,17 +302,6 @@ fn require_atom(
     match &forms[index] {
         Form::Atom { kind, span } if accepts(*kind) => Ok(span.clone()),
         form => Err(header_error(expected, span(form))),
-    }
-}
-
-fn require_end(forms: &[Form], at: usize, end: usize) -> Result<(), CircuitFormError> {
-    if at < end {
-        Err(header_error(
-            HeaderError::UnexpectedArgument,
-            span(&forms[at]),
-        ))
-    } else {
-        Ok(())
     }
 }
 
