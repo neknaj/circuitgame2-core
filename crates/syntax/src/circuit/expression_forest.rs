@@ -108,6 +108,89 @@ pub closed spec fn expression_references(
     }
 }
 
+/// 指定の構文木位置に、専用フォーム以外の呼び出しがあることを表す。
+pub closed spec fn ordinary_call_at(source: &str, forms: Seq<Form>, call: int, stop: int) -> bool {
+    &&& 0 <= call && call + 1 < stop <= forms.len()
+    &&& forms[call] is List
+    &&& call + 2 <= forms[call]->List_end <= stop
+    &&& argument_matches(forms, call + 1, forms[call]->List_end as int, HeaderError::ExpectedReference)
+    &&& list_head_matches(source, forms, call + 1, None)
+}
+
+/// 通常呼び出しの参照添字は、対応するリストの直後の先頭語を指す。
+pub(super) proof fn expression_callee_location(
+    source: &str, forms: Seq<Form>, start: int, stop: int, position: int,
+)
+    requires
+        forms.len() <= usize::MAX,
+        0 <= position < expression_references(source, forms, start, stop).len(),
+        expression_references(source, forms, start, stop)[position].kind is Callee,
+    ensures ({
+        let call = expression_references(source, forms, start, stop)[position].form - 1;
+        &&& 0 <= start <= call && call + 1 < stop <= forms.len()
+        &&& forms[call] is List && call + 2 <= forms[call]->List_end <= stop
+        &&& ordinary_call_at(source, forms, call, stop)
+    }),
+    decreases stop - start,
+{
+    reveal_with_fuel(expression_references, 1);
+    assert(0 <= start < stop <= forms.len());
+    let refs = expression_references(source, forms, start, stop);
+    match forms[start] {
+        Form::Atom { .. } => {
+            expression_callee_location(source, forms, start + 1, stop, position);
+        },
+        Form::List { end, .. } => {
+            assert(start < end <= stop);
+            let (a, b) = choose|a: int, b: int| start < a <= b <= end
+                && #[trigger] expression_child_range(source, forms, start, end as int, a, b);
+            let head = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, start + 1, head);
+            let local = local_reference(forms, start, end as int, head);
+            let children = expression_references(source, forms, a, b);
+            let siblings = expression_references(source, forms, end as int, stop);
+            assert(refs == local + children + siblings);
+            if position < local.len() {
+                assert(refs[position] == local[position]);
+                assert(head is None && refs[position].form == start + 1);
+            } else if position < local.len() + children.len() {
+                let offset = position - local.len();
+                assert(refs[position] == children[offset]);
+                expression_callee_location(source, forms, a, b, offset);
+            } else {
+                let offset = position - local.len() - children.len();
+                assert(refs[position] == siblings[offset]);
+                expression_callee_location(source, forms, end as int, stop, offset);
+            }
+        },
+    }
+}
+
+pub(super) proof fn expression_root_callee(
+    source: &str, forms: Seq<Form>, start: int, stop: int,
+)
+    requires
+        0 <= start < stop <= forms.len() <= usize::MAX,
+        expression_forest(source, forms, start, stop), after_form(forms, start) == stop,
+    ensures ({
+        let refs = expression_references(source, forms, start, stop);
+        ordinary_call_at(source, forms, start, stop)
+            <==> refs.len() > 0 && refs[0].kind is Callee && refs[0].form == start + 1
+    }),
+{
+    let refs = expression_references(source, forms, start, stop);
+    if ordinary_call_at(source, forms, start, stop) {
+        reveal_with_fuel(expression_forest, 1);
+        reveal_with_fuel(expression_references, 1);
+        let (a, b) = choose|a: int, b: int| start < a <= b <= stop
+            && #[trigger] expression_child_range(source, forms, start, stop, a, b);
+        let head = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, start + 1, head);
+        same_expression_head(source, forms, start + 1, head, None);
+        assert(refs[0] == local_reference(forms, start, stop, head)[0]);
+    } else if refs.len() > 0 && refs[0].kind is Callee && refs[0].form == start + 1 {
+        expression_callee_location(source, forms, start, stop, 0);
+    }
+}
+
 #[verifier::opaque]
 spec fn pending_references(source: &str, forms: Seq<Form>, pending: Seq<Range<usize>>) -> Seq<ExpressionReference>
     decreases pending.len(),
@@ -134,8 +217,12 @@ proof fn list_reference_order(
             == local_reference(forms, start, end, builtin)
                 + expression_references(source, forms, child_start, child_stop)
                 + expression_references(source, forms, end, stop),
+        expression_signals(source, forms, start, stop)
+            == expression_signals(source, forms, child_start, child_stop)
+                + expression_signals(source, forms, end, stop),
 {
     reveal_with_fuel(expression_references, 1);
+    reveal_with_fuel(expression_signals, 1);
     let (i, j) = choose|a: int, b: int| start < a <= b <= end
         && #[trigger] expression_child_range(source, forms, start, end, a, b);
     assert(i == child_start && j == child_stop);
@@ -662,14 +749,6 @@ pub(super) fn inspect_expressions_into(
                 let ghost child_stop = children.end as int;
                 proof {
                     list_reference_order(source, forms@, start, stop, next, child_start, child_stop, builtin);
-                    assert(expression_signals(source, forms@, start, stop)
-                        == expression_signals(source, forms@, child_start, child_stop)
-                            + expression_signals(source, forms@, next, stop)) by {
-                        reveal_with_fuel(expression_signals, 1);
-                        let (i, j) = choose|i: int, j: int| start < i <= j <= next
-                            && #[trigger] expression_child_range(source, forms@, start, next, i, j);
-                        assert(i == child_start && j == child_stop);
-                    };
                 }
                 if collect {
                     if builtin.is_none() {

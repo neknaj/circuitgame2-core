@@ -1,5 +1,65 @@
 use circuitgame2_syntax::Form;
-use circuitgame2_syntax::circuit::{index_build_forms, index_definition_references};
+use circuitgame2_syntax::circuit::{
+    RoutineArity, definition_root_is_call, index_build_forms, index_definition_references,
+    indexed_call_shape, routine_arity,
+};
+
+#[test]
+fn projects_call_positions_and_counts_only_direct_arguments() {
+    let source = concat!(
+        "; 入れ子\n",
+        "(func f (in (a (bits 3)) b) (out x (y (bits 3))) ",
+        "  (def (x y) (call (none) (as ::types::T a) (next b a))) ",
+        "  (def tmp (raw (zero))) ",
+        "  (def tail b)) ",
+        "(func no-inputs (in) (out y) (def y 0)) ",
+        "(using nor)",
+    );
+    let build = index_build_forms(source).unwrap();
+    let forms = &build.syntax.forms;
+    assert_eq!(
+        routine_arity(source, &build.syntax, 0),
+        Some(RoutineArity { inputs: 2, outputs: 2 })
+    );
+    assert_eq!(
+        routine_arity(source, &build.syntax, 1),
+        Some(RoutineArity { inputs: 0, outputs: 1 })
+    );
+    assert_eq!(routine_arity(source, &build.syntax, 2), None);
+    assert_eq!(routine_arity(source, &build.syntax, 3), None);
+
+    let root_calls: Vec<_> = build
+        .definitions
+        .iter()
+        .map(|row| definition_root_is_call(source, forms, row, &build.references))
+        .collect();
+    assert_eq!(root_calls, [true, false, false, false]);
+
+    let first = &build.definitions[0];
+    let inner = &build.definitions[1];
+    let mut calls = Vec::new();
+    for row in [first, inner] {
+        for position in row.references.clone() {
+            let reference = &build.references[position];
+            let shape = indexed_call_shape(source, forms, row, &build.references, position);
+            let details = shape.map(|shape| {
+                assert_eq!(shape.form + 1, reference.form);
+                (&source[shape.span], shape.arguments)
+            });
+            calls.push((&source[reference.span.clone()], details));
+        }
+    }
+    assert_eq!(
+        calls,
+        [
+            ("call", Some(("(call (none) (as ::types::T a) (next b a))", 3))),
+            ("none", Some(("(none)", 0))),
+            ("::types::T", None),
+            ("next", Some(("(next b a)", 2))),
+            ("zero", Some(("(zero)", 0))),
+        ]
+    );
+}
 
 #[test]
 fn indexes_only_signal_operands_in_source_order() {

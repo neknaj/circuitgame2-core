@@ -6,7 +6,7 @@ use super::index::index_parsed_headers_into;
 #[cfg(verus_only)]
 use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_syntax};
 #[cfg(verus_only)]
-use super::expression_forest::{expression_signal_evidence, expression_signals};
+use super::expression_forest::{expression_forest, expression_references, expression_signal_evidence, expression_signals};
 use super::*;
 
 verus! {
@@ -178,6 +178,11 @@ pub proof fn build_definition_scope_evidence(
             &&& index.signals@[row.signals.start as int..row.signals.end as int]
                 == expression_signals(source, index.syntax.forms@,
                     row.expression.start as int, row.expression.end as int)
+            &&& row.expression.start < row.expression.end <= index.syntax.forms@.len()
+            &&& definition_call_index(source, index.syntax.forms@, row, index.references@)
+            &&& expression_forest(source, index.syntax.forms@, row.expression.start as int, row.expression.end as int)
+            &&& index.references@[row.references.start as int..row.references.end as int]
+                == expression_references(source, index.syntax.forms@, row.expression.start as int, row.expression.end as int)
             &&& definition_targets_match(index.syntax.forms@, row)
             &&& forall|i: int| row.references.start <= i < row.references.end
                 ==> expression_reference_in_source(source, index.syntax.forms@, #[trigger] index.references@[i])
@@ -201,6 +206,8 @@ pub proof fn build_definition_scope_evidence(
     flat_body_row_evidence(source, forms, body, end, defs, refs, signals,
         frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int, offset);
     let row = index.definitions@[definition];
+    assert(index.references@[row.references.start as int..row.references.end as int]
+        =~= refs[row.references.start as int..row.references.end as int]);
     assert(index.signals@[row.signals.start as int..row.signals.end as int]
         =~= signals[row.signals.start as int..row.signals.end as int]);
     assert forall|i: int| row.references.start <= i < row.references.end

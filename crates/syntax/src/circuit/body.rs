@@ -343,6 +343,7 @@ fn read_body_item(
                 Some(rhs) => body_head_at(source, forms@, index + 1, next as int, BodyHead::Def)
                     && targets_match(forms@, index + 2, next as int, rhs.start as int)
                     && rhs.start < rhs.end == next && after_form(forms@, rhs.start as int) == next
+                    && expression_forest(source, forms@, rhs.start as int, rhs.end as int)
                     && (collect ==> final(references)@ == old(references)@ +
                         expression_references(source, forms@, rhs.start as int, rhs.end as int))
                     && (collect ==> final(signals)@ == old(signals)@
@@ -523,6 +524,7 @@ pub(super) open spec fn flat_definition_matches(
     &&& stop == forms[item]->List_end
     &&& targets_match(forms, item + 2, stop, value)
     &&& value < stop && after_form(forms, value) == stop
+    &&& expression_forest(source, forms, value, stop)
     &&& 0 <= first <= last <= references.len()
     &&& 0 <= row.signals.start <= row.signals.end <= signals.len()
     &&& signals[row.signals.start as int..row.signals.end as int] == expression_signals(source, forms, value, stop)
@@ -571,6 +573,16 @@ pub(super) proof fn flat_body_row_evidence(
         first_signal <= definitions[index].signals.start <= definitions[index].signals.end <= stop_signal,
         signals[definitions[index].signals.start as int..definitions[index].signals.end as int]
             == expression_signals(source, forms, definitions[index].expression.start as int, definitions[index].expression.end as int),
+        ({
+            let row = definitions[index];
+            let value = row.expression.start as int;
+            let end = row.expression.end as int;
+            &&& value < end <= forms.len()
+            &&& after_form(forms, value) == end
+            &&& expression_forest(source, forms, value, end)
+            &&& references[row.references.start as int..row.references.end as int]
+                == expression_references(source, forms, value, end)
+        }),
         targets_match(forms, definitions[index].form + 2, definitions[index].expression.end as int,
             definitions[index].expression.start as int),
         forall|i: int| definitions[index].references.start <= i < definitions[index].references.end

@@ -11,6 +11,7 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod body;
+mod call_shapes;
 mod build;
 mod clauses;
 mod definitions;
@@ -27,6 +28,11 @@ pub use body::routine_expansion_evidence;
 use body::validate_routine_arguments;
 pub use body::{DefinitionReferences, first_routine_expansion};
 use build::BuildRows;
+pub use call_shapes::{
+    CallShape, RoutineArity, definition_root_is_call, indexed_call_shape, routine_arity,
+};
+#[cfg(verus_only)]
+pub use call_shapes::{call_shape_matches, definition_call_index, routine_arity_matches};
 pub use build::{
     BuildCircuitIndex, BuildDefinition, BuildEntryRanges, definition_target_atoms,
     index_build_forms,
@@ -48,6 +54,8 @@ pub use expression_forest::{
 };
 #[cfg(verus_only)]
 pub use expression_forest::{expression_reference_in_source, expression_source_reference_result};
+#[cfg(verus_only)]
+pub use expression_forest::ordinary_call_at;
 pub use index::{
     CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     index_headers, recover_circuit_forms,
