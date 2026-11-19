@@ -328,52 +328,146 @@ pub open spec fn distinct_list_closes(forms: Seq<Form>) -> bool {
         ==> form_span(forms[i]).end != form_span(forms[j]).end
 }
 
-proof fn append_without_close_preserves_distinct_closes(forms: Seq<Form>, form: Form)
-    requires distinct_list_closes(forms), !closed_list(form),
-    ensures distinct_list_closes(forms.push(form)),
+pub open spec fn preorder_range_pair(earlier: Form, later: Form, later_index: int) -> bool {
+    let first = form_span(earlier);
+    let second = form_span(later);
+    &&& first.start < second.start
+    &&& match earlier {
+        Form::Atom { .. } => {
+            if later is Atom { first.end < second.start } else { first.end <= second.start }
+        },
+        Form::List { end, .. } => {
+            if end == 0 {
+                true
+            } else if later_index < end {
+                second.end < first.end
+            } else {
+                first.end <= second.start
+            }
+        },
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn strict_preorder_ranges(forms: Seq<Form>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < forms.len()
+        ==> preorder_range_pair(#[trigger] forms[i], #[trigger] forms[j], j)
+}
+
+#[verifier::opaque]
+spec fn atoms_end_before(forms: Seq<Form>, position: int) -> bool {
+    forall|i: int| 0 <= i < forms.len() && #[trigger] forms[i] is Atom
+        ==> form_span(forms[i]).end < position
+}
+
+proof fn atoms_stay_behind_cursor(
+    source: &str, before: Seq<Form>, after: Seq<Form>, previous: int, next: int,
+)
+    requires
+        form_spans_valid(source, before, previous),
+        previous < next,
+        forall|i: int| 0 <= i < after.len() && #[trigger] after[i] is Atom
+            ==> i < before.len() && after[i] == before[i],
+    ensures atoms_end_before(after, next),
 {
-    reveal(distinct_list_closes);
-    let extended = forms.push(form);
-    assert forall|i: int, j: int| 0 <= i < j < extended.len()
-        && #[trigger] closed_list(extended[i]) && #[trigger] closed_list(extended[j])
-        implies form_span(extended[i]).end != form_span(extended[j]).end by {
-        assert(extended[forms.len() as int] == form);
-        assert(extended[i] == forms[i] && extended[j] == forms[j]);
+    reveal(form_spans_valid);
+    reveal(atoms_end_before);
+    assert forall|i: int| 0 <= i < after.len() && #[trigger] after[i] is Atom
+        implies form_span(after[i]).end < next by {
+        assert(after[i] == before[i]);
+        assert(form_span(before[i]).end <= previous);
     };
 }
 
-proof fn close_preserves_distinct_closes(
+proof fn append_preserves_preorder_ranges(
+    source: &str, forms: Seq<Form>, added: Form, before: int,
+)
+    requires
+        strict_preorder_ranges(forms),
+        form_spans_valid(source, forms, before),
+        complete_or_pending_ends_in_bounds(forms),
+        form_span(added).start == before,
+        added is Atom ==> atoms_end_before(forms, before),
+    ensures strict_preorder_ranges(forms.push(added)),
+{
+    reveal(strict_preorder_ranges);
+    reveal(form_spans_valid);
+    reveal(atoms_end_before);
+    let extended = forms.push(added);
+    assert forall|i: int, j: int| 0 <= i < j < extended.len()
+        implies preorder_range_pair(#[trigger] extended[i], #[trigger] extended[j], j) by {
+        assert(extended[i] == forms[i]);
+        if j < forms.len() {
+            assert(extended[j] == forms[j]);
+        } else {
+            assert(extended[j] == added);
+            assert(form_span(forms[i]).start < form_span(forms[i]).end <= before);
+        }
+    };
+}
+
+spec fn complete_or_pending_ends_in_bounds(forms: Seq<Form>) -> bool {
+    forall|i: int| 0 <= i < forms.len() && #[trigger] forms[i] is List
+        ==> forms[i]->List_end <= forms.len()
+}
+
+proof fn close_preserves_preorder_ranges(
     source: &str, before: Seq<Form>, after: Seq<Form>, closed: int, position: int,
 )
     requires
-        distinct_list_closes(before),
+        strict_preorder_ranges(before),
+        nested_list_indices(before),
         form_spans_valid(source, before, position),
         0 <= closed < before.len() == after.len(),
+        before[closed] is List && before[closed]->List_end == 0,
+        after[closed] is List && after[closed]->List_end == after.len(),
+        form_span(after[closed]).start == form_span(before[closed]).start,
         position < form_span(after[closed]).end,
         forall|i: int| 0 <= i < before.len() && i != closed
             ==> #[trigger] after[i] == before[i],
-    ensures distinct_list_closes(after),
+    ensures strict_preorder_ranges(after),
 {
-    reveal(distinct_list_closes);
+    reveal(strict_preorder_ranges);
     reveal(form_spans_valid);
+    reveal(nested_list_indices);
     assert forall|i: int, j: int| 0 <= i < j < after.len()
-        && #[trigger] closed_list(after[i]) && #[trigger] closed_list(after[j])
-        implies form_span(after[i]).end != form_span(after[j]).end by {
+        implies preorder_range_pair(#[trigger] after[i], #[trigger] after[j], j) by {
+        assert(preorder_range_pair(before[i], before[j], j));
         if i == closed {
             assert(after[j] == before[j]);
             assert(form_span(before[j]).end <= position);
         } else if j == closed {
             assert(after[i] == before[i]);
-            assert(form_span(before[i]).end <= position);
+            if closed_list(before[i]) {
+                assert(before[i]->List_end <= closed);
+            }
         } else {
             assert(after[i] == before[i] && after[j] == before[j]);
         }
     };
 }
 
+proof fn preorder_ranges_have_distinct_closes(source: &str, forms: Seq<Form>, consumed: int)
+    requires
+        strict_preorder_ranges(forms),
+        form_spans_valid(source, forms, consumed),
+    ensures distinct_list_closes(forms),
+{
+    reveal(strict_preorder_ranges);
+    reveal(distinct_list_closes);
+    reveal(form_spans_valid);
+    assert forall|i: int, j: int| 0 <= i < j < forms.len()
+        && #[trigger] closed_list(forms[i]) && #[trigger] closed_list(forms[j])
+        implies form_span(forms[i]).end != form_span(forms[j]).end by {
+        assert(preorder_range_pair(forms[i], forms[j], j));
+        assert(form_span(forms[j]).start < form_span(forms[j]).end);
+    };
+}
+
 #[verifier::opaque]
 pub open spec fn strict_source_covered(source: &str, forms: Seq<Form>) -> bool {
     &&& distinct_list_closes(forms)
+    &&& strict_preorder_ranges(forms)
     &&& exists|pieces: Seq<(int, int)>| covers(source.spec_bytes(), pieces, source.spec_bytes().len() as int)
         && #[trigger] pieces_represented(source, forms, pieces)
         && all_form_pieces_present(forms, pieces)
@@ -385,6 +479,7 @@ proof fn source_coverage_from_pieces(source: &str, forms: Seq<Form>, pieces: Seq
         pieces_represented(source, forms, pieces),
         all_form_pieces_present(forms, pieces),
         distinct_list_closes(forms),
+        strict_preorder_ranges(forms),
     ensures strict_source_covered(source, forms),
 {
     reveal(strict_source_covered);
@@ -1194,8 +1289,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         assert(pieces_represented(source, forms@, spans));
         reveal(all_form_pieces_present);
         assert(all_form_pieces_present(forms@, spans));
-        reveal(distinct_list_closes);
-        assert(distinct_list_closes(forms@));
+        reveal(strict_preorder_ranges);
+        assert(strict_preorder_ranges(forms@));
+        reveal(atoms_end_before);
+        assert(atoms_end_before(forms@, 0));
         reveal(nested_list_indices);
         assert(nested_list_indices(forms@));
         reveal(repair_input_spans_valid);
@@ -1213,7 +1310,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
             !recovering ==> pieces_represented(source, forms@, spans)
                 && all_form_pieces_present(forms@, spans)
-                && distinct_list_closes(forms@),
+                && strict_preorder_ranges(forms@),
+            !recovering && !lexer.needs_separator ==> atoms_end_before(forms@, lexer.cursor.position()),
             no_inserted_closes(repairs@),
             repair_input_spans_valid(source, repairs@, lexer.cursor.position()),
             form_spans_valid(source, forms@, lexer.cursor.position()),
@@ -1228,6 +1326,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         let Some((segment, next)) = lexer.next_segment() else {
             proof {
                 if !recovering {
+                    preorder_ranges_have_distinct_closes(source, forms@, length as int);
                     source_coverage_from_pieces(source, forms@, spans);
                 }
             }
@@ -1235,6 +1334,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         };
         let ghost previous_position = lexer.cursor.position();
         let ghost old_forms = forms@;
+        let ghost previous_needs_separator = lexer.needs_separator;
         let kind = segment.kind;
         let span = segment.span;
         let missing_separator = segment.missing_separator;
@@ -1276,6 +1376,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         assert(parsed_piece(source, forms@, piece));
                         append_represented_piece(source, forms@, old_spans, piece);
                         form_pieces_preserved(forms@, forms@, old_spans, piece);
+                        atoms_stay_behind_cursor(source, old_forms, forms@, previous_position, lexer.cursor.position());
                     }
                 }
             }
@@ -1313,7 +1414,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     if !recovering {
                         appended_form_preserves_pieces(source, before, added, old_spans);
                         add_form_pieces(before, added, old_spans, piece);
-                        append_without_close_preserves_distinct_closes(before, added);
+                        assert(complete_or_pending_ends_in_bounds(before));
+                        append_preserves_preorder_ranges(source, before, added, previous_position);
+                        atoms_stay_behind_cursor(source, before, forms@, previous_position, lexer.cursor.position());
                         assert(parsed_piece(source, forms@, piece)) by {
                             assert(form_represents_piece(forms@[before.len() as int], piece));
                         };
@@ -1339,7 +1442,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                             assert(form_span(before[closed]).end == form_span(before[closed]).start + 1);
                             closed_form_preserves_pieces(source, before, forms@, closed, old_spans);
                             close_form_pieces(before, forms@, closed, old_spans, piece);
-                            close_preserves_distinct_closes(source, before, forms@, closed, previous_position);
+                            close_preserves_preorder_ranges(source, before, forms@, closed, previous_position);
+                            atoms_stay_behind_cursor(source, before, forms@, previous_position, lexer.cursor.position());
                             assert(parsed_piece(source, forms@, piece)) by {
                                 assert(form_represents_piece(forms@[index as int], piece));
                             };
@@ -1377,7 +1481,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     if !recovering {
                         appended_form_preserves_pieces(source, before, added, old_spans);
                         add_form_pieces(before, added, old_spans, piece);
-                        append_without_close_preserves_distinct_closes(before, added);
+                        assert(complete_or_pending_ends_in_bounds(before));
+                        assert(!previous_needs_separator);
+                        append_preserves_preorder_ranges(source, before, added, previous_position);
                         assert(parsed_piece(source, forms@, piece)) by {
                             assert(form_represents_piece(forms@[before.len() as int], piece));
                         };
