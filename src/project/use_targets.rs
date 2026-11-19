@@ -48,8 +48,8 @@ pub struct ResolvedUse<'p, 'a> {
     pub site: UseSite<'p, 'a>,
     /// 解決した宣言または名前空間。
     pub target: AbsoluteTarget<'p, 'a, 'a>,
-    _file: usize,
-    _entry: usize,
+    pub(super) _file: usize,
+    pub(super) _entry: usize,
 }
 
 /// 参照先を解決した別名指定の一覧と、解決に使った公開表。
@@ -293,7 +293,8 @@ pub fn index_use_targets<'p, 'a>(
     requires project.has_parsed_sources(),
     ensures
         match result {
-            Ok(targets) => use_targets_match(project, targets),
+            Ok(targets) => use_targets_match(project, targets)
+                && targets.exports_model().declarations_model().well_formed(),
             Err(error) => use_target_error_evidence(project, error),
         },
 {

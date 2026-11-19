@@ -308,6 +308,14 @@ pub(super) proof fn declaration_location_evidence(
     assert(name_in_source(items[i].source.text, items[i].form.name));
 }
 
+pub(super) proof fn declaration_key_evidence(
+    table: &DeclarationTable, key: NameKey, source: &ProjectSource, form: &NamedForm,
+)
+    requires table.declaration_at(key, source, form),
+    ensures key_view(form_key(*form)) == key_view(key),
+{
+}
+
 pub(super) proof fn declaration_key_equivalence(project: &CircuitProject, left: NameKey, right: NameKey)
     requires key_view(left) == key_view(right),
     ensures project_declares(project, left) <==> project_declares(project, right),

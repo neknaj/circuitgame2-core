@@ -2,7 +2,7 @@
 
 use super::declarations::key_of;
 #[cfg(verus_only)]
-use super::declarations::{declaration_location_evidence, form_key};
+use super::declarations::{declaration_key_evidence, declaration_location_evidence, form_key};
 #[cfg(verus_only)]
 use super::location_in_source;
 #[cfg(verus_only)]
@@ -98,6 +98,26 @@ pub open spec fn direct_target_matches(
                 && table.namespace_at(key, introduced_at) && location_in_source(introduced_at),
         None => !declaration_exists(table, key)
             && (forall|location: LocatedName| !#[trigger] table.namespace_at(key, location)),
+    }
+}
+
+pub(super) proof fn direct_targets_agree(
+    table: &DeclarationTable, key: NameKey, left: Option<AbsoluteTarget>, right: Option<AbsoluteTarget>,
+)
+    requires direct_target_matches(table, key, left), direct_target_matches(table, key, right),
+    ensures match (left, right) {
+        (Some(left), Some(right)) => same_target(left, right),
+        (None, None) => true,
+        _ => false,
+    },
+{
+    if let Some(AbsoluteTarget::Declaration { source, form }) = left {
+        declaration_key_evidence(table, key, source, form);
+        assert(declaration_exists(table, key));
+    }
+    if let Some(AbsoluteTarget::Declaration { source, form }) = right {
+        declaration_key_evidence(table, key, source, form);
+        assert(declaration_exists(table, key));
     }
 }
 
