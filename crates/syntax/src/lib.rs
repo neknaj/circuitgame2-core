@@ -7,6 +7,10 @@ mod boundary;
 pub mod circuit;
 mod digits;
 #[cfg(verus_only)]
+mod lexical;
+#[cfg(verus_only)]
+pub use lexical::{LexemeKind, lexeme_at};
+#[cfg(verus_only)]
 mod projection;
 #[cfg(verus_only)]
 pub use projection::{forest_terminals, significant_pieces};
@@ -103,6 +107,27 @@ impl SegmentKind {
     }
 }
 
+#[cfg(verus_only)]
+spec fn segment_lexeme(kind: SegmentKind) -> Option<LexemeKind> {
+    match kind {
+        SegmentKind::Whitespace => Some(LexemeKind::Whitespace),
+        SegmentKind::Comment => Some(LexemeKind::Comment),
+        SegmentKind::Open => Some(LexemeKind::Open),
+        SegmentKind::Close => Some(LexemeKind::Close),
+        SegmentKind::Atom(kind) => Some(LexemeKind::Atom(kind)),
+        SegmentKind::Malformed(_) => None,
+    }
+}
+
+#[cfg(verus_only)]
+#[verifier::opaque]
+spec fn lexical_step_agrees(bytes: Seq<u8>, start: int, end: int, observed: Option<LexemeKind>) -> bool {
+    &&& (observed is Some ==> lexeme_at(bytes, start, end, observed->Some_0))
+    &&& forall|expected_end: int, expected: LexemeKind|
+        #[trigger] lexeme_at(bytes, start, expected_end, expected)
+            ==> end == expected_end && observed == Some(expected)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct Segment {
     kind: SegmentKind,
@@ -143,9 +168,8 @@ impl<'a> Lexer<'a> {
                     &&& segment.span.start < segment.span.end
                     &&& segment.span.end == next.cursor.position()
                     &&& segment.span.end <= self.cursor.source.spec_bytes().len()
-                    &&& (forall|close: int| #[trigger] quoted_prefix_at(self.cursor.remaining.spec_bytes(), close)
-                        ==> segment.kind is Atom && segment.kind->Atom_0 == AtomKind::String
-                            && segment.span.end == segment.span.start + close + 1)
+                    &&& lexical_step_agrees(self.cursor.source.spec_bytes(), self.cursor.position(),
+                        segment.span.end as int, segment_lexeme(segment.kind))
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.start as int)
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.end as int)
                     &&& (segment.kind is Whitespace || segment.kind is Comment ==> trivia_extent(
@@ -167,6 +191,7 @@ impl<'a> Lexer<'a> {
         let Some((raw, span, cursor)) = self.cursor.advance() else {
             return None;
         };
+        let ghost raw_segment = raw;
         let (kind, is_atom) = match raw {
             RawSegment::Whitespace => (SegmentKind::Whitespace, false),
             RawSegment::Comment => (SegmentKind::Comment, false),
@@ -192,6 +217,63 @@ impl<'a> Lexer<'a> {
         };
         assert(kind is Malformed ==> syntax_error_evidence(self.cursor.source, kind->Malformed_0))
             by { reveal(syntax_error_evidence); reveal(atom_and_close_error_evidence); };
+        proof {
+            assert(segment_lexeme(kind) is Some ==> lexeme_at(
+                self.cursor.source.spec_bytes(), span.start as int,
+                span.end as int, segment_lexeme(kind)->Some_0)) by {
+                reveal(lexeme_at);
+                match raw_segment {
+                    RawSegment::Bare(atom) => {
+                        assert(atom.spec_bytes() =~= self.cursor.source.spec_bytes()[
+                            span.start as int..span.end as int]);
+                    }
+                    _ => {}
+                }
+            };
+            assert forall|end: int, expected: LexemeKind|
+                #[trigger] lexeme_at(self.cursor.source.spec_bytes(), self.cursor.position(), end, expected)
+                implies span.end == end && segment_lexeme(kind) == Some(expected) by {
+                let bytes = self.cursor.source.spec_bytes();
+                let start = self.cursor.position();
+                lexical::lexical_extent_facts(bytes, start, end, expected);
+                match raw_segment {
+                    RawSegment::Whitespace => {
+                        lexical::raw_trivia_matches(bytes, start, span.end as int, end, expected, false);
+                    }
+                    RawSegment::Comment => {
+                        lexical::raw_trivia_matches(bytes, start, span.end as int, end, expected, true);
+                    }
+                    RawSegment::Open => {
+                        assert(expected == LexemeKind::Open);
+                    }
+                    RawSegment::Close => {
+                        assert(expected == LexemeKind::Close);
+                    }
+                    RawSegment::Quoted(_) => {
+                        assert(expected == LexemeKind::Atom(AtomKind::String));
+                        reveal(lexeme_at);
+                        reveal(quoted_prefix_at);
+                        let relative_close = end - start - 1;
+                        let remaining = self.cursor.remaining.spec_bytes();
+                        assert(remaining[..relative_close + 1] =~= bytes[start..end]);
+                        assert(quoted_prefix_at(remaining, relative_close));
+                        assert(raw_segment->Quoted_0 is None);
+                        assert(segment_lexeme(kind) == Some(expected));
+                    }
+                    RawSegment::Bare(atom) => {
+                        let expected_kind = lexical::raw_bare_matches(
+                            bytes, start, span.end as int, end, expected);
+                        assert(atom.spec_bytes() =~= bytes[start..end]);
+                        assert(bare_atom_kind(atom.spec_bytes()) == Some(expected_kind));
+                        assert(segment_lexeme(kind) == Some(expected));
+                    }
+                }
+            };
+            assert(lexical_step_agrees(self.cursor.source.spec_bytes(), self.cursor.position(),
+                span.end as int, segment_lexeme(kind))) by {
+                reveal(lexical_step_agrees);
+            };
+        }
         let missing_separator = self.needs_separator && is_atom;
         Some((
             Segment { kind, span, missing_separator },
@@ -1886,6 +1968,7 @@ impl<'a> SourceCursor<'a> {
                     &&& span.end <= self.source.spec_bytes().len()
                     &&& (forall|close: int| #[trigger] quoted_prefix_at(self.remaining.spec_bytes(), close)
                         ==> kind is Quoted && kind->Quoted_0 is None && span.end == span.start + close + 1)
+                    &&& (kind is Quoted ==> self.source.spec_bytes()[span.start as int] == 34)
                     &&& (kind is Quoted && kind->Quoted_0 is None
                         ==> quoted_atom(self.source.spec_bytes()[span.start as int..span.end as int]))
                     &&& (kind is Quoted && kind->Quoted_0 is Some
@@ -1969,6 +2052,7 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
         forall|close: int| #[trigger] quoted_prefix_at(input.spec_bytes(), close)
             ==> result.0 is Quoted && result.0->Quoted_0 is None
                 && result.1.spec_bytes() == input.spec_bytes()[(close + 1)..],
+        result.0 is Quoted ==> input.spec_bytes()[0] == 34,
         is_suffix(input.spec_bytes(), result.1.spec_bytes()),
         result.1.spec_bytes().len() < input.spec_bytes().len(),
         is_char_boundary(input.spec_bytes(), input.spec_bytes().len() - result.1.spec_bytes().len()),
