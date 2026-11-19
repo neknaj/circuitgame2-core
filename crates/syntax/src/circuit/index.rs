@@ -7,7 +7,7 @@ mod recovery;
 #[cfg(verus_only)]
 use crate::{sexpr_form_model, syntax_error_evidence, well_formed_sexpr};
 #[cfg(verus_only)]
-pub use recovery::circuit_recovery_matches;
+pub use recovery::{circuit_recovery_matches, complete_recovery_agrees_with_index};
 pub use recovery::{
     CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     recover_circuit_forms,
@@ -139,6 +139,111 @@ pub(super) proof fn same_indexed_forms(
     requires circuit_index_matches(source, left, left_entries), circuit_index_matches(source, right, right_entries),
     ensures left == right,
 {
+}
+
+proof fn same_head_word(source: &str, form: Form, left: Head, right: Head)
+    requires head_word_matches(source, form, left), head_word_matches(source, form, right),
+    ensures left == right,
+{
+    reveal(head_word_matches);
+    let left_word = head_spelling(left);
+    let right_word = head_spelling(right);
+    encode_utf8_decode_utf8(left_word@);
+    encode_utf8_decode_utf8(right_word@);
+    assert(left_word@ == right_word@);
+}
+
+proof fn index_contains_entry(source: &str, forms: Seq<Form>, entries: Seq<Entry>, entry: Entry)
+    requires
+        circuit_index_matches(source, forms, entries),
+        entry.form < forms.len(),
+        indexed_location(source, forms, entry.form as int, entry.namespace),
+        header_matches(source, forms, entry.form as int, entry.namespace.is_some(), entry.head),
+    ensures exists|i: int| 0 <= i < entries.len() && (#[trigger] entries[i]) == entry,
+{
+    reveal(index_prefix);
+    let i = choose|i: int| 0 <= i < entries.len()
+        && (#[trigger] entries[i]).form == entry.form && entries[i].namespace == entry.namespace;
+    same_head_word(source, forms[entry.form + 1], entries[i].head, entry.head);
+    assert(entries[i] == entry);
+}
+
+proof fn indexes_agree_through(
+    source: &str, forms: Seq<Form>, left: Seq<Entry>, right: Seq<Entry>, count: int,
+)
+    requires
+        circuit_index_matches(source, forms, left),
+        circuit_index_matches(source, forms, right),
+        0 <= count <= left.len(),
+        count <= right.len(),
+    ensures forall|i: int| 0 <= i < count ==> (#[trigger] left[i]) == (#[trigger] right[i]),
+    decreases count,
+{
+    if count > 0 {
+        let i = count - 1;
+        indexes_agree_through(source, forms, left, right, i);
+        reveal(index_prefix);
+        let a = left[i];
+        let b = right[i];
+        index_contains_entry(source, forms, right, a);
+        index_contains_entry(source, forms, left, b);
+        let j = choose|j: int| 0 <= j < right.len() && (#[trigger] right[j]) == a;
+        let k = choose|k: int| 0 <= k < left.len() && (#[trigger] left[k]) == b;
+        // 先行項目は一致しているため、現在の要素に対応する項目は先行部分に現れない。
+        assert(i <= j) by {
+            if j < i {
+                assert(left[j] == right[j]);
+                assert(left[j].form < a.form);
+            }
+        };
+        assert(i <= k) by {
+            if k < i {
+                assert(left[k] == right[k]);
+                assert(right[k].form < b.form);
+            }
+        };
+        if j > i {
+            assert(b.form < a.form);
+            assert(k > i);
+            assert(a.form < b.form);
+        }
+        assert(a == b);
+    }
+}
+
+/// 同じソースから得た回路フォームの索引は、構文木とすべての索引項目で一致する。
+///
+/// 両方の索引が `circuit_index_matches` を満たすとき、各項目の元の添字、種別、親名前空間が同じ順に並ぶ。
+pub proof fn circuit_indexes_agree(
+    source: &str, left: &CircuitForms, right: &CircuitForms,
+)
+    requires
+        circuit_index_matches(source, left.forms@, left.entries@),
+        circuit_index_matches(source, right.forms@, right.entries@),
+    ensures left.forms@ == right.forms@, left.entries@ == right.entries@,
+{
+    let forms = left.forms@;
+    let a = left.entries@;
+    let b = right.entries@;
+    assert(forms == right.forms@);
+    let common = if a.len() < b.len() { a.len() } else { b.len() } as int;
+    indexes_agree_through(source, forms, a, b, common);
+    reveal(index_prefix);
+    if common < a.len() {
+        let entry = a[common];
+        index_contains_entry(source, forms, b, entry);
+        let j = choose|j: int| 0 <= j < b.len() && (#[trigger] b[j]) == entry;
+        assert(a[j] == entry);
+        assert(a[j].form < entry.form);
+    }
+    if common < b.len() {
+        let entry = b[common];
+        index_contains_entry(source, forms, a, entry);
+        let j = choose|j: int| 0 <= j < a.len() && (#[trigger] a[j]) == entry;
+        assert(b[j] == entry);
+        assert(b[j].form < entry.form);
+    }
+    assert(a =~= b);
 }
 
 pub(super) proof fn entry_forms_in_order(source: &str, forms: Seq<Form>, entries: Seq<Entry>)

@@ -184,6 +184,22 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
     }
 }
 
+/// 妥当なソースでは、回復解析と厳格解析の構文木と索引項目が一致する。
+///
+/// 回復結果と厳格索引は、どちらも同じソースに対する契約を満たす必要がある。
+pub proof fn complete_recovery_agrees_with_index(source: &str, recovered: &CircuitRecovery, strict: &CircuitForms)
+    requires
+        circuit_source_matches(source),
+        circuit_recovery_matches(source, *recovered),
+        circuit_index_matches(source, strict.forms@, strict.entries@),
+    ensures recovered matches CircuitRecovery::Complete(index)
+        && index.forms@ == strict.forms@ && index.entries@ == strict.entries@,
+{
+    if let CircuitRecovery::Complete(index) = recovered {
+        circuit_indexes_agree(source, index, strict);
+    }
+}
+
 /// 回路フォームを検査し、回路文法に違反したフォームの後も検査を続ける。
 ///
 /// 妥当なソースでは厳格索引を返す。S 式として読めるソースでは、壊れたフォームの後にある兄弟も検査する。

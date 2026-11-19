@@ -6,7 +6,7 @@ use super::body::{definitions_before, routine_arguments_match};
 #[cfg(verus_only)]
 use super::body::{flat_body_matches, same_body_references};
 #[cfg(verus_only)]
-use super::build::{build_entry_matches, indexed_build_entry_evidence};
+use super::build::{build_entry_matches, build_has_circuit_index, indexed_build_entry_evidence};
 #[cfg(verus_only)]
 use super::index::indexed_entry_evidence;
 use super::*;
@@ -64,6 +64,47 @@ proof fn same_signature_end(source: &str, forms: Seq<Form>, root: int, end: int,
     }
 }
 
+/// 対応する索引項目で、定義と右辺の参照が同じ順に並ぶことを表す。
+pub open spec fn definition_references_agree_at(
+    build: &BuildCircuitIndex, reference: &CircuitDefinitionIndex, build_entry: int, reference_entry: int,
+) -> bool {
+    &&& 0 <= build_entry < build.entry_ranges@.len()
+    &&& 0 <= reference_entry < reference.definitions_by_entry@.len()
+    &&& {
+        let range = build.entry_ranges@[build_entry].definitions;
+        let nested = reference.definitions_by_entry@[reference_entry]@;
+        &&& 0 <= range.start <= range.end <= build.definitions@.len()
+        &&& range.end - range.start == nested.len()
+        &&& forall|i: int| 0 <= i < nested.len() ==> {
+            let a = #[trigger] build.definitions@[range.start + i];
+            let b = #[trigger] nested[i];
+            &&& a.form == b.definition
+            &&& a.expression == b.expression
+            &&& 0 <= a.references.start <= a.references.end <= build.references@.len()
+            &&& build.references@[a.references.start as int..a.references.end as int] == b.references@
+        }
+    }
+}
+
+/// 同じソースを受理したビルド版と参照版の索引が一致することを示す。
+///
+/// 構文木と索引項目の列が一致し、同じ添字の項目で定義の件数と順序、右辺の範囲、参照列が一致する。
+pub proof fn definition_indexes_agree(source: &str, build: &BuildCircuitIndex, reference: &CircuitDefinitionIndex)
+    requires build_index_matches(source, *build), circuit_definitions_match(source, *reference),
+    ensures
+        build.syntax.forms@ == reference.syntax.forms@,
+        build.syntax.entries@ == reference.syntax.entries@,
+        forall|i: int| 0 <= i < build.syntax.entries@.len()
+            ==> #[trigger] definition_references_agree_at(build, reference, i, i),
+{
+    build_has_circuit_index(source, build);
+    circuit_indexes_agree(source, &build.syntax, &reference.syntax);
+    assert forall|i: int| 0 <= i < build.syntax.entries@.len()
+        implies #[trigger] definition_references_agree_at(build, reference, i, i) by {
+        same_indexed_definition_references(source, build, reference, i, i);
+    };
+}
+
 /// 両方の索引にある同じ宣言または断片について、定義の順序、右辺の範囲、参照列が一致することを示す。
 ///
 /// 呼び出し側は、両方の索引で値が等しい `Entry` の添字を渡す。
@@ -77,23 +118,7 @@ pub proof fn same_indexed_definition_references(
         0 <= build_entry < build.syntax.entries@.len(),
         0 <= reference_entry < reference.syntax.entries@.len(),
         build.syntax.entries@[build_entry] == reference.syntax.entries@[reference_entry],
-    ensures
-        0 <= build_entry < build.entry_ranges@.len(),
-        0 <= reference_entry < reference.definitions_by_entry@.len(),
-        ({
-            let range = build.entry_ranges@[build_entry].definitions;
-            let nested = reference.definitions_by_entry@[reference_entry]@;
-            &&& 0 <= range.start <= range.end <= build.definitions@.len()
-            &&& range.end - range.start == nested.len()
-            &&& forall|i: int| 0 <= i < nested.len() ==> {
-                let a = #[trigger] build.definitions@[range.start + i];
-                let b = #[trigger] nested[i];
-                &&& a.form == b.definition
-                &&& a.expression == b.expression
-                &&& 0 <= a.references.start <= a.references.end <= build.references@.len()
-                &&& build.references@[a.references.start as int..a.references.end as int] == b.references@
-            }
-        }),
+    ensures definition_references_agree_at(build, reference, build_entry, reference_entry),
 {
     indexed_build_entry_evidence(source, build, build_entry);
     let forms = build.syntax.forms@;

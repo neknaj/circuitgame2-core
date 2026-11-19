@@ -52,7 +52,8 @@ pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
 pub use definitions::{
     circuit_definitions_match, definition_row_evidence, definition_rows_match,
-    definition_scope_evidence, same_indexed_definition_references,
+    definition_indexes_agree, definition_references_agree_at, definition_scope_evidence,
+    same_indexed_definition_references,
 };
 pub use expression_forest::{
     ExpressionReference, ExpressionReferenceKind, index_expression_references,
@@ -69,8 +70,8 @@ pub use index::{
 };
 #[cfg(verus_only)]
 pub use index::{
-    basis_entry_evidence, circuit_index_matches, circuit_recovery_matches, circuit_source_error,
-    circuit_source_matches, export_entry_evidence, indexed_entry_evidence, indexed_location,
+    basis_entry_evidence, circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_source_error,
+    circuit_source_matches, complete_recovery_agrees_with_index, export_entry_evidence, indexed_entry_evidence, indexed_location,
     use_entry_evidence,
 };
 pub use names::{
