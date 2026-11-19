@@ -34,7 +34,8 @@ pub use build::{
 #[cfg(verus_only)]
 pub use build::{
     build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
-    build_signal_evidence, definition_target_range, definition_targets_match,
+    build_signal_cursor_evidence, build_signal_evidence, definition_target_range,
+    definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]

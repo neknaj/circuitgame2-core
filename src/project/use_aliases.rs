@@ -3,6 +3,7 @@
 mod batch;
 mod definitions;
 mod function_drivers;
+mod function_wiring;
 mod port_types;
 mod relative;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
@@ -12,6 +13,9 @@ pub use definitions::{
 };
 pub use function_drivers::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
+};
+pub use function_wiring::{
+    BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
 #[cfg(verus_only)]
 pub use port_types::port_types_equal;

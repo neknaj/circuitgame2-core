@@ -78,6 +78,9 @@ pub use use_aliases::{
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };
+pub use use_aliases::{
+    BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
+};
 pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, use_aliases_acceptable, use_aliases_match};

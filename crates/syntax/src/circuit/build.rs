@@ -1,7 +1,7 @@
 //! ビルドで使う定義と参照をファイル単位の配列に格納する。
 
 #[cfg(verus_only)]
-use super::body::{flat_body_matches, flat_body_row_evidence, targets_match};
+use super::body::{flat_body_matches, flat_body_row_evidence, flat_body_signal_cursor, targets_match};
 use super::index::index_parsed_headers_into;
 #[cfg(verus_only)]
 use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_syntax};
@@ -125,6 +125,19 @@ pub closed spec fn build_index_matches(source: &str, index: BuildCircuitIndex) -
             index.entry_ranges@, index.definitions@, index.references@, index.signals@)
 }
 
+proof fn indexed_build_entry_evidence(source: &str, index: &BuildCircuitIndex, entry: int)
+    requires build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
+    ensures
+        index.entry_ranges@.len() == index.syntax.entries@.len(),
+        ({
+            let item = index.syntax.entries@[entry];
+            build_entry_matches(source, index.syntax.forms@, item.form as int, item.head,
+                index.entry_ranges@[entry], index.definitions@, index.references@, index.signals@)
+        }),
+{
+    reveal(build_rows_match);
+}
+
 /// 索引項目の定義範囲と参照範囲が、対応する配列内に収まることを示す。
 pub proof fn build_entry_ranges_evidence(source: &str, index: &BuildCircuitIndex, entry: int)
     requires build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
@@ -137,12 +150,8 @@ pub proof fn build_entry_ranges_evidence(source: &str, index: &BuildCircuitIndex
         index.entry_ranges@[entry].signals.start <= index.entry_ranges@[entry].signals.end
             <= index.signals@.len(),
 {
-    reveal(build_rows_match);
+    indexed_build_entry_evidence(source, index, entry);
     reveal(build_entry_matches);
-    let range = index.entry_ranges@[entry];
-    let item = index.syntax.entries@[entry];
-    assert(build_entry_matches(source, index.syntax.forms@, item.form as int, item.head, range,
-        index.definitions@, index.references@, index.signals@));
 }
 
 /// 定義の参照が、その索引項目の所属と元ソースの字句に対応することを示す。
@@ -174,14 +183,11 @@ pub proof fn build_definition_scope_evidence(
                 ==> expression_reference_in_source(source, index.syntax.forms@, #[trigger] index.references@[i])
         }),
 {
-    reveal(build_rows_match);
+    indexed_build_entry_evidence(source, index, entry);
     reveal(build_entry_matches);
-    build_entry_ranges_evidence(source, index, entry);
     let forms = index.syntax.forms@;
     let item = index.syntax.entries@[entry];
     let frame = index.entry_ranges@[entry];
-    assert(build_entry_matches(source, forms, item.form as int, item.head, frame,
-        index.definitions@, index.references@, index.signals@));
     indexed_entry_evidence(source, forms, index.syntax.entries@, entry);
     let end = forms[item.form as int]->List_end as int;
     let defs = index.definitions@[frame.definitions.start as int..frame.definitions.end as int];
@@ -201,6 +207,49 @@ pub proof fn build_definition_scope_evidence(
         implies expression_reference_in_source(source, forms, #[trigger] index.references@[i]) by {
         assert(refs[i] == index.references@[i]);
     };
+}
+
+/// 定義の区切りで、前の定義の信号範囲の末尾と次の範囲の先頭が一致することを示す。
+/// 関数の先頭と末尾では、索引項目全体の信号範囲の端に対応する。
+pub proof fn build_signal_cursor_evidence(
+    source: &str, index: &BuildCircuitIndex, entry: int, cursor: int,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= cursor <= index.entry_ranges@[entry].definitions.end,
+    ensures ({
+        let frame = index.entry_ranges@[entry];
+        let previous = if cursor == frame.definitions.start { frame.signals.start }
+            else { index.definitions@[cursor - 1].signals.end };
+        if cursor == frame.definitions.end { previous == frame.signals.end }
+        else { previous == index.definitions@[cursor].signals.start }
+    }),
+{
+    indexed_build_entry_evidence(source, index, entry);
+    reveal(build_entry_matches);
+    let forms = index.syntax.forms@;
+    let item = index.syntax.entries@[entry];
+    let frame = index.entry_ranges@[entry];
+    if item.head is Func || item.head is Module || item.head is ModulePart {
+        let end = forms[item.form as int]->List_end as int;
+        let defs = index.definitions@[frame.definitions.start as int..frame.definitions.end as int];
+        let refs = index.references@.take(frame.references.end as int);
+        let signals = index.signals@.take(frame.signals.end as int);
+        let body = choose|body: int| #[trigger] routine_signature_matches(source, forms, item.form + 2, end, item.head, body)
+            && flat_body_matches(source, forms, body, end, end, defs, refs, signals,
+                frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int);
+        let offset = cursor - frame.definitions.start;
+        if offset > 0 {
+            assert(defs[offset - 1] == index.definitions@[cursor - 1]);
+        }
+        if offset < defs.len() {
+            assert(defs[offset] == index.definitions@[cursor]);
+        }
+        flat_body_signal_cursor(source, forms, body, end, defs, refs, signals,
+            frame.references.start as int, frame.references.end as int,
+            frame.signals.start as int, frame.signals.end as int, offset);
+    }
 }
 
 /// 指定した信号名が定義の右辺にあり、構文木で無修飾の名前を指すことを示す。

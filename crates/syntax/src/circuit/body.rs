@@ -582,6 +582,27 @@ pub(super) proof fn flat_body_row_evidence(
     reveal(flat_definition_matches);
 }
 
+pub(super) proof fn flat_body_signal_cursor(
+    source: &str, forms: Seq<Form>, start: int, end: int,
+    rows: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
+    first: int, stop: int, first_signal: int, stop_signal: int, cursor: int,
+)
+    requires
+        flat_body_matches(source, forms, start, end, end, rows, references, signals, first, stop, first_signal, stop_signal),
+        0 <= cursor <= rows.len(),
+    ensures
+        ({
+            let previous = if cursor == 0 { first_signal } else { rows[cursor - 1].signals.end as int };
+            if cursor == rows.len() { previous == stop_signal }
+            else { previous == rows[cursor].signals.start }
+        }),
+{
+    reveal(flat_body_matches);
+    if cursor == rows.len() && cursor > 0 {
+        assert(rows.last() == rows[cursor - 1]);
+    }
+}
+
 /// 参照配列の末尾への追加は、検査済みの定義が指す区間を変えない。
 proof fn keep_flat_definition(
     source: &str, forms: Seq<Form>, start: int, end: int, row: BuildDefinition,

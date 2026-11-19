@@ -48,7 +48,7 @@ pub struct DefinitionDriver<'a> {
     pub result_index: usize,
 }
 
-/// 出力ポートを駆動する入力または定義。
+/// 出力ポートまたは右辺で使う信号に値を供給する入力や定義。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputDriver {
     /// 同じ回路の入力配線。添字は署名の入力一覧を指す。
@@ -227,7 +227,7 @@ fn collect_drivers<'a>(source: &'a str, parsed: &NamedBuildCircuit<'a>, entry: u
     drivers
 }
 
-spec fn names_match_ports(source: &str, forms: Seq<Form>, ports: Seq<TypedPort>, names: Seq<NameSite>) -> bool {
+pub(super) open spec fn names_match_ports(source: &str, forms: Seq<Form>, ports: Seq<TypedPort>, names: Seq<NameSite>) -> bool {
     &&& names.len() <= ports.len()
     &&& forall|i: int| 0 <= i < names.len() ==> {
         let name = #[trigger] names[i];
@@ -235,7 +235,7 @@ spec fn names_match_ports(source: &str, forms: Seq<Form>, ports: Seq<TypedPort>,
     }
 }
 
-fn typed_port_names<'a>(source: &'a str, forms: &[Form], ports: &[TypedPort]) -> (names: Vec<NameSite<'a>>)
+pub(super) fn typed_port_names<'a>(source: &'a str, forms: &[Form], ports: &[TypedPort]) -> (names: Vec<NameSite<'a>>)
     requires
         typed_name_sites(forms@, ports@),
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
@@ -258,11 +258,11 @@ fn typed_port_names<'a>(source: &'a str, forms: &[Form], ports: &[TypedPort]) ->
     names
 }
 
-spec fn same_word(left: NameSite, right: NameSite) -> bool {
+pub(super) open spec fn same_word(left: NameSite, right: NameSite) -> bool {
     left.word.spec_bytes() == right.word.spec_bytes()
 }
 
-fn find_driver(drivers: &[DefinitionDriver], stop: usize, word: &str) -> (found: Option<usize>)
+pub(super) fn find_driver(drivers: &[DefinitionDriver], stop: usize, word: &str) -> (found: Option<usize>)
     requires stop <= drivers@.len(),
     ensures
         found matches Some(i) ==> i < stop && drivers@[i as int].name.word.spec_bytes() == word.spec_bytes(),
@@ -284,7 +284,7 @@ fn find_driver(drivers: &[DefinitionDriver], stop: usize, word: &str) -> (found:
     None
 }
 
-fn name_location<'p, 'a>(source: &'p ProjectSource<'a>, name: &NameSite) -> (location: LocatedName<'p, 'a>)
+pub(super) fn name_location<'p, 'a>(source: &'p ProjectSource<'a>, name: &NameSite) -> (location: LocatedName<'p, 'a>)
     requires name_in_source(source.text, *name),
     ensures location_in_source(location), *location.source == *source, location.span == name.span,
 {
@@ -293,11 +293,11 @@ fn name_location<'p, 'a>(source: &'p ProjectSource<'a>, name: &NameSite) -> (loc
     location
 }
 
-spec fn is_location(source: &ProjectSource, name: NameSite, location: LocatedName) -> bool {
+pub(super) open spec fn is_location(source: &ProjectSource, name: NameSite, location: LocatedName) -> bool {
     *location.source == *source && location.span == name.span && location_in_source(location)
 }
 
-spec fn disjoint_input(inputs: Seq<NameSite>, name: NameSite) -> bool {
+pub(super) open spec fn disjoint_input(inputs: Seq<NameSite>, name: NameSite) -> bool {
     forall|i: int| 0 <= i < inputs.len() ==> !same_word(#[trigger] inputs[i], name)
 }
 
@@ -491,6 +491,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && #[trigger] after_collecting_names(source, parsed, entry, &signature, inputs, outputs, definitions, result)),
             }
         }
+    }
+
+    proof fn reveal_checked_driver_result(
+        &self, file: usize, entry: usize, max_width: u64, checked: FuncDrivers,
+    )
+        requires self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
+        ensures ({
+            let project = self.targets.project_model();
+            let source = &project.sources_model()[file as int];
+            &&& func_at(project.circuits_model(), file, entry)
+            &&& self.typed_signature_evidence(file, entry, max_width, Ok(Some(checked.signature)))
+            &&& forall|i: int| 0 <= i < checked.definitions@.len()
+                ==> name_in_source(source.text, (#[trigger] checked.definitions@[i]).name)
+        }),
+    {
+        reveal(UseAliases::func_driver_evidence);
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let result = Ok(FuncDriverResult::Checked(checked));
+        let (signature, inputs, outputs, definitions) = choose|sig: TypedRoutineSignature, ins: Seq<NameSite>,
+            outs: Seq<NameSite>, defs: Seq<DefinitionDriver>|
+            #[trigger] self.typed_signature_evidence(file, entry, max_width, Ok(Some(sig)))
+                && #[trigger] after_collecting_names(source, parsed, entry, &sig, ins, outs, defs, result);
+        assert(signature == checked.signature && definitions == checked.definitions@);
+    }
+
+    pub(super) proof fn checked_driver_sources(
+        &self, file: usize, entry: usize, max_width: u64, checked: FuncDrivers,
+    )
+        requires self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
+        ensures ({
+            let project = self.targets.project_model();
+            let source = &project.sources_model()[file as int];
+            let circuits = project.circuits_model();
+            &&& file < circuits.len() && entry < circuits[file as int].syntax.entries@.len()
+            &&& circuits[file as int].syntax.entries@[entry as int].head is Func
+            &&& typed_name_sites(circuits[file as int].syntax.forms@, checked.signature.inputs@)
+            &&& forall|i: int| 0 <= i < checked.definitions@.len()
+                ==> name_in_source(source.text, (#[trigger] checked.definitions@[i]).name)
+        }),
+    {
+        self.reveal_checked_driver_result(file, entry, max_width, checked);
+        self.typed_signature_sites(file, entry, max_width, checked.signature);
     }
 
     /// `func` の署名を解決し、本体の明示的な定義から出力の駆動元を求める。
