@@ -210,7 +210,7 @@ proof fn head_errors_agree(
     }
 }
 
-proof fn header_errors_on_directives_agree(
+proof fn header_errors_on_declarations_agree(
     source: &str, forms: Seq<Form>, index: int, in_namespace: bool,
     left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
 )
@@ -218,7 +218,8 @@ proof fn header_errors_on_directives_agree(
         header_error_evidence(source, forms, index, in_namespace, left.0, left.1),
         header_error_evidence(source, forms, index, in_namespace, right.0, right.1),
         forall|head: Head| #[trigger] form_has_head(source, forms, index, in_namespace, head)
-            ==> head is Using || head is Namespace || head is Export || head is Use,
+            ==> head is Using || head is Namespace || head is Export || head is Use
+                || head is Struct || head is Latch || head is Memory,
     ensures left == right,
 {
     let a_rejected = form_head_error_evidence(source, forms, index, in_namespace, left.0, left.1);
@@ -242,8 +243,40 @@ proof fn header_errors_on_directives_agree(
             && header_arguments_error(source, forms, index + 2, stop, closing, head, right.0, right.1);
         same_head_word(source, forms[index + 1], a, b);
         reveal(header_arguments_error);
-        super::directive_diagnostics::directive_errors_agree(source, forms, index + 2, stop, closing, a, left, right);
+        let first = index + 2;
+        match a {
+            Head::Struct => super::structure::structure_errors_agree(source, forms, first, stop, closing, left, right),
+            Head::Latch | Head::Memory => {
+                if directive_word_at(source, forms, first, stop, HeaderError::ExpectedName) {
+                    super::clause_diagnostics::storage_errors_agree(
+                        source, forms, first + 1, stop, closing, a, left, right);
+                }
+            },
+            _ => super::directive_diagnostics::directive_errors_agree(source, forms, first, stop, closing, a, left, right),
+        }
     }
+}
+
+/// 先頭語や、指示・構造体・状態素子の宣言で見つかった違反について、厳格索引の診断値が一致する。
+///
+/// フォームの位置は `first_circuit_header_error` から得られる。
+/// 有効な先頭語を認識できた場合は、`using`、`namespace`、`export`、`use`、
+/// `struct`、`latch`、`memory` のいずれかを対象とする。
+pub proof fn circuit_header_errors_agree(
+    source: &str, left: CircuitFormError, right: CircuitFormError, index: int, namespace: Option<usize>,
+)
+    requires
+        circuit_header_error_at(source, left, index, namespace),
+        circuit_header_error_at(source, right, index, namespace),
+        forall|head: Head| #[trigger] form_has_head(
+            source, sexpr_form_model(source)->Some_0, index, namespace.is_some(), head)
+            ==> head is Using || head is Namespace || head is Export || head is Use
+                || head is Struct || head is Latch || head is Memory,
+    ensures left == right,
+{
+    let forms = sexpr_form_model(source)->Some_0;
+    header_errors_on_declarations_agree(source, forms, index, namespace.is_some(),
+        (left->Header_kind, left->Header_span), (right->Header_kind, right->Header_span));
 }
 
 /// 同じフォームの先頭語または指示フォームの引数に違反があるとき、厳格索引の診断値が一致する。
@@ -261,9 +294,7 @@ pub proof fn circuit_directive_errors_agree(
             ==> head is Using || head is Namespace || head is Export || head is Use,
     ensures left == right,
 {
-    let forms = sexpr_form_model(source)->Some_0;
-    header_errors_on_directives_agree(source, forms, index, namespace.is_some(),
-        (left->Header_kind, left->Header_span), (right->Header_kind, right->Header_span));
+    circuit_header_errors_agree(source, left, right, index, namespace);
 }
 
 #[verifier::opaque]

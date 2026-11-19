@@ -4,6 +4,11 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
+use super::clause_diagnostics::{
+    natural_errors_agree, natural_match_excludes_error, type_after_agrees, type_errors_agree,
+    type_match_excludes_error,
+};
+#[cfg(verus_only)]
 use super::clauses::enclosing_region_bounds_form;
 #[cfg(verus_only)]
 use super::{
@@ -34,6 +39,17 @@ pub open spec fn field_matches(source: &str, forms: Seq<Form>, index: int, limit
     }
 }
 
+/// 位置指定の違反、または位置指定の直後にある余分な引数の診断根拠を表す。
+pub open spec fn field_offset_error_evidence(
+    source: &str, forms: Seq<Form>, at: int, end: int, close: usize,
+    kind: HeaderError, span: Range<usize>,
+) -> bool {
+    natural_clause_error_evidence(source, forms, at, end, close, Clause::At, kind, span)
+        || (kind == HeaderError::UnexpectedArgument && exists|after: int|
+            #[trigger] natural_clause_matches(source, forms, at, end, after, Clause::At)
+            && after < end && span == form_span(forms[after]))
+}
+
 /// 不正なフィールドの最初の違反と診断範囲の対応を表す。
 pub open spec fn field_error_evidence(
     source: &str, forms: Seq<Form>, index: int, limit: int,
@@ -52,16 +68,107 @@ pub open spec fn field_error_evidence(
             &&& (if directive_word_at(source, forms, index + 1, end, name) {
                 type_error_evidence(source, forms, index + 2, end, close, kind, span)
                     || (exists|at: int| #[trigger] type_matches(source, forms, index + 2, end, at)
-                        && (natural_clause_error_evidence(
-                            source, forms, at, end, close, Clause::At, kind, span)
-                        || (kind == HeaderError::UnexpectedArgument && exists|after: int|
-                            #[trigger] natural_clause_matches(source, forms, at, end, after, Clause::At)
-                            && after < end && span == form_span(forms[after]))))
+                        && field_offset_error_evidence(source, forms, at, end, close, kind, span))
             } else {
                 kind == name && directive_argument_error_span(forms, index + 1, end, close, span)
             })
         } else {
             kind == HeaderError::ExpectedList && span == form_span(field)
+        }
+    }
+}
+
+proof fn field_offset_errors_agree(
+    source: &str, forms: Seq<Form>, at: int, end: int, close: usize,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        field_offset_error_evidence(source, forms, at, end, close, left.0, left.1),
+        field_offset_error_evidence(source, forms, at, end, close, right.0, right.1),
+    ensures left == right,
+{
+    let left_clause =
+        natural_clause_error_evidence(source, forms, at, end, close, Clause::At, left.0, left.1);
+    let right_clause =
+        natural_clause_error_evidence(source, forms, at, end, close, Clause::At, right.0, right.1);
+    if left_clause && right_clause {
+        natural_errors_agree(source, forms, at, end, close, Clause::At, left, right);
+    } else {
+        let after = at + 3;
+        assert(natural_clause_matches(source, forms, at, end, after, Clause::At)) by {
+            if !left_clause {
+                let matched = choose|next: int|
+                    #[trigger] natural_clause_matches(source, forms, at, end, next, Clause::At)
+                    && next < end && left.1 == form_span(forms[next]);
+                assert(matched == after);
+            } else {
+                let matched = choose|next: int|
+                    #[trigger] natural_clause_matches(source, forms, at, end, next, Clause::At)
+                    && next < end && right.1 == form_span(forms[next]);
+                assert(matched == after);
+            }
+        };
+        natural_match_excludes_error(source, forms, at, end, close, Clause::At, after, left);
+        natural_match_excludes_error(source, forms, at, end, close, Clause::At, after, right);
+        // 位置指定が文法に適合していれば、診断範囲は直後のフォームに限られる。
+        assert(left.1 == form_span(forms[after]) && right.1 == form_span(forms[after]));
+    }
+}
+
+proof fn field_match_excludes_error(
+    source: &str, forms: Seq<Form>, index: int, limit: int, error: (HeaderError, Range<usize>),
+)
+    requires field_matches(source, forms, index, limit),
+    ensures !field_error_evidence(source, forms, index, limit, error.0, error.1),
+{
+    if field_error_evidence(source, forms, index, limit, error.0, error.1) {
+        let end = forms[index]->List_end as int;
+        let close = (form_span(forms[index]).end - 1) as usize;
+        let at = choose|at: int| #[trigger] type_matches(source, forms, index + 2, end, at)
+            && natural_clause_matches(source, forms, at, end, end, Clause::At);
+        type_match_excludes_error(source, forms, index + 2, end, close, at, error);
+        let error_at = choose|at: int| #[trigger] type_matches(source, forms, index + 2, end, at)
+            && field_offset_error_evidence(source, forms, at, end, close, error.0, error.1);
+        type_after_agrees(source, forms, index + 2, end, at, error_at);
+        natural_match_excludes_error(source, forms, at, end, close, Clause::At, end, error);
+        let after = choose|after: int|
+            #[trigger] natural_clause_matches(source, forms, at, end, after, Clause::At)
+            && after < end && error.1 == form_span(forms[after]);
+        assert(after == end);
+    }
+}
+
+proof fn field_errors_agree(
+    source: &str, forms: Seq<Form>, index: int, limit: int,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        field_error_evidence(source, forms, index, limit, left.0, left.1),
+        field_error_evidence(source, forms, index, limit, right.0, right.1),
+    ensures left == right,
+{
+    let field = forms[index];
+    if field is List {
+        let end = field->List_end as int;
+        let close = (form_span(field).end - 1) as usize;
+        if directive_word_at(source, forms, index + 1, end, HeaderError::ExpectedName) {
+            let left_type = type_error_evidence(source, forms, index + 2, end, close, left.0, left.1);
+            let right_type = type_error_evidence(source, forms, index + 2, end, close, right.0, right.1);
+            if left_type && right_type {
+                type_errors_agree(source, forms, index + 2, end, close, left, right);
+            } else if !left_type {
+                let at = choose|at: int| #[trigger] type_matches(source, forms, index + 2, end, at)
+                    && field_offset_error_evidence(source, forms, at, end, close, left.0, left.1);
+                type_match_excludes_error(source, forms, index + 2, end, close, at, right);
+                let other_at = choose|at: int| #[trigger] type_matches(source, forms, index + 2, end, at)
+                    && field_offset_error_evidence(source, forms, at, end, close, right.0, right.1);
+                type_after_agrees(source, forms, index + 2, end, at, other_at);
+                field_offset_errors_agree(source, forms, at, end, close, left, right);
+            } else {
+                let at = choose|at: int| #[trigger] type_matches(source, forms, index + 2, end, at)
+                    && field_offset_error_evidence(source, forms, at, end, close, right.0, right.1);
+                type_match_excludes_error(source, forms, index + 2, end, close, at, left);
+            }
         }
     }
 }
@@ -252,6 +359,59 @@ pub open spec fn structure_error_evidence(
         structure_body_error_evidence(source, forms, first + 1, limit, closing, kind, span)
     } else {
         kind == HeaderError::ExpectedName && directive_argument_error_span(forms, first, limit, closing, span)
+    }
+}
+
+/// 同じ構造体の診断根拠から、最初の違反の種別と範囲が一意に定まることを示す。
+pub(super) proof fn structure_errors_agree(
+    source: &str, forms: Seq<Form>, first: int, limit: int, closing: usize,
+    left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
+)
+    requires
+        structure_error_evidence(source, forms, first, limit, closing, left.0, left.1),
+        structure_error_evidence(source, forms, first, limit, closing, right.0, right.1),
+    ensures left == right,
+{
+    if directive_word_at(source, forms, first, limit, HeaderError::ExpectedName) {
+        let width = first + 1;
+        let left_width =
+            natural_clause_error_evidence(source, forms, width, limit, closing, Clause::Width, left.0, left.1);
+        let right_width =
+            natural_clause_error_evidence(source, forms, width, limit, closing, Clause::Width, right.0, right.1);
+        if left_width && right_width {
+            natural_errors_agree(source, forms, width, limit, closing, Clause::Width, left, right);
+        } else if !left_width {
+            let (fields, i) = choose|fields: int, i: int|
+                #[trigger] natural_clause_matches(source, forms, width, limit, fields, Clause::Width)
+                && #[trigger] direct_form_in_range(forms, fields, limit, i)
+                && fields_match_before(source, forms, fields, limit, i)
+                && field_error_evidence(source, forms, i, limit, left.0, left.1);
+            natural_match_excludes_error(source, forms, width, limit, closing, Clause::Width, fields, right);
+            let (other_fields, j) = choose|fields: int, j: int|
+                #[trigger] natural_clause_matches(source, forms, width, limit, fields, Clause::Width)
+                && #[trigger] direct_form_in_range(forms, fields, limit, j)
+                && fields_match_before(source, forms, fields, limit, j)
+                && field_error_evidence(source, forms, j, limit, right.0, right.1);
+            assert(fields == other_fields);
+            // 先に失敗したフィールドは、後の違反の根拠では文法に適合する。
+            reveal(fields_match_before);
+            if i < j {
+                assert(field_matches(source, forms, i, limit));
+                field_match_excludes_error(source, forms, i, limit, left);
+            } else if j < i {
+                assert(field_matches(source, forms, j, limit));
+                field_match_excludes_error(source, forms, j, limit, right);
+            } else {
+                field_errors_agree(source, forms, i, limit, left, right);
+            }
+        } else {
+            let (fields, i) = choose|fields: int, i: int|
+                #[trigger] natural_clause_matches(source, forms, width, limit, fields, Clause::Width)
+                && #[trigger] direct_form_in_range(forms, fields, limit, i)
+                && fields_match_before(source, forms, fields, limit, i)
+                && field_error_evidence(source, forms, i, limit, right.0, right.1);
+            natural_match_excludes_error(source, forms, width, limit, closing, Clause::Width, fields, left);
+        }
     }
 }
 
