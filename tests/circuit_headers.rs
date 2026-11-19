@@ -445,7 +445,7 @@ fn accepts_routine_bodies_with_builtin_forms_and_calls() {
         "(def (y z) (::raw (bit x 00) (slice x 0 2) (slice x 0 2 1) ",
         "(concat (field x low) (as ns::Word (raw #xF)) #b1 0 1))) ",
         "(expand ::m () (bit) \"macro argument\")) ",
-        "(module m (in x) (out y) (def y (ns::bit))) ",
+        "(module m (in x) (out y z) (def y (::raw)) (def z (ns::bit))) ",
         "(module-part m (def y (nor x x)))",
     );
     assert_eq!(index_headers(source).unwrap().entries.len(), 3);
@@ -470,6 +470,21 @@ fn reports_malformed_routine_body_items_and_expressions() {
         ("(def y ())", HeaderError::ExpectedReference, ""),
         ("(def y (bit))", HeaderError::ExpectedExpression, ""),
         ("(def y (bit x -1))", HeaderError::ExpectedNatural, "-1"),
+        (
+            "(def y (bit \"不正な子式\" -1))",
+            HeaderError::ExpectedNatural,
+            "-1",
+        ),
+        (
+            "(def y (slice 00 0 1 nope extra))",
+            HeaderError::ExpectedNatural,
+            "nope",
+        ),
+        (
+            "(def y (slice 00 0 1 2 extra))",
+            HeaderError::UnexpectedArgument,
+            "extra",
+        ),
         ("(def y (slice x 0))", HeaderError::ExpectedNatural, ""),
         (
             "(def y (slice x 0 1 2 3))",

@@ -11,8 +11,10 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod clauses;
+mod expressions;
 mod ports;
 mod structure;
+use expressions::expression_children;
 use ports::read_routine_signature;
 #[cfg(verus_only)]
 pub use ports::{
@@ -500,7 +502,8 @@ fn expressions(source: &str, forms: &[Form], roots: Range<usize>) -> Result<(), 
                     sequence.start += 1;
                 }
                 Form::List { span, end } => {
-                    let children = expression_children(source, forms, index, *end, span.end - 1)?;
+                    let children = expression_children(source, forms, index, *end, span.end - 1)
+                        .map_err(|(kind, span)| header_error(kind, span))?;
                     if *end < sequence.end {
                         pending.push(*end..sequence.end);
                     }
@@ -510,73 +513,6 @@ fn expressions(source: &str, forms: &[Form], roots: Range<usize>) -> Result<(), 
         }
     }
     Ok(())
-}
-
-fn expression_children(
-    source: &str,
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-) -> Result<Range<usize>, CircuitFormError> {
-    let head = require_atom(
-        forms,
-        index + 1,
-        end,
-        closing,
-        HeaderError::ExpectedReference,
-        is_reference,
-    )?;
-    let first = index + 2;
-    let builtin = recognize_expression_head(&source[head]);
-    match builtin {
-        Some(ExpressionHead::As) => {
-            require_atom(
-                forms,
-                first,
-                end,
-                closing,
-                HeaderError::ExpectedReference,
-                is_reference,
-            )?;
-            let value = first + 1;
-            let next = expression_end(forms, value, end, closing)?;
-            require_end(forms, next, end)?;
-            Ok(value..next)
-        }
-        Some(
-            ExpressionHead::Bit
-            | ExpressionHead::Slice
-            | ExpressionHead::Field
-            | ExpressionHead::Raw,
-        ) => {
-            let next = expression_end(forms, first, end, closing)?;
-            let after = match builtin {
-                Some(ExpressionHead::Bit) => natural_at(forms, next, end, closing)?,
-                Some(ExpressionHead::Slice) => {
-                    let length = natural_at(forms, next, end, closing)?;
-                    let after_length = natural_at(forms, length, end, closing)?;
-                    if after_length < end {
-                        natural_at(forms, after_length, end, closing)?
-                    } else {
-                        after_length
-                    }
-                }
-                Some(ExpressionHead::Field) => {
-                    require_name(forms, next, end, closing)?;
-                    next + 1
-                }
-                _ => next,
-            };
-            require_end(forms, after, end)?;
-            Ok(first..next)
-        }
-        Some(ExpressionHead::Concat) => {
-            expression_end(forms, first, end, closing)?;
-            Ok(first..end)
-        }
-        None => Ok(first..end),
-    }
 }
 
 fn natural_at(
