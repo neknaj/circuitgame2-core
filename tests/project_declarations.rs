@@ -216,3 +216,70 @@ fn keeps_the_first_two_of_three_declarations_of_one_name() {
     assert_eq!(error.first.source.id.components(), ["early.ncg2"]);
     assert_eq!(error.second.source.id.components(), ["middle.ncg2"]);
 }
+
+#[test]
+fn indexed_names_keep_the_first_introduction_and_check_key_boundaries() {
+    let implicit = "; 暗黙の導入\n(namespace app::inner)";
+    let explicit = "; 明示的な導入\n(namespace app (struct Word (width 1)))";
+    for reverse in [false, true] {
+        let mut inputs = [
+            snapshot("implicit.ncg2", 4, implicit),
+            snapshot("explicit.ncg2", 7, explicit),
+        ];
+        if reverse {
+            inputs.reverse();
+        }
+        let project = parse_circuit_project(&inputs).unwrap();
+        let table = index_declarations(&project).unwrap();
+        let app = table
+            .namespace(NameKey {
+                parent: None,
+                name: "app",
+            })
+            .unwrap();
+        assert_eq!(app.source.id.components(), [inputs[0].path]);
+        assert_eq!(app.source.revision, inputs[0].revision);
+        assert_eq!(&app.source.text[app.span], "app");
+
+        let inner = NameKey {
+            parent: Some("app"),
+            name: "inner",
+        };
+        assert_eq!(table.namespace(inner).unwrap().source.revision, 4);
+        let word = NameKey {
+            parent: Some("app"),
+            name: "Word",
+        };
+        assert_eq!(table.declaration(word).unwrap().0.revision, 7);
+
+        for key in [
+            NameKey {
+                parent: None,
+                name: "app::inner",
+            },
+            NameKey {
+                parent: None,
+                name: "app::Word",
+            },
+            NameKey {
+                parent: None,
+                name: "",
+            },
+            NameKey {
+                parent: Some(""),
+                name: "app",
+            },
+            NameKey {
+                parent: Some("app"),
+                name: "word",
+            },
+            NameKey {
+                parent: Some("app"),
+                name: "Wor",
+            },
+        ] {
+            assert!(table.namespace(key).is_none(), "{key:?}");
+            assert!(table.declaration(key).is_none(), "{key:?}");
+        }
+    }
+}

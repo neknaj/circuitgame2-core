@@ -63,6 +63,122 @@ impl PathIndex {
         reveal(PathIndex::valid);
     }
 
+    proof fn missing_edge(&self, parent: usize, byte: u8)
+        requires self.valid(), parent < self.paths().len(), !self.edges@.contains_key((parent, byte)),
+        ensures forall|i: int| 0 <= i < self.paths().len() ==>
+            (#[trigger] self.paths()[i]) != self.paths()[parent as int].push(byte),
+    {
+        reveal(PathIndex::valid);
+        let path = self.paths()[parent as int].push(byte);
+        assert forall|i: int| 0 <= i < self.paths().len() implies (#[trigger] self.paths()[i]) != path by {
+            if i == 0 {
+                assert(path.len() > 0);
+            } else if self.paths()[i] == path {
+                let (p, b) = self.parents@[i];
+                assert(self.edges@.contains_key((p, b)) && self.edges@[(p, b)] == i);
+                assert(self.paths()[i] == self.paths()[p as int].push(b));
+                assert(path[path.len() as int - 1] == b);
+                assert(path[path.len() as int - 1] == byte);
+                assert(self.paths()[p as int].len() == self.paths()[parent as int].len());
+                assert forall|k: int| 0 <= k < self.paths()[p as int].len()
+                    implies self.paths()[p as int][k] == self.paths()[parent as int][k] by {
+                    assert(path[k] == self.paths()[p as int][k]);
+                    assert(path[k] == self.paths()[parent as int][k]);
+                };
+                assert(self.paths()[p as int] =~= self.paths()[parent as int]);
+                self.same_path(p as int, parent as int);
+                assert(p == parent && b == byte);
+            }
+        };
+    }
+
+    proof fn prefix_node(&self, node: int, len: int) -> (prefix: int)
+        requires self.valid(), 0 <= node < self.paths().len(), 0 <= len <= self.paths()[node].len(),
+        ensures 0 <= prefix < self.paths().len(), self.paths()[prefix] == self.paths()[node].take(len),
+        decreases node,
+    {
+        reveal(PathIndex::valid);
+        if len == self.paths()[node].len() {
+            assert(self.paths()[node].take(len) =~= self.paths()[node]);
+            node
+        } else {
+            assert(node != 0);
+            let (p, b) = self.parents@[node];
+            assert(self.edges@.contains_key((p, b)) && self.edges@[(p, b)] == node);
+            assert(self.paths()[node] == self.paths()[p as int].push(b));
+            assert(self.paths()[node].take(len) =~= self.paths()[p as int].take(len));
+            self.prefix_node(p as int, len)
+        }
+    }
+
+    fn follow(&self, parent: usize, bytes: &[u8]) -> (result: Option<usize>)
+        requires self.valid(), parent < self.paths().len(),
+        ensures
+            result matches Some(node) ==> node < self.paths().len()
+                && self.paths()[node as int] == self.paths()[parent as int] + bytes@,
+            result.is_none() ==> forall|i: int| 0 <= i < self.paths().len()
+                ==> !(self.paths()[parent as int] + bytes@).is_prefix_of(#[trigger] self.paths()[i]),
+    {
+        proof {
+            broadcast use vstd::laws_cmp::group_laws_cmp;
+            reveal(PathIndex::valid);
+            assert(obeys_cmp::<Edge>());
+        }
+        let mut node = parent;
+        let mut at = 0;
+        assert(bytes@.take(0) =~= Seq::<u8>::empty());
+        while at < bytes.len()
+            invariant
+                self.valid(), parent < self.paths().len(), node < self.paths().len(),
+                at <= bytes@.len(),
+                self.paths()[node as int] == self.paths()[parent as int] + bytes@.take(at as int),
+                obeys_cmp::<Edge>(),
+            decreases bytes@.len() - at,
+        {
+            let byte = bytes[at];
+            let edge = (node, byte);
+            let ghost part = self.paths()[node as int].push(byte);
+            assert(bytes@.take(at as int).push(bytes@[at as int]) =~= bytes@.take(at + 1));
+            assert(part =~= self.paths()[parent as int] + bytes@.take(at + 1));
+            let Some(next) = self.edges.get(&edge) else {
+                proof {
+                    self.missing_edge(node, byte);
+                    assert forall|i: int| 0 <= i < self.paths().len() implies
+                        !(self.paths()[parent as int] + bytes@).is_prefix_of(#[trigger] self.paths()[i]) by {
+                        if (self.paths()[parent as int] + bytes@).is_prefix_of(self.paths()[i]) {
+                            let p = self.prefix_node(i, part.len() as int);
+                            assert(self.paths()[i].take(part.len() as int) =~= part);
+                            assert(self.paths()[p] != part);
+                        }
+                    };
+                }
+                return None;
+            };
+            node = *next;
+            at += 1;
+        }
+        assert(bytes@.take(at as int) =~= bytes@);
+        Some(node)
+    }
+
+    pub(super) fn find(&self, key: NameKey) -> (result: Option<usize>)
+        requires self.valid(),
+        ensures
+            result matches Some(node) ==> node < self.paths().len() && self.paths()[node as int] == full_name_bytes(key),
+            result.is_none() ==> forall|i: int| 0 <= i < self.paths().len() ==> (#[trigger] self.paths()[i]) != full_name_bytes(key),
+    {
+        proof { reveal(PathIndex::valid); }
+        let prefix = if let Some(parent) = key.parent {
+            let parent_node = self.follow(0, parent.as_bytes())?;
+            let separator = [b':', b':'];
+            assert(separator@ =~= seq![b':', b':']);
+            self.follow(parent_node, separator.as_slice())?
+        } else {
+            0
+        };
+        self.follow(prefix, key.name.as_bytes())
+    }
+
     // 接頭辞を延ばすたびに最長で一つ添字を追加する。空きが尽きた場合は呼び出し側で扱う。
     pub(super) fn extend(&mut self, parent: usize, byte: u8) -> (child: Option<usize>)
         requires old(self).valid(), parent < old(self).paths().len(),
@@ -91,31 +207,7 @@ impl PathIndex {
         let ghost old_edges = self.edges@;
         let ghost old_parents = self.parents@;
         let ghost path = old_paths[parent as int].push(byte);
-        proof {
-            assert forall|i: int| 0 <= i < old_paths.len() implies (#[trigger] old_paths[i]) != path by {
-                if i == 0 {
-                    assert(path.len() > 0);
-                } else if old_paths[i] == path {
-                    let (p, b) = old_parents[i];
-                    assert(old_edges.contains_key((p, b)) && old_edges[(p, b)] == i);
-                    assert(old_paths[i] == old_paths[p as int].push(b));
-                    assert(p < i);
-                    assert(path[path.len() as int - 1] == b);
-                    assert(path[path.len() as int - 1] == byte);
-                    assert(b == byte);
-                    assert(old_paths[p as int].len() == old_paths[parent as int].len());
-                    assert forall|k: int| 0 <= k < old_paths[p as int].len()
-                        implies old_paths[p as int][k] == old_paths[parent as int][k] by {
-                        assert(path[k] == old_paths[p as int][k]);
-                        assert(path[k] == old_paths[parent as int][k]);
-                    };
-                    assert(old_paths[p as int] =~= old_paths[parent as int]);
-                    self.same_path(p as int, parent as int);
-                    assert(p == parent);
-                    assert(!old_edges.contains_key(edge));
-                }
-            };
-        }
+        proof { self.missing_edge(parent, byte); }
         let _ = self.edges.insert(edge, child);
         self.next = child + 1;
         self.paths = Ghost(old_paths.push(path));

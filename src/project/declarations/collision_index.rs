@@ -4,9 +4,10 @@ use super::path_index::PathIndex;
 use super::{Occurrence, key_of};
 #[cfg(verus_only)]
 use super::{before, conflicts, form_key};
+use crate::project::name_keys::NameKey;
 #[cfg(verus_only)]
 use crate::project::name_keys::{
-    NameKey, full_name_bytes, key_views_agree, namespace_component, namespace_component_prefix,
+    full_name_bytes, key_view, key_views_agree, namespace_component, namespace_component_prefix,
 };
 use crate::syntax::circuit::Head;
 #[cfg(verus_only)]
@@ -141,15 +142,90 @@ pub(super) open spec fn no_pair_before(items: Seq<Occurrence>, start: int, stop_
         ==> !conflicts(*(#[trigger] items[i]).form, *(#[trigger] items[j]).form)
 }
 
+pub(super) struct LookupIndex {
+    paths: PathIndex,
+    declarations: BTreeMap<usize, usize>,
+    namespaces: BTreeMap<usize, usize>,
+}
+
+pub(super) open spec fn lookup_matches(form: NamedForm, key: NameKey, namespace: bool) -> bool {
+    if namespace {
+        form.head is Namespace && exists|lo: int, hi: int|
+            #[trigger] namespace_component(form.name.word, key, lo, hi)
+    } else {
+        !(form.head is Namespace) && key_view(form_key(form)) == key_view(key)
+    }
+}
+
+impl LookupIndex {
+    pub(super) closed spec fn matches(&self, items: Seq<Occurrence>) -> bool {
+        &&& self.paths.valid()
+        &&& forall|id: usize| #[trigger] self.declarations@.contains_key(id) ==> self.declarations@[id] < items.len()
+        &&& forall|id: usize| #[trigger] self.namespaces@.contains_key(id) ==> self.namespaces@[id] < items.len()
+        &&& forall|i: int| 0 <= i < items.len()
+            ==> binding_indexed(*(#[trigger] items[i]).form, self.paths.paths(),
+                before_rank(self.declarations@, i + 1), before_rank(self.namespaces@, i + 1))
+    }
+
+    // 完全修飾名の候補より前に一致する出現がないことを、構築時の網羅性から示す。
+    pub(super) fn candidate(
+        &self, items: &[Occurrence], key: NameKey, namespace: bool,
+    ) -> (rank: usize)
+        requires self.matches(items@),
+        ensures
+            rank <= items@.len(),
+            forall|i: int| 0 <= i < rank ==> !lookup_matches(*(#[trigger] items@[i]).form, key, namespace),
+    {
+        reveal(LookupIndex::matches);
+        let map = if namespace { &self.namespaces } else { &self.declarations };
+        let node = self.paths.find(key);
+        let rank = match node {
+            Some(id) => earliest(map, id, items.len()),
+            None => items.len(),
+        };
+        proof {
+            let paths = self.paths.paths();
+            let name = full_name_bytes(key);
+            assert forall|i: int| 0 <= i < rank implies
+                !lookup_matches(*(#[trigger] items@[i]).form, key, namespace) by {
+                let form = *items@[i].form;
+                if lookup_matches(form, key, namespace) {
+                    let ids = before_rank(map@, i + 1);
+                    assert(binding_indexed(form, paths,
+                        before_rank(self.declarations@, i + 1), before_rank(self.namespaces@, i + 1)));
+                    if namespace {
+                        let (_lo, _hi) = choose|lo: int, hi: int|
+                            #[trigger] namespace_component(form.name.word, key, lo, hi);
+                    } else {
+                        key_views_agree(form_key(form), key);
+                    }
+                    assert(indexed_path(paths, ids, name));
+                    let id = choose|id: usize| #[trigger] ids.contains(id)
+                        && id < paths.len() && paths[id as int] == name;
+                    assert(map@.contains_key(id) && map@[id] <= i);
+                    if let Some(found) = node {
+                        self.paths.same_path(id as int, found as int);
+                        assert(id == found && rank == map@[id]);
+                    } else {
+                        assert(paths[id as int] != name);
+                    }
+                }
+            };
+        }
+        rank
+    }
+}
+
 // 後ろから走査し、各キーについて処理済みの範囲で最初の添字を保持する。
 // 索引は候補を絞り、呼び出し側は既存の判定でその候補の種類と範囲を確定する。
-pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<Option<(usize, usize)>, ()>)
+pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<LookupIndex, Option<(usize, usize)>>)
     ensures
         match result {
-            Ok(Some((left, right))) => left < right < items@.len()
+            Err(Some((left, right))) => left < right < items@.len()
                 && no_pair_before(items@, 0, left as int, right as int),
-            Ok(None) => no_pair_before(items@, 0, items@.len() as int, items@.len() as int),
-            Err(()) => true,
+            Ok(index) => index.matches(items@)
+                && no_pair_before(items@, 0, items@.len() as int, items@.len() as int),
+            Err(None) => true,
         },
 {
     let mut index = PathIndex::new();
@@ -180,7 +256,7 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<Option<(u
         let ghost before_ns = namespaces@;
         let (right, Ghost(added_decls), Ghost(added_ns)) = if matches!(item.form.head, Head::Namespace) {
             let bytes = item.form.name.word.as_bytes();
-            let nodes = index.namespace(bytes).ok_or(())?;
+            let nodes = index.namespace(bytes).ok_or(None)?;
             let mut right = count;
             let mut pos = 0;
             let ghost all = nodes@.to_set();
@@ -230,7 +306,7 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<Option<(u
             }
             (right, Ghost(Set::<usize>::empty()), Ghost(all))
         } else {
-            let node = index.declaration(key_of(item.form)).ok_or(())?;
+            let node = index.declaration(key_of(item.form)).ok_or(None)?;
             let right = min(earliest(&declarations, node, count), earliest(&namespaces, node, count));
             record_earliest(&mut declarations, node, left);
             let ghost only = set![node];
@@ -273,7 +349,11 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<Option<(u
         }
         at = left;
     }
-    if best_left == count { Ok(None) } else { Ok(Some((best_left, best_right))) }
+    if best_left == count {
+        Ok(LookupIndex { paths: index, declarations, namespaces })
+    } else {
+        Err(Some((best_left, best_right)))
+    }
 }
 
 } // verus!
@@ -304,7 +384,13 @@ mod tests {
             }])
             .unwrap();
             let items = read_occurrences(&project);
-            assert_eq!(first_candidate(&items), Ok(expected), "{text}");
+            match expected {
+                Some(pair) => assert!(
+                    matches!(first_candidate(&items), Err(Some(found)) if found == pair),
+                    "{text}"
+                ),
+                None => assert!(first_candidate(&items).is_ok(), "{text}"),
+            }
         }
     }
 }

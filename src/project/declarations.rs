@@ -13,7 +13,9 @@ use super::parsed_circuit_matches;
 use super::{CircuitProject, NameKey, ProjectSource};
 use crate::syntax::circuit::{Head, NamedForm};
 use alloc::vec::Vec;
-use collision_index::first_candidate;
+#[cfg(verus_only)]
+use collision_index::lookup_matches;
+use collision_index::{LookupIndex, first_candidate};
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -61,9 +63,9 @@ pub struct NameConflict<'p, 'a> {
 }
 
 /// 共有名前空間に属する独立宣言と、名前空間の導入箇所。
-#[derive(Debug)]
 pub struct DeclarationTable<'p, 'a> {
     occurrences: Vec<Occurrence<'p, 'a>>,
+    lookup: Option<LookupIndex>,
 }
 
 spec fn named_binding(head: Head) -> bool {
@@ -497,6 +499,11 @@ proof fn rule_out_conflicts(project: &CircuitProject, items: Seq<Occurrence>)
 }
 
 impl<'p, 'a> DeclarationTable<'p, 'a> {
+    #[verifier::type_invariant]
+    spec fn lookup_matches_occurrences(&self) -> bool {
+        self.lookup matches Some(index) ==> index.matches(self.occurrences@)
+    }
+
     /// 保持している名前とその範囲が、元ソースの字句に対応することを表す。
     pub closed spec fn well_formed(&self) -> bool {
         forall|i: int| 0 <= i < self.occurrences@.len() ==> {
@@ -523,6 +530,19 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             result.is_none() ==> forall|source: &ProjectSource, form: &NamedForm|
                 !#[trigger] self.declaration_at(key, source, form),
     {
+        proof { use_type_invariant(self); }
+        if let Some(lookup) = &self.lookup {
+            let rank = lookup.candidate(self.occurrences.as_slice(), key, false);
+            if rank == self.occurrences.len() {
+                return None;
+            }
+            let item = self.occurrences[rank];
+            if !matches!(item.form.head, Head::Namespace) && key_of(item.form).same_name(key) {
+                assert(self.declaration_at(key, item.source, item.form));
+                return Some((item.source, item.form));
+            }
+        }
+        // 名前の綴りを連結した索引では、公開キーの親と末尾の分け方を照合し直す。
         let mut index = 0;
         while index < self.occurrences.len()
             invariant
@@ -554,13 +574,41 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             }
     }
 
+    /// 範囲が指定された名前空間の最初の導入箇所を指すことを表す。
+    pub closed spec fn first_namespace_at(&self, key: NameKey, location: LocatedName) -> bool {
+        exists|i: int| 0 <= i < self.occurrences@.len()
+            && {
+                let item = #[trigger] self.occurrences@[i];
+                &&& item.form.head is Namespace
+                &&& *item.source == *location.source
+                &&& portion_matches(*item.form, key, location.span)
+                &&& forall|j: int| 0 <= j < i ==> !lookup_matches(*(#[trigger] self.occurrences@[j]).form, key, true)
+            }
+    }
+
     /// 明示された名前空間と中間の名前空間を探し、最初の導入箇所を返す。
     pub fn namespace(&self, key: NameKey) -> (result: Option<LocatedName<'p, 'a>>)
         requires self.well_formed(),
         ensures
-            result matches Some(location) ==> self.namespace_at(key, location) && location_in_source(location),
+            result matches Some(location) ==> self.namespace_at(key, location)
+                && self.first_namespace_at(key, location) && location_in_source(location),
             result.is_none() ==> forall|location: LocatedName| !#[trigger] self.namespace_at(key, location),
     {
+        proof { use_type_invariant(self); }
+        if let Some(lookup) = &self.lookup {
+            let rank = lookup.candidate(self.occurrences.as_slice(), key, true);
+            if rank == self.occurrences.len() {
+                return None;
+            }
+            let item = self.occurrences[rank];
+            if matches!(item.form.head, Head::Namespace) {
+                if let Some(location) = namespace_location(item, key) {
+                    assert(self.namespace_at(key, location));
+                    assert(self.first_namespace_at(key, location));
+                    return Some(location);
+                }
+            }
+        }
         let mut index = 0;
         while index < self.occurrences.len()
             invariant
@@ -577,6 +625,7 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             if matches!(item.form.head, Head::Namespace) {
                 if let Some(location) = namespace_location(item, key) {
                     assert(self.namespace_at(key, location));
+                    assert(self.first_namespace_at(key, location));
                     return Some(location);
                 }
             }
@@ -606,21 +655,21 @@ pub fn index_declarations<'p, 'a>(
 {
     let items = read_occurrences(project);
     match first_candidate(items.as_slice()) {
-        Ok(None) => {
+        Ok(lookup) => {
             proof {
                 rule_out_conflicts(project, items@);
                 reveal(occurrences_before);
             }
-            return Ok(DeclarationTable { occurrences: items });
+            return Ok(DeclarationTable { occurrences: items, lookup: Some(lookup) });
         },
-        Ok(Some((left, right))) => {
+        Err(Some((left, right))) => {
             proof { reveal(occurrences_before); }
             if let Some(error) = check_pair(items[left], items[right]) {
                 proof { record_conflict(project, items@, left as int, right as int, error); }
                 return Err(error);
             }
         },
-        Err(()) => {},
+        Err(None) => {},
     }
     // 索引で候補を確定できない場合も、出現順の全組比較で診断を返す。
     let mut left = 0;
@@ -651,7 +700,16 @@ pub fn index_declarations<'p, 'a>(
         rule_out_conflicts(project, items@);
         reveal(occurrences_before);
     }
-    Ok(DeclarationTable { occurrences: items })
+    Ok(DeclarationTable { occurrences: items, lookup: None })
 }
 
 } // verus!
+
+impl core::fmt::Debug for DeclarationTable<'_, '_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("DeclarationTable")
+            .field("occurrences", &self.occurrences)
+            .finish()
+    }
+}
