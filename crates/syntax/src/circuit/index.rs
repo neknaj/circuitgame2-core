@@ -93,6 +93,21 @@ pub closed spec fn circuit_source_matches(source: &str) -> bool {
         && #[trigger] forms_before(source, forms, forms.len() as int))
 }
 
+/// 回路文法に最初に違反するフォームと、その直接の親名前空間を表す。
+///
+/// 位置は平坦な S 式構文木の添字で表す。親名前空間がない場合は `None` になる。
+pub closed spec fn circuit_header_error_at(
+    source: &str, error: CircuitFormError, index: int, namespace: Option<usize>,
+) -> bool {
+    &&& well_formed_sexpr(source)
+    &&& sexpr_form_model(source) matches Some(forms)
+    &&& error matches CircuitFormError::Header { kind, span }
+    &&& indexed_location(source, forms, index, namespace)
+    &&& forms_before(source, forms, index)
+    &&& (forall|head: Head| !#[trigger] header_matches(source, forms, index, namespace.is_some(), head))
+    &&& header_error_evidence(source, forms, index, namespace.is_some(), kind, span)
+}
+
 /// 字句、S 式、回路文法のいずれかの診断に根拠を与える。
 ///
 /// 回路文法の診断では、入力全体が S 式の文法に従い、診断位置より前に検査するすべてのフォームが回路文法に従う。
@@ -100,12 +115,8 @@ pub closed spec fn circuit_source_error(source: &str, error: CircuitFormError) -
     match error {
         CircuitFormError::Syntax(error) => !well_formed_sexpr(source) && syntax_error_evidence(source, error)
             && strict_syntax_rejection(source, error),
-        CircuitFormError::Header { kind, span } => well_formed_sexpr(source)
-            && (exists|forms: Seq<Form>, index: int, namespace: Option<usize>|
-                sexpr_form_model(source) == Some(forms)
-                && #[trigger] indexed_location(source, forms, index, namespace)
-                && forms_before(source, forms, index)
-                && header_error_evidence(source, forms, index, namespace.is_some(), kind, span)),
+        CircuitFormError::Header { .. } => exists|index: int, namespace: Option<usize>|
+            #[trigger] circuit_header_error_at(source, error, index, namespace),
     }
 }
 
@@ -128,6 +139,43 @@ pub proof fn circuit_token_errors_agree(source: &str, left: CircuitFormError, ri
     assert(right is Syntax);
     assert(structural_error_location(source, a) && structural_error_location(source, b));
     strict_token_errors_agree(source, a, b);
+}
+
+/// 同じ入力で回路文法に違反した両索引が、最初に検査を通らないフォームを同じ位置で見つけることを示す。
+pub proof fn first_circuit_header_error(
+    source: &str, left: CircuitFormError, right: CircuitFormError,
+) -> (site: (int, Option<usize>))
+    requires circuit_source_error(source, left), circuit_source_error(source, right), left is Header,
+    ensures
+        circuit_header_error_at(source, left, site.0, site.1),
+        circuit_header_error_at(source, right, site.0, site.1),
+{
+    let (a, a_owner) = choose|index: int, owner: Option<usize>| #[trigger] circuit_header_error_at(source, left, index, owner);
+    assert(well_formed_sexpr(source) && right is Header);
+    let (b, b_owner) = choose|index: int, owner: Option<usize>| #[trigger] circuit_header_error_at(source, right, index, owner);
+    let forms = sexpr_form_model(source)->Some_0;
+    if a < b {
+        assert(exists|head: Head| #[trigger] header_matches(source, forms, a, a_owner.is_some(), head));
+    } else if b < a {
+        assert(exists|head: Head| #[trigger] header_matches(source, forms, b, b_owner.is_some(), head));
+    }
+    assert(a == b);
+    if let Some(parent) = a_owner {
+        same_namespace_owner(source, forms, a, parent, b_owner);
+    } else if let Some(parent) = b_owner {
+        same_namespace_owner(source, forms, a, parent, a_owner);
+    }
+    (a, a_owner)
+}
+
+proof fn same_namespace_owner(source: &str, forms: Seq<Form>, index: int, parent: usize, owner: Option<usize>)
+    requires
+        indexed_location(source, forms, index, Some(parent)),
+        indexed_location(source, forms, index, owner),
+    ensures owner == Some(parent),
+{
+    reveal(direct_form_in_range);
+    indexed_subtree_location(source, forms, parent as int, forms[parent as int]->List_end as int, index, owner);
 }
 
 #[verifier::opaque]
@@ -552,6 +600,7 @@ proof fn reject_index_entry(
 {
     indexed_prefix_is_valid(source, forms, entries, index);
     assert(!forms_before(source, forms, forms.len() as int));
+    assert(circuit_header_error_at(source, CircuitFormError::Header { kind, span }, index, owner));
 }
 
 fn index_namespace(
