@@ -126,3 +126,79 @@ fn reports_malformed_declaration_arguments() {
         assert_eq!(&source[span], text, "{source:?}");
     }
 }
+
+#[test]
+fn accepts_routine_bodies_with_builtin_forms_and_calls() {
+    let source = concat!(
+        "(func f (in x) (out y z) ",
+        "(def (y z) (::raw (bit x 00) (slice x 0 2) (slice x 0 2 1) ",
+        "(concat (field x low) (as ns::Word (raw #xF)) #b1 0 1))) ",
+        "(expand ::m () (bit) \"macro argument\")) ",
+        "(module m (in x) (out y) (def y (ns::bit))) ",
+        "(module-part m (def y (nor x x)))",
+    );
+    assert_eq!(index_headers(source).unwrap().entries.len(), 3);
+}
+
+#[test]
+fn reports_malformed_routine_body_items_and_expressions() {
+    for (body, kind, text) in [
+        ("(call)", HeaderError::ExpectedBodyItem, "call"),
+        (
+            "(expand \"arg\")",
+            HeaderError::ExpectedReference,
+            "\"arg\"",
+        ),
+        ("(def)", HeaderError::ExpectedTarget, ""),
+        ("(def () 1)", HeaderError::ExpectedName, ""),
+        ("(def (y ns::z) 1)", HeaderError::ExpectedName, "ns::z"),
+        ("(def y)", HeaderError::ExpectedExpression, ""),
+        ("(def y 00)", HeaderError::ExpectedExpression, "00"),
+        ("(def y ns::x)", HeaderError::ExpectedExpression, "ns::x"),
+        ("(def y 1 extra)", HeaderError::UnexpectedArgument, "extra"),
+        ("(def y ())", HeaderError::ExpectedReference, ""),
+        ("(def y (bit))", HeaderError::ExpectedExpression, ""),
+        ("(def y (bit x -1))", HeaderError::ExpectedNatural, "-1"),
+        ("(def y (slice x 0))", HeaderError::ExpectedNatural, ""),
+        (
+            "(def y (slice x 0 1 2 3))",
+            HeaderError::UnexpectedArgument,
+            "3",
+        ),
+        ("(def y (concat))", HeaderError::ExpectedExpression, ""),
+        (
+            "(def y (field x ::low))",
+            HeaderError::ExpectedName,
+            "::low",
+        ),
+        ("(def y (as 1 x))", HeaderError::ExpectedReference, "1"),
+        ("(def y (raw x y))", HeaderError::UnexpectedArgument, "y"),
+        (
+            "(def y (nor (raw 1) 00))",
+            HeaderError::ExpectedExpression,
+            "00",
+        ),
+    ] {
+        let source = format!("(module-part m {body})");
+        let CircuitFormError::Header { kind: actual, span } = index_headers(&source).unwrap_err()
+        else {
+            panic!("expected circuit form error for {body:?}");
+        };
+        assert_eq!(actual, kind, "{body:?}");
+        assert_eq!(&source[span.clone()], text, "{body:?}");
+        if text.is_empty() {
+            assert_eq!(source.as_bytes()[span.start], b')', "{body:?}");
+        }
+    }
+}
+
+#[test]
+fn validates_deep_expressions_with_pending_siblings() {
+    let depth = 20_000;
+    let source = format!(
+        "(module-part m (def y {}0{}))",
+        "(concat ".repeat(depth),
+        " 1)".repeat(depth),
+    );
+    assert_eq!(index_headers(&source).unwrap().entries.len(), 1);
+}
