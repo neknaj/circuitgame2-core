@@ -270,6 +270,71 @@ fn validates_clause_shape_before_checking_values_and_extra_arguments() {
 }
 
 #[test]
+fn validates_structure_fields_in_source_order() {
+    use circuitgame2_core::syntax::circuit::Clause;
+
+    assert!(index_headers("(struct empty (width 8))").is_ok());
+    assert!(index_headers("(struct layout (width 8) (b (bits 1) (at 7)) (a ::T (at 0)))").is_ok());
+    assert!(
+        index_headers("(struct layout (width 0) (f (bits 1) (at 9)) (f (bits 1) (at 9)))").is_ok()
+    );
+
+    for (source, kind, text) in [
+        (
+            "(struct ::bad (width -1))",
+            HeaderError::ExpectedName,
+            "::bad",
+        ),
+        (
+            "(struct s (width -1) bad)",
+            HeaderError::ExpectedNatural,
+            "-1",
+        ),
+        ("(struct s (width 8) bad)", HeaderError::ExpectedList, "bad"),
+        (
+            "(struct s (width 8) (f (bits 1 (extra)) (at -1)))",
+            HeaderError::UnexpectedArgument,
+            "(extra)",
+        ),
+        (
+            "(struct s (width 8) (f (bits 1) (at 0) (extra)) (bad))",
+            HeaderError::UnexpectedArgument,
+            "(extra)",
+        ),
+    ] {
+        let start = source.find(text).unwrap();
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: start..start + text.len()
+            }),
+            "{source:?}",
+        );
+    }
+
+    for (source, kind, closing_from_end) in [
+        ("(struct)", HeaderError::ExpectedName, 1),
+        ("(struct s (width 8) ())", HeaderError::ExpectedName, 2),
+        (
+            "(struct s (width 8) (f (bits 1)))",
+            HeaderError::ExpectedClause(Clause::At),
+            2,
+        ),
+    ] {
+        let closing = source.len() - closing_from_end;
+        assert_eq!(
+            index_headers(source),
+            Err(CircuitFormError::Header {
+                kind,
+                span: closing..closing
+            }),
+            "{source:?}",
+        );
+    }
+}
+
+#[test]
 fn reports_malformed_declaration_arguments() {
     use circuitgame2_core::syntax::circuit::Clause;
 

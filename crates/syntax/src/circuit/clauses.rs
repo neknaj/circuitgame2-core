@@ -325,7 +325,7 @@ pub open spec fn storage_error_evidence(
     }
 }
 
-proof fn storage_clause_fits(forms: Seq<Form>, first: int, index: int, limit: int)
+pub(super) proof fn enclosing_region_bounds_form(forms: Seq<Form>, first: int, index: int, limit: int)
     requires
         0 <= first <= index <= limit <= forms.len(),
         form_region_ends_at(forms, first, limit),
@@ -358,7 +358,7 @@ pub(super) fn validate_storage_arguments(
         result matches Err((kind, span)) ==>
             storage_error_evidence(source, forms@, first as int, limit as int, closing, head, kind, span),
 {
-    proof { storage_clause_fits(forms@, first as int, first as int, limit as int); }
+    proof { enclosing_region_bounds_form(forms@, first as int, first as int, limit as int); }
     let after = if matches!(head, Head::Latch) {
         let end = read_natural_clause(source, forms, first, limit, closing, Clause::Width)?;
         assert(natural_clause_matches(source, forms@, first as int, limit as int, end as int, Clause::Width));
@@ -366,7 +366,7 @@ pub(super) fn validate_storage_arguments(
     } else {
         let data = read_natural_clause(source, forms, first, limit, closing, Clause::Address)?;
         assert(natural_clause_matches(source, forms@, first as int, limit as int, data as int, Clause::Address));
-        proof { storage_clause_fits(forms@, first as int, data as int, limit as int); }
+        proof { enclosing_region_bounds_form(forms@, first as int, data as int, limit as int); }
         let (data_end, data_close) = read_named_clause(source, forms, data, limit, closing, Clause::Data)?;
         assert(named_clause_matches(source, forms@, data as int, limit as int, data_end as int, Clause::Data));
         let value = data + 2;
@@ -375,7 +375,7 @@ pub(super) fn validate_storage_arguments(
                 assert(exists|parent: int| 0 <= parent < value
                     && #[trigger] forms@[parent] is List && forms@[parent]->List_end == data_end);
             };
-            storage_clause_fits(forms@, value as int, value as int, data_end as int);
+            enclosing_region_bounds_form(forms@, value as int, value as int, data_end as int);
         }
         let next = read_type(source, forms, value, data_end, data_close)?;
         assert(type_matches(source, forms@, value as int, data_end as int, next as int));

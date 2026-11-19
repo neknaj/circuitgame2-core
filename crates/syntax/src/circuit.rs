@@ -11,6 +11,13 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod clauses;
+mod structure;
+use structure::validate_structure_arguments;
+#[cfg(verus_only)]
+pub use structure::{
+    field_error_evidence, field_matches, structure_arguments_match, structure_error_evidence,
+};
+
 #[cfg(verus_only)]
 pub use clauses::{
     clause_fits_region, clause_spelling, clause_word_matches, named_clause_error_span,
@@ -18,9 +25,7 @@ pub use clauses::{
     natural_clause_matches, reference_atom, storage_arguments_match, storage_error_evidence,
     type_error_evidence, type_matches,
 };
-use clauses::{
-    is_reference, read_named_clause, read_natural_clause, read_type, validate_storage_arguments,
-};
+use clauses::{is_reference, read_named_clause, read_type, validate_storage_arguments};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
@@ -233,6 +238,10 @@ fn read_header(
             validate_directive(source, forms, argument, end, closing, head)
                 .map_err(|(kind, span)| header_error(kind, span))?;
         }
+        Head::Struct => {
+            validate_structure_arguments(source, forms, argument, end, closing)
+                .map_err(|(kind, span)| header_error(kind, span))?;
+        }
         Head::Test => {
             require_atom(
                 forms,
@@ -244,12 +253,7 @@ fn read_header(
             )?;
             test_body(source, forms, argument + 1, end, closing)?;
         }
-        Head::Func
-        | Head::Module
-        | Head::ModulePart
-        | Head::Struct
-        | Head::Latch
-        | Head::Memory => {
+        Head::Func | Head::Module | Head::ModulePart | Head::Latch | Head::Memory => {
             require_name(forms, argument, end, closing)?;
             declaration_signature(source, forms, head, argument + 1, end, closing)?;
         }
@@ -396,18 +400,6 @@ fn declaration_signature(
             routine_body(source, forms, first_body, end, closing)?;
         }
         Head::ModulePart => routine_body(source, forms, argument, end, closing)?,
-        Head::Struct => {
-            let mut field = natural_clause(source, forms, argument, end, closing, Clause::Width)?;
-            while field < end {
-                let (field_end, field_close) =
-                    list_at(forms, field, end, closing, HeaderError::ExpectedList)?;
-                require_name(forms, field + 1, field_end, field_close)?;
-                let at = type_at(source, forms, field + 2, field_end, field_close)?;
-                let next = natural_clause(source, forms, at, field_end, field_close, Clause::At)?;
-                require_end(forms, next, field_end)?;
-                field = field_end;
-            }
-        }
         Head::Latch | Head::Memory => {
             validate_storage_arguments(source, forms, argument, end, closing, head)
                 .map_err(|(kind, span)| header_error(kind, span))?;
@@ -659,18 +651,6 @@ fn type_at(
     closing: usize,
 ) -> Result<usize, CircuitFormError> {
     read_type(source, forms, index, end, closing).map_err(|(kind, span)| header_error(kind, span))
-}
-
-fn natural_clause(
-    source: &str,
-    forms: &[Form],
-    index: usize,
-    end: usize,
-    closing: usize,
-    clause: Clause,
-) -> Result<usize, CircuitFormError> {
-    read_natural_clause(source, forms, index, end, closing, clause)
-        .map_err(|(kind, span)| header_error(kind, span))
 }
 
 fn named_clause(
