@@ -1,5 +1,6 @@
 use circuitgame2_syntax::circuit::{
-    CircuitRecovery, Head, HeaderError, RecoveredFormOutcome, index_headers, recover_circuit_forms,
+    CircuitFormError, CircuitRecovery, Head, HeaderError, RecoveredFormOutcome, index_headers,
+    recover_circuit_forms,
 };
 use circuitgame2_syntax::{Form, Repair};
 
@@ -147,6 +148,8 @@ fn checks_unrepaired_roots_before_and_after_repairs_in_source_order() {
         RecoveredFormOutcome::Valid(Head::Export)
     ));
     assert_eq!(second.checked[1].namespace, Some(second.checked[0].form));
+    assert!(matches!(first.source_diagnostics(), [None]));
+    assert!(matches!(second.source_diagnostics(), [None, None]));
     assert!(
         recovered
             .repairs
@@ -164,29 +167,25 @@ fn identifies_primary_and_related_positions_in_the_original_fragment() {
     let [Some(test), Some(using)] = original.as_slice() else {
         panic!("expected independent diagnostics for both lists");
     };
-    let RecoveredFormOutcome::Rejected {
-        kind: HeaderError::MixedTestItems {
-            first_head: (start, end),
-        },
-        span,
-        ..
-    } = &test.checked[0].outcome
+    let [
+        Some(CircuitFormError::Header {
+            kind:
+                HeaderError::MixedTestItems {
+                    first_head: (start, end),
+                },
+            span,
+        }),
+    ] = test.source_diagnostics()
     else {
         panic!("expected mixed test items");
     };
-    assert_eq!(
-        &source[test.span.start + *start..test.span.start + *end],
-        "reset"
-    );
-    assert_eq!(
-        &source[test.span.start + span.start..test.span.start + span.end],
-        "case"
-    );
-    let RecoveredFormOutcome::Rejected { span, .. } = &using.checked[0].outcome else {
+    assert_eq!(&source[*start..*end], "reset");
+    assert_eq!(&source[span.clone()], "case");
+    let [Some(CircuitFormError::Header { span, .. })] = using.source_diagnostics() else {
         panic!("expected a missing argument");
     };
     assert_eq!(span.start, span.end);
-    assert_eq!(using.span.start + span.start, using.span.end - 1);
+    assert_eq!(span.start, using.span.end - 1);
 }
 
 #[test]

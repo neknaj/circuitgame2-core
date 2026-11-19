@@ -43,8 +43,26 @@ pub struct OriginalCircuitList {
     pub forms: Vec<Form>,
     /// ルートと検査可能な名前空間直下の判定。添字はこの構文木を参照する。
     ///
-    /// 主診断と関連箇所のバイト位置は区間内の位置である。ファイル内の位置には `span.start` を加える。
+    /// 主診断と関連箇所の位置は区間内のバイト位置。ファイル内の位置は [`Self::source_diagnostics`] で参照する。
     pub checked: Vec<RecoveredCircuitForm>,
+    source_diagnostics: Vec<Option<CircuitFormError>>,
+}
+
+impl OriginalCircuitList {
+    /// 各フォームの診断を、解析時のファイル全体に対する UTF-8 バイト範囲で返す。
+    ///
+    /// 結果は解析時の `checked` と同じ順に並ぶ。回路文法に従う項目や元入力の範囲を確認できない項目は `None`。
+    /// 関連箇所も同じファイルの位置を使い、要素の欠落位置は長さ 0 の範囲で返す。
+    pub fn source_diagnostics(&self) -> (diagnostics: &[Option<CircuitFormError>])
+        ensures diagnostics@ == self.source_diagnostics_model(),
+    {
+        self.source_diagnostics.as_slice()
+    }
+
+    /// ファイル内の位置で表した診断の列を返す。
+    pub closed spec fn source_diagnostics_model(&self) -> Seq<Option<CircuitFormError>> {
+        self.source_diagnostics@
+    }
 }
 
 /// 確定した境界で検査した回路フォーム。
@@ -195,6 +213,8 @@ pub fn recover_circuit_forms(source: &str) -> (result: CircuitRecovery)
 
 spec fn one_original_circuit_list(source: &str, span: Range<usize>, list: OriginalCircuitList) -> bool {
     &&& list.span == span
+    &&& list.source_diagnostics@.len() == list.checked@.len()
+    &&& original_diagnostics_match(source, span, list.checked@, list.source_diagnostics@)
     &&& exists|fragment: &str| {
         &&& fragment.spec_bytes() == source.spec_bytes()[span.start as int..span.end as int]
         &&& sexpr_form_model(fragment) == Some(list.forms@)
@@ -204,6 +224,120 @@ spec fn one_original_circuit_list(source: &str, span: Range<usize>, list: Origin
         &&& form_spans_valid(fragment, list.forms@, fragment.spec_bytes().len() as int)
         &&& #[trigger] check_trace(fragment, list.forms@, list.checked@, (list.forms@.len() as int, None))
     }
+}
+
+spec fn can_rebase(source: &str, outer: Range<usize>, start: usize, end: usize) -> bool {
+    &&& outer.start <= outer.end <= source.spec_bytes().len()
+    &&& start <= end <= outer.end - outer.start
+    &&& is_char_boundary(source.spec_bytes(), outer.start + start)
+    &&& is_char_boundary(source.spec_bytes(), outer.start + end)
+}
+
+fn rebase_span(source: &str, outer: &Range<usize>, start: usize, end: usize)
+    -> (span: Option<Range<usize>>)
+    ensures
+        span.is_some() <==> can_rebase(source, *outer, start, end),
+        span matches Some(span) ==> span.start == outer.start + start && span.end == outer.start + end,
+{
+    let bytes = source.as_bytes();
+    if outer.start > outer.end || outer.end > bytes.len()
+        || start > end || end > outer.end - outer.start {
+        return None;
+    }
+    let first = outer.start + start;
+    let last = outer.start + end;
+    if source.is_char_boundary(first) && source.is_char_boundary(last) {
+        Some(first..last)
+    } else {
+        None
+    }
+}
+
+spec fn shifted_kind(kind: HeaderError, origin: usize) -> HeaderError {
+    match kind {
+        HeaderError::MixedTestItems { first_head: (start, end) } => HeaderError::MixedTestItems {
+            first_head: ((origin + start) as usize, (origin + end) as usize),
+        },
+        _ => kind,
+    }
+}
+
+spec fn related_range_valid(source: &str, outer: Range<usize>, kind: HeaderError) -> bool {
+    match kind {
+        HeaderError::MixedTestItems { first_head: (start, end) } => can_rebase(source, outer, start, end),
+        _ => true,
+    }
+}
+
+spec fn original_diagnostic_matches(
+    source: &str, outer: Range<usize>, outcome: RecoveredFormOutcome, diagnostic: Option<CircuitFormError>,
+) -> bool {
+    match outcome {
+        RecoveredFormOutcome::Valid(_) => diagnostic.is_none(),
+        RecoveredFormOutcome::Rejected { kind, span, .. } =>
+            if can_rebase(source, outer, span.start, span.end) && related_range_valid(source, outer, kind) {
+                diagnostic == Some(CircuitFormError::Header {
+                    kind: shifted_kind(kind, outer.start),
+                    span: (outer.start + span.start) as usize..(outer.start + span.end) as usize,
+                })
+            } else {
+                diagnostic.is_none()
+            },
+    }
+}
+
+fn source_diagnostic(source: &str, outer: &Range<usize>, outcome: &RecoveredFormOutcome)
+    -> (diagnostic: Option<CircuitFormError>)
+    ensures original_diagnostic_matches(source, *outer, *outcome, diagnostic),
+{
+    let RecoveredFormOutcome::Rejected { kind: local_kind, span: local_span, .. } = outcome else { return None; };
+    let primary = rebase_span(source, outer, local_span.start, local_span.end)?;
+    let kind = match *local_kind {
+        HeaderError::MixedTestItems { first_head: (start, end) } => {
+            let related = rebase_span(source, outer, start, end)?;
+            HeaderError::MixedTestItems { first_head: (related.start, related.end) }
+        },
+        HeaderError::ExpectedList | HeaderError::ExpectedHead | HeaderError::UnknownHead
+        | HeaderError::MisplacedHead(_) | HeaderError::ExpectedNamespacePath | HeaderError::ExpectedNor
+        | HeaderError::ExpectedAbsolutePath | HeaderError::ExpectedName | HeaderError::ExpectedReference
+        | HeaderError::ExpectedNatural | HeaderError::ExpectedPort | HeaderError::ExpectedType
+        | HeaderError::ExpectedBodyItem | HeaderError::ExpectedTarget | HeaderError::ExpectedExpression
+        | HeaderError::ExpectedTestItem | HeaderError::ExpectedTestValue
+        | HeaderError::ExpectedTestValueOrAny | HeaderError::ExpectedClause(_)
+        | HeaderError::UnexpectedArgument => *local_kind,
+    };
+    Some(CircuitFormError::Header { kind, span: primary })
+}
+
+spec fn original_diagnostics_match(
+    source: &str, outer: Range<usize>, checked: Seq<RecoveredCircuitForm>,
+    diagnostics: Seq<Option<CircuitFormError>>,
+) -> bool {
+    &&& diagnostics.len() <= checked.len()
+    &&& forall|i: int| 0 <= i < diagnostics.len() ==> original_diagnostic_matches(
+        source, outer, checked[i].outcome, #[trigger] diagnostics[i])
+}
+
+fn source_diagnostics(
+    source: &str, outer: &Range<usize>, checked: &[RecoveredCircuitForm],
+) -> (diagnostics: Vec<Option<CircuitFormError>>)
+    ensures
+        diagnostics@.len() == checked@.len(),
+        original_diagnostics_match(source, *outer, checked@, diagnostics@),
+{
+    let mut diagnostics: Vec<Option<CircuitFormError>> = Vec::new();
+    let mut at = 0;
+    while at < checked.len()
+        invariant
+            at == diagnostics@.len() <= checked@.len(),
+            original_diagnostics_match(source, *outer, checked@, diagnostics@),
+        decreases checked@.len() - at,
+    {
+        let diagnostic = source_diagnostic(source, outer, &checked[at].outcome);
+        diagnostics.push(diagnostic);
+        at += 1;
+    }
+    diagnostics
 }
 
 spec fn original_circuit_lists(
@@ -269,7 +403,8 @@ fn inspect_original_circuit_list(source: &str, span: &Range<usize>) -> (list: Op
     assert(forms@[0]->List_end == forms@.len());
     assert(form_span(forms@[0]) == (0usize..fragment.spec_bytes().len() as usize));
     let checked = inspect_circuit_forms(fragment, forms.as_slice());
-    let list = OriginalCircuitList { span: span.start..span.end, forms, checked };
+    let source_diagnostics = source_diagnostics(source, span, checked.as_slice());
+    let list = OriginalCircuitList { span: span.start..span.end, forms, checked, source_diagnostics };
     assert(one_original_circuit_list(source, *span, list)) by {
         assert(check_trace(fragment, list.forms@, list.checked@, (list.forms@.len() as int, None)));
     };
@@ -369,3 +504,31 @@ fn inspect_circuit_forms(source: &str, forms: &[Form]) -> (checked: Vec<Recovere
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use super::{HeaderError, RecoveredFormOutcome, rebase_span, source_diagnostic};
+
+    #[test]
+    fn projects_only_ordered_ranges_at_utf8_boundaries() {
+        let source = "|é語|";
+        let outer = 1..6;
+        assert_eq!(rebase_span(source, &outer, 0, 5), Some(1..6));
+        assert_eq!(rebase_span(source, &outer, 2, 2), Some(3..3));
+        assert_eq!(rebase_span(source, &outer, 5, 5), Some(6..6));
+        for (first, last) in [(0, 1), (2, 4), (2, 1), (2, 6), (2, usize::MAX)] {
+            assert_eq!(rebase_span(source, &outer, first, last), None);
+        }
+        assert_eq!(rebase_span(source, &(usize::MAX..usize::MAX), 0, 0), None);
+    }
+
+    #[test]
+    fn requires_the_related_range_to_be_valid_too() {
+        let outcome = RecoveredFormOutcome::Rejected {
+            kind: HeaderError::MixedTestItems { first_head: (0, 1) },
+            span: 2..5,
+            skipped: 0..5,
+        };
+        assert!(source_diagnostic("|é語|", &(1..6), &outcome).is_none());
+    }
+}
