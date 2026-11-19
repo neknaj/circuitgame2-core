@@ -149,3 +149,34 @@ fn points_to_the_conflicting_namespace_component() {
     .unwrap();
     assert!(index_declarations(&project).is_ok());
 }
+
+#[test]
+fn orders_conflicts_by_first_occurrence_then_second_occurrence() {
+    let first = "; 先行する宣言\n(struct a (width 1)) (struct b (width 1))";
+    let first_start = first.find("a (width").unwrap();
+    for (later, expected_kind, second_name) in [
+        (
+            "(struct b (width 1)) (namespace a::inner) (struct a (width 1))",
+            NameConflictKind::DeclarationAndNamespace,
+            "a::inner",
+        ),
+        (
+            "(struct b (width 1)) (struct a (width 1)) (namespace a::inner)",
+            NameConflictKind::DuplicateDeclaration,
+            "a (width",
+        ),
+    ] {
+        let project = parse_circuit_project(&[
+            snapshot("first.ncg2", 2, first),
+            snapshot("later.ncg2", 3, later),
+        ])
+        .unwrap();
+        let error = index_declarations(&project).unwrap_err();
+        assert_eq!(error.kind, expected_kind);
+        assert_eq!(error.first.source.id.components(), ["first.ncg2"]);
+        assert_eq!(error.second.source.id.components(), ["later.ncg2"]);
+        let second_start = later.find(second_name).unwrap();
+        assert_eq!(error.first.span, first_start..first_start + 1);
+        assert_eq!(error.second.span, second_start..second_start + 1);
+    }
+}

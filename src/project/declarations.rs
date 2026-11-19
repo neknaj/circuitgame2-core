@@ -270,12 +270,21 @@ pub closed spec fn project_names_conflict(project: &CircuitProject) -> bool {
         && conflicts(project.circuits_model()[f].names@[n], project.circuits_model()[g].names@[m])
 }
 
-/// 衝突の種類と、同じ名前を導入した二つの異なる出現箇所の根拠を表す。
+spec fn earlier_conflict_candidate(f: int, n: int, g: int, m: int, left: Occurrence, right: Occurrence) -> bool {
+    before(f, n, left._file as int, left._index as int)
+        || (f == left._file && n == left._index && before(g, m, right._file as int, right._index as int))
+}
+
+/// 衝突の種類と元ソース範囲が、出現順で最初の衝突の組に対応することを表す。
 pub closed spec fn name_conflict_evidence(project: &CircuitProject, error: NameConflict) -> bool {
     exists|left: Occurrence, right: Occurrence| #[trigger] occurrence_matches(project, left)
         && #[trigger] occurrence_matches(project, right)
         && before(left._file as int, left._index as int, right._file as int, right._index as int)
         && conflict_at(left, right, error)
+        && (forall|f: int, n: int, g: int, m: int|
+            #[trigger] binding_at(project, f, n) && #[trigger] binding_at(project, g, m)
+                && before(f, n, g, m) && earlier_conflict_candidate(f, n, g, m, left, right)
+            ==> !conflicts(project.circuits_model()[f].names@[n], project.circuits_model()[g].names@[m]))
 }
 
 /// 表が、解析したプロジェクトの名前空間と独立宣言の出現箇所に対応することを表す。
@@ -428,6 +437,8 @@ proof fn record_conflict(
         occurrences_before(project, items, project.circuits_model().len() as int, 0),
         0 <= left < right < items.len(),
         conflict_at(items[left], items[right], error),
+        forall|i: int, j: int| 0 <= i < j < items.len() && before(i, j, left, right)
+            ==> !conflicts(*(#[trigger] items[i]).form, *(#[trigger] items[j]).form),
     ensures project_names_conflict(project), name_conflict_evidence(project, error),
 {
     reveal(occurrences_before);
@@ -436,6 +447,27 @@ proof fn record_conflict(
     assert(occurrence_matches(project, l) && occurrence_matches(project, r));
     assert(before(l._file as int, l._index as int, r._file as int, r._index as int));
     assert(conflicts(*l.form, *r.form));
+    assert forall|f: int, n: int, g: int, m: int|
+        #[trigger] binding_at(project, f, n) && #[trigger] binding_at(project, g, m)
+            && before(f, n, g, m) && earlier_conflict_candidate(f, n, g, m, l, r)
+        implies !conflicts(project.circuits_model()[f].names@[n], project.circuits_model()[g].names@[m])
+    by {
+        let i = choose|i: int| 0 <= i < items.len() && (#[trigger] items[i])._file == f && items[i]._index == n;
+        let j = choose|j: int| 0 <= j < items.len() && (#[trigger] items[j])._file == g && items[j]._index == m;
+        assert(occurrence_matches(project, items[i]) && occurrence_matches(project, items[j]));
+        assert(i < j) by {
+            if j < i {
+                assert(before(g, m, f, n));
+            }
+        };
+        assert(before(i, j, left, right)) by {
+            if i > left {
+                assert(before(l._file as int, l._index as int, f, n));
+            } else if i == left && j > right {
+                assert(before(r._file as int, r._index as int, g, m));
+            }
+        };
+    };
 }
 
 proof fn rule_out_conflicts(project: &CircuitProject, items: Seq<Occurrence>)
@@ -555,6 +587,8 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
 /// # Errors
 ///
 /// 重複宣言や子名前空間との衝突があれば、同じ名前を導入した二つの出現箇所を返す。
+/// 複数の衝突がある場合は、先行箇所が最も早い組を選ぶ。先行箇所が同じなら後続箇所の順で選ぶ。
+/// 出現順は、正規化したソースの初出順と各ソース内の記述順で決まる。
 pub fn index_declarations<'p, 'a>(
     project: &'p CircuitProject<'a>,
 ) -> (result: Result<DeclarationTable<'p, 'a>, NameConflict<'p, 'a>>)
