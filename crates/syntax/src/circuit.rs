@@ -12,6 +12,7 @@ use vstd::prelude::*;
 
 mod body;
 mod clauses;
+mod definitions;
 mod expression_forest;
 mod expressions;
 mod index;
@@ -20,7 +21,11 @@ mod ports;
 mod structure;
 mod test_items;
 mod test_values;
+pub use body::DefinitionReferences;
 use body::validate_routine_arguments;
+pub use definitions::{CircuitDefinitionIndex, index_definition_references};
+#[cfg(verus_only)]
+pub use definitions::{circuit_definitions_match, definition_scope_evidence};
 pub use expression_forest::{
     ExpressionReference, ExpressionReferenceKind, index_expression_references,
 };

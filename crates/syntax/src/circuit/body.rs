@@ -2,9 +2,12 @@
 
 #[cfg(verus_only)]
 use super::clauses::enclosing_region_bounds_form;
-use super::expression_forest::validate_expressions;
 #[cfg(verus_only)]
-use super::expression_forest::{expression_forest, expression_forest_error, expression_region};
+use super::expression_forest::{
+    expression_forest, expression_forest_error, expression_index_region,
+    expression_reference_in_source, expression_references, expression_region,
+};
+use super::expression_forest::{inspect_expressions, validate_expressions};
 #[cfg(verus_only)]
 use super::expressions::{after_form, argument_error, argument_matches};
 use super::expressions::{check_argument, read_expression_form};
@@ -12,6 +15,17 @@ use super::ports::read_routine_signature;
 use super::*;
 
 verus! {
+
+/// 一つの `def` と、その右辺に現れる回路名と型名。
+#[derive(Debug)]
+pub struct DefinitionReferences {
+    /// 元の構文木で `def` のリストを指す添字。
+    pub definition: usize,
+    /// 右辺の式全体が占める、構文木の半開区間。
+    pub expression: Range<usize>,
+    /// 呼び出し名と型名を元ソース順に並べた一覧。
+    pub references: Vec<ExpressionReference>,
+}
 
 /// 単独の名前、または名前を一つ以上含むリストを定義の左辺として認める。
 pub(super) open spec fn targets_match(forms: Seq<Form>, index: int, end: int, after: int) -> bool {
@@ -451,6 +465,140 @@ pub(super) fn validate_routine_arguments(
     assert(routine_signature_matches(source, forms@, first as int, end as int, head, body as int));
     assert(form_region_ends_at(forms@, body as int, end as int));
     validate_body(source, forms, body, end)
+}
+
+pub(super) open spec fn is_definition_at(
+    source: &str, forms: Seq<Form>, start: int, end: int, item: int,
+) -> bool {
+    &&& direct_form_in_range(forms, start, end, item)
+    &&& 0 <= item < end <= forms.len()
+    &&& forms[item] is List
+    &&& body_head_at(source, forms, item + 1, forms[item]->List_end as int, BodyHead::Def)
+}
+
+#[verifier::opaque]
+pub(super) open spec fn definitions_before(
+    source: &str, forms: Seq<Form>, start: int, end: int, cursor: int,
+    rows: Seq<DefinitionReferences>,
+) -> bool {
+    &&& forall|i: int| 0 <= i < rows.len() ==> {
+        let row = #[trigger] rows[i];
+        let item = row.definition as int;
+        let value = row.expression.start as int;
+        let stop = row.expression.end as int;
+        &&& is_definition_at(source, forms, start, end, item)
+        &&& item < cursor
+        &&& stop == forms[item]->List_end
+        &&& targets_match(forms, item + 2, stop, value)
+        &&& value < stop && after_form(forms, value) == stop
+        &&& expression_forest(source, forms, value, stop)
+        &&& row.references@ == expression_references(source, forms, value, stop)
+        &&& forall|r: int| 0 <= r < row.references@.len()
+            ==> expression_reference_in_source(source, forms, #[trigger] row.references@[r])
+    }
+    &&& forall|item: int| #[trigger] is_definition_at(source, forms, start, end, item) && item < cursor
+        ==> exists|i: int| 0 <= i < rows.len() && (#[trigger] rows[i]).definition == item
+    &&& forall|i: int, j: int| 0 <= i < j < rows.len()
+        ==> (#[trigger] rows[i]).definition < (#[trigger] rows[j]).definition
+}
+
+/// 検査済みの署名から本体をたどり、各定義の右辺と参照を取り出す。
+pub(super) fn collect_definitions(
+    source: &str, forms: &[Form], first: usize, end: usize, closing: usize, head: Head,
+) -> (rows: Vec<DefinitionReferences>)
+    requires
+        first <= end <= forms@.len(),
+        form_region_ends_at(forms@, first as int, end as int),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+        list_source_delimiters(source, forms@, false),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        closing < source.spec_bytes().len() && source.spec_bytes()[closing as int] == b')',
+        head is Func || head is Module || head is ModulePart,
+        routine_arguments_match(source, forms@, first as int, end as int, head),
+    ensures
+        exists|body: int| #[trigger] routine_signature_matches(source, forms@, first as int, end as int, head, body)
+            && definitions_before(source, forms@, body, end as int, end as int, rows@),
+{
+    let signature = read_routine_signature(source, forms, first, end, closing, head);
+    let Ok(body) = signature else {
+        proof { assert(false); }
+        unreachable!();
+    };
+    assert(body_items_before(source, forms@, body as int, end as int, end as int));
+    assert(form_region_ends_at(forms@, body as int, end as int));
+    let mut rows: Vec<DefinitionReferences> = Vec::new();
+    let mut index = body;
+    proof {
+        reveal(direct_form_in_range);
+        reveal(definitions_before);
+    }
+    while index < end
+        invariant
+            body <= index <= end <= forms@.len(),
+            form_region_ends_at(forms@, body as int, end as int),
+            complete_list_indices(forms@), nested_list_indices(forms@),
+            list_source_delimiters(source, forms@, false),
+            form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+            index < end ==> direct_form_in_range(forms@, body as int, end as int, index as int),
+            body_items_before(source, forms@, body as int, end as int, end as int),
+            definitions_before(source, forms@, body as int, end as int, index as int, rows@),
+        decreases end - index,
+    {
+        let ghost prior = rows@;
+        proof {
+            reveal(body_items_before);
+            assert(body_item_matches(source, forms@, index as int, end as int));
+        }
+        let Form::List { span: item_span, end: stop } = &forms[index] else {
+            proof { assert(false); }
+            unreachable!();
+        };
+        proof {
+            reveal(list_source_delimiters);
+            assert(list_delimited(source.spec_bytes(), forms@[index as int], false));
+        }
+        let head = read_body_item_head(source, forms, index + 1, *stop, item_span.end - 1);
+        let Ok(kind) = head else {
+            proof { assert(false); }
+            unreachable!();
+        };
+        assert(body_arguments_match(source, forms@, index + 2, *stop as int, kind));
+        if matches!(kind, BodyHead::Def) {
+            let first = index + 2;
+            assert(form_region_ends_at(forms@, first as int, *stop as int));
+            let value = read_targets(source, forms, first, *stop, item_span.end - 1);
+            let Ok(start) = value else {
+                proof { assert(false); }
+                unreachable!();
+            };
+            proof { single_expression_region(forms@, start as int, *stop as int); }
+            let references = inspect_expressions(source, forms, start..*stop, true);
+            let Ok(references) = references else {
+                proof { assert(false); }
+                unreachable!();
+            };
+            rows.push(DefinitionReferences { definition: index, expression: start..*stop, references });
+        }
+        proof {
+            reveal(definitions_before);
+            node_end_is_following_direct_form(forms@, index as int, *stop as int);
+            reveal(following_direct_form);
+            assert(rows@.take(prior.len() as int) =~= prior);
+            assert forall|i: int| #[trigger] is_definition_at(source, forms@, body as int, end as int, i)
+                && i < *stop implies exists|j: int| 0 <= j < rows@.len() && (#[trigger] rows@[j]).definition == i by {
+                if i < index {
+                    let j = choose|j: int| 0 <= j < prior.len() && (#[trigger] prior[j]).definition == i;
+                    assert(rows@[j] == rows@.take(prior.len() as int)[j]);
+                } else {
+                    assert(i == index);
+                    assert(kind is Def);
+                    assert(rows@[prior.len() as int].definition == i);
+                }
+            };
+        }
+        index = *stop;
+    }
+    rows
 }
 
 } // verus!

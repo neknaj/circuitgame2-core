@@ -402,7 +402,7 @@ pub open spec fn expression_index_region(source: &str, forms: Seq<Form>, roots: 
     &&& form_spans_valid(source, forms, source.spec_bytes().len() as int)
 }
 
-fn inspect_expressions(
+pub(super) fn inspect_expressions(
     source: &str, forms: &[Form], roots: Range<usize>, collect: bool,
 ) -> (result: Result<Vec<ExpressionReference>, (HeaderError, Range<usize>)>)
     requires expression_index_region(source, forms@, roots),

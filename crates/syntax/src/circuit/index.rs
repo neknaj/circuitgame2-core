@@ -400,7 +400,9 @@ pub fn index_headers(source: &str) -> (result: Result<CircuitForms, CircuitFormE
         result.is_ok() <==> circuit_source_matches(source),
         match result {
             Ok(index) => circuit_index_matches(source, index.forms@, index.entries@)
-                && form_spans_valid(source, index.forms@, source.spec_bytes().len() as int),
+                && form_spans_valid(source, index.forms@, source.spec_bytes().len() as int)
+                && complete_list_indices(index.forms@) && nested_list_indices(index.forms@)
+                && list_source_delimiters(source, index.forms@, false),
             Err(error) => circuit_source_error(source, error),
         },
 {
