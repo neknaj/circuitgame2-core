@@ -233,6 +233,7 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
         nested_list_indices(result.forms@),
         list_source_delimiters(source, result.forms@, true),
         inserted_closes_match(source, result.forms@, result.repairs@),
+        repair_input_spans_valid(source, result.repairs@, source.spec_bytes().len() as int),
         form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
@@ -621,12 +622,92 @@ proof fn record_inserted_close(source: &str, forms: Seq<Form>, updated: Seq<Form
     };
 }
 
+pub open spec fn repair_input_span(repair: Repair) -> Option<(int, int)> {
+    match repair {
+        Repair::Skipped { span, .. } => Some((span.start as int, span.end as int)),
+        Repair::InsertedSeparator { offset } => Some((offset as int, offset as int)),
+        Repair::InsertedClose { .. } => None,
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn repair_input_spans_valid(source: &str, repairs: Seq<Repair>, consumed: int) -> bool {
+    &&& 0 <= consumed <= source.spec_bytes().len()
+    &&& forall|i: int| 0 <= i < repairs.len() ==> match repair_input_span(#[trigger] repairs[i]) {
+        Some((start, end)) => {
+            &&& 0 <= start <= end <= consumed
+            &&& (repairs[i] is Skipped ==> start < end)
+            &&& is_char_boundary(source.spec_bytes(), start)
+            &&& is_char_boundary(source.spec_bytes(), end)
+        },
+        None => true,
+    }
+    &&& forall|i: int, j: int| 0 <= i < j < repairs.len()
+        ==> match (repair_input_span(#[trigger] repairs[i]), repair_input_span(#[trigger] repairs[j])) {
+            (Some((_, end)), Some((start, _))) => end <= start,
+            _ => true,
+        }
+}
+
+proof fn repair_spans_advance(source: &str, repairs: Seq<Repair>, before: int, after: int)
+    requires
+        repair_input_spans_valid(source, repairs, before),
+        before <= after <= source.spec_bytes().len(),
+    ensures repair_input_spans_valid(source, repairs, after),
+{
+    reveal(repair_input_spans_valid);
+}
+
+proof fn repair_spans_append(source: &str, repairs: Seq<Repair>, repair: Repair,
+    before: int, after: int)
+    requires
+        repair_input_spans_valid(source, repairs, before),
+        before <= after <= source.spec_bytes().len(),
+        match repair_input_span(repair) {
+            Some((start, end)) => {
+                &&& before <= start <= end <= after
+                &&& (repair is Skipped ==> start < end)
+                &&& is_char_boundary(source.spec_bytes(), start)
+                &&& is_char_boundary(source.spec_bytes(), end)
+            },
+            None => true,
+        },
+    ensures repair_input_spans_valid(source, repairs.push(repair), after),
+{
+    reveal(repair_input_spans_valid);
+    let extended = repairs.push(repair);
+    assert forall|i: int| 0 <= i < extended.len() implies match repair_input_span(#[trigger] extended[i]) {
+        Some((start, end)) => {
+            &&& 0 <= start <= end <= after
+            &&& (extended[i] is Skipped ==> start < end)
+            &&& is_char_boundary(source.spec_bytes(), start)
+            &&& is_char_boundary(source.spec_bytes(), end)
+        },
+        None => true,
+    } by {
+        if i < repairs.len() {
+            assert(extended[i] == repairs[i]);
+        }
+    };
+    assert forall|i: int, j: int| 0 <= i < j < extended.len()
+        implies match (repair_input_span(#[trigger] extended[i]), repair_input_span(#[trigger] extended[j])) {
+            (Some((_, end)), Some((start, _))) => end <= start,
+            _ => true,
+        } by {
+        assert(extended[i] == repairs[i]);
+        if j < repairs.len() {
+            assert(extended[j] == repairs[j]);
+        }
+    };
+}
+
 #[verifier::rlimit(30)]
 fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>), Error>)
     ensures
         recovering ==> result.is_ok(),
         match result {
             Ok((forms, repairs)) => inserted_closes_match(source, forms@, repairs@)
+                && repair_input_spans_valid(source, repairs@, source.spec_bytes().len() as int)
                 && complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, recovering)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
@@ -645,6 +726,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         assert(form_spans_valid(source, forms@, 0));
         reveal(nested_list_indices);
         assert(nested_list_indices(forms@));
+        reveal(repair_input_spans_valid);
+        assert(repair_input_spans_valid(source, repairs@, 0));
         reveal(list_source_delimiters);
         assert(list_source_delimiters(source, forms@, recovering));
     }
@@ -657,6 +740,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             valid_utf8(source.spec_bytes()),
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
             no_inserted_closes(repairs@),
+            repair_input_spans_valid(source, repairs@, lexer.cursor.position()),
             form_spans_valid(source, forms@, lexer.cursor.position()),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
@@ -694,7 +778,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         assert(covers(source.spec_bytes(), spans, lexer.cursor.position()));
         if missing_separator {
             if recovering {
-                repairs.push(Repair::InsertedSeparator { offset: span.start });
+                let repair = Repair::InsertedSeparator { offset: span.start };
+                proof { repair_spans_append(source, repairs@, repair, previous_position, previous_position); }
+                repairs.push(repair);
             } else {
                 return Err(Error {
                     kind: ErrorKind::MissingSeparator,
@@ -702,11 +788,14 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 });
             }
         }
+        let ghost repairs_before_segment = repairs@;
         match kind {
             SegmentKind::Whitespace | SegmentKind::Comment => {}
             SegmentKind::Malformed(error) => {
                 if recovering {
-                    repairs.push(Repair::Skipped { span, error });
+                    let repair = Repair::Skipped { span, error };
+                    proof { repair_spans_append(source, repairs@, repair, previous_position, lexer.cursor.position()); }
+                    repairs.push(repair);
                 } else {
                     return Err(error);
                 }
@@ -752,7 +841,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         span: span.start..span.end,
                     };
                     if recovering {
-                        repairs.push(Repair::Skipped { span, error });
+                        let repair = Repair::Skipped { span, error };
+                        proof {
+                            repair_spans_append(source, repairs@, repair, previous_position, lexer.cursor.position());
+                        }
+                        repairs.push(repair);
                     } else {
                         return Err(error);
                     }
@@ -772,6 +865,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 }
             }
         }
+        proof {
+            if repairs@ == repairs_before_segment {
+                repair_spans_advance(source, repairs@, previous_position, lexer.cursor.position());
+            }
+        }
     }
 
     proof { is_char_boundary_start_end_of_seq(source.spec_bytes()); }
@@ -782,6 +880,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             is_char_boundary(source.spec_bytes(), length as int),
             form_spans_valid(source, forms@, length as int),
             inserted_closes_match(source, forms@, repairs@),
+            repair_input_spans_valid(source, repairs@, length as int),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
             nested_list_indices(forms@),
@@ -805,7 +904,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             let opening = span.start..span.end;
             let ghost opening_evidence = opening;
             let ghost previous_repairs = repairs@;
-            repairs.push(Repair::InsertedClose { offset: length, opening, list: index });
+            let repair = Repair::InsertedClose { offset: length, opening, list: index };
+            proof { repair_spans_append(source, repairs@, repair, length as int, length as int); }
+            repairs.push(repair);
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
             proof {
