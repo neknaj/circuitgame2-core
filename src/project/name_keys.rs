@@ -5,8 +5,8 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::{
-    encode_utf8_valid_utf8, is_char_boundary, is_char_boundary_iff_not_is_continuation_byte,
-    is_char_boundary_start_end_of_seq,
+    encode_utf8_decode_utf8, encode_utf8_valid_utf8, is_char_boundary,
+    is_char_boundary_iff_not_is_continuation_byte, is_char_boundary_start_end_of_seq,
 };
 
 verus! {
@@ -27,11 +27,33 @@ pub open spec fn key_view(key: NameKey) -> (Option<Seq<char>>, Seq<char>) {
     }, key.name@)
 }
 
+pub open spec fn key_bytes(key: NameKey) -> (Option<Seq<u8>>, Seq<u8>) {
+    (match key.parent {
+        Some(parent) => Some(parent.spec_bytes()),
+        None => None,
+    }, key.name.spec_bytes())
+}
+
+pub(super) proof fn key_views_agree(left: NameKey, right: NameKey)
+    ensures
+        (key_view(left) == key_view(right)) <==> (key_bytes(left) == key_bytes(right)),
+{
+    encode_utf8_decode_utf8(left.name@);
+    encode_utf8_decode_utf8(right.name@);
+    if let (Some(l), Some(r)) = (left.parent, right.parent) {
+        encode_utf8_decode_utf8(l@);
+        encode_utf8_decode_utf8(r@);
+    }
+}
+
 impl NameKey<'_> {
     /// 名前空間と名前が一致することを確かめる。
     pub fn same_name(self, other: NameKey) -> (same: bool)
-        ensures same == (key_view(self) == key_view(other)),
+        ensures
+            same == (key_view(self) == key_view(other)),
+            same == (key_bytes(self) == key_bytes(other)),
     {
+        proof { key_views_agree(self, other); }
         if self.name != other.name {
             return false;
         }

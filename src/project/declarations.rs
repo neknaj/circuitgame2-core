@@ -282,6 +282,62 @@ pub closed spec fn declaration_table_matches(project: &CircuitProject, table: De
     occurrences_before(project, table.occurrences@, project.circuits_model().len() as int, 0)
 }
 
+/// プロジェクトに完全修飾名で特定できる独立宣言があることを表す。
+pub closed spec fn project_declares(project: &CircuitProject, key: NameKey) -> bool {
+    exists|file: int, index: int| #[trigger] binding_at(project, file, index)
+        && {
+            let form = project.circuits_model()[file].names@[index];
+            !(form.head is Namespace) && key_view(form_key(form)) == key_view(key)
+        }
+}
+
+pub(super) proof fn declaration_key_equivalence(project: &CircuitProject, left: NameKey, right: NameKey)
+    requires key_view(left) == key_view(right),
+    ensures project_declares(project, left) <==> project_declares(project, right),
+{
+}
+
+pub(super) proof fn located_name_evidence(location: LocatedName)
+    requires
+        location.span.start < location.span.end <= location.source.text.spec_bytes().len(),
+        is_char_boundary(location.source.text.spec_bytes(), location.span.start as int),
+        is_char_boundary(location.source.text.spec_bytes(), location.span.end as int),
+    ensures location_in_source(location),
+{
+}
+
+pub(super) proof fn declaration_lookup_agrees(
+    project: &CircuitProject, table: &DeclarationTable, key: NameKey,
+)
+    requires declaration_table_matches(project, *table),
+    ensures
+        project_declares(project, key) <==>
+            exists|source: &ProjectSource, form: &NamedForm| #[trigger] table.declaration_at(key, source, form),
+{
+    let items = table.occurrences@;
+    reveal(occurrences_before);
+    if project_declares(project, key) {
+        let (file, index) = choose|file: int, index: int| #[trigger] binding_at(project, file, index)
+            && {
+                let form = project.circuits_model()[file].names@[index];
+                !(form.head is Namespace) && key_view(form_key(form)) == key_view(key)
+            };
+        let i = choose|i: int| 0 <= i < items.len() && (#[trigger] items[i])._file == file && items[i]._index == index;
+        let item = items[i];
+        assert(table.declaration_at(key, item.source, item.form));
+    } else if exists|source: &ProjectSource, form: &NamedForm| #[trigger] table.declaration_at(key, source, form) {
+        let (source, form) = choose|source: &ProjectSource, form: &NamedForm| #[trigger] table.declaration_at(key, source, form);
+        let i = choose|i: int| 0 <= i < items.len()
+            && {
+                let item = #[trigger] items[i];
+                !(item.form.head is Namespace) && *item.source == *source && *item.form == *form
+                    && key_view(form_key(*item.form)) == key_view(key)
+            };
+        assert(occurrence_matches(project, items[i]));
+        assert(project_declares(project, key));
+    }
+}
+
 fn namespace_location<'p, 'a>(
     item: Occurrence<'p, 'a>, key: NameKey,
 ) -> (location: Option<LocatedName<'p, 'a>>)

@@ -159,6 +159,14 @@ pub(super) open spec fn name_in_source(text: &str, name: NameSite) -> bool {
     &&& text.spec_bytes()[name.span.start as int..name.span.end as int] == name.word.spec_bytes()
 }
 
+pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedCircuit)
+    requires parsed_circuit_matches(source, parsed),
+    ensures
+        circuit_index_matches(source.text, parsed.syntax.forms@, parsed.syntax.entries@),
+        form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int),
+{
+}
+
 pub(super) proof fn parsed_name_span(
     source: ProjectSource, parsed: NamedCircuit, index: int,
 )

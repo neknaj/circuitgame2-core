@@ -116,7 +116,7 @@ proof fn named_first_argument(source: &str, forms: Seq<Form>, index: int, member
     }
 }
 
-proof fn namespace_head_is_unique(source: &str, form: Form, head: Head)
+pub(super) proof fn namespace_head_is_unique(source: &str, form: Form, head: Head)
     requires head_word_matches(source, form, head), head_word_matches(source, form, Head::Namespace),
     ensures head == Head::Namespace,
 {

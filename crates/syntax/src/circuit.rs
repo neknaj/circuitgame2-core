@@ -24,7 +24,8 @@ use body::validate_routine_arguments;
 pub use index::index_headers;
 #[cfg(verus_only)]
 pub use index::{
-    circuit_index_matches, circuit_source_error, circuit_source_matches, indexed_location,
+    circuit_index_matches, circuit_source_error, circuit_source_matches, export_entry_evidence,
+    indexed_location,
 };
 pub use names::{NameSite, NamedCircuit, NamedForm, index_named_forms};
 #[cfg(verus_only)]

@@ -88,6 +88,48 @@ pub(super) proof fn indexed_entry_evidence(
     }
 }
 
+/// 索引に含まれる公開指定の引数と、所属名前空間のパスの位置を示す。
+pub proof fn export_entry_evidence(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, entry: int,
+)
+    requires
+        circuit_index_matches(source, forms, entries),
+        0 <= entry < entries.len(),
+        entries[entry].head is Export,
+    ensures
+        ({
+            let item = entries[entry];
+            let root = item.form as int;
+            &&& 0 <= root < forms.len()
+            &&& forms[root] is List
+            &&& {
+                let end = forms[root]->List_end as int;
+                &&& root + 2 < end <= forms.len()
+                &&& forall|i: int| root + 2 <= i < end ==> #[trigger] forms[i] is Atom
+            }
+        }),
+        entries[entry].namespace matches Some(parent) ==>
+            (parent + 2 < forms.len() && forms[parent + 2] is Atom),
+{
+    indexed_entry_evidence(source, forms, entries, entry);
+    let item = entries[entry];
+    let root = item.form as int;
+    let end = forms[root]->List_end as int;
+    assert(header_matches(source, forms, root, item.namespace.is_some(), Head::Export));
+    reveal(header_arguments_match);
+    assert(directive_arguments_match(source, forms, root + 2, end, Head::Export));
+    assert forall|i: int| root + 2 <= i < end implies #[trigger] forms[i] is Atom by {
+        assert(directive_word_at(source, forms, i, end, HeaderError::ExpectedName));
+    };
+    if let Some(parent) = item.namespace {
+        let head = choose|head: Head| #[trigger] header_matches(source, forms, parent as int, false, head);
+        names::namespace_head_is_unique(source, forms[parent + 1], head);
+        assert(header_matches(source, forms, parent as int, false, Head::Namespace));
+        assert(directive_word_at(source, forms, parent + 2, forms[parent as int]->List_end as int,
+            HeaderError::ExpectedNamespacePath));
+    }
+}
+
 proof fn indexed_subtree_location(
     source: &str, forms: Seq<Form>, root: int, end: int, index: int, owner: Option<usize>,
 )
