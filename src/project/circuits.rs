@@ -19,8 +19,8 @@ use crate::syntax::circuit::NameSite;
 use crate::syntax::circuit::{CircuitFormError, NamedCircuit, index_named_forms};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    circuit_index_matches, circuit_source_error, circuit_source_matches, name_site_matches,
-    named_form_matches, named_forms_match,
+    circuit_index_matches, circuit_source_error, circuit_source_matches, definition_rows_match,
+    name_site_matches, named_form_matches, named_forms_match,
 };
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, bare_atom_kind, form_span, form_spans_valid};
@@ -76,6 +76,7 @@ pub closed spec fn parsed_circuit_matches(source: ProjectSource, parsed: NamedCi
     &&& form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int)
     &&& named_forms_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
         parsed.names@, parsed.syntax.entries@.len() as int)
+    &&& definition_rows_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@, parsed.definitions_by_entry@)
 }
 
 spec fn circuit_inputs_before(inputs: Seq<SourceSnapshot>, stop: int) -> bool {
@@ -203,6 +204,10 @@ pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedCi
     ensures
         circuit_index_matches(source.text, parsed.syntax.forms@, parsed.syntax.entries@),
         form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int),
+        named_forms_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@, parsed.names@,
+            parsed.syntax.entries@.len() as int),
+        definition_rows_match(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
+            parsed.definitions_by_entry@),
 {
 }
 

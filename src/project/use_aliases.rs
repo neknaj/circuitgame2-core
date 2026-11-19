@@ -1,6 +1,11 @@
 //! 解決済みの `use` をスコープごとに照合し、別名の束縛と重複警告を求める。
 
+mod definitions;
 mod relative;
+pub use definitions::{
+    DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
+    DefinitionReferenceSite, ResolvedDefinitionReference,
+};
 pub use relative::{RelativeResolutionError, RelativeTarget};
 
 #[cfg(verus_only)]

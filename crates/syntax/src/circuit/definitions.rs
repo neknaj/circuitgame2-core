@@ -42,9 +42,16 @@ spec fn routine_definition_rows(
 pub closed spec fn circuit_definitions_match(source: &str, index: CircuitDefinitionIndex) -> bool {
     let forms = index.syntax.forms@;
     let entries = index.syntax.entries@;
+    definition_rows_match(source, forms, entries, index.definitions_by_entry@)
+}
+
+/// 定義一覧が厳格構文木と索引の各項目に対応することを表す。
+pub closed spec fn definition_rows_match(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, rows: Seq<Vec<DefinitionReferences>>,
+) -> bool {
     &&& circuit_index_matches(source, forms, entries)
-    &&& definitions_prefix(source, forms, entries, index.definitions_by_entry@)
-    &&& index.definitions_by_entry@.len() == entries.len()
+    &&& definitions_prefix(source, forms, entries, rows)
+    &&& rows.len() == entries.len()
 }
 
 /// 定義の参照を、その宣言または断片のスコープと元ソースの字句に結び付ける。
@@ -68,10 +75,33 @@ pub proof fn definition_scope_evidence(
 {
     let forms = index.syntax.forms@;
     let entries = index.syntax.entries@;
+    definition_row_evidence(source, forms, entries, index.definitions_by_entry@, entry, definition);
+}
+
+/// 各定義の参照が、所属する索引項目と元ソースの範囲に対応することを示す。
+pub proof fn definition_row_evidence(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, definitions: Seq<Vec<DefinitionReferences>>,
+    entry: int, definition: int,
+)
+    requires
+        definition_rows_match(source, forms, entries, definitions),
+        0 <= entry < definitions.len(),
+        0 <= definition < definitions[entry]@.len(),
+    ensures
+        definitions.len() == entries.len(),
+        ({
+            let item = entries[entry];
+            let references = definitions[entry]@[definition].references@;
+            &&& item.head is Func || item.head is Module || item.head is ModulePart
+            &&& indexed_location(source, forms, item.form as int, item.namespace)
+            &&& forall|i: int| 0 <= i < references.len()
+                ==> expression_reference_in_source(source, forms, #[trigger] references[i])
+        }),
+{
     let item = entries[entry];
     let root = item.form as int;
     let end = forms[root]->List_end as int;
-    let rows = index.definitions_by_entry@[entry]@;
+    let rows = definitions[entry]@;
     indexed_entry_evidence(source, forms, entries, entry);
     assert(routine_definition_rows(source, forms, item, rows));
     let body = choose|body: int| #[trigger] routine_signature_matches(source, forms, root + 2, end, item.head, body)
@@ -106,6 +136,19 @@ pub fn index_definition_references(source: &str)
         },
 {
     let syntax = index_headers(source)?;
+    let definitions_by_entry = collect_definition_rows(source, &syntax);
+    Ok(CircuitDefinitionIndex { syntax, definitions_by_entry })
+}
+
+pub(super) fn collect_definition_rows(source: &str, syntax: &CircuitForms)
+    -> (definitions: Vec<Vec<DefinitionReferences>>)
+    requires
+        circuit_index_matches(source, syntax.forms@, syntax.entries@),
+        complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
+        list_source_delimiters(source, syntax.forms@, false),
+        form_spans_valid(source, syntax.forms@, source.spec_bytes().len() as int),
+    ensures definition_rows_match(source, syntax.forms@, syntax.entries@, definitions@),
+{
     let forms = syntax.forms.as_slice();
     let entries = syntax.entries.as_slice();
     let mut definitions = Vec::new();
@@ -144,7 +187,7 @@ pub fn index_definition_references(source: &str)
         definitions.push(rows);
         i += 1;
     }
-    Ok(CircuitDefinitionIndex { syntax, definitions_by_entry: definitions })
+    definitions
 }
 
 } // verus!

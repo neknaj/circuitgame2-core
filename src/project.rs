@@ -37,8 +37,10 @@ pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
 pub use use_aliases::{
-    AliasDisposition, ReferenceScopeError, RelativeResolutionError, RelativeTarget,
-    UnqualifiedTarget, UseAliasConflict, UseAliases, check_use_aliases,
+    AliasDisposition, DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason,
+    DefinitionReferenceSite, ReferenceScopeError, RelativeResolutionError, RelativeTarget,
+    ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
+    check_use_aliases,
 };
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, use_aliases_acceptable, use_aliases_match};

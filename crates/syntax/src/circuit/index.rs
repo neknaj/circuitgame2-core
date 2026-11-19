@@ -88,6 +88,23 @@ pub(super) proof fn indexed_entry_evidence(
     }
 }
 
+pub(super) proof fn namespace_entry_for(
+    source: &str, forms: Seq<Form>, entries: Seq<Entry>, form: int, parent: usize,
+)
+    requires circuit_index_matches(source, forms, entries),
+        indexed_location(source, forms, form, Some(parent)),
+    ensures exists|i: int| 0 <= i < entries.len() && (#[trigger] entries[i]).form == parent
+        && entries[i].head is Namespace && entries[i].namespace is None,
+{
+    reveal(index_prefix);
+    reveal(direct_form_in_range);
+    assert(indexed_location(source, forms, parent as int, None));
+    let i = choose|i: int| 0 <= i < entries.len()
+        && (#[trigger] entries[i]).form == parent && entries[i].namespace is None;
+    indexed_entry_evidence(source, forms, entries, i);
+    names::namespace_head_is_unique(source, forms[parent + 1], entries[i].head);
+}
+
 /// 索引に含まれる公開指定の引数と、所属名前空間のパスの位置を示す。
 pub proof fn export_entry_evidence(
     source: &str, forms: Seq<Form>, entries: Seq<Entry>, entry: int,

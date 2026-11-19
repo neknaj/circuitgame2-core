@@ -308,6 +308,7 @@ impl<'p, 'a> UseTargets<'p, 'a> {
     /// 参照位置の特定に使う構文済みプロジェクトを返す。
     pub(super) fn project(&self) -> (project: &'p CircuitProject<'a>)
         ensures *project == self.project_model(),
+            self.covers_project() ==> project.has_parsed_sources(),
     {
         self.project
     }

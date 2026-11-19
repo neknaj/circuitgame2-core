@@ -17,7 +17,7 @@ use super::*;
 verus! {
 
 /// 一つの `def` と、その右辺に現れる回路名と型名。
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct DefinitionReferences {
     /// 元の構文木で `def` のリストを指す添字。
     pub definition: usize,

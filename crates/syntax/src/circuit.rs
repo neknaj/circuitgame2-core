@@ -25,7 +25,10 @@ pub use body::DefinitionReferences;
 use body::validate_routine_arguments;
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
-pub use definitions::{circuit_definitions_match, definition_scope_evidence};
+pub use definitions::{
+    circuit_definitions_match, definition_row_evidence, definition_rows_match,
+    definition_scope_evidence,
+};
 pub use expression_forest::{
     ExpressionReference, ExpressionReferenceKind, index_expression_references,
 };
@@ -39,7 +42,9 @@ pub use index::{
 };
 pub use names::{NameSite, NamedCircuit, NamedForm, index_named_forms};
 #[cfg(verus_only)]
-pub use names::{name_site_matches, named_form_matches, named_forms_match, named_head};
+pub use names::{
+    indexed_namespace_name, name_site_matches, named_form_matches, named_forms_match, named_head,
+};
 #[cfg(verus_only)]
 pub use ports::{
     port_error_evidence, port_matches, ports_clause_matches, ports_error_evidence,

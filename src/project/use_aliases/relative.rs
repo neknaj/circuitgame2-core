@@ -127,6 +127,21 @@ spec fn path_outcome(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn relative_requires_valid_input(
+        &self, file: usize, block: Option<usize>, path: &str, from: Option<&str>,
+        found: Result<RelativeTarget, RelativeResolutionError>,
+    )
+        requires
+            self.scope_matches(file, block, Ok(from)),
+            bare_atom_kind(path.spec_bytes()) == Some(AtomKind::RelativePath),
+            self.relative_resolution_matches(file, block, path, found),
+        ensures !matches!(found, Err(RelativeResolutionError::Scope(_) | RelativeResolutionError::InvalidPath)),
+    {
+        if let Err(RelativeResolutionError::Scope(error)) = found {
+            assert(self.scope_matches(file, block, Err(error)));
+        }
+    }
+
     /// 相対パスの結果が、参照元の束縛、元の名前空間、共有宣言表、公開条件に対応することを表す。
     pub closed spec fn relative_resolution_matches(
         &self, file: usize, block: Option<usize>, path: &str,

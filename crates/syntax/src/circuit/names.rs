@@ -37,6 +37,34 @@ pub struct NamedCircuit<'a> {
     pub syntax: CircuitForms,
     /// 名前空間、独立した宣言、モジュール断片を入力順に並べた一覧。
     pub names: Vec<NamedForm<'a>>,
+    /// 各索引項目の `def` とその参照。構文木を名前索引と共有する。
+    pub definitions_by_entry: Vec<Vec<DefinitionReferences>>,
+}
+
+/// 参照を囲む名前空間ブロックが名前索引にも含まれることを示す。
+pub proof fn indexed_namespace_name(
+    source: &str, parsed: &NamedCircuit, form: int, parent: usize,
+)
+    requires
+        circuit_index_matches(source, parsed.syntax.forms@, parsed.syntax.entries@),
+        named_forms_match(source, parsed.syntax.forms@, parsed.syntax.entries@,
+            parsed.names@, parsed.syntax.entries@.len() as int),
+        indexed_location(source, parsed.syntax.forms@, form, Some(parent)),
+    ensures exists|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]).form == parent
+        && parsed.names@[i].head is Namespace && parsed.names@[i].block is None,
+{
+    let entries = parsed.syntax.entries@;
+    let forms = parsed.syntax.forms@;
+    let names = parsed.names@;
+    super::index::namespace_entry_for(source, forms, entries, form, parent);
+    let i = choose|i: int| 0 <= i < entries.len() && (#[trigger] entries[i]).form == parent
+        && entries[i].head is Namespace && entries[i].namespace is None;
+    reveal(named_forms_match);
+    assert(named_head(entries[i].head));
+    let j = choose|j: int| 0 <= j < names.len()
+        && #[trigger] named_form_matches(source, forms, entries[i], names[j]);
+    reveal(named_form_matches);
+    assert(names[j].form == parent);
 }
 
 /// 名前を取り出す対象のフォームを定める。
@@ -246,11 +274,14 @@ pub fn index_named_forms(source: &str) -> (result: Result<NamedCircuit<'_>, Circ
             Ok(named) => circuit_index_matches(source, named.syntax.forms@, named.syntax.entries@)
                 && form_spans_valid(source, named.syntax.forms@, source.spec_bytes().len() as int)
                 && named_forms_match(source, named.syntax.forms@, named.syntax.entries@,
-                    named.names@, named.syntax.entries@.len() as int),
+                    named.names@, named.syntax.entries@.len() as int)
+                && definition_rows_match(source, named.syntax.forms@, named.syntax.entries@,
+                    named.definitions_by_entry@),
             Err(error) => circuit_source_error(source, error),
         },
 {
     let syntax = index_headers(source)?;
+    let definitions_by_entry = super::definitions::collect_definition_rows(source, &syntax);
     let mut names: Vec<NamedForm> = Vec::new();
     let mut index = 0;
     let count = syntax.entries.len();
@@ -271,7 +302,7 @@ pub fn index_named_forms(source: &str) -> (result: Result<NamedCircuit<'_>, Circ
         }
         index += 1;
     }
-    Ok(NamedCircuit { syntax, names })
+    Ok(NamedCircuit { syntax, names, definitions_by_entry })
 }
 
 } // verus!
