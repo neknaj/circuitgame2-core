@@ -30,6 +30,8 @@ mod lexical;
 #[cfg(verus_only)]
 mod strict_error;
 #[cfg(verus_only)]
+mod strict_string_error;
+#[cfg(verus_only)]
 pub use strict_error::{strict_syntax_rejection, strict_token_errors_agree};
 #[cfg(verus_only)]
 pub use lexical::{
@@ -49,6 +51,8 @@ use quoted_prefix::{
     advance_quoted_prefixes_over_ordinary, escape_at_quoted_prefixes, initialize_quoted_prefixes,
     quoted_prefix_starts_with_quote, quoted_prefixes_viable, quoted_stop,
 };
+#[cfg(verus_only)]
+use strict_string_error::{first_string_error, record_first_string_error};
 
 use crate::boundary::{Boundary, after_ascii, split_at_boundary, split_first_scalar};
 use alloc::vec::Vec;
@@ -293,6 +297,10 @@ impl<'a> Lexer<'a> {
         };
         assert(kind is Malformed ==> syntax_error_evidence(self.cursor.source, kind->Malformed_0))
             by { reveal(syntax_error_evidence); reveal(atom_and_close_error_evidence); };
+        assert(kind is Malformed ==> strict_error::malformed_atom_extent(
+            self.cursor.source.spec_bytes(), span.start as int, kind->Malformed_0)) by {
+            reveal(strict_error::malformed_atom_extent);
+        };
         proof {
             assert(segment_lexeme(kind) is Some ==> lexeme_at(
                 self.cursor.source.spec_bytes(), span.start as int,
@@ -2434,7 +2442,9 @@ impl<'a> SourceCursor<'a> {
                         ==> quoted_atom(self.source.spec_bytes()[span.start as int..span.end as int]))
                     &&& (kind is Quoted && kind->Quoted_0 is Some
                         ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0)
-                            && string_error_kind(kind->Quoted_0->Some_0.kind))
+                            && string_error_kind(kind->Quoted_0->Some_0.kind)
+                            && first_string_error(self.source.spec_bytes()[span.start as int..],
+                                span.start as int, kind->Quoted_0->Some_0))
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
                         =~= self.source.spec_bytes()[span.start as int..span.end as int]
                         && bare_atom_extent(self.source.spec_bytes(), span.start as int, span.end as int))
@@ -2529,7 +2539,8 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
             RawSegment::Quoted(None) => quoted_atom(input.spec_bytes()[..input.spec_bytes().len() - result.1.spec_bytes().len()]),
             RawSegment::Quoted(Some(error)) => string_error_kind(error.kind)
-                && string_error_site(input.spec_bytes(), start as int, error),
+                && string_error_site(input.spec_bytes(), start as int, error)
+                && first_string_error(input.spec_bytes(), start as int, error),
         },
 {
     let first = input.as_bytes()[0];
@@ -2646,6 +2657,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         match result.1 {
             Some(error) => string_error_kind(error.kind)
                 && string_error_site(input.spec_bytes(), start as int, error)
+                && first_string_error(input.spec_bytes(), start as int, error)
                 && (error.kind is UnterminatedString ==> result.0.spec_bytes().len() == 0),
             None => quoted_atom(input.spec_bytes()[..input.spec_bytes().len() - result.0.spec_bytes().len()]),
         },
@@ -2654,6 +2666,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
     let mut remaining = after_ascii(input);
     let mut error: Option<Error> = None;
     let ghost mut pieces: Seq<Seq<u8>> = Seq::empty();
+    let ghost mut eof_stop = 1int;
     assert(pieces.flatten() =~= input.spec_bytes()[1..1]);
     proof { initialize_quoted_prefixes(input.spec_bytes()); }
     loop
@@ -2671,12 +2684,16 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             remaining.spec_bytes().len() < length,
             match error {
                 Some(error) => error.kind is InvalidEscape
-                    && string_error_site(input.spec_bytes(), start as int, error),
+                    && string_error_site(input.spec_bytes(), start as int, error)
+                    && first_string_error(input.spec_bytes(), start as int, error),
                 None => true,
             },
         ensures
             remaining.spec_bytes().len() == 0,
             forall|close: int| !#[trigger] quoted_prefix_at(input.spec_bytes(), close),
+            error.is_none() ==> 1 <= eof_stop <= length
+                && (eof_stop == length || (eof_stop + 1 == length && input.spec_bytes()[eof_stop] == 92))
+                && quoted_prefix::quoted_body(input.spec_bytes(), 1, eof_stop),
         decreases remaining.spec_bytes().len(),
     {
         let ghost before = remaining.spec_bytes();
@@ -2703,7 +2720,13 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         let position = start + (length - bytes.len());
         let ghost relative = position - start;
         if bytes.len() == 0 {
-            proof { quoted_stop(input.spec_bytes(), relative, error.is_none()); }
+            proof {
+                quoted_stop(input.spec_bytes(), relative, error.is_none());
+                if error.is_none() {
+                    eof_stop = relative;
+                    quoted_prefix::derive_quoted_body(input.spec_bytes(), 1, eof_stop, pieces);
+                }
+            }
             break;
         }
         assert(input.spec_bytes()[relative] == bytes@[0]);
@@ -2731,6 +2754,10 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 proof { quoted_stop(input.spec_bytes(), relative, error.is_none()); }
                 if error.is_none() {
                     error = Some(Error { kind: ErrorKind::NewlineInString { opening: start }, span: position..position + 1 });
+                    proof {
+                        quoted_prefix::derive_quoted_body(input.spec_bytes(), 1, relative, pieces);
+                        record_first_string_error(input.spec_bytes(), start as int, relative, error->Some_0);
+                    }
                 }
                 proof { suffix_boundary(input, remaining); }
                 return (remaining, error);
@@ -2744,6 +2771,12 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 proof { suffix_transitive(input.spec_bytes(), before_slash, remaining.spec_bytes()); }
                 let escaped_bytes = remaining.as_bytes();
                 if escaped_bytes.len() == 0 {
+                    proof {
+                        if clean {
+                            eof_stop = relative;
+                            quoted_prefix::derive_quoted_body(input.spec_bytes(), 1, eof_stop, pieces);
+                        }
+                    }
                     break;
                 }
                 assert(escaped_bytes@ =~= input.spec_bytes()[(relative + 1)..]);
@@ -2755,6 +2788,10 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                         kind: ErrorKind::InvalidEscape { opening: start },
                         span: position..position + 1 + width,
                     });
+                    proof {
+                        quoted_prefix::derive_quoted_body(input.spec_bytes(), 1, relative, pieces);
+                        record_first_string_error(input.spec_bytes(), start as int, relative, error->Some_0);
+                    }
                 }
                 if !matches!(escaped, b'\r' | b'\n') {
                     proof {
@@ -2792,6 +2829,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             kind: ErrorKind::UnterminatedString,
             span: start..start + length,
         });
+        proof { record_first_string_error(input.spec_bytes(), start as int, eof_stop, error->Some_0); }
     }
     proof { suffix_boundary(input, remaining); }
     (remaining, error)

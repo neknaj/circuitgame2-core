@@ -2,6 +2,7 @@
 
 use super::lexical::{input_lexeme_valid, lexeme_at, lexemes_agree, scanned_input_prefix};
 use super::form_model::{form_model_prefix, model_matches};
+use super::strict_string_error::{first_string_error, first_string_errors_agree};
 use super::{Error, ErrorKind, Form, InputDerivation, Lexeme, LexemeKind, bare_atom_delimiter,
     bare_atom_extent, form_span, structural_error_location};
 use vstd::prelude::*;
@@ -10,11 +11,12 @@ use core::ops::Range;
 
 verus! {
 
+#[verifier::opaque]
 pub(super) open spec fn malformed_atom_extent(bytes: Seq<u8>, at: int, error: Error) -> bool {
     if error.kind is InvalidAtom {
         error.span.start == at && bare_atom_extent(bytes, at, error.span.end as int)
     } else {
-        bytes[at] == 34
+        bytes[at] == 34 && first_string_error(bytes[at..], at, error)
     }
 }
 
@@ -43,7 +45,7 @@ spec fn rejection_at(bytes: Seq<u8>, prefix: InputDerivation, at: int, needs_sep
 /// 厳格解析が診断を選ぶまでに受理した字句と、その直後の拒否条件を表す。
 ///
 /// 未閉鎖リストでは、入力末尾まで開いているリストのうち、最も内側の開き括弧を指す。
-/// 文字列内部の違反には、別途 `syntax_error_evidence` が根拠を与える。
+/// 文字列では、開き引用符から字句規則に従って進んだ先で最初に見つかる違反を使う。
 pub closed spec fn strict_syntax_rejection(source: &str, error: Error) -> bool {
     let bytes = source.spec_bytes();
     exists|prefix: InputDerivation, at: int, needs_separator: bool, depth: int|
@@ -177,12 +179,10 @@ proof fn bare_extents_agree(bytes: Seq<u8>, start: int, a_end: int, b_end: int)
     }
 }
 
-/// 厳格解析の一方が余分な閉じ括弧、区切りの欠落、不正な裸のアトム、未閉鎖リストの
-/// いずれかを報告した場合、同じ入力の他方でもエラー値が一致する。
+/// 同じ入力に対する厳格な S 式解析のエラー値が一致することを示す。
 pub proof fn strict_token_errors_agree(source: &str, left: Error, right: Error)
     requires strict_syntax_rejection(source, left), strict_syntax_rejection(source, right),
         structural_error_location(source, left), structural_error_location(source, right),
-        left.kind is UnexpectedClose || left.kind is MissingSeparator || left.kind is InvalidAtom || left.kind is UnclosedList,
     ensures left == right,
 {
     let bytes = source.spec_bytes();
@@ -198,6 +198,7 @@ pub proof fn strict_token_errors_agree(source: &str, left: Error, right: Error)
     preceding_lexemes_agree(bytes, a, b, a.lexemes.len() as int);
     assert(a_stop == b_stop);
     assert(a_separator == b_separator);
+    reveal(malformed_atom_extent);
     if left.kind is UnexpectedClose {
         assert(lexeme_at(bytes, a_stop, left.span.end as int, LexemeKind::Close));
         assert(right.kind is UnexpectedClose) by { reveal(lexeme_at); };
@@ -211,7 +212,7 @@ pub proof fn strict_token_errors_agree(source: &str, left: Error, right: Error)
     } else if left.kind is InvalidAtom {
         assert(right.kind is InvalidAtom) by { reveal(bare_atom_extent); };
         bare_extents_agree(bytes, a_stop, left.span.end as int, right.span.end as int);
-    } else {
+    } else if left.kind is UnclosedList {
         assert(right.kind is UnclosedList) by { reveal(lexeme_at); };
         assert(a.lexemes =~= b.lexemes) by {
             assert forall|i: int| 0 <= i < a.lexemes.len()
@@ -219,6 +220,11 @@ pub proof fn strict_token_errors_agree(source: &str, left: Error, right: Error)
                 preceding_lexemes_agree(bytes, a, b, i + 1);
             };
         };
+    } else {
+        assert(!(right.kind is UnexpectedClose)) by { reveal(lexeme_at); };
+        assert(!(right.kind is UnclosedList || right.kind is MissingSeparator));
+        assert(!(right.kind is InvalidAtom)) by { reveal(bare_atom_extent); };
+        first_string_errors_agree(bytes[a_stop..], a_stop, left, right);
     }
 }
 

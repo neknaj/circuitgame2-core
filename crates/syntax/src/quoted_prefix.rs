@@ -34,7 +34,7 @@ proof fn prepend_ordinary_body(bytes: Seq<u8>, from: int, next: int, until: int)
     }
 }
 
-proof fn derive_quoted_body(bytes: Seq<u8>, from: int, until: int, pieces: Seq<Seq<u8>>)
+pub(super) proof fn derive_quoted_body(bytes: Seq<u8>, from: int, until: int, pieces: Seq<Seq<u8>>)
     requires
         0 <= from <= until <= bytes.len(),
         string_body_pieces(pieces),
