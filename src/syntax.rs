@@ -232,6 +232,7 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
         complete_list_indices(result.forms@),
         nested_list_indices(result.forms@),
         list_source_delimiters(source, result.forms@, true),
+        inserted_closes_match(source, result.forms@, result.repairs@),
         form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
@@ -257,6 +258,7 @@ spec fn pending_lists(forms: Seq<Form>, open: Seq<usize>) -> bool {
     forall|i: int| 0 <= i < open.len() ==> {
         let index = #[trigger] open[i] as int;
         0 <= index < forms.len() && forms[index] is List && forms[index]->List_end == 0
+            && forms[index]->List_span.end == forms[index]->List_span.start + 1
     }
 }
 
@@ -547,12 +549,85 @@ proof fn indices_after_finish(before: Seq<Form>, after: Seq<Form>, open: Seq<usi
     };
 }
 
+#[verifier::opaque]
+pub open spec fn inserted_closes_match(source: &str, forms: Seq<Form>, repairs: Seq<Repair>) -> bool {
+    forall|i: int| 0 <= i < repairs.len() ==> match #[trigger] repairs[i] {
+        Repair::InsertedClose { offset, opening, list } => {
+            &&& list < forms.len()
+            &&& forms[list as int] is List
+            &&& forms[list as int]->List_end > 0
+            &&& offset == source.spec_bytes().len()
+            &&& form_span(forms[list as int]).end == offset
+            &&& form_span(forms[list as int]).start == opening.start
+            &&& opening.end == opening.start + 1
+        },
+        _ => true,
+    }
+}
+
+spec fn no_inserted_closes(repairs: Seq<Repair>) -> bool {
+    forall|i: int| 0 <= i < repairs.len() ==> !(#[trigger] repairs[i] is InsertedClose)
+}
+
+proof fn no_closes_implies_evidence(source: &str, forms: Seq<Form>, repairs: Seq<Repair>)
+    requires no_inserted_closes(repairs),
+    ensures inserted_closes_match(source, forms, repairs),
+{
+    reveal(inserted_closes_match);
+}
+
+proof fn record_inserted_close(source: &str, forms: Seq<Form>, updated: Seq<Form>,
+    repairs: Seq<Repair>, index: usize, opening: Range<usize>, offset: usize)
+    requires
+        inserted_closes_match(source, forms, repairs),
+        updated.len() == forms.len(),
+        index < forms.len(),
+        forms[index as int] is List,
+        forms[index as int]->List_end == 0,
+        updated[index as int] is List,
+        updated[index as int]->List_end > 0,
+        offset == source.spec_bytes().len(),
+        form_span(updated[index as int]).start == opening.start,
+        form_span(updated[index as int]).end == offset,
+        opening.end == opening.start + 1,
+        forall|i: int| 0 <= i < forms.len() && i != index ==> #[trigger] updated[i] == forms[i],
+    ensures
+        inserted_closes_match(source, updated, repairs.push(Repair::InsertedClose {
+            offset, opening, list: index,
+        })),
+{
+    reveal(inserted_closes_match);
+    let all = repairs.push(Repair::InsertedClose { offset, opening, list: index });
+    assert forall|i: int| 0 <= i < all.len() implies match #[trigger] all[i] {
+        Repair::InsertedClose { offset, opening, list } => {
+            &&& list < updated.len()
+            &&& updated[list as int] is List
+            &&& updated[list as int]->List_end > 0
+            &&& offset == source.spec_bytes().len()
+            &&& form_span(updated[list as int]).end == offset
+            &&& form_span(updated[list as int]).start == opening.start
+            &&& opening.end == opening.start + 1
+        },
+        _ => true,
+    } by {
+        if i < repairs.len() {
+            assert(all[i] == repairs[i]);
+            if all[i] is InsertedClose {
+                let target = all[i]->InsertedClose_list;
+                assert(target != index);
+                assert(updated[target as int] == forms[target as int]);
+            }
+        }
+    };
+}
+
 #[verifier::rlimit(30)]
 fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>), Error>)
     ensures
         recovering ==> result.is_ok(),
         match result {
-            Ok((forms, _)) => complete_list_indices(forms@) && nested_list_indices(forms@)
+            Ok((forms, repairs)) => inserted_closes_match(source, forms@, repairs@)
+                && complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, recovering)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
@@ -581,6 +656,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             length == source.spec_bytes().len(),
             valid_utf8(source.spec_bytes()),
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
+            no_inserted_closes(repairs@),
             form_spans_valid(source, forms@, lexer.cursor.position()),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
@@ -699,11 +775,13 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     }
 
     proof { is_char_boundary_start_end_of_seq(source.spec_bytes()); }
+    proof { no_closes_implies_evidence(source, forms@, repairs@); }
     while open.len() > 0
         invariant
             length == source.spec_bytes().len(),
             is_char_boundary(source.spec_bytes(), length as int),
             form_spans_valid(source, forms@, length as int),
+            inserted_closes_match(source, forms@, repairs@),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
             nested_list_indices(forms@),
@@ -724,14 +802,14 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 reveal(list_source_delimiters);
                 assert(list_delimited(source.spec_bytes(), forms@[index as int], recovering));
             };
-            repairs.push(Repair::InsertedClose {
-                offset: length,
-                opening: span.start..span.end,
-                list: index,
-            });
+            let opening = span.start..span.end;
+            let ghost opening_evidence = opening;
+            let ghost previous_repairs = repairs@;
+            repairs.push(Repair::InsertedClose { offset: length, opening, list: index });
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
             proof {
+                record_inserted_close(source, before, forms@, previous_repairs, index, opening_evidence, length);
                 delimiters_after_close(source, before, forms@, index as int, recovering);
                 nested_after_close(before, forms@, previous, index);
                 indices_after_finish(before, forms@, previous, open@, index);
