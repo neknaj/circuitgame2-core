@@ -111,6 +111,43 @@ pub closed spec fn namespace_component(path: &str, key: NameKey, start: int, end
     &&& (end == bytes.len() || bytes_at(bytes, end, separator))
 }
 
+pub(super) open spec fn full_name_bytes(key: NameKey) -> Seq<u8> {
+    let (parent, name) = key_bytes(key);
+    match parent {
+        None => name,
+        Some(parent) => parent + seq![b':', b':'] + name,
+    }
+}
+
+pub(super) open spec fn component_ends_at(bytes: Seq<u8>, end: int) -> bool {
+    0 < end <= bytes.len() && (end == bytes.len()
+        || (end + 1 < bytes.len() && bytes[end] == b':' && bytes[end + 1] == b':'))
+}
+
+pub(super) proof fn namespace_component_prefix(path: &str, key: NameKey, start: int, end: int)
+    requires namespace_component(path, key, start, end),
+    ensures
+        component_ends_at(path.spec_bytes(), end),
+        full_name_bytes(key) == path.spec_bytes().take(end),
+{
+    reveal(namespace_component);
+    let bytes = path.spec_bytes();
+    match key.parent {
+        None => {
+            assert(bytes.take(end) =~= key.name.spec_bytes());
+        },
+        Some(parent) => {
+            let (prefix, name) = (parent.spec_bytes(), key.name.spec_bytes());
+            let separator = seq![b':', b':'];
+            assert(bytes[prefix.len() as int..start] == separator);
+            assert(bytes.take(end) =~= prefix + separator + name);
+        }
+    }
+    if end != bytes.len() {
+        assert(bytes[end] == b':' && bytes[end + 1] == b':');
+    }
+}
+
 pub(super) proof fn component_source_boundaries(
     source: &str, path: &str, key: NameKey, base: int, limit: int, lo: int, hi: int,
 )

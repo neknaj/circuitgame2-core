@@ -1,5 +1,8 @@
 //! 名前空間の導入箇所と独立宣言を集め、完全修飾名の衝突を検査する。
 
+mod collision_index;
+mod path_index;
+
 #[cfg(verus_only)]
 use super::circuits::{name_in_source, parsed_name_span};
 use super::name_keys::match_namespace_component;
@@ -10,6 +13,7 @@ use super::parsed_circuit_matches;
 use super::{CircuitProject, NameKey, ProjectSource};
 use crate::syntax::circuit::{Head, NamedForm};
 use alloc::vec::Vec;
+use collision_index::no_indexed_conflicts;
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -601,6 +605,14 @@ pub fn index_declarations<'p, 'a>(
         },
 {
     let items = read_occurrences(project);
+    if no_indexed_conflicts(items.as_slice()) {
+        proof {
+            rule_out_conflicts(project, items@);
+            reveal(occurrences_before);
+        }
+        return Ok(DeclarationTable { occurrences: items });
+    }
+    // 索引で衝突候補が見つかった場合は、出現順で診断の組と元ソース範囲を確定する。
     let mut left = 0;
     let mut right = 1;
     while left < items.len()
