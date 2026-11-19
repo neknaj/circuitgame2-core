@@ -235,12 +235,16 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
             Ok(forms) => complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, false)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
-                && strict_source_covered(source, forms@),
+                && strict_source_covered(source, forms@)
+                && strict_sexpr_derivation(source, forms@),
             Err(error) => syntax_error_evidence(source, error),
         },
 {
     match parse_forms(source, false) {
-        Ok((forms, _)) => Ok(forms),
+        Ok((forms, _)) => {
+            proof { derive_strict_forest(source, forms@); }
+            Ok(forms)
+        }
         Err(error) => Err(error),
     }
 }
@@ -919,6 +923,141 @@ pub open spec fn nested_list_indices(forms: Seq<Form>) -> bool {
         ==> 0 < forms[j]->List_end <= forms[i]->List_end
 }
 
+#[verifier::opaque]
+pub open spec fn sexpr_forest(
+    source: &str, forms: Seq<Form>, pieces: Seq<(int, int)>,
+    first: int, limit: int, lower: int, upper: int,
+) -> bool
+    decreases limit - first,
+{
+    &&& 0 <= first <= limit <= forms.len()
+    &&& 0 <= lower <= upper <= source.spec_bytes().len()
+    &&& (first < limit ==> {
+        let form = forms[first];
+        let span = form_span(form);
+        &&& lower <= span.start < span.end <= upper
+        &&& form_pieces_present(form, pieces)
+        &&& match form {
+            Form::Atom { .. } => form_atom_matches(source, form)
+                && sexpr_forest(source, forms, pieces, first + 1, limit, span.end as int, upper),
+            Form::List { end, .. } => {
+                &&& first < end <= limit
+                &&& span.start + 1 < span.end
+                &&& source.spec_bytes()[span.start as int] == 40
+                &&& source.spec_bytes()[span.end - 1] == 41
+                &&& sexpr_forest(source, forms, pieces, first + 1, end as int,
+                    span.start + 1, span.end - 1)
+                &&& sexpr_forest(source, forms, pieces, end as int, limit, span.end as int, upper)
+            },
+        }
+    })
+}
+
+#[verifier::opaque]
+spec fn forest_region(
+    forms: Seq<Form>, first: int, limit: int, lower: int, upper: int,
+) -> bool {
+    forall|index: int| first <= index < limit ==> {
+        let form = #[trigger] forms[index];
+        &&& lower <= form_span(form).start
+        &&& form_span(form).end <= upper
+        &&& (form is List ==> form->List_end <= limit)
+    }
+}
+
+proof fn derive_forest_region(
+    source: &str, forms: Seq<Form>, pieces: Seq<(int, int)>,
+    first: int, limit: int, lower: int, upper: int,
+)
+    requires
+        0 <= first <= limit <= forms.len(),
+        0 <= lower <= upper <= source.spec_bytes().len(),
+        forest_region(forms, first, limit, lower, upper),
+        complete_list_indices(forms),
+        nested_list_indices(forms),
+        strict_preorder_ranges(forms),
+        all_form_pieces_present(forms, pieces),
+        list_source_delimiters(source, forms, false),
+        form_spans_valid(source, forms, source.spec_bytes().len() as int),
+    ensures sexpr_forest(source, forms, pieces, first, limit, lower, upper),
+    decreases limit - first,
+{
+    reveal(sexpr_forest);
+    if first == limit {
+        return;
+    }
+    reveal(forest_region);
+    reveal(all_form_pieces_present);
+    reveal(form_spans_valid);
+    reveal(list_source_delimiters);
+    reveal(strict_preorder_ranges);
+    reveal(nested_list_indices);
+    let form = forms[first];
+    let span = form_span(form);
+    assert(lower <= span.start < span.end <= upper);
+    assert(form_pieces_present(form, pieces));
+    let after = match form {
+        Form::Atom { .. } => first + 1,
+        Form::List { end, .. } => {
+            assert(first < end <= limit);
+            assert(list_delimited(source.spec_bytes(), form, false));
+            assert(span.start + 1 < span.end);
+            assert(forest_region(forms, first + 1, end as int, span.start + 1, span.end - 1)) by {
+                assert forall|i: int| first + 1 <= i < end implies {
+                    let child = #[trigger] forms[i];
+                    &&& span.start + 1 <= form_span(child).start
+                    &&& form_span(child).end <= span.end - 1
+                    &&& (child is List ==> child->List_end <= end)
+                } by {
+                    assert(preorder_range_pair(form, forms[i], i));
+                };
+            };
+            derive_forest_region(source, forms, pieces, first + 1, end as int, span.start + 1, span.end - 1);
+            end as int
+        },
+    };
+    assert(forest_region(forms, after, limit, span.end as int, upper)) by {
+        assert forall|i: int| after <= i < limit implies {
+            let sibling = #[trigger] forms[i];
+            &&& span.end <= form_span(sibling).start
+            &&& form_span(sibling).end <= upper
+            &&& (sibling is List ==> sibling->List_end <= limit)
+        } by {
+            assert(preorder_range_pair(form, forms[i], i));
+        };
+    };
+    derive_forest_region(source, forms, pieces, after, limit, span.end as int, upper);
+}
+
+#[verifier::opaque]
+pub open spec fn strict_sexpr_derivation(source: &str, forms: Seq<Form>) -> bool {
+    &&& strict_preorder_ranges(forms)
+    &&& exists|pieces: Seq<(int, int)>|
+        covers(source.spec_bytes(), pieces, source.spec_bytes().len() as int)
+        && #[trigger] pieces_represented(source, forms, pieces)
+        && sexpr_forest(source, forms, pieces, 0, forms.len() as int, 0, source.spec_bytes().len() as int)
+}
+
+proof fn derive_strict_forest(source: &str, forms: Seq<Form>)
+    requires
+        complete_list_indices(forms),
+        nested_list_indices(forms),
+        list_source_delimiters(source, forms, false),
+        form_spans_valid(source, forms, source.spec_bytes().len() as int),
+        strict_source_covered(source, forms),
+    ensures strict_sexpr_derivation(source, forms),
+{
+    reveal(strict_source_covered);
+    reveal(strict_sexpr_derivation);
+    reveal(form_spans_valid);
+    reveal(forest_region);
+    let upper = source.spec_bytes().len() as int;
+    let pieces = choose|pieces: Seq<(int, int)>| covers(source.spec_bytes(), pieces, upper)
+        && #[trigger] pieces_represented(source, forms, pieces)
+        && all_form_pieces_present(forms, pieces);
+    derive_forest_region(source, forms, pieces, 0, forms.len() as int, 0, upper);
+}
+
 spec fn open_order(open: Seq<usize>) -> bool {
     forall|i: int, j: int| 0 <= i < j < open.len() ==> #[trigger] open[i] < #[trigger] open[j]
 }
@@ -1261,6 +1400,93 @@ proof fn repair_spans_append(source: &str, repairs: Seq<Repair>, repair: Repair,
     };
 }
 
+#[verifier::opaque]
+spec fn strict_prefix_evidence(
+    source: &str, forms: Seq<Form>, spans: Seq<(int, int)>, pos: int, needs_separator: bool,
+) -> bool {
+    &&& pieces_represented(source, forms, spans)
+    &&& all_form_pieces_present(forms, spans)
+    &&& strict_preorder_ranges(forms)
+    &&& (!needs_separator ==> atoms_end_before(forms, pos))
+}
+
+proof fn strict_prefix_add_trivia(
+    source: &str, forms: Seq<Form>, spans: Seq<(int, int)>, piece: (int, int), needs_separator: bool,
+)
+    requires
+        strict_prefix_evidence(source, forms, spans, piece.0, needs_separator),
+        form_spans_valid(source, forms, piece.0),
+        piece.0 < piece.1,
+        trivia_extent(source.spec_bytes(), piece.0, piece.1, false)
+            || trivia_extent(source.spec_bytes(), piece.0, piece.1, true),
+    ensures strict_prefix_evidence(source, forms, spans.push(piece), piece.1, false),
+{
+    reveal(strict_prefix_evidence);
+    assert(parsed_piece(source, forms, piece));
+    append_represented_piece(source, forms, spans, piece);
+    form_pieces_preserved(forms, forms, spans, piece);
+    atoms_stay_behind_cursor(source, forms, forms, piece.0, piece.1);
+}
+
+proof fn strict_prefix_add_form(
+    source: &str, before: Seq<Form>, added: Form, spans: Seq<(int, int)>,
+    piece: (int, int), needed_separator: bool,
+)
+    requires
+        strict_prefix_evidence(source, before, spans, piece.0, needed_separator),
+        form_spans_valid(source, before, piece.0),
+        complete_or_pending_ends_in_bounds(before),
+        first_form_piece(added) == piece && piece.0 < piece.1,
+        added is List ==> added->List_end == 0,
+        added is Atom ==> !needed_separator,
+    ensures strict_prefix_evidence(source, before.push(added), spans.push(piece), piece.1, added is Atom),
+{
+    reveal(strict_prefix_evidence);
+    let after = before.push(added);
+    appended_form_preserves_pieces(source, before, added, spans);
+    add_form_pieces(before, added, spans, piece);
+    append_preserves_preorder_ranges(source, before, added, piece.0);
+    if added is List {
+        atoms_stay_behind_cursor(source, before, after, piece.0, piece.1);
+    }
+    assert(parsed_piece(source, after, piece)) by {
+        assert(form_represents_piece(after[before.len() as int], piece));
+    };
+    append_represented_piece(source, after, spans, piece);
+}
+
+proof fn strict_prefix_close_list(
+    source: &str, before: Seq<Form>, after: Seq<Form>, spans: Seq<(int, int)>,
+    closed: int, piece: (int, int), needed_separator: bool,
+)
+    requires
+        strict_prefix_evidence(source, before, spans, piece.0, needed_separator),
+        form_spans_valid(source, before, piece.0),
+        nested_list_indices(before),
+        0 <= closed < before.len() == after.len(),
+        before[closed] is List && before[closed]->List_end == 0,
+        after[closed] is List && after[closed]->List_end == after.len(),
+        form_span(before[closed]).end == form_span(before[closed]).start + 1,
+        form_span(after[closed]).start == form_span(before[closed]).start,
+        piece == list_close_piece(after[closed]),
+        forall|i: int| 0 <= i < before.len() && i != closed
+            ==> #[trigger] after[i] == before[i],
+    ensures strict_prefix_evidence(source, after, spans.push(piece), piece.1, false),
+{
+    reveal(strict_prefix_evidence);
+    assert(form_span(before[closed]).end <= piece.0) by {
+        reveal(form_spans_valid);
+    };
+    closed_form_preserves_pieces(source, before, after, closed, spans);
+    close_form_pieces(before, after, closed, spans, piece);
+    close_preserves_preorder_ranges(source, before, after, closed, piece.0);
+    atoms_stay_behind_cursor(source, before, after, piece.0, piece.1);
+    assert(parsed_piece(source, after, piece)) by {
+        assert(form_represents_piece(after[closed], piece));
+    };
+    append_represented_piece(source, after, spans, piece);
+}
+
 #[verifier::rlimit(30)]
 fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>), Error>)
     ensures
@@ -1293,6 +1519,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         assert(strict_preorder_ranges(forms@));
         reveal(atoms_end_before);
         assert(atoms_end_before(forms@, 0));
+        reveal(strict_prefix_evidence);
+        assert(strict_prefix_evidence(source, forms@, spans, 0, false));
         reveal(nested_list_indices);
         assert(nested_list_indices(forms@));
         reveal(repair_input_spans_valid);
@@ -1308,10 +1536,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             length == source.spec_bytes().len(),
             valid_utf8(source.spec_bytes()),
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
-            !recovering ==> pieces_represented(source, forms@, spans)
-                && all_form_pieces_present(forms@, spans)
-                && strict_preorder_ranges(forms@),
-            !recovering && !lexer.needs_separator ==> atoms_end_before(forms@, lexer.cursor.position()),
+            !recovering ==> strict_prefix_evidence(source, forms@, spans,
+                lexer.cursor.position(), lexer.needs_separator),
             no_inserted_closes(repairs@),
             repair_input_spans_valid(source, repairs@, lexer.cursor.position()),
             form_spans_valid(source, forms@, lexer.cursor.position()),
@@ -1326,6 +1552,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         let Some((segment, next)) = lexer.next_segment() else {
             proof {
                 if !recovering {
+                    reveal(strict_prefix_evidence);
                     preorder_ranges_have_distinct_closes(source, forms@, length as int);
                     source_coverage_from_pieces(source, forms@, spans);
                 }
@@ -1373,10 +1600,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             SegmentKind::Whitespace | SegmentKind::Comment => {
                 proof {
                     if !recovering {
-                        assert(parsed_piece(source, forms@, piece));
-                        append_represented_piece(source, forms@, old_spans, piece);
-                        form_pieces_preserved(forms@, forms@, old_spans, piece);
-                        atoms_stay_behind_cursor(source, old_forms, forms@, previous_position, lexer.cursor.position());
+                        strict_prefix_add_trivia(source, forms@, old_spans, piece, previous_needs_separator);
                     }
                 }
             }
@@ -1412,15 +1636,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     indices_after_append(before, previous, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
                     if !recovering {
-                        appended_form_preserves_pieces(source, before, added, old_spans);
-                        add_form_pieces(before, added, old_spans, piece);
                         assert(complete_or_pending_ends_in_bounds(before));
-                        append_preserves_preorder_ranges(source, before, added, previous_position);
-                        atoms_stay_behind_cursor(source, before, forms@, previous_position, lexer.cursor.position());
-                        assert(parsed_piece(source, forms@, piece)) by {
-                            assert(form_represents_piece(forms@[before.len() as int], piece));
-                        };
-                        append_represented_piece(source, forms@, old_spans, piece);
+                        strict_prefix_add_form(source, before, added, old_spans, piece, previous_needs_separator);
                     }
                 }
             }
@@ -1435,19 +1652,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         indices_after_finish(before, forms@, previous, open@, index);
                         close_form_span(source, before, forms@, index as int, previous_position, lexer.cursor.position());
                         if !recovering {
-                            let closed = index as int;
-                            assert(form_span(before[closed]).end <= previous_position) by {
-                                reveal(form_spans_valid);
-                            };
-                            assert(form_span(before[closed]).end == form_span(before[closed]).start + 1);
-                            closed_form_preserves_pieces(source, before, forms@, closed, old_spans);
-                            close_form_pieces(before, forms@, closed, old_spans, piece);
-                            close_preserves_preorder_ranges(source, before, forms@, closed, previous_position);
-                            atoms_stay_behind_cursor(source, before, forms@, previous_position, lexer.cursor.position());
-                            assert(parsed_piece(source, forms@, piece)) by {
-                                assert(form_represents_piece(forms@[index as int], piece));
-                            };
-                            append_represented_piece(source, forms@, old_spans, piece);
+                            strict_prefix_close_list(source, before, forms@, old_spans,
+                                index as int, piece, previous_needs_separator);
                         }
                     }
                 } else {
@@ -1479,15 +1685,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     indices_after_append(before, open@, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
                     if !recovering {
-                        appended_form_preserves_pieces(source, before, added, old_spans);
-                        add_form_pieces(before, added, old_spans, piece);
                         assert(complete_or_pending_ends_in_bounds(before));
-                        assert(!previous_needs_separator);
-                        append_preserves_preorder_ranges(source, before, added, previous_position);
-                        assert(parsed_piece(source, forms@, piece)) by {
-                            assert(form_represents_piece(forms@[before.len() as int], piece));
-                        };
-                        append_represented_piece(source, forms@, old_spans, piece);
+                        strict_prefix_add_form(source, before, added, old_spans, piece, previous_needs_separator);
                     }
                 }
             }
