@@ -1,15 +1,25 @@
-[package]
-name = "circuitgame2-core"
+[workspace]
+members = ["crates/syntax"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
 vstd = { version = "=0.0.0-2026-11-01-0251", default-features = false, features = ["alloc"] }
 
-[package.metadata.verus]
-verify = true
-
-[lints.rust]
+[workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
+
+[package]
+name = "circuitgame2-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+circuitgame2-syntax = { path = "crates/syntax", version = "0.1.0" }

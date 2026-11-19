@@ -6,6 +6,13 @@ version = 4
 name = "circuitgame2-core"
 version = "0.1.0"
 dependencies = [
+ "circuitgame2-syntax",
+]
+
+[[package]]
+name = "circuitgame2-syntax"
+version = "0.1.0"
+dependencies = [
  "vstd",
 ]
 

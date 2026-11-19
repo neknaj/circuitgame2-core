@@ -1,7 +1,3 @@
 #![no_std]
 
-extern crate alloc;
-
-mod boundary;
-mod digits;
-pub mod syntax;
+pub use circuitgame2_syntax as syntax;
