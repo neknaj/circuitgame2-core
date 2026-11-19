@@ -131,6 +131,9 @@ impl<'a> Lexer<'a> {
                     &&& segment.span.end <= self.cursor.source.spec_bytes().len()
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.start as int)
                     &&& is_char_boundary(self.cursor.source.spec_bytes(), segment.span.end as int)
+                    &&& (segment.kind is Whitespace || segment.kind is Comment ==> trivia_extent(
+                        self.cursor.source.spec_bytes(), segment.span.start as int, segment.span.end as int,
+                        segment.kind is Comment))
                     &&& (segment.kind is Open ==> segment.span.end == segment.span.start + 1
                         && self.cursor.source.spec_bytes()[segment.span.start as int] == 40)
                     &&& (segment.kind is Close ==> segment.span.end == segment.span.start + 1
@@ -294,6 +297,65 @@ pub open spec fn bare_atom_extent(bytes: Seq<u8>, start: int, end: int) -> bool 
     &&& 0 <= start < end <= bytes.len()
     &&& forall|i: int| start <= i < end ==> !bare_atom_delimiter(#[trigger] bytes[i])
     &&& (end < bytes.len() ==> bare_atom_delimiter(bytes[end]))
+}
+
+spec fn trivia_byte(byte: u8, comment: bool) -> bool {
+    if comment {
+        byte != 10 && byte != 13
+    } else {
+        byte == 32 || byte == 9 || byte == 10 || byte == 13
+    }
+}
+
+#[verifier::opaque]
+spec fn trivia_extent(bytes: Seq<u8>, start: int, end: int, comment: bool) -> bool {
+    &&& 0 <= start < end <= bytes.len()
+    &&& (comment ==> bytes[start] == 59)
+    &&& forall|i: int| start <= i < end ==> trivia_byte(#[trigger] bytes[i], comment)
+    &&& (end < bytes.len() ==> !trivia_byte(bytes[end], comment))
+}
+
+proof fn lift_trivia_extent(bytes: Seq<u8>, suffix: Seq<u8>, start: int, end: int, comment: bool)
+    requires
+        0 <= start < end <= bytes.len(),
+        suffix == bytes[start..],
+        trivia_extent(suffix, 0, end - start, comment),
+    ensures trivia_extent(bytes, start, end, comment),
+{
+    reveal(trivia_extent);
+    assert(bytes[start] == suffix[0]);
+    assert forall|i: int| start <= i < end implies trivia_byte(#[trigger] bytes[i], comment) by {
+        assert(bytes[i] == suffix[i - start]);
+    };
+    if end < bytes.len() {
+        assert(bytes[end] == suffix[end - start]);
+    }
+}
+
+fn split_trivia(input: &str, comment: bool) -> (remaining: &str)
+    requires
+        input.spec_bytes().len() > 0,
+        if comment { input.spec_bytes()[0] == 59 } else { trivia_byte(input.spec_bytes()[0], false) },
+    ensures
+        is_suffix(input.spec_bytes(), remaining.spec_bytes()),
+        trivia_extent(input.spec_bytes(), 0, input.spec_bytes().len() - remaining.spec_bytes().len(), comment),
+        remaining.spec_bytes().len() < input.spec_bytes().len(),
+{
+    let (_trivia, remaining) = split_at_boundary(input,
+        if comment { Boundary::LineEnd } else { Boundary::NonSpace });
+    proof {
+        reveal(trivia_extent);
+        let bytes = input.spec_bytes();
+        let end = _trivia.spec_bytes().len() as int;
+        assert(end > 0);
+        assert forall|i: int| 0 <= i < end implies trivia_byte(#[trigger] bytes[i], comment) by {
+            assert(bytes[i] == _trivia.spec_bytes()[i]);
+        };
+        if end < bytes.len() {
+            assert(bytes[end] == remaining.spec_bytes()[0]);
+        }
+    }
+    remaining
 }
 
 proof fn lift_bare_extent(bytes: Seq<u8>, suffix: Seq<u8>, start: int, end: int)
@@ -1186,6 +1248,8 @@ impl<'a> SourceCursor<'a> {
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
                         =~= self.source.spec_bytes()[span.start as int..span.end as int]
                         && bare_atom_extent(self.source.spec_bytes(), span.start as int, span.end as int))
+                    &&& (kind is Whitespace || kind is Comment ==> trivia_extent(
+                        self.source.spec_bytes(), span.start as int, span.end as int, kind is Comment))
                     &&& (kind is Open ==> span.end == span.start + 1
                         && self.source.spec_bytes()[span.start as int] == 40)
                     &&& (kind is Close ==> span.end == span.start + 1
@@ -1222,6 +1286,10 @@ impl<'a> SourceCursor<'a> {
                 assert(self.remaining.spec_bytes()[..(end - start)]
                     =~= self.source.spec_bytes()[start as int..end as int]);
             }
+            if kind is Whitespace || kind is Comment {
+                lift_trivia_extent(self.source.spec_bytes(), self.remaining.spec_bytes(),
+                    start as int, end as int, kind is Comment);
+            }
             if kind is Bare {
                 assert(kind->Bare_0.spec_bytes() =~= self.remaining.spec_bytes()[..(end - start)]);
                 assert(kind->Bare_0.spec_bytes() =~= self.source.spec_bytes()[start as int..end as int]);
@@ -1254,6 +1322,8 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
             RawSegment::Bare(atom) =>
                 atom.spec_bytes() + result.1.spec_bytes() =~= input.spec_bytes()
                 && bare_atom_extent(input.spec_bytes(), 0, atom.spec_bytes().len() as int),
+            RawSegment::Whitespace | RawSegment::Comment => trivia_extent(input.spec_bytes(),
+                0, input.spec_bytes().len() - result.1.spec_bytes().len(), result.0 is Comment),
             RawSegment::Open => input.spec_bytes()[0] == 40
                 && result.1.spec_bytes().len() + 1 == input.spec_bytes().len(),
             RawSegment::Close => input.spec_bytes()[0] == 41
@@ -1261,16 +1331,15 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
             RawSegment::Quoted(None) => quoted_atom(input.spec_bytes()[..input.spec_bytes().len() - result.1.spec_bytes().len()]),
             RawSegment::Quoted(Some(error)) => string_error_kind(error.kind)
                 && string_error_site(input.spec_bytes(), start as int, error),
-            _ => true,
         },
 {
     let first = input.as_bytes()[0];
     let (kind, remaining) = match first {
         b' ' | b'\t' | b'\r' | b'\n' => (
             RawSegment::Whitespace,
-            split_at_boundary(input, Boundary::NonSpace).1,
+            split_trivia(input, false),
         ),
-        b';' => (RawSegment::Comment, split_at_boundary(input, Boundary::LineEnd).1),
+        b';' => (RawSegment::Comment, split_trivia(input, true)),
         b'(' => (RawSegment::Open, after_ascii(input)),
         b')' => (RawSegment::Close, after_ascii(input)),
         b'"' => {
@@ -1626,5 +1695,18 @@ mod tests {
             assert_eq!(segments[1].kind, SegmentKind::Open);
             assert_eq!(segments[1].span.start, end + 1);
         }
+    }
+
+    #[test]
+    fn line_comment_stops_before_crlf() {
+        let source = ";日\r\n (a)";
+        let mut lexer = Lexer::new(source);
+        let comment = lexer.next().unwrap();
+        assert_eq!(comment.kind, SegmentKind::Comment);
+        assert_eq!(&source[comment.span], ";日");
+        let whitespace = lexer.next().unwrap();
+        assert_eq!(whitespace.kind, SegmentKind::Whitespace);
+        assert_eq!(&source[whitespace.span], "\r\n ");
+        assert_eq!(lexer.next().unwrap().kind, SegmentKind::Open);
     }
 }
