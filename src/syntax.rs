@@ -209,7 +209,7 @@ pub struct Recovered {
 pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
     ensures
         match result {
-            Ok(forms) => complete_list_indices(forms@)
+            Ok(forms) => complete_list_indices(forms@) && nested_list_indices(forms@)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
         },
@@ -225,6 +225,7 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
 pub fn parse_recovering(source: &str) -> (result: Recovered)
     ensures
         complete_list_indices(result.forms@),
+        nested_list_indices(result.forms@),
         form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
@@ -249,7 +250,7 @@ spec fn covers(bytes: Seq<u8>, spans: Seq<(int, int)>, end: int) -> bool {
 spec fn pending_lists(forms: Seq<Form>, open: Seq<usize>) -> bool {
     forall|i: int| 0 <= i < open.len() ==> {
         let index = #[trigger] open[i] as int;
-        0 <= index < forms.len() && forms[index] is List
+        0 <= index < forms.len() && forms[index] is List && forms[index]->List_end == 0
     }
 }
 
@@ -352,6 +353,77 @@ spec fn list_indices(forms: Seq<Form>, open: Seq<usize>) -> bool {
     }
 }
 
+#[verifier::opaque]
+pub open spec fn nested_list_indices(forms: Seq<Form>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < forms.len()
+        && #[trigger] forms[i] is List && #[trigger] forms[j] is List
+        && j < forms[i]->List_end
+        ==> 0 < forms[j]->List_end <= forms[i]->List_end
+}
+
+spec fn open_order(open: Seq<usize>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < open.len() ==> #[trigger] open[i] < #[trigger] open[j]
+}
+
+proof fn nested_after_append(forms: Seq<Form>, added: Form)
+    requires
+        nested_list_indices(forms),
+        forall|i: int| 0 <= i < forms.len() && #[trigger] forms[i] is List
+            ==> forms[i]->List_end <= forms.len(),
+    ensures nested_list_indices(forms.push(added)),
+{
+    reveal(nested_list_indices);
+    let extended = forms.push(added);
+    assert forall|i: int, j: int| 0 <= i < j < extended.len()
+        && #[trigger] extended[i] is List && #[trigger] extended[j] is List
+        && j < extended[i]->List_end
+        implies 0 < extended[j]->List_end <= extended[i]->List_end by {
+        assert(extended[i] == forms[i]);
+        assert(j < forms.len());
+        assert(extended[j] == forms[j]);
+    };
+}
+
+proof fn nested_after_close(before: Seq<Form>, after: Seq<Form>, open: Seq<usize>, last: usize)
+    requires
+        nested_list_indices(before),
+        list_indices(before, open),
+        open_order(open),
+        open.len() > 0,
+        last == open[open.len() - 1],
+        last < before.len(),
+        before[last as int] is List,
+        before[last as int]->List_end == 0,
+        after.len() == before.len(),
+        after[last as int] is List,
+        after[last as int]->List_end == after.len(),
+        forall|i: int| 0 <= i < before.len() && i != last ==> #[trigger] after[i] == before[i],
+    ensures nested_list_indices(after),
+{
+    reveal(nested_list_indices);
+    assert forall|i: int, j: int| 0 <= i < j < after.len()
+        && #[trigger] after[i] is List && #[trigger] after[j] is List
+        && j < after[i]->List_end
+        implies 0 < after[j]->List_end <= after[i]->List_end by {
+        if i == last {
+            assert(after[j] == before[j]);
+            if before[j]->List_end == 0 {
+                assert(open.contains(j as usize));
+                let at = choose|at: int| 0 <= at < open.len() && open[at] == j as usize;
+                assert(at < open.len() - 1);
+                assert(open[at] < open[open.len() - 1]);
+            }
+        } else {
+            assert(after[i] == before[i]);
+            if j == last {
+                assert(0 < before[j]->List_end);
+            } else {
+                assert(after[j] == before[j]);
+            }
+        }
+    };
+}
+
 proof fn indices_after_append(before: Seq<Form>, open: Seq<usize>, form: Form, next: Seq<usize>)
     requires
         list_indices(before, open),
@@ -414,7 +486,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     ensures
         recovering ==> result.is_ok(),
         match result {
-            Ok((forms, _)) => complete_list_indices(forms@)
+            Ok((forms, _)) => complete_list_indices(forms@) && nested_list_indices(forms@)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int),
             Err(_) => true,
         },
@@ -429,6 +501,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         encode_utf8_valid_utf8(source@);
         reveal(form_spans_valid);
         assert(form_spans_valid(source, forms@, 0));
+        reveal(nested_list_indices);
+        assert(nested_list_indices(forms@));
     }
 
     loop
@@ -441,6 +515,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             form_spans_valid(source, forms@, lexer.cursor.position()),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
+            nested_list_indices(forms@),
+            open_order(open@),
         decreases length - lexer.cursor.position(),
     {
         let Some((segment, next)) = lexer.next_segment() else {
@@ -507,6 +583,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         let j = choose|j: int| 0 <= j < previous.len() && previous[j] == value;
                         assert(open@[j] == value);
                     };
+                    nested_after_append(before, added);
                     indices_after_append(before, previous, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
                 }
@@ -517,6 +594,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     let ghost before = forms@;
                     finish_list(&mut forms, index, span.end);
                     proof {
+                        nested_after_close(before, forms@, previous, index);
                         indices_after_finish(before, forms@, previous, open@, index);
                         close_form_span(source, before, forms@, index as int, previous_position, lexer.cursor.position());
                     }
@@ -539,6 +617,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 forms.push(form);
                 assert(forms.len() == before.len() + 1);
                 proof {
+                    nested_after_append(before, added);
                     indices_after_append(before, open@, added, open@);
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
                 }
@@ -554,6 +633,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             form_spans_valid(source, forms@, length as int),
             pending_lists(forms@, open@),
             list_indices(forms@, open@),
+            nested_list_indices(forms@),
+            open_order(open@),
         decreases open@.len(),
     {
         let ghost previous = open@;
@@ -573,6 +654,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
             proof {
+                nested_after_close(before, forms@, previous, index);
                 indices_after_finish(before, forms@, previous, open@, index);
                 close_form_span(source, before, forms@, index as int, length as int, length as int);
             }
