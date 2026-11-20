@@ -17,7 +17,7 @@ use crate::project::name_keys::key_view;
 #[cfg(verus_only)]
 use crate::project::signatures::{
     checked_routine_signatures_agree, checked_signature_ports, checked_signature_success_excludes_other,
-    routine_signature_evidence,
+    checked_signature_input_names_unique, routine_signature_evidence,
 };
 #[cfg(verus_only)]
 use crate::project::widths::{checked_name_sites, checked_width_counts, checked_width_sites, reference_kind};
@@ -29,7 +29,7 @@ use crate::syntax::Form;
 use crate::syntax::circuit::{NamedForm, PortTypeSite};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    RoutineArity, indexed_entry_evidence, named_forms_match, namespace_name_evidence, routine_arity_matches,
+    NameSite, RoutineArity, indexed_entry_evidence, named_forms_match, namespace_name_evidence, routine_arity_matches,
 };
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
@@ -368,6 +368,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
                     && self.typed_after_signature(&context, &signature, result),
         }
+    }
+
+    pub(super) proof fn typed_signature_input_names_unique(
+        &self, file: usize, entry: usize, limit: u64, typed: TypedRoutineSignature, names: Seq<NameSite>,
+    )
+        requires
+            self.typed_signature_evidence(file, entry, limit, Ok(Some(typed))),
+            names.len() == typed.inputs@.len(),
+            super::function_drivers::names_match_ports(self.targets.project_model().sources_model()[file as int].text,
+                self.targets.project_model().circuits_model()[file as int].syntax.forms@, typed.inputs@, names),
+        ensures forall|i: int, j: int| 0 <= i < j < names.len() ==>
+            (#[trigger] names[i]).word.spec_bytes() != (#[trigger] names[j]).word.spec_bytes(),
+    {
+        let project = &self.targets.project_model();
+        let (context, signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, limit, Ok(Some(signature)))
+            && self.typed_after_signature(&context, &signature, Ok(Some(typed)));
+        reveal(UseAliases::typed_ports_before);
+        let forms = project.circuits_model()[file as int].syntax.forms@;
+        let source = &project.sources_model()[file as int];
+        assert forall|i: int| 0 <= i < names.len() implies {
+            let name = #[trigger] names[i];
+            name.span == form_span(forms[signature.ports.inputs@[i].site.name as int])
+                && crate::project::circuits::name_in_source(source.text, name)
+        } by {
+            assert(typed.inputs@[i].declared == signature.ports.inputs@[i]);
+        };
+
+        checked_signature_input_names_unique(project, file as int, entry as int, limit, signature, names);
     }
 
     proof fn port_contexts_agree(&self, file: usize, entry: usize, left: &PortContext, right: &PortContext)

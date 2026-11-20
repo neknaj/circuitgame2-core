@@ -398,6 +398,33 @@ pub(super) proof fn checked_signature_ports(
     super::widths::checked_width_entry_exists(project, file, entry, max_width, widths);
 }
 
+pub(super) proof fn checked_signature_input_names_unique(
+    project: &CircuitProject, file: int, entry: int, limit: u64, signature: CheckedRoutineSignature,
+    names: Seq<NameSite>,
+)
+    requires
+        routine_signature_evidence(project, file, entry, limit, Ok(Some(signature))),
+        names.len() == signature.ports.inputs@.len(),
+        forall|i: int| 0 <= i < names.len() ==> {
+            let name = #[trigger] names[i];
+            let forms = project.circuits_model()[file].syntax.forms@;
+            name.span == form_span(forms[signature.ports.inputs@[i].site.name as int])
+                && name_in_source(project.sources_model()[file].text, name)
+        },
+    ensures forall|i: int, j: int| 0 <= i < j < names.len() ==>
+        (#[trigger] names[i]).word.spec_bytes() != (#[trigger] names[j]).word.spec_bytes(),
+{
+    let source = &project.sources_model()[file];
+    let forms = project.circuits_model()[file].syntax.forms@;
+    let (widths, checked, outputs) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+        routine_port_widths_evidence(project, file, entry, limit, Ok(Some(widths)))
+        && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(signature)));
+    assert forall|i: int| 0 <= i < names.len() implies name_site(source.text, forms,
+        signature.ports.inputs@[i], #[trigger] names[i]) by {};
+    port_name_bytes_agree(source.text, forms, signature.ports.inputs@, checked, names);
+    same_names_preserve_unique(checked, names);
+}
+
 proof fn port_name_bytes_agree(
     source: &str, forms: Seq<Form>, ports: Seq<CheckedPort>, left: Seq<NameSite>, right: Seq<NameSite>,
 )

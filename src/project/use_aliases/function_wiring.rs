@@ -5,7 +5,7 @@ use super::local_signal_index::LocalSignalIndex;
 #[cfg(verus_only)]
 use super::function_drivers::{disjoint_input, is_location, names_match_ports, optional_local_index, same_word};
 #[cfg(verus_only)]
-use super::function_drivers::{expected_output_context, indexed_driver_site};
+use super::function_drivers::{expected_output_context, indexed_driver_site, same_definition_driver};
 use super::{DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver, UseAliases};
 use crate::project::circuits::read_indexed_atom;
 #[cfg(verus_only)]
@@ -91,6 +91,44 @@ spec fn local_binding(
             && same_word(definitions[i as int].name, name)
             && definitions[i as int].definition < current
             && disjoint_input(inputs, name),
+    }
+}
+
+proof fn local_bindings_agree(
+    left_inputs: Seq<NameSite>, right_inputs: Seq<NameSite>,
+    left_defs: Seq<DefinitionDriver>, right_defs: Seq<DefinitionDriver>,
+    current: usize, left_name: NameSite, right_name: NameSite, left: OutputDriver, right: OutputDriver,
+)
+    requires
+        left_inputs.len() == right_inputs.len(),
+        left_defs.len() == right_defs.len(),
+        forall|i: int| 0 <= i < left_inputs.len() ==> same_word(#[trigger] left_inputs[i], #[trigger] right_inputs[i]),
+        forall|i: int| 0 <= i < left_defs.len() ==> same_definition_driver(#[trigger] left_defs[i], #[trigger] right_defs[i]),
+        forall|i: int, j: int| 0 <= i < j < left_inputs.len() ==> !same_word(#[trigger] left_inputs[i], #[trigger] left_inputs[j]),
+        forall|i: int, j: int| 0 <= i < j < left_defs.len() ==>
+            !same_word((#[trigger] left_defs[i]).name, (#[trigger] left_defs[j]).name),
+        same_word(left_name, right_name),
+        local_binding(left_inputs, left_defs, current, left_name, left),
+        local_binding(right_inputs, right_defs, current, right_name, right),
+    ensures left == right,
+{
+    match (left, right) {
+        (OutputDriver::Input(a), OutputDriver::Input(b)) => {
+            assert(same_word(left_inputs[b as int], right_inputs[b as int]));
+            assert(same_word(left_inputs[a as int], left_inputs[b as int]));
+        },
+        (OutputDriver::Definition(a), OutputDriver::Definition(b)) => {
+            assert(same_definition_driver(left_defs[b as int], right_defs[b as int]));
+            assert(same_word(left_defs[a as int].name, left_defs[b as int].name));
+        },
+        (OutputDriver::Input(a), OutputDriver::Definition(_)) => {
+            assert(same_word(left_inputs[a as int], right_inputs[a as int]));
+            assert(!same_word(right_inputs[a as int], right_name));
+        },
+        (OutputDriver::Definition(_), OutputDriver::Input(b)) => {
+            assert(same_word(left_inputs[b as int], right_inputs[b as int]));
+            assert(!same_word(left_inputs[b as int], left_name));
+        },
     }
 }
 
@@ -305,6 +343,85 @@ fn bind_signals<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 同じ関数の検査に成功した配線は、各参照位置と出力で同じ駆動元を指す。
+    pub(super) proof fn checked_func_wiring_agrees(
+        &self, file: usize, entry: usize, limit: u64, left: FuncWiring, right: FuncWiring,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(left))),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(right))),
+        ensures
+            left.drivers.signature.inputs@ == right.drivers.signature.inputs@,
+            left.drivers.signature.outputs@ == right.drivers.signature.outputs@,
+            left.drivers.definitions@.len() == right.drivers.definitions@.len(),
+            forall|i: int| 0 <= i < left.drivers.definitions@.len() ==> same_definition_driver(
+                #[trigger] left.drivers.definitions@[i], #[trigger] right.drivers.definitions@[i]),
+            left.drivers.outputs@ == right.drivers.outputs@,
+            left.signals@ == right.signals@,
+    {
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        self.checked_wiring_is_func(file, entry, limit, left);
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*source, *parsed);
+        let a = self.checked_wiring_input_names(file, entry, limit, left);
+        let b = self.checked_wiring_input_names(file, entry, limit, right);
+        self.checked_func_drivers_agree(file, entry, limit, left.drivers, right.drivers);
+        self.typed_signature_input_names_unique(file, entry, limit, left.drivers.signature, a);
+        assert forall|i: int| 0 <= i < a.len() implies same_word(#[trigger] a[i], #[trigger] b[i]) by {
+            assert(a[i].span == b[i].span);
+        };
+        let first = parsed.entry_ranges@[entry as int].signals.start as int;
+        reveal(bound_prefix);
+        assert(left.signals@.len() == right.signals@.len());
+        assert forall|i: int| 0 <= i < left.signals@.len() implies
+            (#[trigger] left.signals@[i]) == (#[trigger] right.signals@[i]) by {
+            let position = first + i;
+            let l = left.signals@[i];
+            let r = right.signals@[i];
+            let l_name = choose|name: NameSite| #[trigger] signal_site(source, parsed, entry as int, position, l.definition, name)
+                && is_location(source, name, l.site)
+                && local_binding(a, left.drivers.definitions@, l.definition, name, l.driver);
+            let r_name = choose|name: NameSite| #[trigger] signal_site(source, parsed, entry as int, position, r.definition, name)
+                && is_location(source, name, r.site)
+                && local_binding(b, right.drivers.definitions@, r.definition, name, r.driver);
+            build_signal_owner_unique(source.text, &parsed.build_model(), entry as int,
+                l.definition as int, r.definition as int, position);
+            assert(l_name.span == r_name.span);
+            local_bindings_agree(a, b, left.drivers.definitions@, right.drivers.definitions@,
+                l.definition, l_name, r_name, l.driver, r.driver);
+        };
+        assert(left.signals@ =~= right.signals@);
+    }
+
+    proof fn checked_wiring_input_names(
+        &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring,
+    ) -> (inputs: Seq<NameSite<'a>>)
+        requires self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+        ensures ({
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[file as int];
+            let source = &project.sources_model()[file as int];
+            self.func_driver_evidence(file, entry, limit, Ok(FuncDriverResult::Checked(wiring.drivers)))
+                && inputs.len() == wiring.drivers.signature.inputs@.len()
+                && names_match_ports(source.text, parsed.syntax.forms@, wiring.drivers.signature.inputs@, inputs)
+                && signal_sequence_result(source, parsed, entry as int, inputs, wiring.drivers.definitions@, Ok(wiring.signals))
+        }),
+    {
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let (drivers, inputs) = choose|drivers: FuncDrivers, inputs: Seq<NameSite>|
+            #[trigger] self.func_driver_evidence(file, entry, limit, Ok(FuncDriverResult::Checked(drivers)))
+                && #[trigger] names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs)
+                && inputs.len() == drivers.signature.inputs@.len()
+                && wiring.drivers == drivers
+                && signal_sequence_result(source, parsed, entry as int, inputs, drivers.definitions@, Ok(wiring.signals));
+        inputs
+    }
+
     pub(super) proof fn checked_signal_driver(
         &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring, definition: usize, position: usize,
     )
@@ -345,12 +462,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         parsed_index_evidence(*source, *parsed);
         let model = parsed.build_model();
         build_definition_scope_evidence(source.text, &model, entry as int, definition as int);
-        let (drivers, inputs) = choose|drivers: FuncDrivers, inputs: Seq<NameSite>|
-            #[trigger] self.func_driver_evidence(file, entry, limit, Ok(FuncDriverResult::Checked(drivers)))
-                && #[trigger] names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs)
-                && inputs.len() == drivers.signature.inputs@.len()
-                && wiring.drivers == drivers
-                && signal_sequence_result(source, parsed, entry as int, inputs, drivers.definitions@, Ok(wiring.signals));
+        let drivers = wiring.drivers;
+        let inputs = self.checked_wiring_input_names(file, entry, limit, wiring);
         reveal(bound_prefix);
         let first = parsed.entry_ranges@[entry as int].signals.start;
         let bound = wiring.signals@[position - first];

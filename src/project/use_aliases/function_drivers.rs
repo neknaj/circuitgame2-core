@@ -154,6 +154,68 @@ spec fn drivers_before(
             && (#[trigger] drivers[i]).definition == d && drivers[i].result_index == r
 }
 
+pub(super) open spec fn same_definition_driver(left: DefinitionDriver, right: DefinitionDriver) -> bool {
+    &&& left.definition == right.definition
+    &&& left.result_index == right.result_index
+    &&& left.name.span == right.name.span
+    &&& same_word(left.name, right.name)
+}
+
+proof fn definition_driver_prefix_agrees(
+    source: &str, forms: Seq<Form>, definitions: Seq<BuildDefinition>, first: int, end: int,
+    left: Seq<DefinitionDriver>, right: Seq<DefinitionDriver>, count: nat,
+)
+    requires
+        drivers_before(source, forms, definitions, first, end, end, 0, left),
+        drivers_before(source, forms, definitions, first, end, end, 0, right),
+        count <= left.len(),
+    ensures
+        count <= right.len(),
+        forall|i: int| 0 <= i < count ==> same_definition_driver(#[trigger] left[i], #[trigger] right[i]),
+    decreases count,
+{
+    if count > 0 {
+        let i = (count - 1) as int;
+        definition_driver_prefix_agrees(source, forms, definitions, first, end, left, right, i as nat);
+        let a = left[i];
+        let d = a.definition as int;
+        let r = a.result_index as int;
+        assert(driver_site(source, forms, definitions, first, end, a));
+        assert(target_position(forms, definitions, first, end, d, r));
+        let k = choose|k: int| 0 <= k < right.len()
+            && (#[trigger] right[k]).definition == d && right[k].result_index == r;
+        if k < i {
+            assert(same_definition_driver(left[k], right[k]));
+            assert(ordered(left[k].definition as int, left[k].result_index as int, d, r));
+        }
+        assert(i <= k < right.len());
+        let b = right[i];
+        if i < k {
+            let bd = b.definition as int;
+            let br = b.result_index as int;
+            assert(ordered(bd, br, d, r));
+            assert(driver_site(source, forms, definitions, first, end, b));
+            assert(target_position(forms, definitions, first, end, bd, br));
+            let j = choose|j: int| 0 <= j < left.len()
+                && (#[trigger] left[j]).definition == bd && left[j].result_index == br;
+            if j < i {
+                assert(same_definition_driver(left[j], right[j]));
+                assert(ordered(right[j].definition as int, right[j].result_index as int, bd, br));
+            } else if i < j {
+                assert(ordered(d, r, left[j].definition as int, left[j].result_index as int));
+            }
+        }
+        assert(k == i);
+        assert(driver_site(source, forms, definitions, first, end, b));
+        assert(a.name.span == b.name.span);
+        assert(same_definition_driver(a, b));
+        assert forall|j: int| 0 <= j < count implies
+            same_definition_driver(#[trigger] left[j], #[trigger] right[j]) by {
+            if j < i { assert(same_definition_driver(left[j], right[j])); }
+        };
+    }
+}
+
 proof fn record_driver(
     source: &str, forms: Seq<Form>, definitions: Seq<BuildDefinition>, first: int, end: int,
     drivers: Seq<DefinitionDriver>, driver: DefinitionDriver,
@@ -733,13 +795,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     proof fn reveal_checked_driver_result(
         &self, file: usize, entry: usize, max_width: u64, checked: FuncDrivers,
-    )
+    ) -> (names: (Seq<NameSite<'a>>, Seq<NameSite<'a>>))
         requires self.can_resolve(), self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(checked))),
         ensures ({
             let project = self.targets.project_model();
             let source = &project.sources_model()[file as int];
             let parsed = &project.circuits_model()[file as int];
             let frame = parsed.entry_ranges@[entry as int].definitions;
+            let forms = parsed.syntax.forms@;
+            &&& names.0.len() == checked.signature.inputs@.len()
+            &&& names.1.len() == checked.signature.outputs@.len()
+            &&& names_match_ports(source.text, forms, checked.signature.inputs@, names.0)
+            &&& names_match_ports(source.text, forms, checked.signature.outputs@, names.1)
+            &&& drivers_before(source.text, forms, parsed.definitions@, frame.start as int,
+                frame.end as int, frame.end as int, 0, checked.definitions@)
+            &&& single_drivers_before(names.0, checked.definitions@, checked.definitions@.len() as int)
+            &&& output_drivers_before(checked.signature.output_inputs@, names.1, checked.definitions@, checked.outputs@)
             &&& func_at(project.circuits_model(), file, entry)
             &&& self.typed_signature_evidence(file, entry, max_width, Ok(Some(checked.signature)))
             &&& entry < parsed.entry_ranges@.len()
@@ -771,6 +842,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] self.typed_signature_evidence(file, entry, max_width, Ok(Some(sig)))
                 && #[trigger] after_collecting_names(source, parsed, entry, &sig, ins, outs, defs, result);
         assert(signature == checked.signature && definitions == checked.definitions@);
+        (inputs, outputs)
     }
 
     pub(super) proof fn checked_driver_sources(
@@ -796,6 +868,54 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.reveal_checked_driver_result(file, entry, max_width, checked);
         self.typed_signature_sites(file, entry, max_width, checked.signature);
         self.typed_signature_types_declared(file, entry, max_width, checked.signature);
+    }
+
+    /// 同じ関数では左辺の位置と順序、名前のバイト列、出力の駆動元が一致する。
+    pub(super) proof fn checked_func_drivers_agree(
+        &self, file: usize, entry: usize, max_width: u64, left: FuncDrivers, right: FuncDrivers,
+    )
+        requires
+            self.can_resolve(),
+            self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(left))),
+            self.func_driver_evidence(file, entry, max_width, Ok(FuncDriverResult::Checked(right))),
+        ensures
+            self.typed_signature_evidence(file, entry, max_width, Ok(Some(left.signature))),
+            left.signature.inputs@ == right.signature.inputs@,
+            left.signature.outputs@ == right.signature.outputs@,
+            left.signature.output_inputs@ == right.signature.output_inputs@,
+            left.definitions@.len() == right.definitions@.len(),
+            forall|i: int| 0 <= i < left.definitions@.len() ==> same_definition_driver(
+                #[trigger] left.definitions@[i], #[trigger] right.definitions@[i]),
+            left.outputs@ == right.outputs@,
+            forall|i: int, j: int| 0 <= i < j < left.definitions@.len() ==>
+                !same_word((#[trigger] left.definitions@[i]).name, (#[trigger] left.definitions@[j]).name),
+    {
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let frame = parsed.entry_ranges@[entry as int].definitions;
+        let first = frame.start as int;
+        let end = frame.end as int;
+        let (_, left_outputs) = self.reveal_checked_driver_result(file, entry, max_width, left);
+        let (_, right_outputs) = self.reveal_checked_driver_result(file, entry, max_width, right);
+        self.typed_routine_signatures_agree(file, entry, max_width, left.signature, right.signature);
+        definition_driver_prefix_agrees(source.text, forms, parsed.definitions@, first, end,
+            left.definitions@, right.definitions@, left.definitions@.len());
+        definition_driver_prefix_agrees(source.text, forms, parsed.definitions@, first, end,
+            right.definitions@, left.definitions@, right.definitions@.len());
+        assert forall|i: int| 0 <= i < left.outputs@.len() implies
+            (#[trigger] left.outputs@[i]) == (#[trigger] right.outputs@[i]) by {
+            let a = left.outputs@[i];
+            let b = right.outputs@[i];
+            if let (OutputDriver::Definition(x), OutputDriver::Definition(y)) = (a, b) {
+                assert(left_outputs[i].span == right_outputs[i].span);
+                assert(same_word(left_outputs[i], right_outputs[i]));
+                assert(same_definition_driver(left.definitions@[y as int], right.definitions@[y as int]));
+                assert(same_word(left.definitions@[x as int].name, left.definitions@[y as int].name));
+            }
+        };
+        assert(left.outputs@ =~= right.outputs@);
     }
 
     /// `func` の署名を解決し、本体の明示的な定義から出力の駆動元を求める。
