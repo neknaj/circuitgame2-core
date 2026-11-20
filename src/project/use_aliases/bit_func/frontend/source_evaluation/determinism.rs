@@ -8,6 +8,7 @@ enum SourceRhsKind {
     Atom,
     Nor,
     Selection(BitSelectionShape),
+    NestedSelection(Seq<BitSelectionShape>, usize),
     Structure(StructureExpressionShape),
 }
 
@@ -89,6 +90,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.source_nor_values_agree(context, other, inputs, prior, left, right),
             (SourceRhsKind::Selection(_), SourceRhsKind::Selection(_)) =>
                 self.source_selection_values_agree(context, other, inputs, prior, left, right),
+            (SourceRhsKind::NestedSelection(a, al), SourceRhsKind::NestedSelection(b, bl)) =>
+                self.source_nested_selection_values_agree(context, other, inputs, prior, left, right, a, al, b, bl),
             (SourceRhsKind::Structure(_), SourceRhsKind::Structure(_)) =>
                 self.source_structure_values_agree(context, other, layouts->Some_0, other_layouts->Some_0, types, inputs, prior, left, right),
             (SourceRhsKind::Nor, _) | (_, SourceRhsKind::Nor) =>
@@ -96,6 +99,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             (SourceRhsKind::Selection(shape), SourceRhsKind::Structure(_))
             | (SourceRhsKind::Structure(_), SourceRhsKind::Selection(shape)) =>
                 bit_selection_excludes_structure(context.source.text, forms, root, shape),
+            (SourceRhsKind::NestedSelection(steps, leaf), SourceRhsKind::Structure(_))
+            | (SourceRhsKind::Structure(_), SourceRhsKind::NestedSelection(steps, leaf)) => {
+                nested_named_selection_root(context.source.text, forms, root as usize, steps, leaf);
+                bit_selection_excludes_structure(context.source.text, forms, root, steps[0]);
+            },
+            (SourceRhsKind::NestedSelection(steps, leaf), SourceRhsKind::Selection(shape))
+            | (SourceRhsKind::Selection(shape), SourceRhsKind::NestedSelection(steps, leaf)) => {
+                nested_named_selection_root(context.source.text, forms, root as usize, steps, leaf);
+                bit_selection_shapes_agree(context.source.text, forms, root, steps[0], shape);
+            },
             _ => {},
         }
     }
@@ -120,6 +133,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 SourceRhsKind::Selection(shape) => forms[root] is List
                     && named_selection_matches(context.source.text, forms, root, shape)
                     && self.source_selection_value(context, inputs, prior, value),
+                SourceRhsKind::NestedSelection(steps, leaf) => forms[root] is List
+                    && bit_selection_shape_matches(context.source.text, forms, root, steps[0])
+                    && nested_named_selection_matches(context.source.text, forms, root as usize, steps, leaf)
+                    && exists|driver: OutputDriver, origin: LocatedName|
+                        #[trigger] self.source_nested_selection_case(context, inputs, prior, value, steps, leaf, driver, origin),
                 SourceRhsKind::Structure(shape) => forms[root] is List
                     && structure_expression_matches(context.source.text, forms, root, shape)
                     && (layouts matches Some(table) && self.structure_source_rhs_value(context, table, types, inputs, prior, value)),
@@ -143,6 +161,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(UseAliases::source_selection_case);
             assert(self.source_selection_case(context, inputs, prior, value, shape, driver, selection, origin));
             SourceRhsKind::Selection(shape)
+        } else if self.source_nested_selection_value(context, inputs, prior, value) {
+            let (steps, leaf, driver, origin) = choose|
+                steps: Seq<BitSelectionShape>, leaf: usize, driver: OutputDriver, origin: LocatedName|
+                #[trigger] self.source_nested_selection_case(context, inputs, prior, value, steps, leaf, driver, origin);
+            reveal(UseAliases::source_nested_selection_case);
+            assert(self.source_nested_selection_case(context, inputs, prior, value, steps, leaf, driver, origin));
+            nested_named_selection_root(context.source.text, context.parsed.syntax.forms@, root as usize, steps, leaf);
+            SourceRhsKind::NestedSelection(steps, leaf)
         } else {
             let table = layouts->Some_0;
             reveal(UseAliases::structure_source_rhs_value);
@@ -152,6 +178,40 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(self.source_structure_case(context, table, types, inputs, prior, value, shape, checked));
             SourceRhsKind::Structure(shape)
         }
+    }
+
+    proof fn source_nested_selection_values_agree(
+        &self, context: &SourceFunc, other: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>,
+        left: Seq<bool>, right: Seq<bool>, left_steps: Seq<BitSelectionShape>, left_leaf: usize,
+        right_steps: Seq<BitSelectionShape>, right_leaf: usize,
+    )
+        requires
+            parsed_circuit_matches(*context.source, *context.parsed),
+            context.entry < context.parsed.syntax.entries@.len() && context.entry < context.parsed.entry_ranges@.len(),
+            indexed_driver_site(context.source, context.parsed, context.entry as int,
+                context.wiring.drivers.definitions@[prior.len() as int]),
+            same_source_bindings(context, other),
+            prior.len() < context.wiring.drivers.definitions@.len(),
+            exists|driver: OutputDriver, origin: LocatedName|
+                #[trigger] self.source_nested_selection_case(context, inputs, prior, left, left_steps, left_leaf, driver, origin),
+            exists|driver: OutputDriver, origin: LocatedName|
+                #[trigger] self.source_nested_selection_case(other, inputs, prior, right, right_steps, right_leaf, driver, origin),
+        ensures left == right,
+    {
+        reveal(UseAliases::source_nested_selection_case);
+        let (a, a_origin) = choose|driver: OutputDriver, origin: LocatedName|
+            #[trigger] self.source_nested_selection_case(context, inputs, prior, left, left_steps, left_leaf, driver, origin);
+        let (b, b_origin) = choose|driver: OutputDriver, origin: LocatedName|
+            #[trigger] self.source_nested_selection_case(other, inputs, prior, right, right_steps, right_leaf, driver, origin);
+        let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
+        let row = context.parsed.definitions@[definition as int];
+        let forms = context.parsed.syntax.forms@;
+        nested_named_selections_agree(context.source.text, forms, row.expression.start, left_steps, left_leaf,
+            right_steps, right_leaf);
+        source_operands_agree(context.source, context.parsed, context.entry, definition, left_leaf as int,
+            context.wiring, other.wiring, prior.len() as int, SingleBitOperand::Driver(a), SingleBitOperand::Driver(b));
+        selection_chain_values_agree(context.source, forms, left_steps, a_origin, b_origin,
+            driver_values(inputs, prior, a), left, right);
     }
 
     proof fn source_nor_values_agree(

@@ -109,10 +109,16 @@ pub(super) proof fn nested_named_selection_root(
     source: &str, forms: Seq<Form>, root: usize, steps: Seq<BitSelectionShape>, leaf: usize,
 )
     requires nested_named_selection_matches(source, forms, root, steps, leaf),
-    ensures bit_selection_shape_matches(source, forms, root as int, steps[0]),
+    ensures
+        bit_selection_shape_matches(source, forms, root as int, steps[0]),
+        0 <= root < forms.len() && forms[root as int] is List,
+        steps[0].input.start < forms.len() && forms[steps[0].input.start as int] is List,
 {
     reveal(nested_named_selection_matches);
     assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 0), steps[0]));
+    assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 1), steps[1]));
+    bit_selection_shape_positions(source, forms, root as int, steps[0]);
+    bit_selection_shape_positions(source, forms, steps[0].input.start as int, steps[1]);
 }
 
 proof fn named_leaf_is_not_selection(source: &str, forms: Seq<Form>, leaf: usize)
@@ -123,6 +129,22 @@ proof fn named_leaf_is_not_selection(source: &str, forms: Seq<Form>, leaf: usize
         let shape = choose|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, leaf as int, shape);
         bit_selection_shape_positions(source, forms, leaf as int, shape);
     }
+}
+
+/// 裸の信号名で終わる二つの選択列は、同じ式から始まれば一致する。
+pub(super) proof fn nested_named_selections_agree(
+    source: &str, forms: Seq<Form>, root: usize,
+    left: Seq<BitSelectionShape>, lhs: usize, right: Seq<BitSelectionShape>, rhs: usize,
+)
+    requires
+        nested_named_selection_matches(source, forms, root, left, lhs),
+        nested_named_selection_matches(source, forms, root, right, rhs),
+    ensures left == right, lhs == rhs,
+{
+    reveal(nested_named_selection_matches);
+    named_leaf_is_not_selection(source, forms, lhs);
+    named_leaf_is_not_selection(source, forms, rhs);
+    bit_selection_paths_agree(source, forms, root, left, lhs, right, rhs);
 }
 
 /// 裸の信号名で終わる二段以上の選択式から、各段の引数位置と信号名の添字を返す。
@@ -550,6 +572,90 @@ spec fn selection_suffix_stage(
         selection_input_width(checked, j, base), checked[j])
 }
 
+spec fn selection_chain_values<T>(input: Seq<T>, checked: Seq<CheckedBitSelection>) -> Seq<T>
+    decreases checked.len(),
+{
+    if checked.len() == 0 {
+        input
+    } else {
+        let outer = checked[0];
+        selected_bits_values(selection_chain_values(input, checked.drop_first()),
+            outer.start, outer.count as nat, outer.stride)
+    }
+}
+
+/// 元の引数を使い、内側から順に選択を適用した値を表す。
+pub(super) closed spec fn selection_chain_values_match<T>(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    origin: LocatedName, input: Seq<T>, output: Seq<T>,
+) -> bool {
+    &&& input.len() <= u64::MAX
+    &&& exists|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, input.len() as u64, origin, 0, checked)
+        && output == selection_chain_values(input, checked)
+}
+
+spec fn selection_stage_fits(checked: Seq<CheckedBitSelection>, base: u64, j: int) -> bool {
+    checked[j].fits(selection_input_width(checked, j, base))
+}
+
+proof fn selection_chain_values_positions<T>(input: Seq<T>, checked: Seq<CheckedBitSelection>)
+    requires
+        input.len() <= u64::MAX,
+        forall|j: int| 0 <= j < checked.len() ==> #[trigger] selection_stage_fits(checked, input.len() as u64, j),
+    ensures ({
+        let output = selection_chain_values(input, checked);
+        &&& output.len() == if checked.len() == 0 { input.len() } else { checked[0].count as nat }
+        &&& forall|j: int| 0 <= j < output.len() ==> {
+            let at = #[trigger] selection_chain_position(checked, j);
+            0 <= at < input.len() && output[j] == input[at]
+        }
+    }),
+    decreases checked.len(),
+{
+    let output = selection_chain_values(input, checked);
+    if checked.len() == 0 {
+        assert forall|j: int| 0 <= j < output.len() implies {
+            let at = #[trigger] selection_chain_position(checked, j);
+            0 <= at < input.len() && output[j] == input[at]
+        } by {};
+    } else {
+        let rest = checked.drop_first();
+        let base = input.len() as u64;
+        assert forall|j: int| 0 <= j < rest.len() implies #[trigger] selection_stage_fits(rest, base, j) by {
+            assert(selection_stage_fits(checked, base, j + 1));
+            assert(rest[j] == checked[j + 1]);
+            assert(selection_input_width(rest, j, base) == selection_input_width(checked, j + 1, base));
+        };
+        selection_chain_values_positions(input, rest);
+        let outer = checked[0];
+        let intermediate = selection_chain_values(input, rest);
+        assert(selection_stage_fits(checked, base, 0));
+        assert(outer.fits(intermediate.len() as u64));
+        assert forall|j: int| 0 <= j < output.len() implies {
+            let at = #[trigger] selection_chain_position(checked, j);
+            0 <= at < input.len() && output[j] == input[at]
+        } by {
+            selected_bit_in_range(intermediate.len() as u64, outer.start, outer.count, outer.stride, outer.last, j);
+            let k = selection_position(outer, j);
+            let at = selection_chain_position(rest, k);
+            assert(output[j] == intermediate[k]);
+            assert(intermediate[k] == input[at]);
+        };
+    }
+}
+
+proof fn selection_stage_witness<'p, 'a>(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>, index: int,
+    base_origin: LocatedName<'p, 'a>, width: u64, checked: CheckedBitSelection,
+) -> (site: LocatedName<'p, 'a>)
+    requires checked_selection_stage(source, forms, steps, index, base_origin, width, checked),
+    ensures selection_arguments_match(source, forms, &steps[index], width, &site, Ok(checked)),
+{
+    choose|site: LocatedName| selection_width_origin(source, forms, steps, index, base_origin, site)
+        && #[trigger] selection_arguments_match(source, forms, &steps[index], width, &site, Ok(checked))
+}
+
 /// 成功時は全段の選択と元の入力への射影を表す。失敗時は内側から最初に見つかった違反を表す。
 pub(super) closed spec fn selection_chain_arguments_match(
     source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>, base: u64, origin: LocatedName,
@@ -566,6 +672,68 @@ pub(super) closed spec fn selection_chain_arguments_match(
             && #[trigger] selection_arguments_match(source, forms, &steps[i],
                 selection_input_width(checked, -1, base), &site, Err(error)),
     }
+}
+
+/// 合成した選択で取り出した値は、元の選択式を各段で評価した値と一致する。
+pub(super) proof fn selection_chain_projection_preserves_values<T>(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    origin: LocatedName, input: Seq<T>, projection: CheckedBitSelection,
+)
+    requires
+        input.len() <= u64::MAX,
+        selection_chain_arguments_match(source, forms, steps, input.len() as u64, origin, Ok(projection)),
+    ensures selection_chain_values_match(source, forms, steps, origin, input,
+        selected_bits_values(input, projection.start, projection.count as nat, projection.stride)),
+{
+    let base = input.len() as u64;
+    let checked = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, base, origin, 0, checked)
+        && projects_selection_chain(checked, base, Some(projection));
+    assert(checked.len() > 0);
+    assert forall|j: int| 0 <= j < checked.len() implies #[trigger] selection_stage_fits(checked, base, j) by {
+        assert(selection_suffix_stage(source, forms, steps, base, origin, 0, checked, j));
+        let width = selection_input_width(checked, j, base);
+        let site = selection_stage_witness(source, forms, steps, j, origin, width, checked[j]);
+        checked_selection_fits_width(source, forms, &steps[j], width, &site, checked[j]);
+    };
+    selection_chain_values_positions(input, checked);
+    let expected = selection_chain_values(input, checked);
+    let combined = selected_bits_values(input, projection.start, projection.count as nat, projection.stride);
+    assert forall|j: int| 0 <= j < expected.len() implies #[trigger] combined[j] == #[trigger] expected[j] by {
+        let at = selection_position(projection, j);
+        assert(at == selection_chain_position(checked, j));
+        assert(combined[j] == input[at]);
+    };
+    assert(combined =~= expected);
+}
+
+/// 同じ構文と入力の選択列が取り出す値は一意に定まる。
+pub(super) proof fn selection_chain_values_agree<T>(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    left_origin: LocatedName, right_origin: LocatedName, input: Seq<T>, left: Seq<T>, right: Seq<T>,
+)
+    requires
+        selection_chain_values_match(source, forms, steps, left_origin, input, left),
+        selection_chain_values_match(source, forms, steps, right_origin, input, right),
+    ensures left == right,
+{
+    let base = input.len() as u64;
+    let a = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, base, left_origin, 0, checked)
+        && left == selection_chain_values(input, checked);
+    let b = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, base, right_origin, 0, checked)
+        && right == selection_chain_values(input, checked);
+    assert forall|j: int| 0 <= j < a.len() implies #[trigger] a[j] == #[trigger] b[j] by {
+        assert(selection_suffix_stage(source, forms, steps, base, left_origin, 0, a, j));
+        assert(selection_suffix_stage(source, forms, steps, base, right_origin, 0, b, j));
+        let lw = selection_input_width(a, j, base);
+        let rw = selection_input_width(b, j, base);
+        let la = selection_stage_witness(source, forms, steps, j, left_origin, lw, a[j]);
+        let ra = selection_stage_witness(source, forms, steps, j, right_origin, rw, b[j]);
+        successful_selections_agree(source, forms, &steps[j], lw, &la, a[j], rw, &ra, b[j]);
+    };
+    assert(a =~= b);
 }
 
 /// 同じ選択式の列を検査できたとき、最外段の選択数は入力幅や診断位置にかかわらず一致する。

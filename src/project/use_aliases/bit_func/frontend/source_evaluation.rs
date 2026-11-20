@@ -9,11 +9,14 @@ use super::super::semantics::{
 };
 use super::super::super::function_atoms::named_structure_expression_matches;
 use super::super::super::function_drivers::same_definition_driver;
-use super::super::super::selection_arguments::successful_selections_agree;
+use super::super::super::selection_arguments::{
+    nested_named_selection_matches, nested_named_selection_root, nested_named_selections_agree, selection_chain_values_agree,
+    selection_chain_values_match, successful_selections_agree,
+};
 use super::super::super::single_bit_func::{source_operand_is_atom, source_operands_agree};
 use super::super::super::structure_types::{CheckedStructureExpression, StructureExpressionContext};
 use crate::syntax::circuit::{
-    StructureExpressionShape, bit_selection_excludes_structure, bit_selection_shapes_agree,
+    StructureExpressionShape, bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shapes_agree,
     indexed_call_arguments, ordinary_call_at, ordinary_call_excludes_special_forms,
     structure_expression_matches, structure_expression_positions, structure_expression_shapes_agree,
 };
@@ -330,6 +333,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ||| atomic_value(context, definition, root, inputs, prior, value)
         ||| self.source_nor_value(context, inputs, prior, value)
         ||| self.source_selection_value(context, inputs, prior, value)
+        ||| self.source_nested_selection_value(context, inputs, prior, value)
     }
 
     spec fn source_nor_value(
@@ -345,6 +349,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         exists|shape: BitSelectionShape, driver: OutputDriver, selection: CheckedBitSelection, origin: LocatedName|
             #[trigger] self.source_selection_case(context, inputs, prior, value, shape, driver, selection, origin)
+    }
+
+    spec fn source_nested_selection_value(
+        &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
+    ) -> bool {
+        exists|steps: Seq<BitSelectionShape>, leaf: usize, driver: OutputDriver, origin: LocatedName|
+            #[trigger] self.source_nested_selection_case(context, inputs, prior, value, steps, leaf, driver, origin)
+    }
+
+    #[verifier::opaque]
+    spec fn source_nested_selection_case(
+        &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
+        steps: Seq<BitSelectionShape>, leaf: usize, driver: OutputDriver, origin: LocatedName,
+    ) -> bool {
+        let parsed = context.parsed;
+        let forms = parsed.syntax.forms@;
+        let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
+        let root = parsed.definitions@[definition as int].expression.start;
+        &&& nested_named_selection_matches(context.source.text, forms, root, steps, leaf)
+        &&& operand_matches(context.source, parsed, context.entry, definition, leaf as int,
+            context.wiring, prior.len() as int, SingleBitOperand::Driver(driver))
+        &&& selection_chain_values_match(context.source, forms, steps, origin, driver_values(inputs, prior, driver), value)
     }
 
     #[verifier::opaque]
