@@ -12,7 +12,7 @@ use vstd::prelude::*;
 use super::circuits::{parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    reference_atom, structure_field_site_evidence, structure_sites_match, structure_width_site_evidence,
+    reference_atom, structure_field_site_evidence, structure_sites_agree, structure_sites_match, structure_width_site_evidence,
 };
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, Form, decimal_natural_value, form_span, form_spans_valid, natural_atom_has_value};
@@ -286,6 +286,32 @@ pub closed spec fn structure_declaration_result(
     } else {
         result == Ok(None)
     }
+}
+
+/// 同じ宣言の数値検査に成功すると、総幅と各フィールドの数値および構文位置が一致する。
+pub(super) proof fn structure_declarations_agree(
+    project: &CircuitProject, file: int, entry: int, limit: u64,
+    left: StructureDeclaration, right: StructureDeclaration,
+)
+    requires
+        structure_declaration_result(project, file, entry, limit, Ok(Some(left))),
+        structure_declaration_result(project, file, entry, limit, Ok(Some(right))),
+    ensures left.width == right.width && left.fields@ == right.fields@,
+{
+    let source = &project.sources_model()[file];
+    let syntax = &project.circuits_model()[file].syntax;
+    let forms = syntax.forms@;
+    let a = choose|sites: StructureSites| #[trigger] structure_sites_match(source.text, syntax, entry, Some(sites))
+        && declaration_numbers_match(source, forms, sites, limit, Ok(left));
+    let b = choose|sites: StructureSites| #[trigger] structure_sites_match(source.text, syntax, entry, Some(sites))
+        && declaration_numbers_match(source, forms, sites, limit, Ok(right));
+    structure_sites_agree(source.text, syntax, entry, a, b);
+    assert forall|i: int| 0 <= i < left.fields@.len() implies
+        (#[trigger] left.fields@[i]) == (#[trigger] right.fields@[i]) by {
+        assert(field_numbers_match(source.text, forms, a.fields@[i], limit, left.fields@[i]));
+        assert(field_numbers_match(source.text, forms, b.fields@[i], limit, right.fields@[i]));
+    };
+    assert(left.fields@ =~= right.fields@);
 }
 
 pub(super) proof fn no_structure_declaration(project: &CircuitProject, file: int, entry: int, limit: u64)

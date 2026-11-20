@@ -167,6 +167,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             index.entries_model().contains(row),
         ensures
             self.is_structure_position(row.position),
+            self.structure_resolution_matches(row.position.file, row.position.entry, limit, Ok(Some(row.declaration))),
             0 < row.declaration.width <= limit,
             forall|i: int| 0 <= i < row.declaration.fields@.len() ==> {
                 let f = #[trigger] row.declaration.fields@[i];
@@ -488,6 +489,98 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && index.entries_model()[prior.len() as int].position == position
                     && self.layout_row_result(index, index.entries_model()[prior.len() as int], Err(error)),
             _ => false,
+        }
+    }
+
+    proof fn layout_entries_agree_at(
+        &self, limit: u64, left_index: &ResolvedStructures, right_index: &ResolvedStructures,
+        left: StructureLayouts, right: StructureLayouts, a: int, b: int,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_index_matches(limit, Ok(*left_index)),
+            self.structure_index_matches(limit, Ok(*right_index)),
+            self.layouts_for_index(left_index, Ok(left)),
+            self.layouts_for_index(right_index, Ok(right)),
+            0 <= a < left.entries_model().len(),
+            0 <= b < right.entries_model().len(),
+            left.entries_model()[a].position == right.entries_model()[b].position,
+        ensures ({
+            let l = left.entries_model()[a];
+            let r = right.entries_model()[b];
+            &&& l.width == r.width
+            &&& l.fields@.len() == r.fields@.len()
+            &&& forall|i: int| 0 <= i < l.fields@.len() ==> {
+                let x = #[trigger] l.fields@[i];
+                let y = #[trigger] r.fields@[i];
+                &&& x.name.spec_bytes() == y.name.spec_bytes()
+                &&& x.location == y.location
+                &&& x.ty == y.ty
+                &&& x.range == y.range
+            }
+        }),
+    {
+        self.targets.parsed_project_model();
+        let lx = left_index.entries_model()[a];
+        let rx = right_index.entries_model()[b];
+        let l = left.entries_model()[a];
+        let r = right.entries_model()[b];
+        assert(self.layout_row_result(left_index, lx, Ok(l)));
+        assert(self.layout_row_result(right_index, rx, Ok(r)));
+        self.structure_row_evidence(left_index, limit, lx);
+        self.structure_row_evidence(right_index, limit, rx);
+        self.resolved_structures_agree(l.position, limit, lx.declaration, rx.declaration);
+        reveal(UseAliases::structure_layout_prefix);
+        assert forall|i: int| 0 <= i < l.fields@.len() implies {
+            let x = #[trigger] l.fields@[i];
+            let y = #[trigger] r.fields@[i];
+            &&& x.name.spec_bytes() == y.name.spec_bytes()
+            &&& x.location == y.location
+            &&& x.ty == y.ty
+            &&& x.range == y.range
+        } by {
+            self.layout_fields_agree_at(limit, left_index, right_index, lx, rx, i, l.fields@[i], r.fields@[i]);
+        };
+    }
+
+    proof fn layout_fields_agree_at(
+        &self, limit: u64, left_index: &ResolvedStructures, right_index: &ResolvedStructures,
+        left_row: ResolvedStructureEntry, right_row: ResolvedStructureEntry, i: int,
+        left: StructureLayoutField, right: StructureLayoutField,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_index_matches(limit, Ok(*left_index)),
+            self.structure_index_matches(limit, Ok(*right_index)),
+            left_row.position == right_row.position,
+            left_row.declaration.fields@ == right_row.declaration.fields@,
+            self.layout_field_at(left_index, left_row, i, left),
+            self.layout_field_at(right_index, right_row, i, right),
+        ensures
+            left.name.spec_bytes() == right.name.spec_bytes(),
+            left.location == right.location,
+            left.ty == right.ty,
+            left.range == right.range,
+    {
+        let a = choose|field: FieldPlacement| #[trigger] self.field_placement_input(left_index, left_row, i, field)
+            && left.name == field.name && left.location == field.location && left.ty == field.ty
+            && field_range_matches(field.offset, field.width, left.range)
+            && left.range.end <= left_row.declaration.width;
+        let b = choose|field: FieldPlacement| #[trigger] self.field_placement_input(right_index, right_row, i, field)
+            && right.name == field.name && right.location == field.location && right.ty == field.ty
+            && field_range_matches(field.offset, field.width, right.range)
+            && right.range.end <= right_row.declaration.width;
+        if let StructureFieldType::Struct(position) = a.ty {
+            let ls = left_index.entries_model();
+            let rs = right_index.entries_model();
+            let x = choose|j: int| 0 <= j < ls.len() && (#[trigger] ls[j]).position == position
+                && ls[j].declaration.width == a.width;
+            let y = choose|j: int| 0 <= j < rs.len() && (#[trigger] rs[j]).position == position
+                && rs[j].declaration.width == b.width;
+            self.targets.parsed_project_model();
+            self.structure_row_evidence(left_index, limit, ls[x]);
+            self.structure_row_evidence(right_index, limit, rs[y]);
+            self.resolved_structures_agree(position, limit, ls[x].declaration, rs[y].declaration);
         }
     }
 

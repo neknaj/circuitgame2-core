@@ -164,6 +164,69 @@ pub closed spec fn structure_sites_match(
     }
 }
 
+proof fn field_site_prefix_agrees(
+    source: &str, forms: Seq<Form>, start: int, end: int, left: Seq<FieldSite>, right: Seq<FieldSite>, count: nat,
+)
+    requires
+        field_sites_before(source, forms, start, end, end, left),
+        field_sites_before(source, forms, start, end, end, right),
+        count <= left.len(),
+    ensures
+        count <= right.len(),
+        forall|i: int| 0 <= i < count ==> (#[trigger] left[i]) == (#[trigger] right[i]),
+    decreases count,
+{
+    if count > 0 {
+        let i = (count - 1) as int;
+        field_site_prefix_agrees(source, forms, start, end, left, right, i as nat);
+        let a = left[i];
+        assert(direct_form_in_range(forms, start, end, a.form as int));
+        let k = choose|k: int| 0 <= k < right.len() && (#[trigger] right[k]).form == a.form;
+        if k < i {
+            assert(left[k] == right[k]);
+            assert(left[k].form < a.form);
+        }
+        assert(i <= k < right.len());
+        let b = right[i];
+        if i < k {
+            assert(b.form < a.form);
+            assert(direct_form_in_range(forms, start, end, b.form as int));
+            let j = choose|j: int| 0 <= j < left.len() && (#[trigger] left[j]).form == b.form;
+            if j < i {
+                assert(left[j] == right[j]);
+                assert(right[j].form < b.form);
+            } else if i < j {
+                assert(a.form < left[j].form);
+            }
+        }
+        assert(k == i);
+        assert(field_site_matches(source, forms, a));
+        assert(field_site_matches(source, forms, b));
+        assert(a == b);
+        assert forall|j: int| 0 <= j < count implies (#[trigger] left[j]) == (#[trigger] right[j]) by {
+            if j < i { assert(left[j] == right[j]); }
+        };
+    }
+}
+
+/// 同じ構造体宣言から得た総幅とフィールドの構文位置は、宣言順に一致する。
+pub proof fn structure_sites_agree(
+    source: &str, syntax: &CircuitForms, entry: int, left: StructureSites, right: StructureSites,
+)
+    requires
+        structure_sites_match(source, syntax, entry, Some(left)),
+        structure_sites_match(source, syntax, entry, Some(right)),
+    ensures left.width == right.width && left.fields@ == right.fields@,
+{
+    let root = syntax.entries@[entry].form as int;
+    let forms = syntax.forms@;
+    let start = root + 6;
+    let end = forms[root]->List_end as int;
+    field_site_prefix_agrees(source, forms, start, end, left.fields@, right.fields@, left.fields@.len());
+    field_site_prefix_agrees(source, forms, start, end, right.fields@, left.fields@, right.fields@.len());
+    assert(left.fields@ =~= right.fields@);
+}
+
 /// 総幅の添字が元の構文木の自然数の字句を指すことを示す。
 pub proof fn structure_width_site_evidence(
     source: &str, syntax: &CircuitForms, entry: int, sites: StructureSites,

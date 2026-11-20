@@ -16,6 +16,8 @@ use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_
 use order::{DependencyEdge, check_dependency_order};
 use alloc::vec::Vec;
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -254,6 +256,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         _ => false,
                     },
         }
+    }
+
+    /// 同じ宣言の配置どうしは総幅と宣言順のフィールドの型・名前・区間が一致する。
+    pub proof fn structure_type_layouts_agree_at(
+        &self, limit: u64, left: StructureLayouts, right: StructureLayouts, a: int, b: int,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(limit, Ok(left)),
+            self.structure_types_match(limit, Ok(right)),
+            0 <= a < left.entries_model().len(),
+            0 <= b < right.entries_model().len(),
+            left.entries_model()[a].position == right.entries_model()[b].position,
+        ensures ({
+            let l = left.entries_model()[a];
+            let r = right.entries_model()[b];
+            &&& l.width == r.width
+            &&& l.fields@.len() == r.fields@.len()
+            &&& forall|i: int| 0 <= i < l.fields@.len() ==> {
+                let x = #[trigger] l.fields@[i];
+                let y = #[trigger] r.fields@[i];
+                &&& x.name.spec_bytes() == y.name.spec_bytes()
+                &&& x.location == y.location
+                &&& x.ty == y.ty
+                &&& x.range == y.range
+            }
+        }),
+    {
+        let a_index = self.structure_type_layout_index(limit, left);
+        let b_index = self.structure_type_layout_index(limit, right);
+        self.layout_entries_agree_at(limit, &a_index, &b_index, left, right, a, b);
+    }
+
+    proof fn structure_type_layout_index(&self, limit: u64, layouts: StructureLayouts) -> (index: ResolvedStructures)
+        requires self.structure_types_match(limit, Ok(layouts)),
+        ensures self.structure_index_matches(limit, Ok(index)), self.layouts_for_index(&index, Ok(layouts)),
+    {
+        let (index, graph) = choose|index: ResolvedStructures, graph: Seq<Vec<Option<usize>>>|
+            #[trigger] self.structure_index_matches(limit, Ok(index))
+                && #[trigger] self.dependency_rows_match(&index, graph)
+                && graph.len() == index.entries_model().len()
+                && self.layouts_for_index(&index, Ok(layouts))
+                && exists|rank: Seq<nat>| #[trigger] dependencies_in_order(graph, rank);
+        index
     }
 
     /// 型検査を通過した配置表には、このプロジェクトの各構造体の配置がある。

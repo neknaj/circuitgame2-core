@@ -122,7 +122,7 @@ pub use structure::sites::{FieldSite, FieldTypeSite, StructureSites, structure_s
 #[cfg(verus_only)]
 pub use structure::sites::{
     field_site_matches, structure_field_site_evidence, structure_field_sites_order,
-    structure_sites_match, structure_width_site_evidence,
+    structure_sites_agree, structure_sites_match, structure_width_site_evidence,
 };
 #[cfg(verus_only)]
 pub use structure::{

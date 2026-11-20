@@ -33,9 +33,11 @@ use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::project::declarations::{declaration_location_evidence, form_key, located_name_evidence};
 #[cfg(verus_only)]
-use crate::project::structure_declarations::checked_structure_fields;
+use crate::project::structure_declarations::{checked_structure_fields, structure_declarations_agree};
 #[cfg(verus_only)]
 use crate::project::sources::source_ordinals_agree;
+#[cfg(verus_only)]
+use vstd::utf8::encode_utf8_decode_utf8;
 #[cfg(verus_only)]
 use crate::project::{StructureDeclaration, location_in_source, structure_declaration_result};
 #[cfg(verus_only)]
@@ -213,6 +215,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.structure_port_type_matches(right, Some(ty)),
         ensures left == right,
     {
+        match ty {
+            ResolvedPortType::Struct { source, form } =>
+                self.structure_binding_positions_agree(DefinitionBinding::Declaration { source, form }, left, right),
+            _ => {},
+        }
+    }
+
+    proof fn structure_binding_positions_agree(
+        &self, binding: DefinitionBinding, left: StructurePosition, right: StructurePosition,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_position_matches(left, binding),
+            self.structure_position_matches(right, binding),
+        ensures left == right,
+    {
         let project = self.targets.project_model();
         self.targets.parsed_project_model();
         source_ordinals_agree(project.sources_model(), left.file as int, right.file as int);
@@ -366,6 +384,75 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] self.structure_scope_matches(file, entry, &scope)
                     && #[trigger] structure_declaration_result(project, file as int, entry as int, limit, Ok(Some(declaration)))
                     && self.structure_after_numbers(&scope, declaration, result),
+        }
+    }
+
+    /// 同じ宣言の解決に成功した結果は、総幅と宣言順のフィールド型が一致する。
+    pub(super) proof fn resolved_structures_agree(
+        &self, position: StructurePosition, limit: u64, left: ResolvedStructure, right: ResolvedStructure,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_resolution_matches(position.file, position.entry, limit, Ok(Some(left))),
+            self.structure_resolution_matches(position.file, position.entry, limit, Ok(Some(right))),
+        ensures left.width == right.width && left.fields@ == right.fields@,
+    {
+        let project = &self.targets.project_model();
+        let file = position.file;
+        let entry = position.entry;
+        let (a, left_decl) = choose|scope: StructureScope, declaration: StructureDeclaration|
+            #[trigger] self.structure_scope_matches(file, entry, &scope)
+            && #[trigger] structure_declaration_result(project, file as int, entry as int, limit, Ok(Some(declaration)))
+            && self.structure_after_numbers(&scope, declaration, Ok(Some(left)));
+        let (b, right_decl) = choose|scope: StructureScope, declaration: StructureDeclaration|
+            #[trigger] self.structure_scope_matches(file, entry, &scope)
+            && #[trigger] structure_declaration_result(project, file as int, entry as int, limit, Ok(Some(declaration)))
+            && self.structure_after_numbers(&scope, declaration, Ok(Some(right)));
+        structure_declarations_agree(project, file as int, entry as int, limit, left_decl, right_decl);
+        self.relative_scope_agrees(file, a.block, a.namespace, b.namespace);
+        assert forall|i: int| 0 <= i < left.fields@.len() implies
+            (#[trigger] left.fields@[i]) == (#[trigger] right.fields@[i]) by {
+            let field = left_decl.fields@[i];
+            self.resolved_structure_field_agrees(&a, &b, field, left.fields@[i], right.fields@[i]);
+        };
+        assert(left.fields@ =~= right.fields@);
+    }
+
+    proof fn resolved_structure_field_agrees(
+        &self, a: &StructureScope, b: &StructureScope, declared: DeclaredField,
+        left: ResolvedStructureField, right: ResolvedStructureField,
+    )
+        requires
+            self.can_resolve(),
+            a.file == b.file,
+            *a.source == *b.source,
+            a.forms@ == b.forms@,
+            a.block == b.block,
+            a.namespace == b.namespace,
+            self.structure_field_matches(a, declared, left),
+            self.structure_field_matches(b, declared, right),
+        ensures left == right,
+    {
+        if let DeclaredFieldType::Named { form } = declared.ty {
+            let x = choose|binding: DefinitionBinding| #[trigger] self.structure_type_binding(a, form, Ok(binding))
+                && self.structure_position_matches(left.ty->Struct_0, binding);
+            let y = choose|binding: DefinitionBinding| #[trigger] self.structure_type_binding(b, form, Ok(binding))
+                && self.structure_position_matches(right.ty->Struct_0, binding);
+            let span = form_span(a.forms@[form as int]);
+            let bytes = a.source.text.spec_bytes()[span.start as int..span.end as int];
+            let kind = a.forms@[form as int]->Atom_kind;
+            let lw = choose|word: &str| word.spec_bytes() == bytes && #[trigger] self.binding_evidence(a.file,
+                ReferenceRequest { block: a.block, word, role: ReferenceUse::StructType }, a.namespace, kind, Ok(x));
+            let rw = choose|word: &str| word.spec_bytes() == bytes && #[trigger] self.binding_evidence(b.file,
+                ReferenceRequest { block: b.block, word, role: ReferenceUse::StructType }, b.namespace, kind, Ok(y));
+            encode_utf8_decode_utf8(lw@);
+            encode_utf8_decode_utf8(rw@);
+            self.struct_bindings_agree(a.file,
+                ReferenceRequest { block: a.block, word: lw, role: ReferenceUse::StructType },
+                ReferenceRequest { block: b.block, word: rw, role: ReferenceUse::StructType },
+                a.namespace, b.namespace, kind, x->Declaration_source, x->Declaration_form,
+                y->Declaration_source, y->Declaration_form);
+            self.structure_binding_positions_agree(x, left.ty->Struct_0, right.ty->Struct_0);
         }
     }
 
