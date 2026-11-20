@@ -57,6 +57,72 @@ pub closed spec fn concat_prefix_width(widths: Seq<u64>, count: nat) -> int
     else { concat_prefix_width(widths, (count - 1) as nat) + widths[count - 1] }
 }
 
+/// 先頭の引数列を連接した長さは、その引数の幅の合計に等しい。
+pub(super) proof fn concat_flatten_prefix_len<T>(
+    parts: Seq<Seq<T>>, widths: Seq<u64>, count: nat,
+)
+    requires
+        count <= parts.len(), count <= widths.len(),
+        forall|i: int| 0 <= i < count ==> (#[trigger] parts[i]).len() == widths[i],
+    ensures parts.take(count as int).flatten().len() == concat_prefix_width(widths, count),
+    decreases count,
+{
+    reveal(concat_prefix_width);
+    if count > 0 {
+        let last = count - 1;
+        let earlier = parts.take(last);
+        concat_flatten_prefix_len(parts, widths, last as nat);
+        assert(earlier.push(parts[last]) =~= parts.take(count as int));
+        earlier.lemma_flatten_push(parts[last]);
+    }
+}
+
+/// 引数の低位ビットは、先行する引数の幅の合計から始まる。
+pub(super) proof fn concat_flatten_part<T>(
+    parts: Seq<Seq<T>>, widths: Seq<u64>, count: nat, argument: nat,
+)
+    requires
+        argument < count <= parts.len(), count <= widths.len(),
+        forall|i: int| 0 <= i < count ==> (#[trigger] parts[i]).len() == widths[i],
+    ensures ({
+        let flat = parts.take(count as int).flatten();
+        let start = concat_prefix_width(widths, argument);
+        let end = start + widths[argument as int];
+        &&& 0 <= start <= end <= flat.len()
+        &&& flat.subrange(start, end) == parts[argument as int]
+    }),
+    decreases count,
+{
+    let last = count - 1;
+    let earlier = parts.take(last);
+    let through_last = parts.take(count as int);
+    let start = concat_prefix_width(widths, argument);
+    let end = start + widths[argument as int];
+    assert(earlier.push(parts[last]) =~= through_last);
+    earlier.lemma_flatten_push(parts[last]);
+    concat_flatten_prefix_len(parts, widths, last as nat);
+    if argument < last {
+        concat_flatten_part(parts, widths, last as nat, argument);
+    }
+    assert(through_last.flatten().subrange(start, end) =~= parts[argument as int]);
+}
+
+proof fn concat_flatten_mixed_width_example() {
+    let low = seq![true, false];
+    let high = seq![false, true, true];
+    let parts = seq![low, high];
+    let widths = seq![2u64, 3u64];
+    assert forall|i: int| 0 <= i < 2 implies (#[trigger] parts[i]).len() == widths[i] by {
+        if i == 0 { assert(parts[i] == low); } else { assert(parts[i] == high); }
+    };
+    concat_flatten_prefix_len(parts, widths, 2);
+    concat_flatten_part(parts, widths, 2, 0);
+    concat_flatten_part(parts, widths, 2, 1);
+    reveal_with_fuel(concat_prefix_width, 3);
+    let flat = parts.take(2).flatten();
+    assert(flat =~= seq![true, false, false, true, true]);
+}
+
 #[verifier::opaque]
 spec fn within_limit(widths: Seq<u64>, count: int, limit: u64) -> bool {
     &&& 0 <= count <= widths.len()
