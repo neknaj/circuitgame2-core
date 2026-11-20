@@ -163,7 +163,7 @@ impl<'p, 'a> DefinitionReferenceSite<'p, 'a> {
     }
 }
 
-spec fn accepts_declaration(role: ReferenceUse, target: Head) -> bool {
+pub(super) open spec fn accepts_declaration(role: ReferenceUse, target: Head) -> bool {
     match role {
         ReferenceUse::StructType => target is Struct,
         ReferenceUse::Callee(owner) => target is Func
@@ -582,7 +582,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
     }
 
-    proof fn binding_declaration_origin(
+    pub(super) proof fn binding_declaration_origin(
         &self, file: usize, request: ReferenceRequest, from: Option<&str>, kind: AtomKind,
         source: &ProjectSource, form: &NamedForm,
     )

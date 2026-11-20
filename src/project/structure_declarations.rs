@@ -12,7 +12,7 @@ use vstd::prelude::*;
 use super::circuits::{parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    structure_field_site_evidence, structure_sites_match, structure_width_site_evidence,
+    reference_atom, structure_field_site_evidence, structure_sites_match, structure_width_site_evidence,
 };
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, Form, decimal_natural_value, form_span, form_spans_valid, natural_atom_has_value};
@@ -98,7 +98,7 @@ spec fn number_result(
 ) -> Result<u64, StructureNumberErrorKind> {
     let span = form_span(forms[index as int]);
     let value = decimal_natural_value(source.spec_bytes()[span.start as int..span.end as int])->Some_0;
-    if value > u64::MAX {
+    if value < 0 || value > u64::MAX {
         Err(StructureNumberErrorKind::NumericRange)
     } else if number is FieldOffset {
         Ok(value as u64)
@@ -286,6 +286,61 @@ pub closed spec fn structure_declaration_result(
     } else {
         result == Ok(None)
     }
+}
+
+/// 数値検査に成功した宣言が、元の索引と幅の上限に対応することを示す。
+pub(super) proof fn checked_structure_fields(
+    project: &CircuitProject, file: usize, entry: usize, limit: u64, declaration: StructureDeclaration,
+)
+    requires
+        project.has_parsed_sources(),
+        structure_declaration_result(project, file as int, entry as int, limit, Ok(Some(declaration))),
+    ensures
+        file < project.circuits_model().len(),
+        entry < project.circuits_model()[file as int].syntax.entries@.len(),
+        project.circuits_model()[file as int].syntax.entries@[entry as int].head is Struct,
+        0 < declaration.width <= limit,
+        forall|i: int| 0 <= i < declaration.fields@.len() ==> {
+            let field = #[trigger] declaration.fields@[i];
+            let forms = project.circuits_model()[file as int].syntax.forms@;
+            &&& field.site.name < forms.len()
+            &&& forms[field.site.name as int] is Atom
+            &&& forms[field.site.name as int]->Atom_kind is Name
+            &&& field.site.offset < forms.len()
+            &&& forms[field.site.offset as int] is Atom
+            &&& forms[field.site.offset as int]->Atom_kind is Natural
+            &&& match field.ty {
+                DeclaredFieldType::Bits(width) => 0 < width <= limit,
+                DeclaredFieldType::Named { form } =>
+                    form < forms.len() && forms[form as int] is Atom && reference_atom(forms[form as int]->Atom_kind),
+            }
+        },
+{
+    reveal(structure_declaration_result);
+    let source = &project.sources_model()[file as int];
+    let syntax = &project.circuits_model()[file as int].syntax;
+    let forms = syntax.forms@;
+    let sites = choose|sites: StructureSites| #[trigger] structure_sites_match(source.text, syntax, entry as int, Some(sites))
+        && declaration_numbers_match(source, forms, sites, limit, Ok(declaration));
+    assert(number_result(source.text, forms, sites.width, StructureNumber::TotalWidth, limit) == Ok(declaration.width));
+    assert forall|i: int| 0 <= i < declaration.fields@.len() implies {
+        let field = #[trigger] declaration.fields@[i];
+        &&& field.site.name < forms.len()
+        &&& forms[field.site.name as int] is Atom
+        &&& forms[field.site.name as int]->Atom_kind is Name
+        &&& field.site.offset < forms.len()
+        &&& forms[field.site.offset as int] is Atom
+        &&& forms[field.site.offset as int]->Atom_kind is Natural
+        &&& match field.ty {
+            DeclaredFieldType::Bits(width) => 0 < width <= limit,
+            DeclaredFieldType::Named { form } =>
+                form < forms.len() && forms[form as int] is Atom && reference_atom(forms[form as int]->Atom_kind),
+        }
+    } by {
+        let field = declaration.fields@[i];
+        assert(field_numbers_match(source.text, forms, sites.fields@[i], limit, field));
+        structure_field_site_evidence(source.text, syntax, entry as int, sites, i);
+    };
 }
 
 /// 総幅、フィールドの幅とオフセットを検査して宣言順に返す。

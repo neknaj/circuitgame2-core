@@ -22,6 +22,10 @@ mod relative;
 mod selection_arguments;
 mod signature_cache;
 mod single_bit_func;
+mod structure_types;
+pub use structure_types::{
+    ResolvedStructure, ResolvedStructureField, StructureFieldType, StructurePosition, StructureResolutionError,
+};
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,

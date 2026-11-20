@@ -100,6 +100,9 @@ pub use use_aliases::{
     FuncCallOutputError, FuncCallOutputTypes,
     FuncCallTarget, TypedFuncCall,
 };
+pub use use_aliases::{
+    ResolvedStructure, ResolvedStructureField, StructureFieldType, StructurePosition, StructureResolutionError,
+};
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use use_aliases::{SelectionArgument, SelectionArgumentError};
