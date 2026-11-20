@@ -117,6 +117,28 @@ fn checks_forwarded_outputs_and_preserves_unknown_composite_results() {
 }
 
 #[test]
+fn checks_nested_selections_through_the_public_type_checker() {
+    let text = concat!(
+        "(func valid (in (a (bits 8))) (out y) (def y (bit (slice a 0 4 2) 3))) ",
+        "(func invalid (in (a (bits 8))) (out y) (def y (bit (slice a 0 4 2) 4)))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 11, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let typed = aliases.check_func_signal_types(0, 0, 8).unwrap();
+    let output = typed.types[0].as_ref().unwrap();
+    assert!(matches!(output.ty, ResolvedPortType::Bits(1)));
+    assert_eq!(&text[output.origin.span.clone()], "(bit (slice a 0 4 2) 3)");
+
+    let error = aliases.check_func_signal_types(0, 1, 8).unwrap_err();
+    let FuncSignalTypeError::SelectionArgument(SelectionArgumentError::Outside {
+        site, width_origin, input_width: 4, ..
+    }) = error else { panic!("{error:?}") };
+    assert_eq!(&text[site.span], "4");
+    assert_eq!(&text[width_origin.span], "(slice a 0 4 2)");
+}
+
+#[test]
 fn propagates_selection_widths_through_definitions_and_calls() {
     let text = concat!(
         "(func f (in (a (bits 8)) x) (out (even (bits 4)) y) ",

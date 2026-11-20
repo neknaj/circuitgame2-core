@@ -1,10 +1,11 @@
 //! ビット選択の数値引数を読み取り、入力幅に対する違反を元ソースの位置とともに返す。
 
+use alloc::vec::Vec;
 use super::function_atoms::copy_location;
 use crate::project::circuits::{form_location, read_indexed_atom};
 use crate::project::{BitSelectionError, LocatedName, ProjectSource, check_bit_selection};
-use crate::syntax::circuit::{BitSelectionShape, BitSelectionTail};
-use crate::syntax::{Form, NaturalRangeError, read_natural_u64};
+use crate::syntax::circuit::{BitSelectionShape, BitSelectionTail, bit_selection_chain};
+use crate::syntax::{AtomKind, Form, NaturalRangeError, read_natural_u64};
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
@@ -12,11 +13,14 @@ use crate::project::circuits::is_form_location;
 #[cfg(verus_only)]
 use crate::project::declarations::located_name_evidence;
 #[cfg(verus_only)]
-use crate::project::{bit_selection_matches, location_in_source};
+use crate::project::{bit_selection_matches, location_in_source, selected_bit_in_range, selected_bits_values};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{bit_selection_shape_matches, bit_selection_shape_positions};
+use crate::syntax::circuit::{
+    bit_selection_path, bit_selection_paths_agree, bit_selection_shape_matches, bit_selection_shape_positions,
+    bit_selection_step_root,
+};
 #[cfg(verus_only)]
-use crate::syntax::{AtomKind, decimal_natural_value, form_span, form_spans_valid, natural_atom_has_value};
+use crate::syntax::{decimal_natural_value, form_span, form_spans_valid, natural_atom_has_value};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
@@ -57,7 +61,7 @@ pub enum SelectionArgumentError<'p, 'a> {
     Outside {
         /// 開始位置から最後の明示引数までのソース範囲。
         site: LocatedName<'p, 'a>,
-        /// 入力の幅を決めた型のソース範囲。
+        /// 入力幅を決めた宣言や式のソース範囲。
         width_origin: LocatedName<'p, 'a>,
         /// 最初に選ぶ添字。
         start: u64,
@@ -79,6 +83,212 @@ pub struct CheckedBitSelection {
     pub stride: u64,
     /// 最後に選ぶ添字。
     pub last: u64,
+}
+
+impl CheckedBitSelection {
+    /// 選択数と刻みが正で、計算した末尾が指定した入力幅に収まることを表す。
+    pub(super) open spec fn fits(self, width: u64) -> bool {
+        bit_selection_matches(width, self.start, self.count, self.stride, Ok(self.last))
+    }
+}
+
+/// 複数の選択式をたどると、末端が裸の信号名になることを表す。
+#[verifier::opaque]
+pub(super) open spec fn nested_named_selection_matches(
+    source: &str, forms: Seq<Form>, root: usize, steps: Seq<BitSelectionShape>, leaf: usize,
+) -> bool {
+    &&& steps.len() >= 2
+    &&& bit_selection_path(source, forms, root, steps, leaf)
+    &&& leaf < forms.len()
+    &&& forms[leaf as int] is Atom
+    &&& forms[leaf as int]->Atom_kind is Name
+}
+
+/// 選択列の先頭は、元の式のビット選択に対応する。
+pub(super) proof fn nested_named_selection_root(
+    source: &str, forms: Seq<Form>, root: usize, steps: Seq<BitSelectionShape>, leaf: usize,
+)
+    requires nested_named_selection_matches(source, forms, root, steps, leaf),
+    ensures bit_selection_shape_matches(source, forms, root as int, steps[0]),
+{
+    reveal(nested_named_selection_matches);
+    assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 0), steps[0]));
+}
+
+proof fn named_leaf_is_not_selection(source: &str, forms: Seq<Form>, leaf: usize)
+    requires leaf < forms.len(), forms[leaf as int] is Atom,
+    ensures !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, leaf as int, shape)),
+{
+    if exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, leaf as int, shape) {
+        let shape = choose|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, leaf as int, shape);
+        bit_selection_shape_positions(source, forms, leaf as int, shape);
+    }
+}
+
+/// 裸の信号名で終わる二段以上の選択式から、各段の引数位置と信号名の添字を返す。
+pub(super) fn nested_named_selection(source: &str, forms: &[Form], root: usize)
+    -> (result: Option<(Vec<BitSelectionShape>, usize)>)
+    ensures
+        result matches Some((steps, leaf)) ==> nested_named_selection_matches(source, forms@, root, steps@, leaf),
+        forall|steps: Seq<BitSelectionShape>, leaf: usize|
+            #[trigger] nested_named_selection_matches(source, forms@, root, steps, leaf)
+            ==> (result matches Some((found, at)) && found@ == steps && at == leaf),
+{
+    reveal(nested_named_selection_matches);
+    let (steps, leaf) = bit_selection_chain(source, forms, root);
+    assert forall|other: Seq<BitSelectionShape>, at: usize|
+        #[trigger] nested_named_selection_matches(source, forms@, root, other, at)
+        implies steps@ == other && leaf == at by {
+        named_leaf_is_not_selection(source, forms@, at);
+        bit_selection_paths_agree(source, forms@, root, steps@, leaf, other, at);
+    };
+    if steps.len() >= 2 && leaf < forms.len() && matches!(forms[leaf], Form::Atom { kind: AtomKind::Name, .. }) {
+        Some((steps, leaf))
+    } else {
+        None
+    }
+}
+
+/// 外側の選択の各要素が、二段の選択を通ると元の入力のどの位置に対応するかを表す。
+pub(super) open spec fn selection_composition(
+    inner: CheckedBitSelection, outer: CheckedBitSelection, composed: CheckedBitSelection,
+) -> bool {
+    &&& composed.count == outer.count
+    &&& forall|i: int| 0 <= i < outer.count ==> #[trigger] selection_position(composed, i)
+        == selection_position(inner, selection_position(outer, i))
+}
+
+pub(super) open spec fn selection_position(selection: CheckedBitSelection, index: int) -> int {
+    selection.start + index * selection.stride
+}
+
+/// 二段の選択を、元の入力に対する一段の選択にまとめる。
+///
+/// 選択数が1の場合は刻みを1にする。選択位置は開始位置だけで決まる。
+pub(super) fn compose_selections(_width: u64, inner: CheckedBitSelection, outer: CheckedBitSelection)
+    -> (composed: CheckedBitSelection)
+    requires inner.fits(_width), outer.fits(inner.count),
+    ensures composed.fits(_width), selection_composition(inner, outer, composed),
+{
+    proof {
+        selected_bit_in_range(_width, inner.start, inner.count, inner.stride, inner.last, outer.start as int);
+        selected_bit_in_range(_width, inner.start, inner.count, inner.stride, inner.last, outer.last as int);
+    }
+    let start = inner.start + outer.start * inner.stride;
+    let last = inner.start + outer.last * inner.stride;
+    let stride = if outer.count == 1 {
+        1
+    } else {
+        proof {
+            selected_bit_in_range(inner.count, outer.start, outer.count, outer.stride, outer.last, 1);
+            selected_bit_in_range(_width, inner.start, inner.count, inner.stride, inner.last,
+                outer.start + outer.stride);
+            assert(0 < outer.stride * inner.stride < _width) by (nonlinear_arith)
+                requires
+                    0 < outer.stride, 0 < inner.stride,
+                    inner.start + (outer.start + outer.stride) * inner.stride < _width,
+            ;
+        }
+        outer.stride * inner.stride
+    };
+    let composed = CheckedBitSelection { start, count: outer.count, stride, last };
+    proof {
+        assert(start == selection_position(inner, outer.start as int));
+        assert(last == selection_position(inner, outer.last as int));
+        assert forall|i: int| 0 <= i < outer.count implies #[trigger] selection_position(composed, i)
+            == selection_position(inner, selection_position(outer, i)) by {
+            let a = outer.start as int;
+            let b = outer.stride as int;
+            let c = inner.start as int;
+            let d = inner.stride as int;
+            assert(selection_position(composed, i) == c + a * d + i * stride);
+            assert(selection_position(inner, selection_position(outer, i)) == c + (a + i * b) * d);
+            if outer.count == 1 {
+                assert(i == 0);
+                assert(c + a * d + i * stride == c + (a + i * b) * d) by (nonlinear_arith)
+                    requires i == 0;
+            } else {
+                assert(stride == b * d);
+                assert(c + a * d + i * stride == c + (a + i * b) * d) by (nonlinear_arith)
+                    requires stride == b * d;
+            }
+        };
+        assert(selection_position(composed, composed.count - 1)
+            == selection_position(inner, outer.last as int));
+    }
+    composed
+}
+
+/// 合成した選択は、二段の選択を順に適用した場合と同じ要素列を返す。
+pub(super) proof fn composed_selection_values_agree<T>(
+    input: Seq<T>, inner: CheckedBitSelection, outer: CheckedBitSelection, composed: CheckedBitSelection,
+)
+    requires
+        input.len() <= u64::MAX,
+        inner.fits(input.len() as u64), outer.fits(inner.count),
+        selection_composition(inner, outer, composed),
+    ensures
+        selected_bits_values(input, composed.start, composed.count as nat, composed.stride)
+        == selected_bits_values(
+            selected_bits_values(input, inner.start, inner.count as nat, inner.stride),
+            outer.start, outer.count as nat, outer.stride,
+        ),
+{
+    let intermediate = selected_bits_values(input, inner.start, inner.count as nat, inner.stride);
+    let sequential = selected_bits_values(intermediate, outer.start, outer.count as nat, outer.stride);
+    let combined = selected_bits_values(input, composed.start, composed.count as nat, composed.stride);
+    assert forall|i: int| 0 <= i < outer.count implies #[trigger] combined[i] == #[trigger] sequential[i] by {
+        selected_bit_in_range(inner.count, outer.start, outer.count, outer.stride, outer.last, i);
+        let intermediate_at = selection_position(outer, i);
+        assert(sequential[i] == intermediate[intermediate_at]);
+        assert(combined[i] == input[selection_position(composed, i)]);
+        assert(intermediate[intermediate_at] == input[selection_position(inner, intermediate_at)]);
+    };
+    assert(combined =~= sequential);
+}
+
+/// 外側から順に各選択の添字を当てはめ、元の入力上の位置を求める。
+pub(super) open spec fn selection_chain_position(checked: Seq<CheckedBitSelection>, i: int) -> int
+    decreases checked.len(),
+{
+    if checked.len() == 0 { i }
+    else { selection_chain_position(checked.drop_first(), selection_position(checked[0], i)) }
+}
+
+spec fn projects_selection_chain(
+    checked: Seq<CheckedBitSelection>, width: u64, projection: Option<CheckedBitSelection>,
+) -> bool {
+    if checked.len() == 0 {
+        projection is None
+    } else {
+        &&& projection matches Some(composed)
+        &&& composed.fits(width)
+        &&& composed.count == checked[0].count
+        &&& forall|i: int| 0 <= i < composed.count ==> #[trigger] selection_position(composed, i)
+            == selection_chain_position(checked, i)
+    }
+}
+
+proof fn prepend_selection_projection(
+    checked: Seq<CheckedBitSelection>, width: u64, inner: CheckedBitSelection, outer: CheckedBitSelection,
+    composed: CheckedBitSelection,
+)
+    requires
+        checked.len() > 0,
+        projects_selection_chain(checked, width, Some(inner)),
+        outer.fits(inner.count),
+        composed.fits(width),
+        selection_composition(inner, outer, composed),
+    ensures projects_selection_chain(seq![outer] + checked, width, Some(composed)),
+{
+    let all = seq![outer] + checked;
+    assert(all.drop_first() =~= checked);
+    assert forall|i: int| 0 <= i < composed.count implies #[trigger] selection_position(composed, i)
+        == selection_chain_position(all, i) by {
+        let p = selection_position(outer, i);
+        selected_bit_in_range(inner.count, outer.start, outer.count, outer.stride, outer.last, i);
+        assert(selection_position(inner, p) == selection_chain_position(checked, p));
+    };
 }
 
 spec fn explicit_count(shape: &BitSelectionShape) -> Option<usize> {
@@ -300,6 +510,199 @@ pub(super) fn check_selection_arguments<'p, 'a>(
                 start: first, last, input_width: width,
             }),
     }
+}
+
+spec fn selection_width_origin(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    i: int, base_origin: LocatedName, origin: LocatedName,
+) -> bool {
+    if i + 1 == steps.len() { origin == base_origin }
+    else { is_form_location(source, forms[steps[i].input.start as int], origin) }
+}
+
+spec fn selection_input_width(checked: Seq<CheckedBitSelection>, index: int, base: u64) -> u64 {
+    if index + 1 == checked.len() { base } else { checked[index + 1].count }
+}
+
+spec fn checked_selection_stage(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>, i: int,
+    base_origin: LocatedName, width: u64, value: CheckedBitSelection,
+) -> bool {
+    exists|site: LocatedName| selection_width_origin(source, forms, steps, i, base_origin, site)
+        && #[trigger] selection_arguments_match(source, forms, &steps[i], width, &site, Ok(value))
+}
+
+spec fn checked_selection_suffix(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    base: u64, base_origin: LocatedName, offset: int, checked: Seq<CheckedBitSelection>,
+) -> bool {
+    &&& 0 <= offset <= steps.len()
+    &&& checked.len() == steps.len() - offset
+    &&& forall|j: int| 0 <= j < checked.len() ==> #[trigger]
+        selection_suffix_stage(source, forms, steps, base, base_origin, offset, checked, j)
+}
+
+spec fn selection_suffix_stage(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    base: u64, base_origin: LocatedName, offset: int, checked: Seq<CheckedBitSelection>, j: int,
+) -> bool {
+    checked_selection_stage(source, forms, steps, offset + j, base_origin,
+        selection_input_width(checked, j, base), checked[j])
+}
+
+/// 成功時は全段の選択と元の入力への射影を表す。失敗時は内側から最初に見つかった違反を表す。
+pub(super) closed spec fn selection_chain_arguments_match(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>, base: u64, origin: LocatedName,
+    result: Result<CheckedBitSelection, SelectionArgumentError>,
+) -> bool {
+    match result {
+        Ok(projection) => exists|checked: Seq<CheckedBitSelection>|
+            #[trigger] checked_selection_suffix(source, forms, steps, base, origin, 0, checked)
+            && projects_selection_chain(checked, base, Some(projection)),
+        Err(error) => exists|i: int, checked: Seq<CheckedBitSelection>, site: LocatedName|
+            0 <= i < steps.len()
+            && #[trigger] checked_selection_suffix(source, forms, steps, base, origin, i + 1, checked)
+            && selection_width_origin(source, forms, steps, i, origin, site)
+            && #[trigger] selection_arguments_match(source, forms, &steps[i],
+                selection_input_width(checked, -1, base), &site, Err(error)),
+    }
+}
+
+/// 同じ選択式の列を検査できたとき、最外段の選択数は入力幅や診断位置にかかわらず一致する。
+pub(super) proof fn successful_selection_chain_counts_agree(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    a_width: u64, a_origin: LocatedName, a: CheckedBitSelection,
+    b_width: u64, b_origin: LocatedName, b: CheckedBitSelection,
+)
+    requires
+        selection_chain_arguments_match(source, forms, steps, a_width, a_origin, Ok(a)),
+        selection_chain_arguments_match(source, forms, steps, b_width, b_origin, Ok(b)),
+    ensures a.count == b.count,
+{
+    let left = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, a_width, a_origin, 0, checked)
+        && projects_selection_chain(checked, a_width, Some(a));
+    let right = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, b_width, b_origin, 0, checked)
+        && projects_selection_chain(checked, b_width, Some(b));
+    assert(checked_selection_suffix(source, forms, steps, a_width, a_origin, 0, left));
+    assert(checked_selection_suffix(source, forms, steps, b_width, b_origin, 0, right));
+    assert(projects_selection_chain(left, a_width, Some(a)));
+    assert(projects_selection_chain(right, b_width, Some(b)));
+    assert(left.len() > 0 && right.len() > 0);
+    let lw = selection_input_width(left, 0, a_width);
+    let rw = selection_input_width(right, 0, b_width);
+    assert(selection_suffix_stage(source, forms, steps, a_width, a_origin, 0, left, 0));
+    assert(selection_suffix_stage(source, forms, steps, b_width, b_origin, 0, right, 0));
+    let la = choose|site: LocatedName| selection_width_origin(source, forms, steps, 0, a_origin, site)
+        && #[trigger] selection_arguments_match(source, forms, &steps[0], lw, &site, Ok(left[0]));
+    let ra = choose|site: LocatedName| selection_width_origin(source, forms, steps, 0, b_origin, site)
+        && #[trigger] selection_arguments_match(source, forms, &steps[0], rw, &site, Ok(right[0]));
+    successful_selections_agree(source, forms, &steps[0], lw, &la, left[0], rw, &ra, right[0]);
+}
+
+/// 内側から順に選択を検査し、各段の入力幅には直前の選択数を使う。
+///
+/// 範囲違反の診断は、入力幅を決めた子式または基底信号の幅の根拠となる位置を示す。
+pub(super) fn check_selection_chain<'p, 'a>(
+    source: &'p ProjectSource<'a>, forms: &[Form], root: usize, steps: &[BitSelectionShape],
+    _leaf: usize, base: u64, origin: &LocatedName<'p, 'a>,
+) -> (result: Result<CheckedBitSelection, SelectionArgumentError<'p, 'a>>)
+    requires
+        steps@.len() > 0,
+        bit_selection_path(source.text, forms@, root, steps@, _leaf),
+        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+        location_in_source(*origin),
+    ensures
+        selection_chain_arguments_match(source, forms@, steps@, base, *origin, result),
+        result matches Ok(projection) ==> projection.fits(base),
+{
+    let mut cursor = steps.len();
+    let mut width_origin = copy_location(origin);
+    let mut projection: Option<CheckedBitSelection> = None;
+    let ghost mut checked: Seq<CheckedBitSelection> = Seq::empty();
+    while cursor > 0
+        invariant
+            0 <= cursor <= steps@.len(),
+            steps@.len() > 0,
+            checked_selection_suffix(source, forms@, steps@, base, *origin, cursor as int, checked),
+            projects_selection_chain(checked, base, projection),
+            bit_selection_path(source.text, forms@, root, steps@, _leaf),
+            form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+            location_in_source(width_origin),
+            cursor > 0 ==> selection_width_origin(source, forms@, steps@, cursor - 1, *origin, width_origin),
+        decreases cursor,
+    {
+        cursor -= 1;
+        let at = if cursor == 0 { root } else { steps[cursor - 1].input.start };
+        let shape = &steps[cursor];
+        assert(bit_selection_shape_matches(
+            source.text, forms@, bit_selection_step_root(root, steps@, cursor as int), steps@[cursor as int],
+        ));
+        proof { bit_selection_shape_positions(source.text, forms@, at as int, *shape); }
+        let width = match projection { Some(inner) => inner.count, None => base };
+        let outer = match check_selection_arguments(source, forms, at, shape, width, &width_origin) {
+            Ok(selection) => selection,
+            Err(error) => {
+                assert(selection_chain_arguments_match(
+                    source, forms@, steps@, base, *origin, Err(error),
+                )) by {
+                    reveal(selection_chain_arguments_match);
+                    assert(checked_selection_suffix(source, forms@, steps@, base, *origin, cursor + 1, checked));
+                    assert(selection_width_origin(source, forms@, steps@, cursor as int, *origin, width_origin));
+                    assert(selection_input_width(checked, -1, base) == width);
+                    assert(selection_arguments_match(source, forms@, &steps@[cursor as int],
+                        selection_input_width(checked, -1, base), &width_origin, Err(error)));
+                };
+                return Err(error);
+            }
+        };
+        proof {
+            let updated = seq![outer] + checked;
+            assert forall|j: int| 0 <= j < updated.len() implies #[trigger]
+                selection_suffix_stage(source, forms@, steps@, base, *origin, cursor as int, updated, j) by {
+                if j == 0 {
+                    assert(updated[0] == outer);
+                    assert(selection_input_width(updated, 0, base) == width);
+                    assert(selection_arguments_match(source, forms@, shape, width, &width_origin, Ok(outer)));
+                } else {
+                    assert(updated[j] == checked[j - 1]);
+                    assert(selection_input_width(updated, j, base) == selection_input_width(checked, j - 1, base));
+                    assert(selection_suffix_stage(source, forms@, steps@, base, *origin, cursor + 1, checked, j - 1));
+                }
+            };
+            assert(checked_selection_suffix(source, forms@, steps@, base, *origin, cursor as int, updated));
+        }
+        let next = if let Some(inner) = projection {
+            let combined = compose_selections(base, inner, outer);
+            proof { prepend_selection_projection(checked, base, inner, outer, combined); }
+            combined
+        } else {
+            proof {
+                let single = seq![outer] + checked;
+                assert(single =~= seq![outer]);
+                assert(single.drop_first() =~= Seq::<CheckedBitSelection>::empty());
+                assert forall|i: int| 0 <= i < outer.count implies #[trigger] selection_position(outer, i)
+                    == selection_chain_position(single, i) by {
+                    assert(selection_chain_position(single.drop_first(), selection_position(outer, i))
+                        == selection_position(outer, i));
+                };
+                assert(projects_selection_chain(single, base, Some(outer)));
+            }
+            outer
+        };
+        proof { checked = seq![outer] + checked; }
+        projection = Some(next);
+        width_origin = form_location(source, forms, at);
+    }
+    let Some(selection) = projection else {
+        proof { assert(false); }
+        unreachable!()
+    };
+    assert(selection_chain_arguments_match(source, forms@, steps@, base, *origin, Ok(selection))) by {
+        reveal(selection_chain_arguments_match);
+    };
+    Ok(selection)
 }
 
 } // verus!

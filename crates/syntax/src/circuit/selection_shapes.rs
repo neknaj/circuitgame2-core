@@ -219,6 +219,65 @@ pub open spec fn bit_selection_path(
     )
 }
 
+proof fn selection_path_prefixes_agree(
+    source: &str, forms: Seq<Form>, root: usize,
+    left: Seq<BitSelectionShape>, lhs: usize, right: Seq<BitSelectionShape>, rhs: usize, count: nat,
+)
+    requires
+        bit_selection_path(source, forms, root, left, lhs),
+        bit_selection_path(source, forms, root, right, rhs),
+        count <= left.len(), count <= right.len(),
+    ensures left.take(count as int) == right.take(count as int),
+    decreases count,
+{
+    if count == 0 {
+        assert(left.take(0) =~= right.take(0));
+    } else {
+        let i = count - 1;
+        selection_path_prefixes_agree(source, forms, root, left, lhs, right, rhs, i as nat);
+        if i > 0 {
+            assert(left[i - 1] == left.take(i)[i - 1]);
+            assert(right[i - 1] == right.take(i)[i - 1]);
+        }
+        let a = bit_selection_step_root(root, left, i);
+        let b = bit_selection_step_root(root, right, i);
+        assert(a == b);
+        assert(bit_selection_shape_matches(source, forms, a, left[i]));
+        assert(bit_selection_shape_matches(source, forms, b, right[i]));
+        bit_selection_shapes_agree(source, forms, a, left[i], right[i]);
+        assert(left.take(count as int) =~= right.take(count as int));
+    }
+}
+
+/// 同じフォームから始まる二つの選択列は、どちらも末端までたどると一致する。
+pub proof fn bit_selection_paths_agree(
+    source: &str, forms: Seq<Form>, root: usize,
+    left: Seq<BitSelectionShape>, lhs: usize, right: Seq<BitSelectionShape>, rhs: usize,
+)
+    requires
+        bit_selection_path(source, forms, root, left, lhs),
+        bit_selection_path(source, forms, root, right, rhs),
+        !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, lhs as int, shape)),
+        !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, rhs as int, shape)),
+    ensures left == right, lhs == rhs,
+{
+    let n = if left.len() <= right.len() { left.len() } else { right.len() };
+    selection_path_prefixes_agree(source, forms, root, left, lhs, right, rhs, n);
+    if left.len() != right.len() {
+        let (short, leaf, long) = if left.len() < right.len() { (left, lhs, right) } else { (right, rhs, left) };
+        if n > 0 {
+            assert(short.last() == short.take(n as int)[n - 1]);
+            assert(long[n - 1] == long.take(n as int)[n - 1]);
+        }
+        let at = bit_selection_step_root(root, long, n as int);
+        assert(at == leaf);
+        assert(bit_selection_shape_matches(source, forms, at, long[n as int]));
+        assert(false);
+    }
+    assert(left.take(n as int) =~= left);
+    assert(right.take(n as int) =~= right);
+}
+
 /// `root` から `bit`・`slice` の入力式をたどり、引数の位置を外側から順に返す。
 ///
 /// 返り値の添字は、ビット選択の局所構造を持たない最初のフォームを指す。
