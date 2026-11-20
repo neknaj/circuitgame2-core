@@ -309,6 +309,26 @@ pub(super) proof fn bare_signal_index(source: &str, forms: Seq<Form>, first: int
     reveal_with_fuel(expression_signals, 2);
 }
 
+/// リスト単体の信号列は、値を取る子式の信号列に等しい。
+pub(super) proof fn list_child_signals(
+    source: &str, forms: Seq<Form>, root: int, end: int, first: int, stop: int, head: ExpressionHead,
+)
+    requires
+        root < first <= stop <= end,
+        expression_child_range(source, forms, root, end, first, stop),
+        list_head_matches(source, forms, root + 1, Some(head)),
+    ensures expression_signals(source, forms, root, end) == expression_signals(source, forms, first, stop),
+{
+    assert forall|i: int, j: int| #[trigger] expression_child_range(source, forms, root, end, i, j)
+        implies i == first && j == stop by {
+        same_child_interval(source, forms, root, end, first, stop, i, j);
+    };
+    list_reference_order(source, forms, root, end, end, first, stop, Some(head));
+    assert(expression_signals(source, forms, end, end) == Seq::<usize>::empty()) by {
+        reveal_with_fuel(expression_signals, 1);
+    };
+}
+
 proof fn direct_name_in_signal_index(
     source: &str, forms: Seq<Form>, first: int, end: int, name: usize,
 )

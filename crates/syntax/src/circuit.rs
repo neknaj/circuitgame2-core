@@ -54,7 +54,7 @@ pub use build::{
 pub use build::{
     build_bare_signal_position, build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
     build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
-    definition_signal_positions_agree, definition_target_range,
+    definition_expression_region, definition_signal_positions_agree, definition_target_range,
     definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
@@ -104,10 +104,10 @@ pub use ports::{
 };
 #[cfg(verus_only)]
 pub use ports::{port_site_evidence, routine_ports_agree, routine_ports_availability, routine_ports_match};
-pub use selection_shapes::{BitSelectionShape, BitSelectionTail, bit_selection_shape};
+pub use selection_shapes::{BitSelectionShape, BitSelectionTail, bit_selection_chain, bit_selection_shape};
 #[cfg(verus_only)]
 pub use selection_shapes::{
-    build_selection_input_position,
+    bit_selection_path, bit_selection_step_root, build_selection_chain_signal, build_selection_input_position,
     bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
     strict_bit_selection_has_shape, strict_bit_selection_input,
 };

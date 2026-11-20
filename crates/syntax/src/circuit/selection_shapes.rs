@@ -2,7 +2,9 @@
 
 use super::*;
 #[cfg(verus_only)]
-use super::expression_forest::{expression_signals_in_order, first_expression_children};
+use super::expression_forest::{
+    bare_signal_index, expression_signals, expression_signals_in_order, first_expression_children, list_child_signals,
+};
 
 #[cfg(verus_only)]
 use super::expressions::{
@@ -202,6 +204,64 @@ fn read_selection_shape(source: &str, forms: &[Form], index: usize) -> (result: 
     Some(BitSelectionShape { input: first..next, start: next, tail })
 }
 
+/// 列の指定位置にある選択式の先頭を求める。
+pub open spec fn bit_selection_step_root(root: usize, steps: Seq<BitSelectionShape>, i: int) -> int {
+    if i == 0 { root as int } else { steps[i - 1].input.start as int }
+}
+
+/// 子式の位置をたどると、各選択式を外側から順に経由して末端に達することを表す。
+pub open spec fn bit_selection_path(
+    source: &str, forms: Seq<Form>, root: usize, steps: Seq<BitSelectionShape>, leaf: usize,
+) -> bool {
+    &&& leaf == if steps.len() == 0 { root } else { steps.last().input.start }
+    &&& forall|i: int| 0 <= i < steps.len() ==> #[trigger] bit_selection_shape_matches(
+        source, forms, bit_selection_step_root(root, steps, i), steps[i],
+    )
+}
+
+/// `root` から `bit`・`slice` の入力式をたどり、引数の位置を外側から順に返す。
+///
+/// 返り値の添字は、ビット選択の局所構造を持たない最初のフォームを指す。
+/// `root` が範囲外なら空の列と `root` を返す。式の妥当性や選択範囲は呼び出し側で検査する。
+pub fn bit_selection_chain(
+    source: &str, forms: &[Form], root: usize,
+) -> (result: (Vec<BitSelectionShape>, usize))
+    ensures
+        bit_selection_path(source, forms@, root, result.0@, result.1),
+        !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(
+            source, forms@, result.1 as int, shape,
+        )),
+{
+    let mut steps = Vec::new();
+    let mut current = root;
+    loop
+        invariant
+            bit_selection_path(source, forms@, root, steps@, current),
+        decreases forms@.len() - current as int,
+    {
+        let Some(shape) = bit_selection_shape(source, forms, current) else {
+            return (steps, current);
+        };
+        proof { bit_selection_shape_positions(source, forms@, current as int, shape); }
+        let ghost before = steps@;
+        let child = shape.input.start;
+        steps.push(shape);
+        assert forall|i: int| 0 <= i < steps@.len() implies #[trigger] bit_selection_shape_matches(
+            source, forms@, bit_selection_step_root(root, steps@, i), steps@[i],
+        ) by {
+            if i < before.len() {
+                assert(steps@[i] == before[i]);
+                assert(bit_selection_shape_matches(source, forms@, bit_selection_step_root(root, before, i), before[i]));
+            } else {
+                assert(i == before.len());
+                assert(bit_selection_step_root(root, steps@, i) == current);
+                assert(steps@[i] == shape);
+            }
+        };
+        current = child;
+    }
+}
+
 /// 選択式の入力区間と各自然数アトムが、同じリスト内にあることを示す。
 pub proof fn bit_selection_shape_positions(source: &str, forms: Seq<Form>, index: int, shape: BitSelectionShape)
     requires bit_selection_shape_matches(source, forms, index, shape),
@@ -281,6 +341,86 @@ pub proof fn strict_bit_selection_input(
         && arguments_match(forms, index + 2, stop, head, first, last);
     let expected = match shape.tail { BitSelectionTail::Bit => ExpressionHead::Bit, _ => ExpressionHead::Slice };
     same_expression_head(source, forms, index + 1, candidate, Some(expected));
+}
+
+proof fn selection_path_signals(
+    source: &str, forms: Seq<Form>, root: usize, end: int, steps: Seq<BitSelectionShape>, leaf: usize,
+)
+    requires
+        expression_forest(source, forms, root as int, end),
+        root < end <= forms.len() <= usize::MAX,
+        end == after_form(forms, root as int),
+        bit_selection_path(source, forms, root, steps, leaf),
+        leaf < forms.len(),
+        forms[leaf as int] is Atom,
+        forms[leaf as int]->Atom_kind is Name,
+    ensures expression_signals(source, forms, root as int, end) == seq![leaf],
+    decreases steps.len(),
+{
+    if steps.len() == 0 {
+        bare_signal_index(source, forms, root as int, end);
+    } else {
+        let shape = steps[0];
+        let start = shape.input.start as int;
+        let stop = shape.input.end as int;
+        let head = match shape.tail { BitSelectionTail::Bit => ExpressionHead::Bit, _ => ExpressionHead::Slice };
+        assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 0), steps[0]));
+        bit_selection_shape_positions(source, forms, root as int, shape);
+        strict_bit_selection_input(source, forms, root as int, end, shape);
+        assert(bit_selection_path(source, forms, shape.input.start, steps.drop_first(), leaf)) by {
+            assert forall|i: int| 0 <= i < steps.drop_first().len() implies #[trigger] bit_selection_shape_matches(
+                source, forms,
+                bit_selection_step_root(shape.input.start, steps.drop_first(), i),
+                steps.drop_first()[i],
+            ) by {
+                assert(steps.drop_first()[i] == steps[i + 1]);
+                assert(bit_selection_step_root(shape.input.start, steps.drop_first(), i)
+                    == bit_selection_step_root(root, steps, i + 1));
+                assert(bit_selection_shape_matches(source, forms,
+                    bit_selection_step_root(root, steps, i + 1), steps[i + 1]));
+            };
+        };
+        selection_path_signals(source, forms, shape.input.start, stop, steps.drop_first(), leaf);
+        assert(expression_child_range(source, forms, root as int, end, start, stop)) by {
+            reveal(bit_selection_shape_matches);
+        };
+        reveal(bit_selection_shape_matches);
+        list_child_signals(source, forms, root as int, end, start, stop, head);
+    }
+}
+
+/// 裸の信号名で終わる選択式の列では、定義行の信号索引がその信号名だけを指す。
+pub proof fn build_selection_chain_signal(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int,
+    steps: Seq<BitSelectionShape>, leaf: usize,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition
+            < index.entry_ranges@[entry].definitions.end <= index.definitions@.len(),
+        steps.len() > 0,
+        bit_selection_path(source, index.syntax.forms@, index.definitions@[definition].expression.start, steps, leaf),
+        leaf < index.syntax.forms@.len(),
+        index.syntax.forms@[leaf as int] is Atom,
+        index.syntax.forms@[leaf as int]->Atom_kind is Name,
+    ensures ({
+        let row = index.definitions@[definition];
+        &&& row.signals.start < row.signals.end <= index.signals@.len()
+        &&& row.signals.end == row.signals.start + 1
+        &&& index.signals@[row.signals.start as int] == leaf
+    }),
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    let row = index.definitions@[definition];
+    let forms = index.syntax.forms@;
+    let root = row.expression.start;
+    let end = row.expression.end as int;
+    super::build::definition_expression_end(forms, row);
+    selection_path_signals(source, forms, root, end, steps, leaf);
+    let signals = index.signals@[row.signals.start as int..row.signals.end as int];
+    assert(signals.len() == 1 && signals[0] == leaf);
 }
 
 /// 入力式が裸の信号名なら、選択式の定義に付く信号索引の先頭がその名を指す。

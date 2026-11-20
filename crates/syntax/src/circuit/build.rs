@@ -189,6 +189,7 @@ pub proof fn build_definition_scope_evidence(
                 == expression_signals(source, index.syntax.forms@,
                     row.expression.start as int, row.expression.end as int)
             &&& row.expression.start < row.expression.end <= index.syntax.forms@.len()
+            &&& definition_expression_region(index.syntax.forms@, row)
             &&& definition_call_index(source, index.syntax.forms@, row, index.references@)
             &&& expression_forest(source, index.syntax.forms@, row.expression.start as int, row.expression.end as int)
             &&& index.references@[row.references.start as int..row.references.end as int]
@@ -224,6 +225,18 @@ pub proof fn build_definition_scope_evidence(
         implies expression_reference_in_source(source, forms, #[trigger] index.references@[i]) by {
         assert(refs[i] == index.references@[i]);
     };
+}
+
+/// 定義行の右辺の区間が、構文木のフォーム一つを占めることを表す。
+pub closed spec fn definition_expression_region(forms: Seq<Form>, row: BuildDefinition) -> bool {
+    &&& row.expression.start < row.expression.end <= forms.len()
+    &&& super::expressions::after_form(forms, row.expression.start as int) == row.expression.end
+}
+
+pub(super) proof fn definition_expression_end(forms: Seq<Form>, row: BuildDefinition)
+    requires definition_expression_region(forms, row),
+    ensures super::expressions::after_form(forms, row.expression.start as int) == row.expression.end,
+{
 }
 
 /// 定義の区切りで、前の定義の信号範囲の末尾と次の範囲の先頭が一致することを示す。
