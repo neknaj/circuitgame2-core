@@ -17,7 +17,7 @@ use crate::syntax::{complete_list_indices, nested_list_indices};
 #[cfg(verus_only)]
 use super::super::single_bit_func::{
     indexed_name_is_operand, no_operand, operand_excludes_missing, operand_matches, operand_transfers,
-    single_bit_driver_available, single_bit_operand_available, source_operands_agree,
+    single_bit_driver_available, single_bit_operand_available, source_operand_is_atom, source_operands_agree,
 };
 
 verus! {
@@ -61,6 +61,26 @@ spec fn type_for_argument<'p, 'a>(
             },
         },
     }
+}
+
+type ConcatArgument<'p, 'a> = Result<Option<(SingleBitOperand, u64)>, SignalType<'p, 'a>>;
+
+spec fn argument_width<'p, 'a>(result: ConcatArgument<'p, 'a>) -> Result<Option<u64>, SignalType<'p, 'a>> {
+    match result {
+        Ok(Some((_, width))) => Ok(Some(width)),
+        Ok(None) => Ok(None),
+        Err(actual) => Err(actual),
+    }
+}
+
+spec fn argument_projection(
+    context: &ConcatContext, prior: Seq<Option<SignalType>>, at: int, item: (SingleBitOperand, u64),
+) -> bool {
+    let definition = context.wiring.drivers.definitions@[context.index as int].definition;
+    &&& operand_matches(context.source, context.parsed, context.entry, definition, at,
+        context.wiring, context.index as int, item.0)
+    &&& single_bit_operand_available(item.0, context.wiring.drivers.signature.inputs@.len(), context.index as nat)
+    &&& type_for_argument(context, prior, item.0) == Ok(Some(item.1))
 }
 
 proof fn argument_types_agree(
@@ -135,6 +155,125 @@ spec fn checked_prefix(
         &&& i + 1 < starts.len() ==> argument_end(forms, at) == starts[i + 1]
         &&& argument_type(context, prior, at, Ok(widths[i]))
     }
+}
+
+pub(super) closed spec fn concat_operands_match(
+    context: &ConcatContext, prior: Seq<Option<SignalType>>, arguments: core::ops::Range<usize>,
+    operands: Seq<(SingleBitOperand, u64)>, width: u64,
+) -> bool {
+    let definition = context.wiring.drivers.definitions@[context.index as int].definition;
+    let root = context.parsed.definitions@[definition as int].expression.start;
+    &&& concat_arguments_match(context.source.text, context.parsed.syntax.forms@, root as int, arguments)
+    &&& 0 < operands.len()
+    &&& crate::project::concat_prefix_width(operands.map_values(|item: (SingleBitOperand, u64)| item.1),
+        operands.len()) == width
+    &&& exists|starts: Seq<usize>, known: Seq<Option<u64>>|
+        #[trigger] checked_prefix(context, prior, arguments, arguments.end, starts, known)
+        && operands.len() == starts.len()
+        && (forall|j: int| 0 <= j < operands.len() ==> {
+            let item = #[trigger] operands[j];
+            item.1 > 0 && known[j] == Some(item.1) && argument_projection(context, prior, starts[j] as int, item)
+        })
+}
+
+pub(super) proof fn concat_operands_evidence(
+    context: &ConcatContext, prior: Seq<Option<SignalType>>, arguments: core::ops::Range<usize>,
+    operands: Seq<(SingleBitOperand, u64)>, width: u64,
+)
+    requires concat_operands_match(context, prior, arguments, operands, width),
+    ensures
+        operands.len() > 0,
+        crate::project::concat_prefix_width(operands.map_values(|item: (SingleBitOperand, u64)| item.1), operands.len()) == width,
+        forall|i: int| 0 <= i < operands.len() ==> {
+            let (operand, bits) = #[trigger] operands[i];
+            &&& bits > 0
+            &&& single_bit_operand_available(operand, context.wiring.drivers.signature.inputs@.len(), context.index as nat)
+            &&& match operand {
+                SingleBitOperand::Constant(_) => bits == 1,
+                SingleBitOperand::Driver(driver) =>
+                    signal_type_at(context.wiring, prior, driver) matches Some(ty) && ty.ty == ResolvedPortType::Bits(bits),
+            }
+        },
+{
+    let (starts, known) = choose|starts: Seq<usize>, known: Seq<Option<u64>>|
+        #[trigger] checked_prefix(context, prior, arguments, arguments.end, starts, known)
+        && operands.len() == starts.len()
+        && (forall|j: int| 0 <= j < operands.len() ==> {
+            let item = #[trigger] operands[j];
+            item.1 > 0 && known[j] == Some(item.1) && argument_projection(context, prior, starts[j] as int, item)
+        });
+    assert forall|i: int| 0 <= i < operands.len() implies {
+        let (operand, bits) = #[trigger] operands[i];
+        &&& bits > 0
+        &&& single_bit_operand_available(operand, context.wiring.drivers.signature.inputs@.len(), context.index as nat)
+        &&& match operand {
+            SingleBitOperand::Constant(_) => bits == 1,
+            SingleBitOperand::Driver(driver) =>
+                signal_type_at(context.wiring, prior, driver) matches Some(ty) && ty.ty == ResolvedPortType::Bits(bits),
+        }
+    } by {
+        let item = operands[i];
+        assert(argument_projection(context, prior, starts[i] as int, item));
+    };
+}
+
+proof fn atom_argument_position(forms: Seq<Form>, starts: Seq<usize>, first: usize, i: int)
+    requires
+        0 <= i < starts.len(), starts[0] == first,
+        forall|j: int| 0 <= j < starts.len() ==> forms[(#[trigger] starts[j]) as int] is Atom,
+        forall|j: int| 0 <= j && j + 1 < starts.len() ==> argument_end(forms, #[trigger] starts[j] as int) == starts[j + 1],
+    ensures starts[i] == first + i,
+    decreases i,
+{
+    if i > 0 {
+        atom_argument_position(forms, starts, first, i - 1);
+        assert(argument_end(forms, starts[i - 1] as int) == starts[i]);
+    }
+}
+
+/// 保持した各引数が、元の連接式のどのアトムに対応するかを示す。
+pub(super) proof fn concat_operand_positions(
+    context: &ConcatContext, prior: Seq<Option<SignalType>>, arguments: core::ops::Range<usize>,
+    operands: Seq<(SingleBitOperand, u64)>, width: u64,
+)
+    requires concat_operands_match(context, prior, arguments, operands, width),
+    ensures
+        concat_arguments_match(context.source.text, context.parsed.syntax.forms@,
+            context.parsed.definitions@[context.wiring.drivers.definitions@[context.index as int].definition as int].expression.start as int,
+            arguments),
+        operands.len() == arguments.end - arguments.start,
+        forall|j: int| 0 <= j < operands.len() ==>
+            operand_matches(context.source, context.parsed, context.entry,
+                context.wiring.drivers.definitions@[context.index as int].definition,
+                arguments.start + j, context.wiring, context.index as int, (#[trigger] operands[j]).0),
+{
+    let (starts, known) = choose|starts: Seq<usize>, known: Seq<Option<u64>>|
+        #[trigger] checked_prefix(context, prior, arguments, arguments.end, starts, known)
+        && operands.len() == starts.len()
+        && (forall|j: int| 0 <= j < operands.len() ==> {
+            let item = #[trigger] operands[j];
+            item.1 > 0 && known[j] == Some(item.1) && argument_projection(context, prior, starts[j] as int, item)
+        });
+    reveal(checked_prefix);
+    let forms = context.parsed.syntax.forms@;
+    let definition = context.wiring.drivers.definitions@[context.index as int].definition;
+    assert forall|j: int| 0 <= j < starts.len() implies forms[(#[trigger] starts[j]) as int] is Atom by {
+        let item = operands[j];
+        assert(argument_projection(context, prior, starts[j] as int, item));
+        source_operand_is_atom(context.source, context.parsed, context.entry, definition, starts[j] as int,
+            context.wiring, context.index as int, item.0);
+    };
+    assert forall|j: int| 0 <= j && j + 1 < starts.len() implies
+        argument_end(forms, #[trigger] starts[j] as int) == starts[j + 1] by {};
+    assert forall|j: int| 0 <= j < operands.len() implies
+        operand_matches(context.source, context.parsed, context.entry, definition, arguments.start + j,
+            context.wiring, context.index as int, (#[trigger] operands[j]).0) by {
+        atom_argument_position(forms, starts, arguments.start, j);
+    };
+    let last = (starts.len() - 1) as int;
+    atom_argument_position(forms, starts, arguments.start, last);
+    assert(starts[last] == starts.last());
+    assert(forms[starts[last] as int] is Atom);
 }
 
 /// 各開始位置は、その直前のフォームの末尾から一意に決まる。
@@ -392,7 +531,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn check_concat_argument(
         &self, context: &ConcatContext<'_, 'p, 'a>, prior: &[Option<SignalType<'p, 'a>>], at: usize,
         Ghost(arguments): Ghost<core::ops::Range<usize>>,
-    ) -> (result: Result<Option<u64>, SignalType<'p, 'a>>)
+    ) -> (result: ConcatArgument<'p, 'a>)
         requires
             self.concat_context_valid(context, prior@.len() as int),
             concat_arguments_match(context.source.text, context.parsed.syntax.forms@,
@@ -400,7 +539,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 arguments),
             direct_form_in_range(context.parsed.syntax.forms@, arguments.start as int, arguments.end as int, at as int),
             at < context.parsed.syntax.forms@.len(),
-        ensures argument_type(context, prior@, at as int, result),
+        ensures
+            argument_type(context, prior@, at as int, argument_width(result)),
+            result matches Ok(Some(item)) ==> argument_projection(context, prior@, at as int, item),
     {
         let definition = context.wiring.drivers.definitions[context.index].definition;
         let operand = self.read_single_bit_operand(
@@ -415,11 +556,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let result = match operand {
             None => Ok(None),
-            Some(SingleBitOperand::Constant(_)) => Ok(Some(1)),
+            Some(value @ SingleBitOperand::Constant(_)) => Ok(Some((value, 1))),
             Some(SingleBitOperand::Driver(driver)) => match inherit_type(context.wiring, prior, driver) {
                 None => Ok(None),
                 Some(signal) => match signal.ty {
-                    ResolvedPortType::Bits(width) => Ok(Some(width)),
+                    ResolvedPortType::Bits(width) => Ok(Some((SingleBitOperand::Driver(driver), width))),
                     _ => Err(signal),
                 },
             },
@@ -444,7 +585,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 context.source.text.spec_bytes().len() as int),
         ensures
             finished_type_matches(context, expected_value(expected), widths@, root, result),
-            result matches Ok(Some(ty)) ==> ty.ty is Bits && location_in_source(ty.origin),
+            result matches Ok(Some(ty)) ==> ty.ty is Bits && location_in_source(ty.origin)
+                && is_form_location(context.source, context.parsed.syntax.forms@[root as int], ty.origin)
+                && ty.ty->Bits_0 == crate::project::concat_prefix_width(widths@, widths@.len()),
+            result matches Ok(Some(_)) ==> forall|i: int| 0 <= i < widths@.len() ==> (#[trigger] widths@[i]) > 0,
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
     {
         let expression = form_location(context.source, context.parsed.syntax.forms.as_slice(), root);
@@ -490,8 +634,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 幅が未確定の引数があっても残りを調べ、既知の型に対する診断を拾う。
     pub(super) fn check_concat_type(
         &self, context: &ConcatContext<'_, 'p, 'a>, prior: &[Option<SignalType<'p, 'a>>],
-        root: usize, Ghost(rhs_end): Ghost<usize>, arguments: core::ops::Range<usize>, expected: Option<&TypedPort<'p, 'a>>,
-    ) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
+        root: usize, Ghost(rhs_end): Ghost<usize>, arguments: core::ops::Range<usize>,
+        expected: Option<&TypedPort<'p, 'a>>, retain: bool,
+    ) -> (result: Result<(Option<SignalType<'p, 'a>>, Vec<(SingleBitOperand, u64)>), FuncSignalTypeError<'p, 'a>>)
         requires
             self.concat_context_valid(context, prior@.len() as int),
             ({
@@ -503,8 +648,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             expression_forest(context.source.text, context.parsed.syntax.forms@, root as int, rhs_end as int),
             concat_arguments_match(context.source.text, context.parsed.syntax.forms@, root as int, arguments),
         ensures
-            concat_atom_step(context, prior@, root, arguments, expected_value(expected), result),
-            result matches Ok(Some(ty)) ==> ty.ty is Bits && location_in_source(ty.origin),
+            concat_atom_step(context, prior@, root, arguments, expected_value(expected),
+                match result { Ok((ty, _)) => Ok(ty), Err(error) => Err(error) }),
+            result matches Ok((Some(ty), operands)) ==> {
+                &&& ty.ty is Bits && location_in_source(ty.origin)
+                    && is_form_location(context.source, context.parsed.syntax.forms@[root as int], ty.origin)
+                &&& retain ==> concat_operands_match(context, prior@, arguments, operands@, ty.ty->Bits_0)
+                &&& !retain ==> operands@.len() == 0
+            },
+            result matches Ok((None, operands)) ==> operands@.len() == 0,
             result matches Err(error) ==> error is Signal || error is ConcatInputType || error is ConcatWidth,
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
     {
@@ -518,6 +670,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut cursor = arguments.start;
         let mut deferred = false;
         let mut widths: Vec<u64> = Vec::new();
+        let mut operands = Vec::<(SingleBitOperand, u64)>::new();
         let ghost mut starts = Seq::<usize>::empty();
         let ghost mut known = Seq::<Option<u64>>::empty();
         assert(checked_prefix(context, prior@, arguments, cursor, starts, known));
@@ -531,12 +684,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 nested_list_indices(forms@), complete_list_indices(forms@),
                 form_spans_valid(context.source.text, forms@, context.source.text.spec_bytes().len() as int),
                 arguments.start <= cursor <= arguments.end <= forms@.len(),
+                arguments.start < arguments.end,
                 cursor < arguments.end ==> direct_form_in_range(forms@, arguments.start as int, arguments.end as int, cursor as int),
                 expression_region(forms@, cursor as int, arguments.end as int),
                 checked_prefix(context, prior@, arguments, cursor, starts, known),
                 widths@.len() == known.len(),
                 forall|i: int| 0 <= i < known.len() && (#[trigger] known[i]).is_some() ==> widths@[i] == known[i]->Some_0,
                 deferred <==> exists|i: int| 0 <= i < known.len() && (#[trigger] known[i]).is_none(),
+                !retain ==> operands@.len() == 0,
+                retain && !deferred ==> {
+                    &&& operands@.len() == starts.len()
+                    &&& forall|j: int| 0 <= j < operands@.len() ==> {
+                        let item = #[trigger] operands@[j];
+                        known[j] == Some(item.1) && argument_projection(context, prior@, starts[j] as int, item)
+                    }
+                },
             decreases arguments.end - cursor,
         {
             proof {
@@ -545,21 +707,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             let Some(argument) = next_call_argument(forms, cursor..arguments.end) else {
                 proof { assert(false); }
-                return Ok(None);
+                return Ok((None, Vec::new()));
             };
+            let ghost previous_operands = operands@;
             let width = match self.check_concat_argument(context, prior, cursor, Ghost(arguments)) {
                 Err(actual) => {
                     let reference = form_location(context.source, forms, cursor);
                     let ghost site = reference;
                     let ghost invalid = actual;
-                    let result = Err(FuncSignalTypeError::ConcatInputType { reference, actual });
+                    let error = FuncSignalTypeError::ConcatInputType { reference, actual };
                     assert(checked_prefix(context, prior@, arguments, cursor, starts, known)
                         && argument_type(context, prior@, cursor as int, Err(invalid))
                         && is_form_location(context.source, context.parsed.syntax.forms@[cursor as int], site));
-                    assert(concat_atom_step(context, prior@, root, arguments, expected_value(expected), result));
-                    return result;
+                    assert(concat_atom_step(context, prior@, root, arguments, expected_value(expected), Err(error)));
+                    return Err(error);
                 },
-                Ok(width) => width,
+                Ok(Some(item)) => {
+                    if retain && !deferred { operands.push(item); }
+                    Some(item.1)
+                },
+                Ok(None) => None,
             };
             let ghost was_deferred = deferred;
             if width.is_none() { deferred = true; }
@@ -600,19 +767,45 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert forall|i: int| 0 <= i < known.len() implies (#[trigger] known[i]).is_some() by {
                         if i < previous_widths.len() { assert(known[i] == previous_widths[i]); }
                     };
+                    if retain {
+                        assert forall|j: int| 0 <= j < operands@.len() implies {
+                            let item = #[trigger] operands@[j];
+                            known[j] == Some(item.1) && argument_projection(context, prior@, starts[j] as int, item)
+                        } by {
+                            if j < previous_operands.len() {
+                                assert(operands@[j] == previous_operands[j]);
+                                assert(starts[j] == previous[j] && known[j] == previous_widths[j]);
+                            }
+                        };
+                    }
                 }
                 assert(checked_prefix(context, prior@, arguments, argument.end, starts, known));
             }
             cursor = argument.end;
         }
-        if deferred { return Ok(None); }
+        if deferred { return Ok((None, Vec::new())); }
         let ghost requested = expected_value(expected);
         let result = self.finish_concat_type(context, expected, &widths, root);
         proof {
             assert(widths@ =~= Seq::new(known.len(), |i: int| known[i]->Some_0));
             assert(finished_type_matches(context, requested, Seq::new(known.len(), |i: int| known[i]->Some_0), root, result));
         }
-        result
+        match result {
+            Ok(ty) => {
+                proof {
+                    if retain && ty.is_some() {
+                        let operand_widths = operands@.map_values(|item: (SingleBitOperand, u64)| item.1);
+                        assert(operand_widths =~= widths@);
+                        assert forall|j: int| 0 <= j < operands@.len() implies (#[trigger] operands@[j]).1 > 0 by {
+                            assert(operands@[j].1 == widths@[j]);
+                        };
+                        assert(concat_operands_match(context, prior@, arguments, operands@, ty->Some_0.ty->Bits_0));
+                    }
+                }
+                Ok((ty, operands))
+            },
+            Err(error) => Err(error),
+        }
     }
 }
 

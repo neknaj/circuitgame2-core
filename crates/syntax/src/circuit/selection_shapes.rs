@@ -95,6 +95,17 @@ pub(super) proof fn ordinary_head_excludes_selection(source: &str, forms: Seq<Fo
     }
 }
 
+pub(super) proof fn selection_head_evidence(
+    source: &str, forms: Seq<Form>, root: int, shape: BitSelectionShape,
+) -> (head: ExpressionHead)
+    requires bit_selection_shape_matches(source, forms, root, shape),
+    ensures
+        head is Bit || head is Slice,
+        list_head_matches(source, forms, root + 1, Some(head)),
+{
+    match shape.tail { BitSelectionTail::Bit => ExpressionHead::Bit, _ => ExpressionHead::Slice }
+}
+
 /// 同じ位置から得たビット選択の構文情報が一致することを示す。
 pub proof fn bit_selection_shapes_agree(source: &str, forms: Seq<Form>, index: int, left: BitSelectionShape, right: BitSelectionShape)
     requires

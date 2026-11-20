@@ -57,6 +57,26 @@ pub closed spec fn concat_prefix_width(widths: Seq<u64>, count: nat) -> int
     else { concat_prefix_width(widths, (count - 1) as nat) + widths[count - 1] }
 }
 
+pub(super) proof fn concat_prefix_width_step(widths: Seq<u64>, count: nat)
+    requires count < widths.len(),
+    ensures concat_prefix_width(widths, count + 1) == concat_prefix_width(widths, count) + widths[count as int],
+{
+    reveal(concat_prefix_width);
+}
+
+pub(super) proof fn concat_prefix_width_bounds(widths: Seq<u64>, first: nat, last: nat)
+    requires first <= last <= widths.len(),
+    ensures 0 <= concat_prefix_width(widths, first) <= concat_prefix_width(widths, last),
+    decreases last, first,
+{
+    reveal(concat_prefix_width);
+    if first < last {
+        concat_prefix_width_bounds(widths, first, (last - 1) as nat);
+    } else if first > 0 {
+        concat_prefix_width_bounds(widths, (first - 1) as nat, (last - 1) as nat);
+    }
+}
+
 /// 先頭の引数列を連接した長さは、その引数の幅の合計に等しい。
 pub(super) proof fn concat_flatten_prefix_len<T>(
     parts: Seq<Seq<T>>, widths: Seq<u64>, count: nat,
@@ -242,6 +262,7 @@ pub fn check_concat_width(widths: &[u64], max_width: u64) -> (result: Result<u64
     ensures
         concat_width_matches(widths@, max_width, result),
         result matches Ok(width) ==> 0 < width <= max_width,
+        result.is_ok() ==> forall|i: int| 0 <= i < widths@.len() ==> (#[trigger] widths@[i]) > 0,
 {
     if widths.len() == 0 { return Err(ConcatWidthError::Empty); }
     let mut argument = 0;
@@ -306,6 +327,7 @@ pub fn check_concat_result_width(
     ensures
         concat_result_width_matches(widths@, expected, limit, result),
         result matches Ok(width) ==> 0 < width <= limit && width == concat_prefix_width(widths@, widths@.len()),
+        result.is_ok() ==> forall|i: int| 0 <= i < widths@.len() ==> (#[trigger] widths@[i]) > 0,
         result matches Ok(width) ==> expected matches Some(requested) ==> width == requested,
         result matches Err(ConcatResultWidthError::Mismatch { expected: requested, actual })
             ==> expected == Some(requested) && requested != actual,

@@ -3,7 +3,7 @@
 use super::*;
 use super::super::semantics::{
     bit_func_definitions_match, bit_func_evaluation, bit_func_evaluation_intro, bit_func_inputs_match, bit_func_outputs_match,
-    definition_values, driver_values, operand_value,
+    checked_definition_values, concat_operand_values, definition_values, driver_values, operand_value,
 };
 use crate::netlist::{NorEvaluationError, gate_values_match, nor_evaluation, nor_evaluation_result, output_values_match, wire_value};
 
@@ -103,6 +103,97 @@ proof fn operand_matches_wire(
     }
 }
 
+proof fn mapped_wire_parts_flatten(
+    parts: Seq<Seq<Wire>>, input: Seq<bool>, gates: Seq<bool>,
+)
+    ensures parts.flatten().map_values(|wire: Wire| wire_value(wire, input, gates))
+        == parts.map_values(|part: Seq<Wire>| part.map_values(|wire: Wire| wire_value(wire, input, gates))).flatten(),
+    decreases parts.len(),
+{
+    if parts.len() > 0 {
+        let earlier = parts.drop_last();
+        let last = parts.last();
+        let value = |wire: Wire| wire_value(wire, input, gates);
+        let values = |part: Seq<Wire>| part.map_values(value);
+        let mapped = earlier.map_values(values);
+        mapped_wire_parts_flatten(earlier, input, gates);
+        assert(earlier.push(last) =~= parts);
+        earlier.lemma_flatten_push(last);
+        assert(mapped.push(last.map_values(value)) =~= parts.map_values(values));
+        mapped.lemma_flatten_push(last.map_values(value));
+        assert((earlier.flatten() + last).map_values(value) =~=
+            earlier.flatten().map_values(value) + last.map_values(value));
+    }
+}
+
+/// 連接で追加した配線の値を、引数ごとの参照値の連接に対応付ける。
+proof fn concat_wiring_preserves_values(
+    source: &CheckedBitFunc, lowered: &LoweredBitFunc, capacity: usize, i: usize,
+    input: Seq<bool>, gates: Seq<bool>,
+)
+    requires
+        checked_bit_func_available(source),
+        layouts_result(source, capacity, Ok(lowered.layouts)),
+        input.len() == lowered.layouts.inputs.total_bits_model(),
+        lowered.definition_wires@.len() == lowered.layouts.definitions.total_bits_model(),
+        i < source.definitions@.len(),
+        source.definitions@[i as int].rhs is Concat,
+        definition_wiring_matches(source, &lowered.layouts, lowered.definition_wires@,
+            lowered.netlist.gates@, lowered.gate_definitions@, i as int),
+    ensures
+        definition_wire_values(lowered, input, gates)[i as int] == checked_definition_values(
+            source.definitions@[i as int], port_values(&lowered.layouts.inputs, input),
+            definition_wire_values(lowered, input, gates).take(i as int)),
+{
+    use_bit_definition(source, i as int);
+    use_layouts(source, capacity, &lowered.layouts);
+    let operands = source.definitions@[i as int].operands@;
+    let input_ranges = lowered.layouts.inputs.ranges_model();
+    let definition_ranges = lowered.layouts.definitions.ranges_model();
+    let range = definition_ranges[i as int];
+    port_bit_layout_port(definition_widths(source.definitions@), capacity, lowered.layouts.definitions, i);
+    let prefix = lowered.definition_wires@.take(range.start as int);
+    let wires = concat_operand_wires(input_ranges, definition_ranges, prefix, operands);
+    let inputs = port_values(&lowered.layouts.inputs, input);
+    let values = definition_wire_values(lowered, input, gates).take(i as int);
+    let expected = concat_operand_values(inputs, values, operands);
+    let mapped = wires.map_values(|part: Seq<Wire>| part.map_values(|wire: Wire| wire_value(wire, input, gates)));
+    assert forall|j: int| 0 <= j < operands.len() implies (#[trigger] mapped[j]) == expected[j] by {
+        let (operand, width) = operands[j];
+        assert(wires[j].len() == width && width > 0);
+        match operand {
+            SingleBitOperand::Constant(bit) => {
+                assert(width == 1);
+                assert(mapped[j] =~= seq![bit]);
+            },
+            SingleBitOperand::Driver(driver) => {
+                driver_bit_value(source, lowered, capacity, i as int, input, gates, driver, width, 0);
+                let values = expected[j];
+                let part = mapped[j];
+                assert(values.len() == part.len());
+                assert forall|bit: int| 0 <= bit < width implies (#[trigger] part[bit]) == values[bit] by {
+                    driver_bits_fit_layout(source, &lowered.layouts, capacity, i as int, range.start as int, driver, width, bit);
+                    driver_bit_value(source, lowered, capacity, i as int, input, gates, driver, width, bit);
+                    if let OutputDriver::Definition(from) = driver {
+                        let at = definition_ranges[from as int].start + bit;
+                        assert(prefix[at] == lowered.definition_wires@[at]);
+                    }
+                    assert(wires[j][bit] == driver_wire(input_ranges, definition_ranges, prefix, driver, bit));
+                };
+                assert(part =~= values);
+            },
+        }
+    };
+    assert(mapped =~= expected);
+    mapped_wire_parts_flatten(wires, input, gates);
+    reveal(definition_wiring_matches);
+    reveal(definition_wire_values);
+    let flat = lowered.definition_wires@.subrange(range.start as int, range.end as int);
+    assert(flat == wires.flatten());
+    assert(definition_wire_values(lowered, input, gates)[i as int]
+        =~= flat.map_values(|wire: Wire| wire_value(wire, input, gates)));
+}
+
 proof fn definition_values_match_wiring(
     source: &CheckedBitFunc, lowered: &LoweredBitFunc, capacity: usize, i: usize,
     input: Seq<bool>, gates: Seq<bool>,
@@ -116,8 +207,8 @@ proof fn definition_values_match_wiring(
         i < source.definitions@.len(),
     ensures
         definition_wire_values(lowered, input, gates)[i as int].len() == source.definitions@[i as int].width,
-        definition_wire_values(lowered, input, gates)[i as int] == definition_values(
-            source.definitions@[i as int].rhs, port_values(&lowered.layouts.inputs, input),
+        definition_wire_values(lowered, input, gates)[i as int] == checked_definition_values(
+            source.definitions@[i as int], port_values(&lowered.layouts.inputs, input),
             definition_wire_values(lowered, input, gates).take(i as int)),
 {
     reveal(lowered_bit_func_result);
@@ -141,6 +232,9 @@ proof fn definition_values_match_wiring(
     let definition_ranges = lowered.layouts.definitions.ranges_model();
 
     match definition.rhs {
+        BitFuncRhs::Concat => {
+            concat_wiring_preserves_values(source, lowered, capacity, i, input, gates);
+        },
         BitFuncRhs::Constant(value_bit) => {
             assert(lowered.definition_wires@[range.start as int] == Wire::Constant(value_bit));
             assert(value[0] == value_bit);
@@ -227,7 +321,7 @@ pub(super) proof fn lowered_bit_func_refines_evaluation(
         vstd::std_specs::vec::axiom_spec_len(&source.definitions);
         assert forall|i: int| 0 <= i < values.len() implies {
             &&& (#[trigger] values[i]).len() == source.definitions@[i].width
-            &&& values[i] == definition_values(source.definitions@[i].rhs, inputs, values.take(i))
+            &&& values[i] == checked_definition_values(source.definitions@[i], inputs, values.take(i))
         } by {
             definition_values_match_wiring(source, lowered, capacity, i as usize, input, gates);
         };

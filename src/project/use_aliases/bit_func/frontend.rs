@@ -12,7 +12,7 @@ use super::super::{
     ResolvedPortType, SelectionArgumentError, SingleBitOperand, StructureLayouts, StructureTypeError,
     TypedPort, TypedRoutineSignature, UseAliases,
 };
-use super::super::function_atoms::{StructureProjection, copy_location, named_selection};
+use super::super::function_atoms::{ConcatProjection, StructureProjection, copy_location, named_selection};
 #[cfg(verus_only)]
 use super::super::function_atoms::SignalType;
 use super::super::selection_arguments::{
@@ -24,7 +24,7 @@ use crate::project::circuits::form_location;
 use crate::syntax::{Form, circuit::{NamedBuildCircuit, definition_target_atoms}};
 
 #[cfg(verus_only)]
-use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, nor_operand_matches};
+use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, concat_operands_fit, nor_operand_matches};
 #[cfg(verus_only)]
 use super::super::{
     FuncCallOutputTypes, TypedFuncCall, function_atoms::named_selection_matches,
@@ -33,7 +33,9 @@ use super::super::{
 };
 #[cfg(verus_only)]
 use super::super::function_atoms::{
-    signal_type_at, structure_projection_matches, structure_projection_required, structure_projections_in_order,
+    concat_projection_evidence, concat_projection_matches, concat_projection_required, concat_projections_complete,
+    concat_projections_order, signal_type_at,
+    structure_projection_matches, structure_projection_required, structure_projections_in_order,
 };
 #[cfg(verus_only)]
 use super::super::selection_arguments::{
@@ -275,6 +277,49 @@ fn next_structure_projection(rows: &[StructureProjection], cursor: usize, target
     }
 }
 
+#[verifier::opaque]
+spec fn concat_cursor_ready(rows: Seq<ConcatProjection>, model: Seq<ConcatProjection>, cursor: usize, target: int) -> bool {
+    &&& cursor <= rows.len() == model.len()
+    &&& forall|j: int| 0 <= j < cursor ==> (#[trigger] model[j]).target < target
+    &&& forall|j: int| cursor <= j < rows.len() ==> (#[trigger] rows[j]) == model[j] && target <= model[j].target
+}
+
+/// 定義順に走査し、対象の連接に保存した引数列を移す。
+fn take_concat_projection(
+    rows: &mut Vec<ConcatProjection>, cursor: usize, target: usize, Ghost(model): Ghost<Seq<ConcatProjection>>,
+) -> (result: (usize, Option<ConcatProjection>))
+    requires
+        concat_cursor_ready(old(rows)@, model, cursor, target as int),
+        forall|a: int, b: int| 0 <= a < b < model.len() ==> (#[trigger] model[a]).target < (#[trigger] model[b]).target,
+    ensures
+        concat_cursor_ready(final(rows)@, model, result.0, target as int + 1),
+        result.1 matches Some(row) ==> cursor < model.len() && row == model[cursor as int]
+            && row.target == target && result.0 == cursor + 1,
+        result.1.is_none() ==> result.0 == cursor,
+        result.1.is_none() ==> forall|j: int| 0 <= j < model.len() ==> (#[trigger] model[j]).target != target,
+{
+    reveal(concat_cursor_ready);
+    if cursor < rows.len() && rows[cursor].target == target {
+        let mut row = ConcatProjection { target, width: 0, _arguments: Ghost(arbitrary()), operands: Vec::new() };
+        let ghost original = rows@[cursor as int];
+        assert(original == model[cursor as int]);
+        rows.set_and_swap(cursor, &mut row);
+        (cursor + 1, Some(row))
+    } else {
+        (cursor, None)
+    }
+}
+
+spec fn concat_type_ready(scope: &FuncProjection, index: int) -> bool {
+    let driver = scope.wiring.drivers.definitions@[index];
+    let root = scope.parsed.definitions@[driver.definition as int].expression.start;
+    &&& 0 <= index < scope.types@.len() && index < scope.wiring.drivers.definitions@.len()
+    &&& driver.result_index == 0
+    &&& scope.types@[index] matches Some(ty) && ty.ty is Bits
+    &&& exists|args: core::ops::Range<usize>|
+        #[trigger] crate::syntax::circuit::concat_arguments_match(scope.source.text, scope.parsed.syntax.forms@, root as int, args)
+}
+
 fn operand_width(
     signature: &TypedRoutineSignature, inputs: &[u64], prior: &[CheckedBitDefinition], operand: SingleBitOperand,
 ) -> (width: u64)
@@ -447,7 +492,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     spec fn bit_rhs_from_source(&self, scope: &FuncProjection, prior: Seq<CheckedBitDefinition>, i: int,
-        rhs: BitFuncRhs) -> bool {
+        rhs: BitFuncRhs, operands: Seq<(SingleBitOperand, u64)>) -> bool {
         let parsed = scope.parsed;
         let forms = parsed.syntax.forms@;
         let definition = scope.wiring.drivers.definitions@[i].definition;
@@ -484,6 +529,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     SingleBitOperand::Driver(input))
                 && selection_arguments_match(scope.source, forms, &shape, width, &driver_width_origin(signature, prior, input),
                     Ok(selection)))) || Self::nested_selection_projection(scope, prior, i, input, selection),
+            BitFuncRhs::Concat => exists|concat: ConcatProjection|
+                #[trigger] concat_projection_matches(scope.file, entry, scope.limit, scope.source, parsed, scope.wiring,
+                    scope.types@, concat)
+                && concat.target == i && concat.operands@ == operands,
         } }
     }
 
@@ -514,14 +563,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let (first, end) = definition_target_range(forms, row);
         &&& end - first == 1
         &&& is_form_location(scope.source, forms[row.expression.start as int], checked.expression)
-        &&& self.bit_rhs_from_source(scope, prior, i, checked.rhs)
+        &&& self.bit_rhs_from_source(scope, prior, i, checked.rhs, checked.operands@)
         &&& bit_definition_matches(scope.inputs@, prior, checked)
     }
 
+    #[verifier::opaque]
     spec fn definition_prefix(&self, scope: &FuncProjection, definitions: Seq<CheckedBitDefinition>) -> bool {
         &&& definitions.len() <= scope.wiring.drivers.definitions@.len()
         &&& forall|i: int| 0 <= i < definitions.len() ==>
             self.bit_definition_from_source(scope, definitions.take(i), i, #[trigger] definitions[i])
+    }
+
+    proof fn extend_definition_prefix(
+        &self, scope: &FuncProjection, previous: Seq<CheckedBitDefinition>, checked: CheckedBitDefinition,
+    )
+        requires
+            self.definition_prefix(scope, previous),
+            previous.len() < scope.wiring.drivers.definitions@.len(),
+            self.bit_definition_from_source(scope, previous, previous.len() as int, checked),
+        ensures self.definition_prefix(scope, previous.push(checked)),
+    {
+        reveal(UseAliases::definition_prefix);
+        let next = previous.push(checked);
+        assert forall|j: int| 0 <= j < next.len() implies
+            self.bit_definition_from_source(scope, next.take(j), j, #[trigger] next[j]) by {
+            if j < previous.len() {
+                assert(next[j] == previous[j]);
+                assert(next.take(j) =~= previous.take(j));
+            } else {
+                assert(next.take(j) =~= previous);
+            }
+        };
     }
 
     /// 入出力ポート、定義順、右辺の各参照が、検査した元の関数と対応することを表す。
@@ -580,6 +652,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ==> forall|j: int| 0 <= j < scope.structures@.len() ==> (#[trigger] scope.structures@[j]).target != i)
         &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
             ==> end - first == 1 && no_operand(source, parsed, entry, definition, root, wiring, i))
+        &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
+            ==> !concat_type_ready(scope, i))
         &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
             ==> forall|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
                 !#[trigger] field_selection_shape_matches(source.text, forms, root as usize, steps, at, shape))
@@ -912,6 +986,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     self.driver_type_matches_width(scope, prior, input, bit_driver_width(scope.inputs@, prior, input)->Some_0);
                     self.selection_definition_type(scope, typed, prior, index, checked, input, selection);
                 },
+                BitFuncRhs::Concat => {
+                    let row = choose|concat: ConcatProjection|
+                        #[trigger] concat_projection_matches(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                            scope.wiring, scope.types@, concat)
+                        && concat.target == index && concat.operands@ == checked.operands@;
+                    let bits = concat_projection_evidence(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                        scope.wiring, scope.types@, row);
+                    assert(bits == checked.width);
+                },
             }
         }
         assert(scope.types@[index] matches Some(ty) && self.port_width_matches(ty.ty, checked.width, scope.layouts));
@@ -992,8 +1075,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         } else {
             (range.end - range.start, contiguous_rhs(project.input, range.start, range.end, project.input_width))
         };
-        assert(self.bit_rhs_from_source(scope, _prior@, _index as int, rhs));
-        CheckedBitDefinition { expression, width, rhs }
+        assert(self.bit_rhs_from_source(scope, _prior@, _index as int, rhs, Seq::empty()));
+        CheckedBitDefinition { expression, width, rhs, operands: Vec::new() }
     }
 
     /// 選択列の入力を結線から取り出し、合成した選択を一つの右辺にする。
@@ -1070,7 +1153,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(nested_named_selection_matches(source.text, forms@, root, steps@, leaf));
         };
         let rhs = BitFuncRhs::Selection { input, selection };
-        CheckedBitDefinition { expression, width: selection.count, rhs }
+        CheckedBitDefinition { expression, width: selection.count, rhs, operands: Vec::new() }
     }
 
     /// 型検査を終えたフィールド選択には、対応する変換用の行が存在する。
@@ -1152,7 +1235,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     fn project_definition(
         &self, scope: &FuncProjection<'_, 'p, 'a>, prior: &[CheckedBitDefinition<'p, 'a>], index: usize,
-        projection: Option<usize>, Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
+        projection: Option<usize>, concat: Option<ConcatProjection>, Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
     ) -> (result: Result<CheckedBitDefinition<'p, 'a>, BitFuncError<'p, 'a>>)
         requires
             self.projection_context(scope),
@@ -1169,6 +1252,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             projection matches Some(at) ==> at < scope.structures@.len() && scope.structures@[at as int].target == index,
             projection.is_none() ==> forall|j: int| 0 <= j < scope.structures@.len()
                 ==> (#[trigger] scope.structures@[j]).target != index,
+            concat matches Some(row) ==> row.target == index && concat_projection_matches(scope.file, scope.entry, scope.limit,
+                scope.source, scope.parsed, scope.wiring, scope.types@, row),
+            concat.is_none() ==> !concat_type_ready(scope, index as int),
             forall|i: int| 0 <= i < prior@.len() ==>
                 location_in_source((#[trigger] prior@[i]).expression) && prior@[i].width > 0,
         ensures
@@ -1198,6 +1284,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         if let Some(at) = projection {
             return Ok(self.project_structure_definition(scope, prior, index, at, expression));
+        }
+        if let Some(concat) = concat {
+            proof {
+                concat_projection_evidence(file, entry, limit, source, parsed, wiring, scope.types@, concat);
+                assert forall|j: int| 0 <= j < concat.operands@.len() implies {
+                    let (operand, width) = #[trigger] concat.operands@[j];
+                    &&& width > 0
+                    &&& match operand {
+                        SingleBitOperand::Constant(_) => width == 1,
+                        SingleBitOperand::Driver(driver) =>
+                            bit_driver_width(scope.inputs@, prior@, driver) == Some(width),
+                    }
+                } by {
+                    if let SingleBitOperand::Driver(driver) = concat.operands@[j].0 {
+                        let width = bit_driver_width(scope.inputs@, prior@, driver)->Some_0;
+                        self.driver_type_matches_width(scope, prior@, driver, width);
+                    }
+                };
+                assert(concat_operands_fit(scope.inputs@, prior@, concat.operands@));
+            }
+            let checked = CheckedBitDefinition { expression, width: concat.width, rhs: BitFuncRhs::Concat,
+                operands: concat.operands };
+            assert(self.bit_definition_from_source(scope, prior@, index as int, checked));
+            return Ok(checked);
         }
         assert forall|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
             !#[trigger] field_selection_shape_matches(source.text, forms@, root, steps, at, shape) by {
@@ -1252,8 +1362,40 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         } else {
             return Err(BitFuncError::Unsupported(UnsupportedBitFunc::Expression, expression));
         };
-        let checked = CheckedBitDefinition { expression, width, rhs };
+        let checked = CheckedBitDefinition { expression, width, rhs, operands: Vec::new() };
         Ok(checked)
+    }
+
+    /// 型が確定した連接を未対応と判定する経路がないことを示す。
+    proof fn ready_concat_has_row(
+        &self, scope: &FuncProjection, typed: FuncSignalTypes, rows: Seq<ConcatProjection>, target: int,
+    )
+        requires
+            self.projection_context(scope),
+            self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            typed.types@ == scope.types@,
+            self.func_concat_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, rows),
+            concat_type_ready(scope, target),
+        ensures exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).target == target,
+    {
+        let (file, entry, limit) = (scope.file, scope.entry, scope.limit);
+        let wiring = scope.wiring;
+        let parsed = scope.parsed;
+        let source = scope.source;
+        let driver = wiring.drivers.definitions@[target];
+        let root = parsed.definitions@[driver.definition as int].expression.start;
+        let args = choose|args: core::ops::Range<usize>|
+            #[trigger] crate::syntax::circuit::concat_arguments_match(source.text, parsed.syntax.forms@, root as int, args);
+        crate::syntax::circuit::concat_excludes_other_shapes(source.text, parsed.syntax.forms@, root as int, args);
+        self.checked_types_keep_wiring(file, entry, limit, typed, *wiring);
+        self.literal_widths_fit_wiring(file, entry, limit, &typed.literals, wiring);
+        self.nonliteral_definition_has_no_literal_width(file, entry, limit, &typed.literals, wiring, target);
+        let roots = choose|roots: FuncCallOutputTypes|
+            #[trigger] self.signal_type_sources(file, entry, limit, typed.literals, wiring, roots)
+            && roots.types@.len() == wiring.drivers.definitions@.len()
+            && concat_projections_complete(source, parsed, wiring, typed.literals.widths@, roots.types@, typed.types@, rows);
+        assert(concat_projection_required(source, parsed, wiring, typed.literals.widths@, roots.types@, typed.types@, target));
     }
 
     /// 組み合わせ関数から、ポートの幅と定義順の右辺を取り出す。
@@ -1263,6 +1405,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 入れ子の選択は配線上で一段にまとめる。
     /// `field`・`as`・`raw` は、裸の信号名を入力に取る式を扱う。
     /// 構造体型のポート間で同じ型の信号を転送するときは、宣言の総幅を使う。
+    ///
+    /// `concat` は、型が確定した裸のビット列信号と定数 `0`・`1` を引数に取れる。
     ///
     /// # Examples
     ///
@@ -1328,7 +1472,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => self.checked_bit_func_error(file, entry, limit, error),
         },
     {
-        let (typed, projections) = match self.check_func_signal_projections(file, entry, limit) {
+        let (typed, projections) = match self.check_func_signal_projections(file, entry, limit, true) {
             Ok(checked) => checked,
             Err(error) => return Err(BitFuncError::Check(error)),
         };
@@ -1404,11 +1548,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
         };
         let mut definitions = Vec::new();
+        assert(self.definition_prefix(&scope, definitions@)) by { reveal(UseAliases::definition_prefix); };
         assert(self.definition_widths_match(&scope, definitions@)) by {
             reveal(UseAliases::definition_widths_match);
         };
         let mut i = 0usize;
         let mut next_structure = 0usize;
+        let mut next_concat = 0usize;
+        let mut concats = projections.concats;
+        let ghost concat_model = concats@;
+        proof {
+            concat_projections_order(file, entry, limit, source, parsed, &wiring, scope.types@, concat_model);
+            assert(concat_cursor_ready(concats@, concat_model, next_concat, i as int)) by { reveal(concat_cursor_ready); };
+        }
         while i < wiring.drivers.definitions.len()
             invariant
                 self.projection_context(&scope),
@@ -1417,12 +1569,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 typed_model.types@ == scope.types@,
                 typed_model.types@.len() == wiring.drivers.definitions@.len(),
                 self.func_structure_projections_complete(file, entry, limit, typed_model, &wiring, scope.structures@),
-                scope.wiring == &wiring && *signature == wiring.drivers.signature,
+                scope.wiring == &wiring && *signature == wiring.drivers.signature && scope.source == source && scope.parsed == parsed,
                 scope.file == file && scope.entry == entry && scope.limit == limit,
                 self.func_signal_types_evidence(file, entry, limit, Ok(typed_model)),
                 typed_model.literals.wiring == FuncWiringResult::Checked(wiring),
-                i == definitions@.len(),
+                i == definitions@.len() <= wiring.drivers.definitions@.len(),
                 next_structure <= scope.structures@.len(),
+                concat_cursor_ready(concats@, concat_model, next_concat, i as int),
+                self.func_concat_projections_complete(file, entry, limit, typed_model, &wiring, concat_model),
+                forall|a: int, b: int| 0 <= a < b < concat_model.len()
+                    ==> (#[trigger] concat_model[a]).target < (#[trigger] concat_model[b]).target,
+                forall|j: int| 0 <= j < concat_model.len() ==> concat_projection_matches(
+                    file, entry, limit, source, parsed, &wiring, scope.types@, #[trigger] concat_model[j]),
                 forall|j: int| 0 <= j < next_structure ==> (#[trigger] scope.structures@[j]).target < i,
                 forall|j: int| next_structure <= j < scope.structures@.len() ==> i <= (#[trigger] scope.structures@[j]).target,
                 self.definition_prefix(&scope, definitions@),
@@ -1436,7 +1594,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         {
             let (cursor, structure) = next_structure_projection(scope.structures.as_slice(), next_structure, i);
             next_structure = cursor;
-            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure, Ghost(typed_model)) {
+            let (cursor, concat) = take_concat_projection(&mut concats, next_concat, i, Ghost(concat_model));
+            proof {
+                if let Some(row) = &concat {
+                    assert(*row == concat_model[next_concat as int]);
+                    assert(concat_projection_matches(file, entry, limit, source, parsed, &wiring, scope.types@, *row));
+                } else if concat_type_ready(&scope, i as int) {
+                    self.ready_concat_has_row(&scope, typed_model, concat_model, i as int);
+                    assert(false);
+                }
+            }
+            next_concat = cursor;
+            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure, concat, Ghost(typed_model)) {
                 Ok(checked) => checked,
                 Err(error) => {
                     assert(self.projection_failure(&scope, error));
@@ -1445,28 +1614,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 },
             };
             let ghost previous = definitions@;
-            proof { self.extend_definition_widths(&scope, typed_model, previous, checked, structure); }
+            proof {
+                self.extend_definition_widths(&scope, typed_model, previous, checked, structure);
+                self.extend_definition_prefix(&scope, previous, checked);
+            }
             definitions.push(checked);
-            assert forall|j: int| 0 <= j < definitions@.len() implies
-                self.bit_definition_from_source(&scope, definitions@.take(j), j, #[trigger] definitions@[j]) by {
-                if j < i {
-                    assert(definitions@[j] == previous[j]);
-                    assert(definitions@.take(j) =~= previous.take(j));
-                } else {
-                    assert(definitions@.take(j) =~= previous);
-                }
-            };
+            assert(concat_cursor_ready(concats@, concat_model, next_concat, i as int + 1));
             i += 1;
         }
+        assert(definitions@.len() == wiring.drivers.definitions@.len());
         if let Err(error) = check_output_widths(&wiring, scope.inputs.as_slice(), scope.outputs.as_slice(), definitions.as_slice()) {
+            assert(self.definition_prefix(&scope, definitions@));
             assert(self.projection_failure(&scope, error));
             proof { self.projected_error(&scope, typed_model, error); }
             return Err(error);
         }
-        proof { reveal(checked_bit_func_available); }
+        let ghost layout_model = scope.layouts;
+        let ghost structures_model = projections.entries;
+        proof {
+            reveal(checked_bit_func_available);
+            reveal(UseAliases::definition_prefix);
+        }
         let checked = CheckedBitFunc { signature: wiring.drivers.signature, input_widths, output_widths,
             definitions, output_drivers: wiring.drivers.outputs };
         assert(checked_bit_func_available(&checked));
+        assert(self.checked_bit_func_projection(file, entry, limit, &checked, typed_model, layout_model, structures_model));
         assert(self.checked_bit_func_matches(file, entry, limit, &checked));
         Ok(checked)
     }

@@ -22,7 +22,7 @@ use super::function_literals::{output_indices, output_indices_agree};
 use super::function_drivers::same_definition_driver;
 #[cfg(verus_only)]
 use super::function_drivers::expected_output_context;
-use super::{FuncLiteralError, FuncLiteralWidths, FuncWiring, FuncWiringResult, OutputDriver, ResolvedPortType, UseAliases};
+use super::{FuncLiteralError, FuncLiteralWidths, FuncWiring, FuncWiringResult, OutputDriver, ResolvedPortType, SingleBitOperand, UseAliases};
 use crate::project::{LocatedName, ProjectSource, TypedPort};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
@@ -42,7 +42,7 @@ use crate::syntax::circuit::{
     build_selection_chain_signal, build_selection_input_position, build_structure_input_position,
     field_selection_root, field_selection_shape_matches, field_selection_shapes_agree,
     ordinary_call_at, ordinary_call_excludes_special_forms, structure_expression_matches, structure_expression_positions,
-    concat_argument_ranges_agree, concat_arguments_match,
+    concat_argument_ranges_agree, concat_arguments_match, concat_excludes_other_shapes,
 };
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
@@ -73,11 +73,213 @@ pub(super) struct StructureProjection {
     pub(super) selection: Option<CheckedBitSelection>,
 }
 
-/// 定義順に集めた構造体式と、共通の配置表。
-#[derive(Debug)]
-pub(super) struct StructureProjections<'p, 'a> {
+/// 定義の添字と、連接する引数の構文範囲および駆動元を保持する。
+pub(super) struct ConcatProjection {
+    pub(super) target: usize,
+    pub(super) width: u64,
+    pub(super) _arguments: Ghost<core::ops::Range<usize>>,
+    pub(super) operands: Vec<(SingleBitOperand, u64)>,
+}
+
+/// 定義順に集めた配線変換用の情報と、構造体の配置表。
+pub(super) struct FuncProjections<'p, 'a> {
     pub(super) entries: Vec<StructureProjection>,
     pub(super) layouts: Option<StructureLayouts<'p, 'a>>,
+    pub(super) concats: Vec<ConcatProjection>,
+}
+
+pub(super) closed spec fn concat_projection_matches(
+    file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+    wiring: &FuncWiring, types: Seq<Option<SignalType>>, row: ConcatProjection,
+) -> bool {
+    let index = row.target;
+    let context = ConcatContext { file, entry, limit, source, parsed, wiring, index };
+    let definition = wiring.drivers.definitions@[index as int].definition;
+    let root = parsed.definitions@[definition as int].expression.start;
+    &&& index < types.len() && index < wiring.drivers.definitions@.len()
+    &&& wiring.drivers.definitions@[index as int].result_index == 0
+    &&& definition < parsed.definitions@.len() && root < parsed.syntax.forms@.len()
+    &&& types[index as int] matches Some(ty)
+    &&& ty.ty matches ResolvedPortType::Bits(width)
+    &&& row.width == width
+    &&& is_form_location(source, parsed.syntax.forms@[root as int], ty.origin)
+    &&& concat::concat_operands_match(&context, types.take(index as int), row._arguments@, row.operands@, width)
+}
+
+/// 連接行を構成する各引数の幅と、使用できる駆動元を取り出す。
+pub(super) proof fn concat_projection_evidence(
+    file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+    wiring: &FuncWiring, types: Seq<Option<SignalType>>, row: ConcatProjection,
+) -> (bits: u64)
+    requires
+        concat_projection_matches(file, entry, limit, source, parsed, wiring, types, row),
+    ensures ({
+        let target = row.target as int;
+        &&& bits == row.width
+        &&& bits > 0
+        &&& target < types.len() && target < wiring.drivers.definitions@.len()
+        &&& types[target] matches Some(ty) && ty.ty == ResolvedPortType::Bits(bits)
+        &&& row.operands@.len() > 0
+        &&& crate::project::concat_prefix_width(
+            row.operands@.map_values(|item: (SingleBitOperand, u64)| item.1), row.operands@.len()) == bits
+        &&& forall|i: int| 0 <= i < row.operands@.len() ==> {
+            let (operand, width) = #[trigger] row.operands@[i];
+            &&& width > 0
+            &&& super::single_bit_func::single_bit_operand_available(operand, wiring.drivers.signature.inputs@.len(), target as nat)
+            &&& match operand {
+                SingleBitOperand::Constant(_) => width == 1,
+                SingleBitOperand::Driver(driver) =>
+                    signal_type_at(wiring, types.take(target), driver) matches Some(ty) && ty.ty == ResolvedPortType::Bits(width),
+            }
+        }
+    }),
+{
+    let context = ConcatContext { file, entry, limit, source, parsed, wiring, index: row.target };
+    let bits = types[row.target as int]->Some_0.ty->Bits_0;
+    concat::concat_operands_evidence(&context, types.take(row.target as int), row._arguments@, row.operands@, bits);
+    let widths = row.operands@.map_values(|item: (SingleBitOperand, u64)| item.1);
+    crate::project::concatenation::concat_prefix_width_step(widths, 0);
+    crate::project::concatenation::concat_prefix_width_bounds(widths, 0, 1);
+    crate::project::concatenation::concat_prefix_width_bounds(widths, 1, widths.len());
+    assert(widths[0] > 0);
+    bits
+}
+
+pub(super) proof fn concat_projections_order(
+    file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+    wiring: &FuncWiring, types: Seq<Option<SignalType>>, rows: Seq<ConcatProjection>,
+)
+    requires concat_projections_match(file, entry, limit, source, parsed, wiring, types, rows),
+    ensures
+        forall|i: int| 0 <= i < rows.len() ==> (#[trigger] rows[i]).target < types.len()
+            && concat_projection_matches(file, entry, limit, source, parsed, wiring, types, rows[i]),
+        forall|a: int, b: int| 0 <= a < b < rows.len() ==> (#[trigger] rows[a]).target < (#[trigger] rows[b]).target,
+{
+}
+
+/// 連接の引数列を厳格構文上の区間と、各位置の束縛に結び付ける。
+pub(super) proof fn concat_projection_positions(
+    file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+    wiring: &FuncWiring, types: Seq<Option<SignalType>>, row: ConcatProjection,
+) -> (arguments: core::ops::Range<usize>)
+    requires concat_projection_matches(file, entry, limit, source, parsed, wiring, types, row),
+    ensures ({
+        let target = row.target as int;
+        let definition = wiring.drivers.definitions@[target].definition;
+        let root = parsed.definitions@[definition as int].expression.start;
+        &&& concat_arguments_match(source.text, parsed.syntax.forms@, root as int, arguments)
+        &&& row.operands@.len() == arguments.end - arguments.start
+        &&& forall|j: int| 0 <= j < row.operands@.len() ==>
+            super::single_bit_func::operand_matches(source, parsed, entry, definition, arguments.start + j,
+                wiring, target, (#[trigger] row.operands@[j]).0)
+    }),
+{
+    let context = ConcatContext { file, entry, limit, source, parsed, wiring, index: row.target };
+    let arguments = row._arguments@;
+    concat::concat_operand_positions(&context, types.take(row.target as int), arguments, row.operands@, row.width);
+    arguments
+}
+
+pub(super) closed spec fn concat_projections_match(
+    file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+    wiring: &FuncWiring, types: Seq<Option<SignalType>>, rows: Seq<ConcatProjection>,
+) -> bool {
+    &&& forall|j: int| 0 <= j < rows.len() ==>
+        concat_projection_matches(file, entry, limit, source, parsed, wiring, types, #[trigger] rows[j])
+    &&& forall|a: int, b: int| 0 <= a < b < rows.len() ==> (#[trigger] rows[a]).target < (#[trigger] rows[b]).target
+}
+
+/// 型が確定した連接式だけが配線変換用の引数列を持つ。
+pub(super) open spec fn concat_projection_required(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, wiring: &FuncWiring,
+    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, types: Seq<Option<SignalType>>, target: int,
+) -> bool {
+    let driver = wiring.drivers.definitions@[target];
+    let root = parsed.definitions@[driver.definition as int].expression.start;
+    &&& 0 <= target < types.len() && target < wiring.drivers.definitions@.len() && target < widths.len()
+    &&& driver.result_index == 0 && widths[target].is_none() && roots.len() > 0
+    &&& (types[target] matches Some(ty) && ty.ty is Bits)
+    &&& exists|arguments: core::ops::Range<usize>|
+        #[trigger] concat_arguments_match(source.text, parsed.syntax.forms@, root as int, arguments)
+}
+
+pub(super) open spec fn concat_projections_complete(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, wiring: &FuncWiring,
+    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, types: Seq<Option<SignalType>>, rows: Seq<ConcatProjection>,
+) -> bool {
+    forall|target: int| #[trigger] concat_projection_required(source, parsed, wiring, widths, roots, types, target)
+        ==> exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).target == target
+}
+
+proof fn concat_root_excludes_other_atoms(source: &str, forms: Seq<Form>, root: usize, arguments: core::ops::Range<usize>)
+    requires concat_arguments_match(source, forms, root as int, arguments),
+    ensures
+        forms[root as int] is List,
+        !(exists|shape: BitSelectionShape| #[trigger] named_selection_matches(source, forms, root as int, shape)),
+        !(exists|shape: StructureExpressionShape| #[trigger] named_structure_expression_matches(source, forms, root as int, shape)),
+        !(exists|steps: Seq<BitSelectionShape>, leaf: usize| #[trigger] nested_named_selection_matches(source, forms, root, steps, leaf)),
+        !(exists|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+            #[trigger] field_selection_shape_matches(source, forms, root, steps, at, shape)),
+{
+    concat_excludes_other_shapes(source, forms, root as int, arguments);
+    if exists|steps: Seq<BitSelectionShape>, leaf: usize| #[trigger] nested_named_selection_matches(source, forms, root, steps, leaf) {
+        let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
+            #[trigger] nested_named_selection_matches(source, forms, root, steps, leaf);
+        nested_named_selection_root(source, forms, root, steps, leaf);
+    }
+    if exists|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+        #[trigger] field_selection_shape_matches(source, forms, root, steps, at, shape)
+    {
+        let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+            #[trigger] field_selection_shape_matches(source, forms, root, steps, at, shape);
+        field_selection_root(source, forms, root, steps, at, shape);
+    }
+}
+
+proof fn concat_projections_keep_prefix(
+    file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+    wiring: &FuncWiring, types: Seq<Option<SignalType>>, next: Option<SignalType>, rows: Seq<ConcatProjection>,
+)
+    requires concat_projections_match(file, entry, limit, source, parsed, wiring, types, rows),
+    ensures concat_projections_match(file, entry, limit, source, parsed, wiring, types.push(next), rows),
+{
+    assert forall|j: int| 0 <= j < rows.len() implies
+        concat_projection_matches(file, entry, limit, source, parsed, wiring, types.push(next), #[trigger] rows[j]) by {
+        let i = rows[j].target as int;
+        assert(types.push(next).take(i) =~= types.take(i));
+    };
+}
+
+fn retain_concat_projection<'p, 'a>(
+    context: &ConcatContext<'_, 'p, 'a>, Ghost(prior): Ghost<Seq<Option<SignalType<'p, 'a>>>>,
+    ty: &Option<SignalType<'p, 'a>>, operands: Vec<(SingleBitOperand, u64)>,
+    Ghost(arguments): Ghost<core::ops::Range<usize>>, retain: bool,
+) -> (row: Option<ConcatProjection>)
+    requires
+        context.index == prior.len() < context.wiring.drivers.definitions@.len(),
+        context.wiring.drivers.definitions@[context.index as int].result_index == 0,
+        ({
+            let definition = context.wiring.drivers.definitions@[context.index as int].definition;
+            let root = context.parsed.definitions@[definition as int].expression.start;
+            &&& definition < context.parsed.definitions@.len() && root < context.parsed.syntax.forms@.len()
+            &&& *ty matches Some(signal) ==> signal.ty is Bits
+                && is_form_location(context.source, context.parsed.syntax.forms@[root as int], signal.origin)
+                && (retain ==> concat::concat_operands_match(context, prior, arguments, operands@, signal.ty->Bits_0))
+        }),
+    ensures
+        row.is_some() <==> retain && ty.is_some(),
+        row matches Some(entry) ==> entry.target == context.index
+            && concat_projection_matches(context.file, context.entry, context.limit, context.source, context.parsed,
+                context.wiring, prior.push(*ty), entry),
+{
+    if !retain { return None; }
+    if let Some(SignalType { ty: ResolvedPortType::Bits(width), .. }) = ty {
+        let row = ConcatProjection { target: context.index, width: *width, _arguments: Ghost(arguments), operands };
+        assert(prior.push(*ty).take(context.index as int) =~= prior);
+        Some(row)
+    } else {
+        None
+    }
 }
 
 pub(super) open spec fn structure_projections_in_order(rows: Seq<StructureProjection>, count: int, inputs: int) -> bool {
@@ -1286,8 +1488,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, file: usize, entry: usize, _limit: u64, source: &'p ProjectSource<'a>, parsed: &'p NamedBuildCircuit<'a>,
         literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>, outputs: &[Option<usize>],
         roots: &[Option<SignalType<'p, 'a>>], types: &[Option<SignalType<'p, 'a>>], i: usize,
-        layouts: &mut Option<StructureLayouts<'p, 'a>>,
-    ) -> (result: Result<(Option<SignalType<'p, 'a>>, Option<StructureProjection>), FuncSignalTypeError<'p, 'a>>)
+        layouts: &mut Option<StructureLayouts<'p, 'a>>, retain_concat: bool,
+    ) -> (result: Result<(Option<SignalType<'p, 'a>>, Option<StructureProjection>, Option<ConcatProjection>), FuncSignalTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -1315,8 +1517,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             old(layouts).is_some() ==> *final(layouts) == *old(layouts),
             *final(layouts) matches Some(table) ==> self.structure_types_match(_limit, Ok(table)),
             atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
-                outputs@, roots@, types@, i as int, match result { Ok((ty, _)) => Ok(ty), Err(error) => Err(error) }),
-            result matches Ok((next, projection)) ==> {
+                outputs@, roots@, types@, i as int, match result { Ok((ty, _, _)) => Ok(ty), Err(error) => Err(error) }),
+            result matches Ok((next, projection, concatenation)) ==> {
                 &&& next matches Some(ty) ==> location_in_source(ty.origin) && self.declared_port_type(ty.ty)
                 &&& structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, i as int)
                     ==> projection.is_some()
@@ -1326,6 +1528,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& *final(layouts) matches Some(table)
                     &&& structure_projection_matches(self, file, entry, _limit, wiring, table, types@.push(next), row)
                 }
+                &&& !retain_concat ==> concatenation.is_none()
+                &&& retain_concat && concat_projection_required(source, parsed, wiring,
+                    literals.widths@, roots@, types@.push(next), i as int) ==> concatenation.is_some()
+                &&& concatenation matches Some(row) ==> row.target == i
+                    && concat_projection_matches(file, entry, _limit, source, parsed, wiring, types@.push(next), row)
             },
             result matches Err(error) ==> error is Signal
                 || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument || error is ConcatInputType || error is ConcatWidth
@@ -1337,6 +1544,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let root = row.expression.start;
         let forms = parsed.syntax.forms.as_slice();
         let mut projection = None;
+        let mut concatenation = None;
         proof {
             reveal(atom_type_step);
             reveal(output_indices);
@@ -1574,8 +1782,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     None => None,
                 };
                 let context = ConcatContext { file, entry, limit: _limit, source, parsed, wiring, index: i };
-                match self.check_concat_type(&context, types, root, Ghost(row.expression.end), arguments, expected) {
-                    Ok(ty) => ty,
+                let ghost argument_range = arguments;
+                match self.check_concat_type(&context, types, root, Ghost(row.expression.end), arguments, expected, retain_concat) {
+                    Ok((ty, operands)) => {
+                        concatenation = retain_concat_projection(&context, Ghost(types@), &ty, operands, Ghost(argument_range), retain_concat);
+                        ty
+                    },
                     Err(error) => {
                         assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
                             literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
@@ -1596,17 +1808,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(structure_projection_required);
         };
         proof {
+            if retain_concat && concat_projection_required(source, parsed, wiring,
+                literals.widths@, roots@, types@.push(next), i as int)
+            {
+                let args = choose|args: core::ops::Range<usize>|
+                    #[trigger] concat_arguments_match(source.text, forms@, root as int, args);
+                concat_root_excludes_other_atoms(source.text, forms@, root, args);
+                assert(concatenation.is_some());
+            }
             if let Some(row) = &projection {
                 assert(structure_projections_in_order(seq![*row], i + 1, wiring.drivers.signature.inputs@.len() as int));
             }
         }
-        Ok((next, projection))
+        Ok((next, projection, concatenation))
     }
 
     pub(super) fn check_atoms(
         &self, file: usize, entry: usize, _limit: u64, literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
-        roots: &[Option<SignalType<'p, 'a>>],
-    ) -> (result: Result<(Vec<Option<SignalType<'p, 'a>>>, StructureProjections<'p, 'a>), FuncSignalTypeError<'p, 'a>>)
+        roots: &[Option<SignalType<'p, 'a>>], retain_concat: bool,
+    ) -> (result: Result<(Vec<Option<SignalType<'p, 'a>>>, FuncProjections<'p, 'a>), FuncSignalTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -1632,6 +1852,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }),
             result matches Ok((types, projections)) ==> {
                 &&& types@.len() == wiring.drivers.definitions@.len()
+                &&& !retain_concat ==> projections.concats@.len() == 0
+                &&& concat_projections_match(file, entry, _limit, &self.targets.project_model().sources_model()[file as int],
+                    &self.targets.project_model().circuits_model()[file as int], wiring, types@, projections.concats@)
+                &&& retain_concat ==> concat_projections_complete(
+                    &self.targets.project_model().sources_model()[file as int], &self.targets.project_model().circuits_model()[file as int],
+                    wiring, literals.widths@, roots@, types@, projections.concats@)
                 &&& projections.layouts matches Some(layouts) ==> self.structure_types_match(_limit, Ok(layouts))
                 &&& projections.layouts.is_none() ==> projections.entries@.len() == 0
                 &&& structure_projections_in_order(projections.entries@, types@.len() as int,
@@ -1658,6 +1884,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let outputs = index_outputs(&wiring.drivers);
         let mut layouts = None;
         let mut projections = Vec::new();
+        let mut concats = Vec::new();
         let mut types: Vec<Option<SignalType>> = Vec::new();
         let mut i = 0;
         proof {
@@ -1691,17 +1918,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     #[trigger] structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, target)
                     ==> exists|j: int| 0 <= j < projections@.len() && (#[trigger] projections@[j]).target == target,
                 i == types@.len() <= wiring.drivers.definitions@.len(),
+                !retain_concat ==> concats@.len() == 0,
+                concat_projections_match(file, entry, _limit, source, parsed, wiring, types@, concats@),
+                retain_concat ==> concat_projections_complete(source, parsed, wiring, literals.widths@, roots@, types@, concats@),
                 typed_prefix(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
             decreases wiring.drivers.definitions@.len() - i,
         {
             let ghost prior_layouts = layouts;
-            let (next, projection) = self.check_atom_definition(
+            let (next, projection, concatenation) = self.check_atom_definition(
                 file, entry, _limit, source, parsed, literals, wiring, outputs.as_slice(),
-                roots, types.as_slice(), i, &mut layouts,
+                roots, types.as_slice(), i, &mut layouts, retain_concat,
             )?;
             let ghost before = types@;
             let ghost prior = projections@;
+            let ghost previous_concats = concats@;
             types.push(next);
+            proof { concat_projections_keep_prefix(file, entry, _limit, source, parsed, wiring, before, next, previous_concats); }
+            if let Some(row) = concatenation {
+                concats.push(row);
+                proof {
+                    assert forall|a: int, b: int| 0 <= a < b < concats@.len() implies
+                        (#[trigger] concats@[a]).target < (#[trigger] concats@[b]).target by {
+                        if b == previous_concats.len() {
+                            assert(concats@[a] == previous_concats[a]);
+                            assert(concat_projection_matches(file, entry, _limit, source, parsed, wiring, before, previous_concats[a]));
+                        }
+                    };
+                    assert forall|j: int| 0 <= j < concats@.len() implies
+                        concat_projection_matches(file, entry, _limit, source, parsed, wiring, types@, #[trigger] concats@[j]) by {
+                        if j < previous_concats.len() { assert(concats@[j] == previous_concats[j]); }
+                    };
+                }
+            }
             if let Some(row) = projection {
                 projections.push(row);
                 assert(structure_projections_in_order(projections@, i + 1, wiring.drivers.signature.inputs@.len() as int)) by {
@@ -1711,6 +1959,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 };
             }
             proof {
+                if retain_concat {
+                    assert forall|target: int| #[trigger] concat_projection_required(
+                        source, parsed, wiring, literals.widths@, roots@, types@, target)
+                        implies exists|j: int| 0 <= j < concats@.len() && (#[trigger] concats@[j]).target == target by {
+                        assert(types@ =~= before.push(next));
+                        if target < i {
+                            assert(concat_projection_required(source, parsed, wiring, literals.widths@, roots@, before, target));
+                            let j = choose|j: int| 0 <= j < previous_concats.len()
+                                && (#[trigger] previous_concats[j]).target == target;
+                            assert(concats@[j] == previous_concats[j]);
+                        } else {
+                            assert(target == i && concatenation.is_some());
+                            assert(concats@[previous_concats.len() as int].target == target);
+                        }
+                    };
+                }
                 assert forall|target: int| 0 <= target <= i &&
                     #[trigger] structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, target)
                     implies exists|j: int| 0 <= j < projections@.len() && (#[trigger] projections@[j]).target == target by {
@@ -1756,7 +2020,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             i += 1;
         }
-        Ok((types, StructureProjections { entries: projections, layouts }))
+        Ok((types, FuncProjections { entries: projections, layouts, concats }))
     }
 
     /// 検査結果が定数の型と信号の束縛に対応することを表す。
@@ -1809,7 +2073,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let roots: &[Option<SignalType>] = &[];
         assert(roots@ =~= Seq::empty());
-        match self.check_atoms(file, entry, max_width, &literals, wiring, roots) {
+        match self.check_atoms(file, entry, max_width, &literals, wiring, roots, false) {
             Ok((types, _)) => Ok(FuncAtomTypes { literals, types }),
             Err(FuncSignalTypeError::Signal(error)) => {
                 assert(self.func_atom_type_evidence(file, entry, max_width, Err(error))) by {

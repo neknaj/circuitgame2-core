@@ -23,9 +23,9 @@ use super::function_atoms::named_selection_matches;
 use super::function_drivers::indexed_driver_site;
 use alloc::vec::Vec;
 use super::signature_cache::SignatureCache;
-use super::function_atoms::StructureProjections;
+use super::function_atoms::FuncProjections;
 #[cfg(verus_only)]
-use super::function_atoms::StructureProjection;
+use super::function_atoms::{ConcatProjection, StructureProjection, concat_projections_complete, concat_projections_match};
 use super::selection_arguments::SelectionArgumentError;
 use crate::project::ConcatResultWidthError;
 use crate::project::LocatedName;
@@ -409,15 +409,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.func_signal_types_evidence(file, entry, max_width, result),
     {
-        match self.check_func_signal_projections(file, entry, max_width) {
+        match self.check_func_signal_projections(file, entry, max_width, false) {
             Ok((types, _)) => Ok(types),
             Err(error) => Err(error),
         }
     }
 
     pub(super) fn check_func_signal_projections(
-        &self, file: usize, entry: usize, max_width: u64,
-    ) -> (result: Result<(FuncSignalTypes<'p, 'a>, StructureProjections<'p, 'a>), FuncSignalTypeError<'p, 'a>>)
+        &self, file: usize, entry: usize, max_width: u64, retain_concat: bool,
+    ) -> (result: Result<(FuncSignalTypes<'p, 'a>, FuncProjections<'p, 'a>), FuncSignalTypeError<'p, 'a>>)
         requires self.can_resolve(),
         ensures
             self.func_signal_types_evidence(file, entry, max_width, match result {
@@ -427,16 +427,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result matches Ok((typed, projections)) ==> {
                 &&& projections.layouts matches Some(layouts) ==> self.structure_types_match(max_width, Ok(layouts))
                 &&& projections.layouts.is_none() ==> projections.entries@.len() == 0
+                &&& !retain_concat ==> projections.concats@.len() == 0
                 &&& if let FuncWiringResult::Checked(wiring) = typed.literals.wiring {
                     &&& typed.types@.len() == wiring.drivers.definitions@.len()
+                    &&& concat_projections_match(file, entry, max_width,
+                        &self.targets.project_model().sources_model()[file as int],
+                        &self.targets.project_model().circuits_model()[file as int], &wiring, typed.types@, projections.concats@)
                     &&& structure_projections_in_order(projections.entries@, typed.types@.len() as int,
                         wiring.drivers.signature.inputs@.len() as int)
                     &&& projections.layouts matches Some(table) ==> forall|j: int| 0 <= j < projections.entries@.len()
                         ==> structure_projection_matches(self, file, entry, max_width, &wiring, table, typed.types@,
                             #[trigger] projections.entries@[j])
                     &&& self.func_structure_projections_complete(file, entry, max_width, typed, &wiring, projections.entries@)
+                    &&& retain_concat ==> self.func_concat_projections_complete(file, entry, max_width, typed, &wiring, projections.concats@)
                 } else {
-                    projections.entries@.len() == 0
+                    projections.entries@.len() == 0 && projections.concats@.len() == 0
                 }
             },
     {
@@ -447,7 +452,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if !matches!(literals.wiring, FuncWiringResult::Checked(_)) {
             return Ok((
                 FuncSignalTypes { literals, types: Vec::new() },
-                StructureProjections { entries: Vec::new(), layouts: None },
+                FuncProjections { entries: Vec::new(), layouts: None, concats: Vec::new() },
             ));
         }
         proof { self.literals_preserve_arity(file, entry, max_width, literals); }
@@ -478,7 +483,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.call_outputs_fit_wiring(file, entry, max_width, &roots, scope);
             assert(self.signal_type_sources(file, entry, max_width, literals, scope, roots));
         }
-        let (types, projections) = match self.check_atoms(file, entry, max_width, &literals, scope, call_types.as_slice()) {
+        let (types, projections) = match self.check_atoms(file, entry, max_width, &literals, scope, call_types.as_slice(), retain_concat) {
             Ok(propagated) => propagated,
             Err(error) => {
                 assert(self.func_signal_types_evidence(file, entry, max_width, Err(error))) by {
@@ -524,6 +529,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &project.sources_model()[file as int], &project.circuits_model()[file as int],
                     entry, wiring, typed.literals.widths@, roots.types@, typed.types@, target,
                 ) ==> exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).target == target)
+    }
+
+    pub(super) open spec fn func_concat_projections_complete(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes,
+        wiring: &FuncWiring, rows: Seq<ConcatProjection>,
+    ) -> bool {
+        let project = self.targets.project_model();
+        exists|roots: FuncCallOutputTypes|
+            #[trigger] self.signal_type_sources(file, entry, limit, typed.literals, wiring, roots)
+            && roots.types@.len() == wiring.drivers.definitions@.len()
+            && concat_projections_complete(&project.sources_model()[file as int], &project.circuits_model()[file as int],
+                wiring, typed.literals.widths@, roots.types@, typed.types@, rows)
     }
 }
 

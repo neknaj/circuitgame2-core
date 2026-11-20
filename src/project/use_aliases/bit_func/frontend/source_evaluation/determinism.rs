@@ -1,7 +1,7 @@
 //! 同じソースの同じ入力から得られる値が一意であることを示す。
 
 use super::*;
-use crate::syntax::circuit::{field_selection_root, field_selection_shape_matches};
+use crate::syntax::circuit::{concat_argument_ranges_agree, concat_excludes_other_shapes, field_selection_root, field_selection_shape_matches};
 use super::super::super::super::selection_arguments::field_and_named_selection_disjoint;
 
 verus! {
@@ -9,6 +9,7 @@ verus! {
 enum SourceRhsKind<'p, 'a> {
     Atom,
     Nor,
+    Concat(core::ops::Range<usize>, Seq<Seq<bool>>),
     Selection(BitSelectionShape),
     NestedSelection(Seq<BitSelectionShape>, usize),
     FieldSelection((Seq<BitSelectionShape>, usize, StructureExpressionShape, CheckedStructureExpression<'p, 'a>)),
@@ -91,6 +92,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 atomic_values_agree(context, other, definition, root, inputs, prior, left, right),
             (SourceRhsKind::Nor, SourceRhsKind::Nor) =>
                 self.source_nor_values_agree(context, other, inputs, prior, left, right),
+            (SourceRhsKind::Concat(ar, ap), SourceRhsKind::Concat(br, bp)) => {
+                reveal(UseAliases::source_concat_case);
+                assert(self.source_concat_case(context, inputs, prior, left, ar, ap));
+                assert(self.source_concat_case(other, inputs, prior, right, br, bp));
+                concat_argument_ranges_agree(context.source.text, forms, root, ar, br);
+                assert forall|j: int| 0 <= j < ap.len() implies (#[trigger] ap[j]) == bp[j] by {
+                    atomic_values_agree(context, other, definition, ar.start + j, inputs, prior, ap[j], bp[j]);
+                };
+                assert(ap =~= bp);
+            },
             (SourceRhsKind::Selection(_), SourceRhsKind::Selection(_)) =>
                 self.source_selection_values_agree(context, other, inputs, prior, left, right),
             (SourceRhsKind::NestedSelection(a, al), SourceRhsKind::NestedSelection(b, bl)) =>
@@ -102,6 +113,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.source_structure_values_agree(context, other, layouts->Some_0, other_layouts->Some_0, types, inputs, prior, left, right),
             (SourceRhsKind::Nor, _) | (_, SourceRhsKind::Nor) =>
                 ordinary_call_excludes_special_forms(context.source.text, forms, root, row.expression.end as int),
+            (SourceRhsKind::Concat(arguments, _), _) | (_, SourceRhsKind::Concat(arguments, _)) =>
+                concat_excludes_other_shapes(context.source.text, forms, root, arguments),
             (SourceRhsKind::Selection(shape), SourceRhsKind::Structure(_))
             | (SourceRhsKind::Structure(_), SourceRhsKind::Selection(shape)) =>
                 bit_selection_excludes_structure(context.source.text, forms, root, shape),
@@ -145,6 +158,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 SourceRhsKind::Nor => forms[root] is List
                     && ordinary_call_at(context.source.text, forms, root, row.expression.end as int)
                     && self.source_nor_value(context, inputs, prior, value),
+                SourceRhsKind::Concat(arguments, parts) => forms[root] is List
+                    && concat_arguments_match(context.source.text, forms, root, arguments)
+                    && self.source_concat_case(context, inputs, prior, value, arguments, parts),
                 SourceRhsKind::Selection(shape) => forms[root] is List
                     && named_selection_matches(context.source.text, forms, root, shape)
                     && self.source_selection_value(context, inputs, prior, value),
@@ -177,6 +193,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(UseAliases::source_nor_operands);
             assert(self.source_nor_operands(context, inputs, prior, call, left, right));
             SourceRhsKind::Nor
+        } else if self.source_concat_value(context, inputs, prior, value) {
+            let (arguments, parts) = choose|arguments: core::ops::Range<usize>, parts: Seq<Seq<bool>>|
+                #[trigger] self.source_concat_case(context, inputs, prior, value, arguments, parts);
+            reveal(UseAliases::source_concat_case);
+            assert(self.source_concat_case(context, inputs, prior, value, arguments, parts));
+            concat_excludes_other_shapes(context.source.text, context.parsed.syntax.forms@, root, arguments);
+            SourceRhsKind::Concat(arguments, parts)
         } else if self.source_selection_value(context, inputs, prior, value) {
             let (shape, driver, selection, origin) = self.source_selection_witness(context, inputs, prior, value);
             reveal(UseAliases::source_selection_case);

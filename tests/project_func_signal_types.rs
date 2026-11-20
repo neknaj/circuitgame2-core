@@ -30,6 +30,27 @@ fn exposes_concat_types_and_diagnostic_sites() {
 }
 
 #[test]
+fn lowers_concat_in_argument_order_without_adding_gates() {
+    let text = concat!(
+        "(using nor) ",
+        "(func assemble (in (lo (bits 2)) (hi (bits 3)) flag) (out (y (bits 7))) ",
+        "  (def inverted (nor flag flag)) ",
+        "  (def y (concat lo inverted 1 hi)))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 7, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let checked = aliases.check_bit_func(0, 1, 7).unwrap();
+    let lowered = checked.lower_bit_func(8).unwrap();
+    let netlist = lowered.netlist();
+    assert_eq!(netlist.gates.len(), 1);
+    assert_eq!(
+        netlist.evaluate(&[true, false, false, false, true, true]).unwrap(),
+        [true, false, false, true, false, false, true],
+    );
+}
+
+#[test]
 fn propagates_each_call_output_through_bare_signals() {
     let text = concat!(
         "(func pair (in (value (bits 8)) flag) (out (value (bits 8)) flag)) ",

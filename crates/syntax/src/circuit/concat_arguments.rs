@@ -84,6 +84,28 @@ pub(super) proof fn ordinary_head_excludes_concat(
     same_expression_head(source, forms, root + 1, None, Some(ExpressionHead::Concat));
 }
 
+/// 連接式の先頭語は、選択式や構造体式の先頭語と重ならない。
+pub proof fn concat_excludes_other_shapes(
+    source: &str, forms: Seq<Form>, root: int, arguments: Range<usize>,
+)
+    requires concat_arguments_match(source, forms, root, arguments),
+    ensures
+        forms[root] is List,
+        !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, root, shape)),
+        !(exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, root, shape)),
+{
+    if exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, root, shape) {
+        let shape = choose|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, root, shape);
+        let head = super::selection_shapes::selection_head_evidence(source, forms, root, shape);
+        same_expression_head(source, forms, root + 1, Some(ExpressionHead::Concat), Some(head));
+    }
+    if exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, root, shape) {
+        let shape = choose|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, root, shape);
+        let head = super::structure_expressions::structure_expression_head_evidence(source, forms, root, shape);
+        same_expression_head(source, forms, root + 1, Some(ExpressionHead::Concat), Some(head));
+    }
+}
+
 fn read_concat_argument_range(source: &str, forms: &[Form], root: usize) -> (result: Option<Range<usize>>)
     ensures
         result matches Some(range) ==> concat_arguments_match(source, forms@, root as int, range),

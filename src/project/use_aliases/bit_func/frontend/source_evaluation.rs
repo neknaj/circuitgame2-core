@@ -6,9 +6,10 @@ mod field_selection;
 use super::*;
 use super::super::semantics::{
     bit_func_definitions_match, bit_func_evaluation, bit_func_evaluation_values, bit_func_inputs_match,
-    contiguous_rhs_preserves_range, definition_values, driver_values,
+    checked_definition_values, concat_operand_values, contiguous_rhs_preserves_range, definition_values, driver_values,
 };
 use super::super::super::function_atoms::named_structure_expression_matches;
+use super::super::super::function_atoms::concat_projection_positions;
 use super::super::super::function_drivers::same_definition_driver;
 use super::super::super::selection_arguments::{
     nested_named_selection_matches, nested_named_selection_root, nested_named_selections_agree, selection_chain_values_agree,
@@ -18,7 +19,7 @@ use super::super::super::single_bit_func::{source_operand_is_atom, source_operan
 use super::super::super::structure_types::{CheckedStructureExpression, StructureExpressionContext};
 use crate::syntax::circuit::{
     StructureExpressionShape, bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shapes_agree,
-    indexed_call_arguments, ordinary_call_at, ordinary_call_excludes_special_forms,
+    concat_arguments_match, indexed_call_arguments, ordinary_call_at, ordinary_call_excludes_special_forms,
     structure_expression_matches, structure_expression_positions, structure_expression_shapes_agree,
 };
 use super::super::{LoweredBitFunc, bit_func_lowering_preserves_evaluation, lowered_bit_func_result, port_values};
@@ -297,6 +298,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(bit_func_definitions_match);
         reveal(UseAliases::definition_widths_match);
+        reveal(UseAliases::definition_prefix);
         reveal(UseAliases::source_definitions_evaluate);
         let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
             source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
@@ -322,14 +324,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             } else {
                 self.ordinary_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition);
             }
-            assert(values[i] == definition_values(definition.rhs, inputs, prior_values));
+            assert(values[i] == checked_definition_values(definition, inputs, prior_values));
         };
         assert(values.len() == scope.wiring.drivers.definitions@.len());
         assert(values.len() == scope.types@.len());
         assert(self.source_definitions_evaluate(&context, scope.layouts, scope.types@, inputs, values));
     }
 
-    /// 定数、信号名、基底 NOR、選択式を元の構文から評価する。
+    /// 定数、信号名、基底 NOR、選択式、連接式を元の構文から評価する。
     #[verifier::opaque]
     spec fn ordinary_source_rhs_value(
         &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
@@ -340,6 +342,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ||| self.source_nor_value(context, inputs, prior, value)
         ||| self.source_selection_value(context, inputs, prior, value)
         ||| self.source_nested_selection_value(context, inputs, prior, value)
+        ||| self.source_concat_value(context, inputs, prior, value)
+    }
+
+    spec fn source_concat_value(
+        &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
+    ) -> bool {
+        exists|arguments: core::ops::Range<usize>, parts: Seq<Seq<bool>>|
+            #[trigger] self.source_concat_case(context, inputs, prior, value, arguments, parts)
+    }
+
+    /// 元の式の直下にある裸の信号名と定数から、連接の値を定める。
+    #[verifier::opaque]
+    spec fn source_concat_case(
+        &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
+        arguments: core::ops::Range<usize>, parts: Seq<Seq<bool>>,
+    ) -> bool {
+        let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
+        let root = context.parsed.definitions@[definition as int].expression.start;
+        &&& concat_arguments_match(context.source.text, context.parsed.syntax.forms@, root as int, arguments)
+        &&& parts.len() == arguments.end - arguments.start
+        &&& forall|i: int| 0 <= i < parts.len() ==>
+            atomic_value(context, definition, arguments.start + i, inputs, prior, #[trigger] parts[i])
+        &&& value == parts.flatten()
     }
 
     spec fn source_nor_value(
@@ -561,7 +586,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures self.ordinary_source_rhs_value(
             &SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
                 source: scope.source, parsed: scope.parsed, wiring: scope.wiring },
-            inputs, values, definition_values(checked.rhs, inputs, values),
+            inputs, values, checked_definition_values(checked, inputs, values),
         ),
     {
         reveal(UseAliases::ordinary_source_rhs_value);
@@ -572,10 +597,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let definition = scope.wiring.drivers.definitions@[index].definition;
         let row = scope.parsed.definitions@[definition as int];
         let root = row.expression.start as int;
-        let result = definition_values(checked.rhs, inputs, values);
-        assert(self.bit_rhs_from_source(scope, definitions, index, checked.rhs));
+        let result = checked_definition_values(checked, inputs, values);
+        assert(self.bit_rhs_from_source(scope, definitions, index, checked.rhs, checked.operands@));
         assert(!(exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == index));
         match checked.rhs {
+            BitFuncRhs::Concat => {
+                let projection = choose|concat: ConcatProjection|
+                    #[trigger] concat_projection_matches(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                        scope.wiring, scope.types@, concat)
+                    && concat.target == index && concat.operands@ == checked.operands@;
+                let arguments = concat_projection_positions(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                    scope.wiring, scope.types@, projection);
+                let parts = concat_operand_values(inputs, values, checked.operands@);
+                assert forall|j: int| 0 <= j < parts.len() implies
+                    atomic_value(&context, definition, arguments.start + j, inputs, values, #[trigger] parts[j]) by {
+                    let operand = checked.operands@[j].0;
+                    atomic_value_intro(&context, definition, arguments.start + j, inputs, values, operand);
+                    assert(parts[j] == atom_result(inputs, values, operand));
+                };
+                assert(self.source_concat_case(&context, inputs, values, result, arguments, parts)) by {
+                    reveal(UseAliases::source_concat_case);
+                };
+            },
             BitFuncRhs::Constant(bit) => {
                 atomic_value_intro(&context, definition, root, inputs, values, SingleBitOperand::Constant(bit));
                 assert(result == seq![bit]);

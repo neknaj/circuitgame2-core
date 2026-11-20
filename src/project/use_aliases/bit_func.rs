@@ -33,6 +33,8 @@ pub(super) enum BitFuncRhs {
     Nor { left: SingleBitOperand, right: SingleBitOperand },
     /// 入力または先行定義のビット列から値を選ぶ。
     Selection { input: OutputDriver, selection: CheckedBitSelection },
+    /// 引数順にビット列を連接する。各引数は定義の `operands` に保持する。
+    Concat,
 }
 
 /// 元ソース位置と値の幅が確定した定義。
@@ -41,6 +43,7 @@ pub(super) struct CheckedBitDefinition<'p, 'a> {
     pub(super) expression: LocatedName<'p, 'a>,
     pub(super) width: u64,
     pub(super) rhs: BitFuncRhs,
+    pub(super) operands: Vec<(SingleBitOperand, u64)>,
 }
 
 /// 入出力の幅、定義の順序、出力の駆動元が確定した組み合わせ回路。
@@ -94,12 +97,26 @@ pub(super) open spec fn nor_operand_matches(
     }
 }
 
+pub(super) open spec fn concat_operands_fit(
+    inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>, operands: Seq<(SingleBitOperand, u64)>,
+) -> bool {
+    forall|i: int| 0 <= i < operands.len() ==> {
+        let (operand, width) = #[trigger] operands[i];
+        &&& width > 0
+        &&& match operand {
+            SingleBitOperand::Constant(_) => width == 1,
+            SingleBitOperand::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(width),
+        }
+    }
+}
+
 /// 参照する幅が定義済みで、各右辺の結果幅と定義幅が一致することを表す。
 pub(super) open spec fn bit_definition_matches(
     inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>, definition: CheckedBitDefinition,
 ) -> bool {
     &&& definition.width > 0
     &&& location_in_source(definition.expression)
+    &&& !(definition.rhs is Concat) ==> definition.operands@.len() == 0
     &&& match definition.rhs {
         BitFuncRhs::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(definition.width),
         BitFuncRhs::Constant(_) => definition.width == 1,
@@ -109,6 +126,11 @@ pub(super) open spec fn bit_definition_matches(
             bit_driver_width(inputs, prior, input) matches Some(width)
             && definition.width == selection.count
             && bit_selection_matches(width, selection.start, selection.count, selection.stride, Ok(selection.last)),
+        BitFuncRhs::Concat => 0 < definition.operands@.len()
+            && concat_operands_fit(inputs, prior, definition.operands@)
+            && crate::project::concat_prefix_width(
+                definition.operands@.map_values(|item: (SingleBitOperand, u64)| item.1),
+                definition.operands@.len()) == definition.width,
     }
 }
 

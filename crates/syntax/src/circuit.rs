@@ -39,7 +39,8 @@ pub use body::{DefinitionReferences, first_routine_expansion};
 pub use concat_arguments::concat_argument_range;
 #[cfg(verus_only)]
 pub use concat_arguments::{
-    concat_argument_ranges_agree, concat_arguments_evidence, concat_arguments_match, following_concat_argument, indexed_concat_argument_signal,
+    concat_argument_ranges_agree, concat_arguments_evidence, concat_arguments_match, concat_excludes_other_shapes,
+    following_concat_argument, indexed_concat_argument_signal,
     strict_concat_has_argument_range,
 };
 use build::BuildRows;

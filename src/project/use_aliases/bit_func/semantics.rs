@@ -2,7 +2,7 @@
 
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use super::{BitFuncRhs, CheckedBitFunc, OutputDriver, SingleBitOperand, checked_bit_func_available};
+use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc, OutputDriver, SingleBitOperand, checked_bit_func_available};
 #[cfg(verus_only)]
 use crate::project::bit_selection_matches;
 
@@ -22,6 +22,16 @@ pub(super) open spec fn operand_value(inputs: Seq<Seq<bool>>, definitions: Seq<S
     }
 }
 
+/// 宣言順の連接引数から、引数ごとの低位順のビット列を得る。
+pub(super) open spec fn concat_operand_values(
+    inputs: Seq<Seq<bool>>, definitions: Seq<Seq<bool>>, operands: Seq<(SingleBitOperand, u64)>,
+) -> Seq<Seq<bool>> {
+    operands.map_values(|item: (SingleBitOperand, u64)| match item.0 {
+        SingleBitOperand::Constant(bit) => seq![bit],
+        SingleBitOperand::Driver(driver) => driver_values(inputs, definitions, driver),
+    })
+}
+
 #[verifier::opaque]
 pub(super) open spec fn definition_values(rhs: BitFuncRhs, inputs: Seq<Seq<bool>>, definitions: Seq<Seq<bool>>) -> Seq<bool> {
     match rhs {
@@ -32,6 +42,17 @@ pub(super) open spec fn definition_values(rhs: BitFuncRhs, inputs: Seq<Seq<bool>
         BitFuncRhs::Selection { input, selection } =>
             Seq::new(selection.count as nat,
                 |i: int| driver_values(inputs, definitions, input)[selection.start + i * selection.stride]),
+        BitFuncRhs::Concat => Seq::empty(),
+    }
+}
+
+pub(super) open spec fn checked_definition_values(
+    definition: CheckedBitDefinition, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>,
+) -> Seq<bool> {
+    if definition.rhs is Concat {
+        concat_operand_values(inputs, prior, definition.operands@).flatten()
+    } else {
+        definition_values(definition.rhs, inputs, prior)
     }
 }
 
@@ -80,7 +101,7 @@ pub(super) open spec fn bit_func_definitions_match(source: &CheckedBitFunc, inpu
     &&& forall|i: int| 0 <= i < values.len() ==> {
         let definition = source.definitions@[i];
         &&& (#[trigger] values[i]).len() == definition.width
-        &&& values[i] == definition_values(definition.rhs, inputs, values.take(i))
+        &&& values[i] == checked_definition_values(definition, inputs, values.take(i))
     }
 }
 
@@ -142,10 +163,10 @@ proof fn definition_values_prefix_agree(
         let i = (end - 1) as int;
         definition_values_prefix_agree(source, inputs, left, right, i as nat);
         let definition = source.definitions@[i];
-        assert(left[i] == definition_values(definition.rhs, inputs, left.take(i))) by {
+        assert(left[i] == checked_definition_values(definition, inputs, left.take(i))) by {
             reveal(bit_func_definitions_match);
         };
-        assert(right[i] == definition_values(definition.rhs, inputs, right.take(i))) by {
+        assert(right[i] == checked_definition_values(definition, inputs, right.take(i))) by {
             reveal(bit_func_definitions_match);
         };
         assert(left.len() == right.len() == source.definitions@.len()) by {
