@@ -96,6 +96,14 @@ pub use use_aliases::{
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
+pub use use_aliases::LoweredSingleBitFunc;
+#[cfg(verus_only)]
+pub use use_aliases::{
+    single_bit_evaluation_result_agrees, single_bit_lowering_matches, single_bit_lowering_preserves_evaluation,
+    single_bit_source_evaluation, single_bit_source_evaluations_agree,
+};
+
+pub use use_aliases::{CheckedSingleBitFunc, SingleBitDefinition, SingleBitFuncError, SingleBitOperand, SingleBitRhs, UnsupportedSingleBitFunc};
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,
 };

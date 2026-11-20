@@ -667,6 +667,13 @@ pub(super) open spec fn expected_output_context(
         ==> (#[trigger] drivers.definitions@[i]).definition <= (#[trigger] drivers.definitions@[j]).definition
 }
 
+pub(super) open spec fn checked_ports_and_output_bounds(forms: Seq<Form>, drivers: FuncDrivers) -> bool {
+    &&& typed_name_sites(forms, drivers.signature.inputs@)
+    &&& typed_name_sites(forms, drivers.signature.outputs@)
+    &&& forall|i: int| 0 <= i < drivers.outputs@.len() && (#[trigger] drivers.outputs@[i]) is Input
+        ==> drivers.outputs@[i]->Input_0 < drivers.signature.inputs@.len()
+}
+
 spec fn after_collecting_names(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize,
     signature: &TypedRoutineSignature, inputs: Seq<NameSite>, outputs: Seq<NameSite>,
@@ -735,6 +742,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& self.typed_signature_evidence(file, entry, max_width, Ok(Some(checked.signature)))
             &&& entry < parsed.entry_ranges@.len()
             &&& checked.outputs@.len() == checked.signature.outputs@.len()
+            &&& forall|i: int| 0 <= i < checked.outputs@.len() && (#[trigger] checked.outputs@[i]) is Input
+                ==> checked.signature.output_inputs@[i] == Some(checked.outputs@[i]->Input_0)
             &&& forall|i: int| 0 <= i < checked.outputs@.len() && (#[trigger] checked.outputs@[i]) is Definition
                 ==> checked.outputs@[i]->Definition_0 < checked.definitions@.len()
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
@@ -772,7 +781,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let circuits = project.circuits_model();
             &&& file < circuits.len() && entry < circuits[file as int].syntax.entries@.len()
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
-            &&& typed_name_sites(circuits[file as int].syntax.forms@, checked.signature.inputs@)
+            &&& checked_ports_and_output_bounds(circuits[file as int].syntax.forms@, checked)
             &&& expected_output_context(source, &circuits[file as int], entry as int, checked)
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
                 ==> indexed_driver_site(source, &circuits[file as int], entry as int, #[trigger] checked.definitions@[i])

@@ -373,6 +373,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& entry < circuits[file as int].syntax.entries@.len()
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
             &&& expected_output_context(&project.sources_model()[file as int], &circuits[file as int], entry as int, wiring.drivers)
+            &&& super::function_drivers::checked_ports_and_output_bounds(circuits[file as int].syntax.forms@, wiring.drivers)
             &&& forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
                 ==> indexed_driver_site(&project.sources_model()[file as int], &circuits[file as int],
                     entry as int, #[trigger] wiring.drivers.definitions@[i])

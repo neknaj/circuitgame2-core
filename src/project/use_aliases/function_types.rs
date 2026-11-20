@@ -36,6 +36,18 @@ pub enum FuncSignalTypeError<'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn checked_types_keep_wiring(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
+    )
+        requires
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+        ensures self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+    {
+        self.literals_preserve_arity(file, entry, limit, typed.literals);
+        self.arity_preserves_wiring(file, entry, limit, typed.literals.wiring);
+    }
+
     spec fn signal_type_sources(
         &self, file: usize, entry: usize, limit: u64, literals: FuncLiteralWidths, wiring: &FuncWiring,
         roots: FuncCallOutputTypes,

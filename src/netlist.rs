@@ -1,4 +1,6 @@
 //! 2入力 NOR を基底とする組み合わせ回路の配線と評価。
+//!
+//! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -176,6 +178,17 @@ pub open spec fn nor_evaluation_error(
     }
 }
 
+/// 評価結果の成功条件、出力列、または最初の配線違反を表す。
+pub open spec fn nor_evaluation_result(
+    netlist: &NorNetlist, input: Seq<bool>, result: Result<Vec<bool>, NorEvaluationError>,
+) -> bool {
+    &&& (result.is_ok() <==> nor_evaluation_ready(netlist, input.len()))
+    &&& match result {
+        Ok(output) => nor_evaluation(netlist, input, output@),
+        Err(error) => nor_evaluation_error(netlist, input, error),
+    }
+}
+
 proof fn gate_value_equation(input: Seq<bool>, gates: Seq<NorGate>, values: Seq<bool>, i: int)
     requires gate_values_match(input, gates, values), 0 <= i < values.len(),
     ensures
@@ -286,12 +299,7 @@ impl NorNetlist {
     /// assert_eq!(circuit.evaluate(&[true]), Ok(vec![false]));
     /// ```
     pub fn evaluate(&self, input: &[bool]) -> (result: Result<Vec<bool>, NorEvaluationError>)
-        ensures
-            result.is_ok() <==> nor_evaluation_ready(self, input@.len()),
-            match result {
-                Ok(output) => nor_evaluation(self, input@, output@),
-                Err(error) => nor_evaluation_error(self, input@, error),
-            },
+        ensures nor_evaluation_result(self, input@, result),
     {
         if input.len() != self.input_count {
             return Err(NorEvaluationError::InputCount { expected: self.input_count, actual: input.len() });

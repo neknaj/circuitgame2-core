@@ -13,6 +13,7 @@ mod local_signal_index;
 mod port_types;
 mod relative;
 mod signature_cache;
+mod single_bit_func;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,
@@ -29,6 +30,14 @@ pub use function_drivers::{
 pub use function_literals::{FuncLiteralError, FuncLiteralWidths};
 pub use function_atoms::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use function_types::{FuncSignalTypeError, FuncSignalTypes};
+pub use single_bit_func::LoweredSingleBitFunc;
+#[cfg(verus_only)]
+pub use single_bit_func::{
+    single_bit_evaluation_result_agrees, single_bit_lowering_matches, single_bit_lowering_preserves_evaluation,
+    single_bit_source_evaluation, single_bit_source_evaluations_agree,
+};
+
+pub use single_bit_func::{CheckedSingleBitFunc, SingleBitDefinition, SingleBitFuncError, SingleBitOperand, SingleBitRhs, UnsupportedSingleBitFunc};
 pub use function_wiring::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
