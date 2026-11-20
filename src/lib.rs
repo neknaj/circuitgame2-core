@@ -6,5 +6,6 @@
 
 extern crate alloc;
 
+pub mod editor;
 pub mod project;
 pub use circuitgame2_syntax as syntax;
