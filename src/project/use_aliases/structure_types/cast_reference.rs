@@ -58,6 +58,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 同じ変換式から解決した二つの型名は、同じ構造体宣言を指す。
+    pub(super) proof fn structure_cast_targets_agree(
+        &self, file: usize, entry: usize, definition: usize, left: StructurePosition, right: StructurePosition,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_cast_resolution_matches(file, entry, definition, Ok(Some(left))),
+            self.structure_cast_resolution_matches(file, entry, definition, Ok(Some(right))),
+        ensures left == right,
+    {
+        let a = choose|resolved: ResolvedDefinitionReference|
+            #[trigger] self.definition_resolution_evidence(file, entry, definition, 0, Ok(resolved))
+            && self.structure_position_matches(left, resolved.binding);
+        let b = choose|resolved: ResolvedDefinitionReference|
+            #[trigger] self.definition_resolution_evidence(file, entry, definition, 0, Ok(resolved))
+            && self.structure_position_matches(right, resolved.binding);
+        self.positioned_declarations_agree(file, entry, definition, 0, a, b);
+        self.structure_binding_positions_agree(a.binding, left, right);
+    }
+
     /// 右辺全体が `as` の定義について、変換先の構造体宣言の位置を返す。
     ///
     /// 型名は定義を囲む名前空間ブロックの別名と公開規則に従って解決する。

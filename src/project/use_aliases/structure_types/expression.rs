@@ -117,11 +117,45 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && layouts.representation_width_matches(ty, left);
         let b = choose|ty: StructureFieldType| #[trigger] self.expression_port_matches(ty, port)
             && layouts.representation_width_matches(ty, right);
-        if let (StructureFieldType::Struct(x), StructureFieldType::Struct(y)) = (a, b) {
-            self.structure_port_positions_agree(port, x, y);
-        }
-        assert(a == b);
+        self.structure_input_types_agree(port, a, b);
         layouts.representation_width_agrees(a, left, right);
+    }
+
+    pub(in crate::project::use_aliases) proof fn layout_port_widths_agree_across_tables(
+        &self, limit: u64, left: &StructureLayouts, right: &StructureLayouts, port: ResolvedPortType, a: int, b: int,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(limit, Ok(*left)),
+            self.structure_types_match(limit, Ok(*right)),
+            self.layout_port_width_matches(left, port, a),
+            self.layout_port_width_matches(right, port, b),
+        ensures a == b,
+    {
+        let x = choose|ty: StructureFieldType| #[trigger] self.expression_port_matches(ty, port)
+            && left.representation_width_matches(ty, a);
+        let y = choose|ty: StructureFieldType| #[trigger] self.expression_port_matches(ty, port)
+            && right.representation_width_matches(ty, b);
+        self.structure_input_types_agree(port, x, y);
+        self.representation_widths_agree_across_layouts(limit, left, right, x, a, b);
+    }
+
+    proof fn structure_input_types_agree(
+        &self, port: ResolvedPortType, left: StructureFieldType, right: StructureFieldType,
+    )
+        requires
+            self.can_resolve(),
+            self.expression_port_matches(left, port),
+            self.expression_port_matches(right, port),
+        ensures left == right,
+    {
+        if let (StructureFieldType::Struct(a), StructureFieldType::Struct(b)) = (left, right) {
+            self.structure_port_positions_agree(port, a, b);
+        } else if let StructureFieldType::Struct(position) = left {
+            self.structure_port_type_resolved(position, Some(port));
+        } else if let StructureFieldType::Struct(position) = right {
+            self.structure_port_type_resolved(position, Some(port));
+        }
     }
 
     pub(in crate::project::use_aliases) proof fn layout_bits_port_width(
@@ -234,11 +268,57 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.structure_operation_from_source(context, shape, found.0),
             self.expression_port_matches(found.1, input.ty),
             layouts.structure_operation_matches(found.0, found.1, Ok(checked.1)),
+            self.expression_port_matches(checked.1.ty, checked.0.ty),
     {
         choose|op: StructureOperation<'a>, field: StructureFieldType|
             #[trigger] self.structure_operation_from_source(context, shape, op)
             && #[trigger] self.expression_port_matches(field, input.ty)
             && layouts.structure_operation_matches(op, field, Ok(checked.1))
+    }
+
+    /// 同じ構造体式と入力型を別々の配置表で検査した成功結果は、型・区間・入力幅が一致する。
+    pub(in crate::project::use_aliases) proof fn checked_structure_expressions_agree(
+        &self, context: &StructureExpressionContext, shape: StructureExpressionShape,
+        left: &StructureLayouts, right: &StructureLayouts, input: SignalType,
+        first: CheckedStructureExpression, second: CheckedStructureExpression,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(context.limit, Ok(*left)),
+            self.structure_types_match(context.limit, Ok(*right)),
+            self.structure_expression_type_matches(context, shape, left, input, Ok(first)),
+            self.structure_expression_type_matches(context, shape, right, input, Ok(second)),
+        ensures first == second,
+    {
+        let (a, left_input) = self.checked_structure_operation(context, shape, left, input, first);
+        let (b, right_input) = self.checked_structure_operation(context, shape, right, input, second);
+        self.structure_input_types_agree(input.ty, left_input, right_input);
+        self.structure_expression_width_evidence(context, shape, left, input, first);
+        self.structure_expression_width_evidence(context, shape, right, input, second);
+        self.layout_port_widths_agree_across_tables(context.limit, left, right, input.ty, first.2 as int, second.2 as int);
+        match shape.kind {
+            StructureExpressionKind::Field { .. } => {
+                left.checked_field_requires_structure(a->Field_0, left_input, first.1);
+                self.checked_field_operations_agree(context.limit, left, right, left_input->Struct_0,
+                    a->Field_0, b->Field_0, first.1, second.1);
+            },
+            StructureExpressionKind::As { .. } => {
+                self.structure_cast_targets_agree(context.file, context.entry, context.definition, a->As_0, b->As_0);
+                left.checked_conversion_operation_type(a, left_input, first.1);
+                right.checked_conversion_operation_type(b, right_input, second.1);
+            },
+            StructureExpressionKind::Raw => {
+                left.checked_conversion_operation_type(a, left_input, first.1);
+                right.checked_conversion_operation_type(b, right_input, second.1);
+                self.layout_bits_port_width(left, first.1.ty->Bits_0, first.1.range.end - first.1.range.start);
+                self.layout_bits_port_width(right, second.1.ty->Bits_0, second.1.range.end - second.1.range.start);
+            },
+        }
+        assert(first.1 == second.1);
+        if let StructureFieldType::Struct(position) = first.1.ty {
+            self.structure_port_types_agree(position, Some(first.0.ty), Some(second.0.ty));
+        }
+        assert(first.0.origin == second.0.origin);
     }
 
     /// 式の結果幅と入力上の選択範囲を、型の表現幅に結び付ける。

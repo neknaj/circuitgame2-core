@@ -5,7 +5,7 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
-use super::{representation_width, structure_before};
+use super::{UseAliases, representation_width, structure_before};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
@@ -195,42 +195,57 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
                 StructureFieldType::Struct(position), Ok(second)),
         ensures first.range == second.range,
     {
-        let (a, field_a) = self.selected_field(position, first_name, first);
-        let (b, field_b) = self.selected_field(position, second_name, second);
-        let i = choose|i: int| 0 <= i < self.entries@.len() && (#[trigger] self.entries@[i]) == *a;
-        let j = choose|j: int| 0 <= j < self.entries@.len() && (#[trigger] self.entries@[j]) == *b;
+        let (i, a) = self.selected_field(position, first_name, first);
+        let (j, b) = self.selected_field(position, second_name, second);
         if i < j {
             assert(structure_before(self.entries@[i].position, self.entries@[j].position));
         } else if j < i {
             assert(structure_before(self.entries@[j].position, self.entries@[i].position));
         }
-        assert(*a == *b);
-        let left = choose|i: int| 0 <= i < a.fields@.len() && (#[trigger] a.fields@[i]) == *field_a
-            && forall|j: int| 0 <= j < i ==> (#[trigger] a.fields@[j]).name.spec_bytes() != first_name.spec_bytes();
-        let right = choose|i: int| 0 <= i < a.fields@.len() && (#[trigger] a.fields@[i]) == *field_b
-            && forall|j: int| 0 <= j < i ==> (#[trigger] a.fields@[j]).name.spec_bytes() != second_name.spec_bytes();
-        if left < right {
-            assert(a.fields@[left].name.spec_bytes() != second_name.spec_bytes());
-        } else if right < left {
-            assert(a.fields@[right].name.spec_bytes() != first_name.spec_bytes());
+        let fields = self.entries@[i].fields@;
+        if a < b {
+            assert(fields[a].name.spec_bytes() != second_name.spec_bytes());
+        } else if b < a {
+            assert(fields[b].name.spec_bytes() != first_name.spec_bytes());
         }
     }
 
     proof fn selected_field(
         &self, position: StructurePosition, name: &str, operation: TypedStructureOperation,
-    ) -> (selected: (&StructureLayout<'p, 'a>, &StructureLayoutField<'p, 'a>))
+    ) -> (selected: (int, int))
         requires self.structure_operation_matches(StructureOperation::Field(name),
             StructureFieldType::Struct(position), Ok(operation)),
-        ensures
-            self.layout_matches(position, Some(selected.0)),
-            selected.0.field_matches(name, Some(selected.1)),
-            operation.range == selected.1.range,
+        ensures ({
+            let (row, i) = selected;
+            let entry = self.entries_model()[row];
+            &&& 0 <= row < self.entries_model().len() && entry.position == position
+            &&& 0 <= i < entry.fields@.len()
+            &&& entry.fields@[i].name.spec_bytes() == name.spec_bytes()
+            &&& forall|j: int| 0 <= j < i ==> (#[trigger] entry.fields@[j]).name.spec_bytes() != name.spec_bytes()
+            &&& operation.ty == entry.fields@[i].ty
+            &&& operation.range == entry.fields@[i].range
+        }),
     {
         let (layout, field) = choose|layout: &StructureLayout, field: &StructureLayoutField|
             #[trigger] self.layout_matches(position, Some(layout))
             && #[trigger] layout.field_matches(name, Some(field))
             && operation == TypedStructureOperation { ty: field.ty, range: field.range };
-        (layout, field)
+        let row = choose|row: int| 0 <= row < self.entries@.len() && (#[trigger] self.entries@[row]) == *layout;
+        let i = choose|i: int| 0 <= i < layout.fields@.len() && (#[trigger] layout.fields@[i]) == *field
+            && forall|j: int| 0 <= j < i ==> (#[trigger] layout.fields@[j]).name.spec_bytes() != name.spec_bytes();
+        (row, i)
+    }
+
+    pub(in crate::project::use_aliases) proof fn checked_conversion_operation_type(
+        &self, op: StructureOperation, input: StructureFieldType, checked: TypedStructureOperation,
+    )
+        requires
+            !(op is Field),
+            self.structure_operation_matches(op, input, Ok(checked)),
+        ensures
+            op is Raw ==> input is Struct && checked.ty is Bits,
+            op matches StructureOperation::As(position) ==> input is Bits && checked.ty == StructureFieldType::Struct(position),
+    {
     }
 
     /// 操作ごとの入力型と、指定した配置から決まる結果型・区間または診断を表す。
@@ -452,6 +467,57 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
             },
             (StructureOperation::As(_), StructureFieldType::Struct(_)) => Err(StructureOperationError::ExpectedBits),
             (_, StructureFieldType::Bits(_)) => Err(StructureOperationError::ExpectedStructure),
+        }
+    }
+}
+
+#[cfg(verus_only)]
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(in crate::project::use_aliases) proof fn checked_field_operations_agree(
+        &self, limit: u64, left: &StructureLayouts, right: &StructureLayouts, position: StructurePosition,
+        left_name: &str, right_name: &str, first: TypedStructureOperation, second: TypedStructureOperation,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(limit, Ok(*left)),
+            self.structure_types_match(limit, Ok(*right)),
+            left_name.spec_bytes() == right_name.spec_bytes(),
+            left.structure_operation_matches(StructureOperation::Field(left_name), StructureFieldType::Struct(position), Ok(first)),
+            right.structure_operation_matches(StructureOperation::Field(right_name), StructureFieldType::Struct(position), Ok(second)),
+        ensures first == second,
+    {
+        let (a, i) = left.selected_field(position, left_name, first);
+        let (b, j) = right.selected_field(position, right_name, second);
+        self.structure_type_layouts_agree_at(limit, *left, *right, a, b);
+        let l = left.entries_model()[a].fields@;
+        let r = right.entries_model()[b].fields@;
+        if i < j {
+            assert(l[i].name.spec_bytes() == r[i].name.spec_bytes());
+            assert(r[i].name.spec_bytes() != right_name.spec_bytes());
+        } else if j < i {
+            assert(l[j].name.spec_bytes() == r[j].name.spec_bytes());
+            assert(l[j].name.spec_bytes() != left_name.spec_bytes());
+        }
+        assert(l[i].ty == r[i].ty && l[i].range == r[i].range);
+    }
+
+    pub(in crate::project::use_aliases) proof fn representation_widths_agree_across_layouts(
+        &self, limit: u64, left: &StructureLayouts, right: &StructureLayouts, ty: StructureFieldType, a: int, b: int,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(limit, Ok(*left)),
+            self.structure_types_match(limit, Ok(*right)),
+            left.representation_width_matches(ty, a),
+            right.representation_width_matches(ty, b),
+        ensures a == b,
+    {
+        if let StructureFieldType::Struct(position) = ty {
+            let i = choose|i: int| 0 <= i < left.entries_model().len()
+                && (#[trigger] left.entries_model()[i]).position == position && left.entries_model()[i].width == a;
+            let j = choose|i: int| 0 <= i < right.entries_model().len()
+                && (#[trigger] right.entries_model()[i]).position == position && right.entries_model()[i].width == b;
+            self.structure_type_layouts_agree_at(limit, *left, *right, i, j);
         }
     }
 }
