@@ -13,6 +13,7 @@ mod path;
 mod resolution;
 mod signatures;
 mod sources;
+mod structure_declarations;
 mod use_aliases;
 mod use_targets;
 mod widths;
@@ -77,6 +78,12 @@ pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
 };
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
+pub use structure_declarations::{
+    DeclaredField, DeclaredFieldType, StructureDeclaration, StructureNumber, StructureNumberError, StructureNumberErrorKind,
+    check_structure_declaration,
+};
+#[cfg(verus_only)]
+pub use structure_declarations::structure_declaration_result;
 #[cfg(verus_only)]
 pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
 #[cfg(verus_only)]
