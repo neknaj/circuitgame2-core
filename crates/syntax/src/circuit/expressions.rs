@@ -243,7 +243,7 @@ pub(super) proof fn same_expression_head(
     }
 }
 
-fn read_expression_head(source: &str, form: &Form) -> (head: Option<ExpressionHead>)
+pub(super) fn read_expression_head(source: &str, form: &Form) -> (head: Option<ExpressionHead>)
     requires
         0 < form_span(*form).end <= source.spec_bytes().len(),
         form_span(*form).start < form_span(*form).end,

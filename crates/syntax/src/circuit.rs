@@ -24,6 +24,7 @@ mod expressions;
 mod index;
 mod names;
 mod ports;
+mod selection_shapes;
 mod structure;
 #[cfg(verus_only)]
 mod test_diagnostics;
@@ -67,7 +68,7 @@ pub use expression_forest::{
 #[cfg(verus_only)]
 pub use expression_forest::{expression_reference_in_source, expression_source_reference_result};
 #[cfg(verus_only)]
-pub use expression_forest::expression_region;
+pub use expression_forest::{expression_forest, expression_region};
 #[cfg(verus_only)]
 pub use expression_forest::ordinary_call_at;
 pub use index::{
@@ -101,6 +102,11 @@ pub use ports::{
 };
 #[cfg(verus_only)]
 pub use ports::{port_site_evidence, routine_ports_agree, routine_ports_availability, routine_ports_match};
+pub use selection_shapes::{BitSelectionShape, BitSelectionTail, bit_selection_shape};
+#[cfg(verus_only)]
+pub use selection_shapes::{
+    bit_selection_shape_matches, bit_selection_shape_positions, strict_bit_selection_has_shape, strict_bit_selection_input,
+};
 use structure::validate_structure_arguments;
 #[cfg(verus_only)]
 pub use structure::{

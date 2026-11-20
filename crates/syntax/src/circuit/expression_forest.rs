@@ -534,6 +534,22 @@ pub closed spec fn expression_forest(source: &str, forms: Seq<Form>, start: int,
     })
 }
 
+/// 文法に適合した式列の先頭がリストなら、専用の引数を除いた子式列も文法に適合する。
+pub(super) proof fn first_expression_children(
+    source: &str, forms: Seq<Form>, start: int, stop: int,
+)
+    requires expression_forest(source, forms, start, stop), 0 <= start < stop <= forms.len(), forms[start] is List,
+    ensures ({
+        let end = forms[start]->List_end as int;
+        &&& start < end <= stop
+        &&& exists|first: int, last: int|
+            #[trigger] expression_child_range(source, forms, start, end, first, last)
+                && expression_forest(source, forms, first, last)
+    }),
+{
+    reveal_with_fuel(expression_forest, 1);
+}
+
 /// 式列を先頭から検査したときの最初の診断を表す。
 ///
 /// リスト自身の違反を優先し、局所文法に合う場合は子式、後続の式の順に調べる。
