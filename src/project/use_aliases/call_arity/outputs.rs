@@ -17,7 +17,7 @@ use super::super::function_literals::output_indices;
 use crate::project::{FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
-use crate::project::{FuncDrivers, FuncWiring, TypedPort, port_types_equal, ResolvedPortType, circuits::{
+use crate::project::{FuncDrivers, FuncWiring, TypedPort, location_in_source, port_types_equal, ResolvedPortType, circuits::{
     is_form_location, parsed_circuit_matches, parsed_index_evidence,
 }};
 use crate::syntax::circuit::{NamedBuildCircuit, definition_root_is_call, definition_target_atoms};
@@ -207,6 +207,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             _ => exists|call: TypedFuncCall, expression: LocatedName|
                 #[trigger] self.root_output_signature(file, entry, definition, limit, Ok(Some(call)))
                     && #[trigger] is_form_location(source, root, expression)
+                    && driver.result_index < call.call.target.port_counts().outputs
                     && output_transfer(call_output_type(&call, &expression, driver.result_index as int),
                         expected, target, expression, result),
         }
@@ -444,8 +445,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     )
         requires self.func_call_outputs_evidence(file, entry, limit, Ok(*outputs)),
             outputs.wiring == FuncWiringResult::Checked(*wiring),
-        ensures outputs.types@.len() == wiring.drivers.definitions@.len(),
-    {}
+        ensures
+            outputs.types@.len() == wiring.drivers.definitions@.len(),
+            forall|i: int| 0 <= i < outputs.types@.len() && (#[trigger] outputs.types@[i]).is_some()
+                ==> location_in_source(outputs.types@[i]->Some_0.origin),
+    {
+        let outlets = choose|outlets: Seq<Option<usize>>|
+            #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outlets)
+            && self.call_output_prefix(file, entry, limit, &wiring.drivers, outlets, outputs.types@);
+        reveal(UseAliases::call_output_prefix);
+        assert forall|i: int| 0 <= i < outputs.types@.len() && (#[trigger] outputs.types@[i]).is_some()
+            implies location_in_source(outputs.types@[i]->Some_0.origin) by {
+            reveal(UseAliases::call_output_step);
+            let drivers = &wiring.drivers;
+            assert(self.call_output_step(file, entry, limit, drivers, outlets, i, Ok(outputs.types@[i])));
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[file as int];
+            let source = &project.sources_model()[file as int];
+            let driver = drivers.definitions@[i];
+            let definition = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+            let root = parsed.syntax.forms@[parsed.definitions@[driver.definition as int].expression.start as int];
+            let target = LocatedName { source, span: driver.name.span };
+            let expected = if let Some(output) = outlets[i] {
+                Some(drivers.signature.outputs@[output as int])
+            } else { None };
+            let (call, expression) = choose|call: TypedFuncCall, expression: LocatedName|
+                #[trigger] self.root_output_signature(file, entry, definition, limit, Ok(Some(call)))
+                && #[trigger] is_form_location(source, root, expression)
+                && driver.result_index < call.call.target.port_counts().outputs
+                && output_transfer(call_output_type(&call, &expression, driver.result_index as int),
+                    expected, target, expression, Ok(outputs.types@[i]));
+            if call.signature is Function {
+                reveal(UseAliases::root_output_signature);
+                self.call_output_annotation_in_source(file, entry, definition, 0, limit, call, driver.result_index as int);
+            }
+        };
+    }
 }
 
 } // verus!

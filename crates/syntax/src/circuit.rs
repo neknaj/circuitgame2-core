@@ -105,6 +105,7 @@ pub use ports::{port_site_evidence, routine_ports_agree, routine_ports_availabil
 pub use selection_shapes::{BitSelectionShape, BitSelectionTail, bit_selection_shape};
 #[cfg(verus_only)]
 pub use selection_shapes::{
+    build_selection_input_position,
     bit_selection_shape_matches, bit_selection_shape_positions, strict_bit_selection_has_shape, strict_bit_selection_input,
 };
 use structure::validate_structure_arguments;

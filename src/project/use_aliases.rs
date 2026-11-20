@@ -12,6 +12,7 @@ mod function_wiring;
 mod local_signal_index;
 mod port_types;
 mod relative;
+mod selection_arguments;
 mod signature_cache;
 mod single_bit_func;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
@@ -29,6 +30,7 @@ pub use function_drivers::{
 };
 pub use function_literals::{FuncLiteralError, FuncLiteralWidths};
 pub use function_atoms::{FuncAtomTypeError, FuncAtomTypes, SignalType};
+pub use selection_arguments::{SelectionArgument, SelectionArgumentError};
 pub use function_types::{FuncSignalTypeError, FuncSignalTypes};
 pub use single_bit_func::LoweredSingleBitFunc;
 #[cfg(verus_only)]

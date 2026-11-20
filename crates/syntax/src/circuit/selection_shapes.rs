@@ -256,4 +256,40 @@ pub proof fn strict_bit_selection_input(
     same_expression_head(source, forms, index + 1, candidate, Some(expected));
 }
 
+/// 入力式が裸の信号名なら、選択式の定義に付く信号索引の先頭がその名を指す。
+pub proof fn build_selection_input_position(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int, shape: BitSelectionShape,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition
+            < index.entry_ranges@[entry].definitions.end <= index.definitions@.len(),
+        bit_selection_shape_matches(source, index.syntax.forms@,
+            index.definitions@[definition].expression.start as int, shape),
+        shape.input.end == shape.input.start + 1,
+        index.syntax.forms@[shape.input.start as int] is Atom,
+        index.syntax.forms@[shape.input.start as int]->Atom_kind is Name,
+    ensures ({
+        let frame = index.entry_ranges@[entry].signals;
+        let row = index.definitions@[definition];
+        &&& frame.start <= row.signals.start < row.signals.end <= frame.end <= index.signals@.len()
+        &&& index.signals@[row.signals.start as int] == shape.input.start
+    }),
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    let forms = index.syntax.forms@;
+    let row = index.definitions@[definition];
+    let first = row.expression.start as int;
+    let stop = row.expression.end as int;
+    first_expression_children(source, forms, first, stop);
+    bit_selection_shape_positions(source, forms, first, shape);
+    let end = forms[first]->List_end as int;
+    assert(expression_child_range(
+        source, forms, first, end, shape.input.start as int, shape.input.end as int,
+    ));
+    super::expression_forest::first_named_child_signal(source, forms, first, stop, shape.input.start);
+}
+
 } // verus!

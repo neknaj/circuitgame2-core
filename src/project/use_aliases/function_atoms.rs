@@ -1,21 +1,33 @@
 //! 定数と裸の信号名から、関数の左辺に対応する型を求める。
 
 use super::function_literals::index_outputs;
+use super::function_types::FuncSignalTypeError;
+use super::selection_arguments::check_selection_arguments;
+#[cfg(verus_only)]
+use super::selection_arguments::selection_arguments_match;
 #[cfg(verus_only)]
 use super::function_literals::output_indices;
 #[cfg(verus_only)]
 use super::function_drivers::expected_output_context;
 use super::{FuncLiteralError, FuncLiteralWidths, FuncWiring, FuncWiringResult, OutputDriver, ResolvedPortType, UseAliases};
-use crate::project::LocatedName;
+use crate::project::{LocatedName, ProjectSource, TypedPort};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
 use crate::project::{
-    ProjectSource, circuits::{parsed_circuit_matches, parsed_index_evidence, is_form_location},
-    port_types_equal,
+    circuits::{parsed_circuit_matches, parsed_index_evidence, is_form_location},
+    location_in_source, port_types_equal,
 };
 use crate::syntax::{AtomKind, Form};
+use crate::syntax::circuit::{BitSelectionShape, bit_selection_shape};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{NamedBuildCircuit, build_bare_signal_position, build_definition_scope_evidence};
+use crate::syntax::circuit::{
+    NamedBuildCircuit, bit_selection_shape_matches, bit_selection_shape_positions, build_bare_signal_position,
+    build_definition_scope_evidence, build_selection_input_position,
+};
+#[cfg(verus_only)]
+use crate::syntax::form_spans_valid;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -40,14 +52,14 @@ pub struct FuncAtomTypes<'p, 'a> {
     pub types: Vec<Option<SignalType<'p, 'a>>>,
 }
 
-/// 定数または裸の信号参照を検査した結果の診断。
+/// 定数の幅、または右辺と出力の型の不一致に関する診断。
 #[derive(Debug)]
 pub enum FuncAtomTypeError<'p, 'a> {
     /// 配線、個数または定数の右辺の違反。
     Literal(FuncLiteralError<'p, 'a>),
-    /// 信号の型と、その信号が駆動する出力の宣言型が異なる。
+    /// 右辺の型と、駆動先の出力の宣言型が異なる。
     OutputType {
-        /// 右辺の裸の信号名。
+        /// 右辺の信号名またはビット選択式の範囲。
         reference: LocatedName<'p, 'a>,
         /// 出力が要求する型と、その注釈位置。
         expected: SignalType<'p, 'a>,
@@ -102,12 +114,109 @@ pub(super) fn inherit_type<'p, 'a>(
     }
 }
 
+spec fn named_selection_matches(source: &str, forms: Seq<Form>, index: int, shape: BitSelectionShape) -> bool {
+    &&& bit_selection_shape_matches(source, forms, index, shape)
+    &&& shape.input.end == shape.input.start + 1
+    &&& forms[shape.input.start as int] is Atom
+    &&& forms[shape.input.start as int]->Atom_kind is Name
+}
+
+fn named_selection(source: &str, forms: &[Form], index: usize) -> (result: Option<BitSelectionShape>)
+    ensures
+        result matches Some(shape) ==> named_selection_matches(source, forms@, index as int, shape),
+        forall|shape: BitSelectionShape| #[trigger] named_selection_matches(source, forms@, index as int, shape)
+            <==> result == Some(shape),
+{
+    let Some(shape) = bit_selection_shape(source, forms, index) else { return None; };
+    proof { bit_selection_shape_positions(source, forms@, index as int, shape); }
+    if shape.input.end - shape.input.start == 1
+        && matches!(forms[shape.input.start], Form::Atom { kind: AtomKind::Name, .. })
+    {
+        Some(shape)
+    } else { None }
+}
+
+spec fn selection_type_matches(
+    source: &ProjectSource, forms: Seq<Form>, root: usize, shape: BitSelectionShape,
+    input: Option<SignalType>, expected: Option<TypedPort>, result: Result<Option<SignalType>, FuncSignalTypeError>,
+) -> bool {
+    match input {
+        None => result == Ok(None),
+        Some(input) => match input.ty {
+            ResolvedPortType::Bits(width) => match result {
+                Err(FuncSignalTypeError::SelectionArgument(error)) =>
+                    selection_arguments_match(source, forms, &shape, width, &input.origin, Err(error)),
+                _ => exists|selection: super::selection_arguments::CheckedBitSelection, expression: LocatedName|
+                    #[trigger] selection_arguments_match(source, forms, &shape, width, &input.origin, Ok(selection))
+                    && #[trigger] is_form_location(source, forms[root as int], expression)
+                    && {
+                        let actual = SignalType { ty: ResolvedPortType::Bits(selection.count), origin: expression };
+                        if let Some(port) = expected {
+                            if port_types_equal(actual.ty, port.ty) {
+                                result == Ok(Some(actual))
+                            } else {
+                                result == Err(FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
+                                    reference: expression,
+                                    expected: SignalType { ty: port.ty, origin: port.annotation },
+                                    actual,
+                                }))
+                            }
+                        } else {
+                            result == Ok(Some(actual))
+                        }
+                    },
+            },
+            _ => result matches Err(FuncSignalTypeError::SelectionInputType { reference, actual })
+                && actual == input && is_form_location(source, forms[shape.input.start as int], reference),
+        },
+    }
+}
+
+fn check_selection_type<'p, 'a>(
+    source: &'p ProjectSource<'a>, forms: &[Form], root: usize, shape: &BitSelectionShape,
+    input: Option<SignalType<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
+) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
+    requires
+        named_selection_matches(source.text, forms@, root as int, *shape),
+        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+        input matches Some(ty) ==> location_in_source(ty.origin),
+    ensures
+        selection_type_matches(source, forms@, root, *shape, input,
+            match expected { Some(port) => Some(*port), None => None }, result),
+        result matches Ok(Some(ty)) ==> location_in_source(ty.origin),
+        result matches Err(error) ==> (error is Signal || error is SelectionInputType || error is SelectionArgument),
+        result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
+{
+    let Some(input) = input else { return Ok(None); };
+    proof { bit_selection_shape_positions(source.text, forms@, root as int, *shape); }
+    let ResolvedPortType::Bits(width) = input.ty else {
+        let reference = form_location(source, forms, shape.input.start);
+        return Err(FuncSignalTypeError::SelectionInputType { reference, actual: input });
+    };
+    let checked = match check_selection_arguments(source, forms, root, shape, width, &input.origin) {
+        Ok(checked) => checked,
+        Err(error) => return Err(FuncSignalTypeError::SelectionArgument(error)),
+    };
+    let expression = form_location(source, forms, root);
+    let actual = SignalType { ty: ResolvedPortType::Bits(checked.count), origin: copy_location(&expression) };
+    if let Some(port) = expected {
+        if !actual.ty.is_same_type(&port.ty) {
+            return Err(FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
+                reference: expression,
+                expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
+                actual,
+            }));
+        }
+    }
+    Ok(Some(actual))
+}
+
 #[verifier::opaque]
 spec fn atom_type_step(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
     widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, roots: Seq<Option<SignalType>>,
     prior: Seq<Option<SignalType>>, i: int,
-    result: Result<Option<SignalType>, FuncAtomTypeError>,
+    result: Result<Option<SignalType>, FuncSignalTypeError>,
 ) -> bool {
     let driver = wiring.drivers.definitions@[i];
     let row = parsed.definitions@[driver.definition as int];
@@ -137,13 +246,33 @@ spec fn atom_type_step(
                 &&& if port_types_equal(actual.ty, port.ty) {
                     result == Ok(Some(actual))
                 } else {
-                    result == Err(FuncAtomTypeError::OutputType {
+                    result == Err(FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
                         reference: bound.site, expected: SignalType { ty: port.ty, origin: port.annotation }, actual,
-                    })
+                    }))
                 }
             },
             _ => result == Ok(actual),
         }
+    } else if roots.len() > 0 && driver.result_index == 0 && exists|shape: BitSelectionShape|
+        #[trigger] named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+    {
+        let shape = choose|shape: BitSelectionShape|
+            #[trigger] named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape);
+        let first = parsed.entry_ranges@[entry].signals.start;
+        let bound = wiring.signals@[row.signals.start - first];
+        let expected = if let Some(output) = outputs[i] {
+            Some(wiring.drivers.signature.outputs@[output as int])
+        } else { None };
+        &&& first <= row.signals.start < first + wiring.signals@.len()
+        &&& bound.definition == driver.definition
+        &&& is_form_location(source, parsed.syntax.forms@[shape.input.start as int], bound.site)
+        &&& match bound.driver {
+            OutputDriver::Input(input) => input < wiring.drivers.signature.inputs@.len(),
+            OutputDriver::Definition(prior_index) => prior_index < prior.len(),
+        }
+        &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
+        &&& selection_type_matches(source, parsed.syntax.forms@, row.expression.start, shape,
+            signal_type_at(wiring, prior, bound.driver), expected, result)
     } else {
         result == Ok(if roots.len() == 0 { None } else { roots[i] })
     }
@@ -161,7 +290,7 @@ spec fn typed_prefix(
 
 pub(super) closed spec fn atoms_match(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
-    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, result: Result<Vec<Option<SignalType>>, FuncAtomTypeError>,
+    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, result: Result<Vec<Option<SignalType>>, FuncSignalTypeError>,
 ) -> bool {
     exists|outputs: Seq<Option<usize>>| #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs)
         && match result {
@@ -190,7 +319,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) fn check_atoms(
         &self, file: usize, entry: usize, _limit: u64, literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
         roots: &[Option<SignalType<'p, 'a>>],
-    ) -> (result: Result<Vec<Option<SignalType<'p, 'a>>>, FuncAtomTypeError<'p, 'a>>)
+    ) -> (result: Result<Vec<Option<SignalType<'p, 'a>>>, FuncSignalTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -203,6 +332,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }),
             literals.widths@.len() == wiring.drivers.definitions@.len(),
             roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
+            forall|i: int| 0 <= i < roots@.len() && (#[trigger] roots@[i]).is_some()
+                ==> location_in_source(roots@[i]->Some_0.origin),
         ensures
             ({
                 let project = self.targets.project_model();
@@ -210,7 +341,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     entry as int, wiring, literals.widths@, roots@, result)
             }),
             result matches Ok(types) ==> types@.len() == wiring.drivers.definitions@.len(),
-            result matches Err(error) ==> !(error is Literal),
+            result matches Err(error) ==> error is Signal
+                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument)),
+            result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
     {
         let project = self.targets.project();
         let source = &project.sources()[file];
@@ -218,7 +351,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let outputs = index_outputs(&wiring.drivers);
         let mut types: Vec<Option<SignalType>> = Vec::new();
         let mut i = 0;
-        proof { reveal(typed_prefix); }
+        proof {
+            reveal(typed_prefix);
+            self.checked_wiring_is_func(file, entry, _limit, *wiring);
+        }
         while i < wiring.drivers.definitions.len()
             invariant
                 self.can_resolve(), self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -230,6 +366,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs@),
                 literals.widths@.len() == wiring.drivers.definitions@.len(),
                 roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
+                forall|j: int| 0 <= j < roots@.len() && (#[trigger] roots@[j]).is_some()
+                    ==> location_in_source(roots@[j]->Some_0.origin),
+                super::function_drivers::checked_ports_and_output_bounds(parsed.syntax.forms@, wiring.drivers),
+                forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
+                    ==> location_in_source(types@[j]->Some_0.origin),
                 i == types@.len() <= wiring.drivers.definitions@.len(),
                 typed_prefix(source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
             decreases wiring.drivers.definitions@.len() - i,
@@ -267,11 +408,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 if let (Some(resolved), Some(output)) = (&actual, outputs[i]) {
                     let port = &wiring.drivers.signature.outputs[output];
                     if !resolved.ty.is_same_type(&port.ty) {
-                        let error = FuncAtomTypeError::OutputType {
+                        let error = FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
                             reference: copy_location(&bound.site),
                             expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
                             actual: SignalType { ty: resolved.ty, origin: copy_location(&resolved.origin) },
-                        };
+                        });
                         assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
                             outputs@, roots@, types@, i as int, Err(error)));
                         return Err(error);
@@ -280,14 +421,55 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 actual
             } else if roots.is_empty() {
                 None
+            } else if driver.result_index == 0 {
+                if let Some(shape) = named_selection(source.text, forms, root) {
+                    proof {
+                        assert(named_selection_matches(source.text, forms@, root as int, shape));
+                        build_selection_input_position(source.text, &parsed.build_model(), entry as int,
+                            driver.definition as int, shape);
+                        self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
+                    }
+                    let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
+                    let bound = &wiring.signals[position];
+                    proof {
+                        if let OutputDriver::Definition(prior) = bound.driver {
+                            assert(prior < i) by {
+                                if i < prior {
+                                    assert(wiring.drivers.definitions@[i as int].definition
+                                        <= wiring.drivers.definitions@[prior as int].definition);
+                                }
+                            };
+                        }
+                    }
+                    let input = inherit_type(wiring, types.as_slice(), bound.driver);
+                    let expected = match outputs[i] {
+                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                        None => None,
+                    };
+                    match check_selection_type(source, forms, root, &shape, input, expected) {
+                        Ok(ty) => ty,
+                        Err(error) => {
+                            assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
+                                outputs@, roots@, types@, i as int, Err(error)));
+                            return Err(error);
+                        },
+                    }
+                } else {
+                    copy_signal_type(&roots[i])
+                }
             } else {
                 copy_signal_type(&roots[i])
             };
             assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@, i as int, Ok(next)));
+            assert(next matches Some(ty) ==> location_in_source(ty.origin));
             let ghost before = types@;
             types.push(next);
             proof {
                 reveal(typed_prefix);
+                assert forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
+                    implies location_in_source(types@[j]->Some_0.origin) by {
+                    if j < i { assert(types@[j] == before[j]); }
+                };
                 assert forall|j: int| 0 <= j < types@.len() implies
                     #[trigger] atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
                         outputs@, roots@, types@.take(j), j, Ok(types@[j])) by {
@@ -322,7 +504,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 },
             Err(error) => exists|literals: FuncLiteralWidths| literals.wiring is Checked
                 && #[trigger] self.func_literal_evidence(file, entry, limit, Ok(literals))
-                && atoms_match(source, parsed, entry as int, &literals.wiring->Checked_0, literals.widths@, Seq::empty(), Err(error)),
+                && atoms_match(source, parsed, entry as int, &literals.wiring->Checked_0, literals.widths@,
+                    Seq::empty(), Err(FuncSignalTypeError::Signal(error))),
         }
     }
 
@@ -356,11 +539,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(roots@ =~= Seq::empty());
         match self.check_atoms(file, entry, max_width, &literals, wiring, roots) {
             Ok(types) => Ok(FuncAtomTypes { literals, types }),
-            Err(error) => {
+            Err(FuncSignalTypeError::Signal(error)) => {
                 assert(self.func_atom_type_evidence(file, entry, max_width, Err(error))) by {
                     assert(self.func_literal_evidence(file, entry, max_width, Ok(literals)));
                 };
                 Err(error)
+            },
+            Err(_) => {
+                proof { assert(false); }
+                unreachable!()
             },
         }
     }

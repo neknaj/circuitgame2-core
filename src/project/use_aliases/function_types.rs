@@ -8,6 +8,8 @@ use super::{
 use super::{FuncWiring, function_atoms::atoms_match};
 use alloc::vec::Vec;
 use super::signature_cache::SignatureCache;
+use super::selection_arguments::SelectionArgumentError;
+use crate::project::LocatedName;
 use vstd::prelude::*;
 
 verus! {
@@ -29,8 +31,17 @@ pub enum FuncSignalTypeError<'p, 'a> {
     Literal(FuncLiteralError<'p, 'a>),
     /// 右辺全体を占める通常呼び出しの署名または出力に関する診断。
     CallOutput(FuncCallOutputError<'p, 'a>),
-    /// 裸の信号名が参照した型と、駆動先の出力宣言型の不一致。
+    /// 信号参照やビット選択式の型と、駆動先の出力宣言型の不一致。
     Signal(FuncAtomTypeError<'p, 'a>),
+    /// ビット選択の入力がビット列型に合わない。
+    SelectionInputType {
+        /// 入力に指定した信号名の範囲。
+        reference: LocatedName<'p, 'a>,
+        /// 入力の型と、その型を決めた元ソースの位置。
+        actual: SignalType<'p, 'a>,
+    },
+    /// ビット選択の数値引数または選択範囲の違反。
+    SelectionArgument(SelectionArgumentError<'p, 'a>),
     /// 直接の引数を検査した呼び出しの位置と、署名または引数に関する診断。
     CallInput(FuncCallInputsError<'p, 'a>),
 }
@@ -60,7 +71,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     spec fn propagated_types_match(
         &self, file: usize, entry: usize, wiring: &FuncWiring, literals: FuncLiteralWidths,
-        roots: FuncCallOutputTypes, result: Result<Vec<Option<SignalType>>, FuncAtomTypeError>,
+        roots: FuncCallOutputTypes, result: Result<Vec<Option<SignalType>>, FuncSignalTypeError>,
     ) -> bool {
         let project = self.targets.project_model();
         atoms_match(&project.sources_model()[file as int], &project.circuits_model()[file as int],
@@ -78,7 +89,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && exists|literals: FuncLiteralWidths| literals.wiring matches FuncWiringResult::Checked(scope)
                     && #[trigger] self.func_literal_evidence(file, entry, limit, Ok(literals))
                     && self.call_output_failure(file, entry, limit, &scope.drivers, error),
-            Err(FuncSignalTypeError::Signal(error)) => exists|literals: FuncLiteralWidths, wiring: FuncWiring, roots: FuncCallOutputTypes|
+            Err(error) if error is Signal || error is SelectionInputType || error is SelectionArgument =>
+                exists|literals: FuncLiteralWidths, wiring: FuncWiring, roots: FuncCallOutputTypes|
                 #[trigger] self.signal_type_sources(file, entry, limit, literals, &wiring, roots)
                 && self.propagated_types_match(file, entry, &wiring, literals, roots, Err(error)),
             Err(FuncSignalTypeError::CallInput(error)) => exists|literals: FuncLiteralWidths, wiring: FuncWiring,
@@ -93,20 +105,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && self.propagated_types_match(file, entry, &wiring, result.literals, roots, Ok(result.types))
                         && self.prepared_call_inputs_match(file, entry, limit, result.types@, &wiring, Ok(()))
                 } else { result.types@.len() == 0 },
+            _ => false,
         }
     }
 
     /// 定数と通常呼び出しから得た型を信号参照に伝え、関数内の呼び出しを検査する。
     ///
     /// 右辺全体が通常呼び出しなら、出力型を左辺の名前へ順に割り当てる。
-    /// 裸の信号名は入力または先行定義の型を引き継ぐ。呼び出しの直接の引数が定数か、
+    /// 裸の信号名は入力または先行定義の型を引き継ぐ。型が分かる信号名を入力とする
+    /// `bit` と `slice` は、選択範囲を検査し、選ぶビット数を結果型の幅にする。
+    /// 呼び出しの直接の引数が定数か、
     /// 型の判明した裸の信号名なら、対応する入力型と照合する。
     /// 参照先の署名が得られたら、その署名をこの検査の入出力の照合で再利用する。
     /// ほかの複合式の結果型は保留する。展開待ちは呼び出し位置を保ったまま返す。
     ///
     /// # Errors
     ///
-    /// 配線・入出力数・定数幅、通常呼び出しの出力、裸の信号参照、直接の引数の順に検査し、
+    /// 配線・入出力数・定数幅、通常呼び出しの出力、信号参照とビット選択、直接の引数の順に検査し、
     /// 各段階で最初に見つけた違反を返す。
     pub fn check_func_signal_types(
         &self, file: usize, entry: usize, max_width: u64,
@@ -152,10 +167,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let types = match self.check_atoms(file, entry, max_width, &literals, scope, call_types.as_slice()) {
             Ok(types) => types,
             Err(error) => {
-                assert(self.func_signal_types_evidence(file, entry, max_width, Err(FuncSignalTypeError::Signal(error)))) by {
+                assert(self.func_signal_types_evidence(file, entry, max_width, Err(error))) by {
                     assert(self.propagated_types_match(file, entry, scope, literals, roots, Err(error)));
                 };
-                return Err(FuncSignalTypeError::Signal(error));
+                return Err(error);
             },
         };
         assert(self.propagated_types_match(file, entry, scope, literals, roots, Ok(types)));

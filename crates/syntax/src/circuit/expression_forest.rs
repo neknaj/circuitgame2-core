@@ -322,6 +322,28 @@ proof fn same_child_interval(
     same_expression_head(source, forms, first + 1, left, right);
 }
 
+/// 引数の式区間が裸の信号名だけなら、その添字が信号索引の先頭にあることを示す。
+pub(super) proof fn first_named_child_signal(
+    source: &str, forms: Seq<Form>, first: int, stop: int, name: usize,
+)
+    requires
+        0 <= first < stop <= forms.len() <= usize::MAX,
+        forms[first] is List,
+        first < name < name + 1 <= forms[first]->List_end <= stop,
+        forms[name as int] is Atom && forms[name as int]->Atom_kind is Name,
+        expression_child_range(source, forms, first, forms[first]->List_end as int, name as int, name + 1),
+    ensures
+        expression_signals(source, forms, first, stop).len() > 0,
+        expression_signals(source, forms, first, stop)[0] == name,
+{
+    reveal_with_fuel(expression_signals, 1);
+    let end = forms[first]->List_end as int;
+    let (a, b) = choose|a: int, b: int| first < a <= b <= end
+        && #[trigger] expression_child_range(source, forms, first, end, a, b);
+    same_child_interval(source, forms, first, end, a, b, name as int, name + 1);
+    bare_signal_index(source, forms, a, b);
+}
+
 pub(super) proof fn call_argument_signal_index(
     source: &str, forms: Seq<Form>, first: int, stop: int, reference: int, name: usize,
 )

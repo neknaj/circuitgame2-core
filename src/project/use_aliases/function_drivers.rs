@@ -670,6 +670,8 @@ pub(super) open spec fn expected_output_context(
 pub(super) open spec fn checked_ports_and_output_bounds(forms: Seq<Form>, drivers: FuncDrivers) -> bool {
     &&& typed_name_sites(forms, drivers.signature.inputs@)
     &&& typed_name_sites(forms, drivers.signature.outputs@)
+    &&& forall|i: int| 0 <= i < drivers.signature.inputs@.len()
+        ==> location_in_source((#[trigger] drivers.signature.inputs@[i]).annotation)
     &&& forall|i: int| 0 <= i < drivers.outputs@.len() && (#[trigger] drivers.outputs@[i]) is Input
         ==> drivers.outputs@[i]->Input_0 < drivers.signature.inputs@.len()
 }

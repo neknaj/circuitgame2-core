@@ -6,7 +6,7 @@ use super::super::signature_cache::SignatureCache;
 use super::{ResolvedDefinitionReference, target_ports_match};
 use crate::project::{LocatedName, PortDirection, ResolvedPortType, TypedRoutineSignature, TypedSignatureError};
 #[cfg(verus_only)]
-use crate::project::circuits::parsed_index_evidence;
+use crate::project::{circuits::parsed_index_evidence, location_in_source};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{Head, RoutineArity, call_arguments_match, call_shape_matches, routine_arity_matches};
 #[cfg(verus_only)]
@@ -185,6 +185,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let resolved = choose|resolved: ResolvedDefinitionReference|
             #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
                 && target_ports_match(&project, resolved, call.target);
+    }
+
+    /// 出力型の注釈範囲が呼び出し先のソース内にあることを示す。
+    pub(in crate::project::use_aliases) proof fn call_output_annotation_in_source(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        call: TypedFuncCall, output: int,
+    )
+        requires
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
+            call.signature is Function,
+            0 <= output < call.call.target.port_counts().outputs,
+        ensures location_in_source(call.signature->Function_0.outputs@[output].annotation),
+    {
+        if let FuncCallTarget::Function { file: target_file, entry: target_entry, .. } = call.call.target {
+            self.typed_signature_sites(target_file, target_entry, limit, call.signature->Function_0);
+        }
     }
 
     /// 署名が同じ呼び出し先の宣言に対応し、入出力列の長さが個数の索引と一致することを表す。
