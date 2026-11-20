@@ -2,6 +2,8 @@
 
 mod dependencies;
 mod fields;
+mod operations;
+pub use operations::{StructureOperation, StructureOperationError, TypedStructureOperation};
 pub use dependencies::{StructureTypeError, StructureTypeReference};
 
 use super::{ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructurePosition, UseAliases};
@@ -64,7 +66,29 @@ pub struct StructureLayouts<'p, 'a> {
     entries: Vec<StructureLayout<'p, 'a>>,
 }
 
+spec fn representation_width(layouts: Seq<StructureLayout>, ty: StructureFieldType, width: int) -> bool {
+    match ty {
+        StructureFieldType::Bits(bits) => width == bits,
+        StructureFieldType::Struct(position) => exists|i: int| 0 <= i < layouts.len()
+            && (#[trigger] layouts[i]).position == position && layouts[i].width == width,
+    }
+}
+
 impl<'p, 'a> StructureLayouts<'p, 'a> {
+    #[verifier::type_invariant]
+    spec fn layout_entries_valid(&self) -> bool {
+        &&& forall|i: int, j: int| 0 <= i < j < self.entries@.len() ==>
+            structure_before((#[trigger] self.entries@[i]).position, (#[trigger] self.entries@[j]).position)
+        &&& forall|i: int| 0 <= i < self.entries@.len() ==> {
+            let entry = #[trigger] self.entries@[i];
+            &&& entry.width > 0
+            &&& forall|j: int| 0 <= j < entry.fields@.len() ==> {
+                let field = #[trigger] entry.fields@[j];
+                &&& field.range.start < field.range.end <= entry.width
+                &&& representation_width(self.entries@, field.ty, field.range.end - field.range.start)
+            }
+        }
+    }
     /// 構造体の配置をファイル順と厳格索引順で返す。
     pub fn entries(&self) -> (entries: &[StructureLayout<'p, 'a>])
         ensures entries@ == self.entries_model(),
@@ -323,6 +347,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         match result {
             Ok(layout) => layout.position == row.position && layout.width == row.declaration.width
+                && layout.width > 0
                 && layout.fields@.len() == row.declaration.fields@.len()
                 && self.structure_layout_prefix(index, row, layout.fields@),
             Err(error) => exists|prior: Seq<StructureLayoutField>, field: FieldPlacement, conflict: FieldConflict|
@@ -376,6 +401,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             index.entries_model().contains(*row),
         ensures self.layout_row_result(index, *row, result),
     {
+        let _project = self.targets.project();
+        proof { self.structure_row_evidence(index, limit, *row); }
         let total = row.declaration.width;
         let mut fields: Vec<StructureLayoutField> = Vec::new();
         assert(self.structure_layout_prefix(index, *row, fields@)) by {
@@ -387,7 +414,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.can_resolve(),
                 self.structure_index_matches(limit, Ok(*index)),
                 index.entries_model().contains(*row),
-                total == row.declaration.width,
+                0 < total == row.declaration.width,
                 i == fields@.len() <= row.declaration.fields@.len(),
                 self.structure_layout_prefix(index, *row, fields@),
             decreases row.declaration.fields@.len() - i,
@@ -508,6 +535,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.place_resolved_structures(&index, limit)
     }
 
+    proof fn layouts_preserve_order_and_ranges(
+        &self, index: &ResolvedStructures, limit: u64, layouts: Seq<StructureLayout>,
+    )
+        requires
+            self.structure_index_matches(limit, Ok(*index)),
+            self.layouts_before(index, layouts),
+            layouts.len() == index.entries_model().len(),
+        ensures
+            forall|i: int, j: int| 0 <= i < j < layouts.len() ==>
+                structure_before((#[trigger] layouts[i]).position, (#[trigger] layouts[j]).position),
+            forall|i: int| 0 <= i < layouts.len() ==> {
+                let entry = #[trigger] layouts[i];
+                &&& entry.width > 0
+                &&& forall|j: int| 0 <= j < entry.fields@.len() ==> {
+                    let field = #[trigger] entry.fields@[j];
+                    &&& field.range.start < field.range.end <= entry.width
+                    &&& representation_width(layouts, field.ty, field.range.end - field.range.start)
+                }
+            },
+    {
+        reveal(UseAliases::structure_index_matches);
+        let rows = index.entries_model();
+        assert(super::entries_in_order(rows));
+        assert forall|i: int, j: int| 0 <= i < j < layouts.len() implies
+            structure_before((#[trigger] layouts[i]).position, (#[trigger] layouts[j]).position) by {
+            assert(self.layout_row_result(index, rows[i], Ok(layouts[i])));
+            assert(self.layout_row_result(index, rows[j], Ok(layouts[j])));
+            assert(structure_before(rows[i].position, rows[j].position));
+        };
+        reveal(UseAliases::structure_layout_prefix);
+        assert forall|i: int| 0 <= i < layouts.len() implies {
+            let entry = #[trigger] layouts[i];
+            &&& entry.width > 0
+            &&& forall|j: int| 0 <= j < entry.fields@.len() ==> {
+                let field = #[trigger] entry.fields@[j];
+                &&& field.range.start < field.range.end <= entry.width
+                &&& representation_width(layouts, field.ty, field.range.end - field.range.start)
+            }
+        } by {
+            assert(self.layout_row_result(index, rows[i], Ok(layouts[i])));
+            assert forall|j: int| 0 <= j < layouts[i].fields@.len() implies {
+                let field = #[trigger] layouts[i].fields@[j];
+                &&& field.range.start < field.range.end <= layouts[i].width
+                &&& representation_width(layouts, field.ty, field.range.end - field.range.start)
+            } by {
+                let output = layouts[i].fields@[j];
+                assert(self.layout_field_at(index, rows[i], j, output));
+                let field = choose|field: FieldPlacement| #[trigger] self.field_placement_input(index, rows[i], j, field)
+                    && output.name == field.name && output.location == field.location && output.ty == field.ty
+                    && field_range_matches(field.offset, field.width, output.range)
+                    && output.range.end <= rows[i].declaration.width;
+                if let StructureFieldType::Struct(position) = field.ty {
+                    let target = choose|target: int| 0 <= target < rows.len()
+                        && (#[trigger] rows[target]).position == position && rows[target].declaration.width == field.width;
+                    assert(self.layout_row_result(index, rows[target], Ok(layouts[target])));
+                    assert(representation_width(layouts, output.ty, output.range.end - output.range.start));
+                }
+            };
+        };
+    }
+
     fn place_resolved_structures(&self, index: &ResolvedStructures, limit: u64)
         -> (result: Result<StructureLayouts<'p, 'a>, StructureLayoutError<'p, 'a>>)
         requires self.can_resolve(), self.structure_index_matches(limit, Ok(*index)),
@@ -534,6 +622,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             layouts.push(layout);
             i += 1;
         }
+        proof { self.layouts_preserve_order_and_ranges(index, limit, layouts@); }
         Ok(StructureLayouts { entries: layouts })
     }
 }

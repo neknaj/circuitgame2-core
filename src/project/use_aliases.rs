@@ -26,7 +26,7 @@ mod structure_types;
 pub use structure_types::{
     ResolvedStructure, ResolvedStructureEntry, ResolvedStructureField, ResolvedStructures,
     StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
-    StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference,
+    StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
 };
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{

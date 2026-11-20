@@ -3,7 +3,7 @@
 mod index;
 pub use index::{
     ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructureLayout, StructureLayoutError,
-    StructureLayoutField, StructureLayouts, StructurePlacementError, StructureTypeError, StructureTypeReference,
+    StructureLayoutField, StructureLayouts, StructurePlacementError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
 };
 
 use super::definitions::{ReferenceRequest, ReferenceUse};
