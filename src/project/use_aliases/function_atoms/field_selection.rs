@@ -9,13 +9,16 @@ use super::super::structure_types::CheckedStructureExpression;
 
 verus! {
 
+type CheckedFieldSelection<'p, 'a> =
+    (SignalType<'p, 'a>, TypedStructureOperation, u64, CheckedBitSelection);
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 結線からフィールドの入力を求め、必要なときに構造体の配置を検査する。
     pub(super) fn check_indexed_field_selection(
         &self, context: &StructureExpressionContext<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
         index: usize, prior: &[Option<SignalType<'p, 'a>>], field: &FieldSelectionShape,
         layouts: &mut Option<StructureLayouts<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
-    ) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
+    ) -> (result: Result<Option<(SignalType<'p, 'a>, StructureProjection)>, FuncSignalTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(context.file, context.entry, context.limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -57,9 +60,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
                 &&& self.field_selection_atom_step(context, row.expression.start, field.steps@, field.field, field.shape,
                     signal_type_at(wiring, prior@, bound.driver),
-                    match expected { Some(port) => Some(*port), None => None }, result)
+                    match expected { Some(port) => Some(*port), None => None },
+                    match result { Ok(Some((ty, _))) => Ok(Some(ty)), Ok(None) => Ok(None), Err(error) => Err(error) })
+                &&& result == Ok(None) ==> signal_type_at(wiring, prior@, bound.driver).is_none()
             }),
-            result matches Ok(Some(ty)) ==> location_in_source(ty.origin) && ty.ty is Bits,
+            result matches Ok(Some((ty, projection))) ==> {
+                &&& location_in_source(ty.origin) && ty.ty is Bits
+                &&& projection.target == index
+                &&& projection.selection.is_some()
+                &&& structure_projections_in_order(seq![projection], index + 1, wiring.drivers.signature.inputs@.len() as int)
+                &&& *final(layouts) matches Some(table)
+                &&& structure_projection_matches(self, context.file, context.entry, context.limit, wiring,
+                    table, prior@.push(Some(ty)), projection)
+            },
             result matches Err(error) ==> error is Signal || error is SelectionInputType || error is SelectionArgument
                 || error is StructureExpression || error is StructureLayout,
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
@@ -109,7 +122,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
         }
         let Some(table) = &*layouts else { unreachable!() };
-        self.check_field_selection_type(context, root, field, table, input, expected)
+        let (ty, operation, input_width, selection) = self.check_field_selection_type(
+            context, root, field, table, input, expected,
+        )?;
+        let projection = StructureProjection {
+            target: index, input: bound.driver, operation, input_width, selection: Some(selection),
+        };
+        assert(structure_projection_matches(self, context.file, context.entry, context.limit, wiring,
+            *table, prior@.push(Some(ty)), projection)) by {
+            reveal(structure_projection_matches);
+            assert(prior@.push(Some(ty)).take(index as int) =~= prior@);
+        };
+        Ok(Some((ty, projection)))
     }
 
     #[verifier::opaque]
@@ -168,7 +192,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn check_field_selection_type(
         &self, context: &StructureExpressionContext<'p, 'a>, root: usize, field: &FieldSelectionShape,
         layouts: &StructureLayouts<'p, 'a>, input: SignalType<'p, 'a>, expected: Option<&TypedPort<'p, 'a>>,
-    ) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
+    ) -> (result: Result<CheckedFieldSelection<'p, 'a>, FuncSignalTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.structure_types_match(context.limit, Ok(*layouts)),
@@ -180,8 +204,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             form_spans_valid(context.source.text, context.parsed.syntax.forms@, context.source.text.spec_bytes().len() as int),
         ensures
             self.field_selection_atom_step(context, root, field.steps@, field.field, field.shape, Some(input),
-                match expected { Some(port) => Some(*port), None => None }, result),
-            result matches Ok(Some(ty)) ==> location_in_source(ty.origin) && ty.ty is Bits,
+                match expected { Some(port) => Some(*port), None => None },
+                match result { Ok((ty, _, _, _)) => Ok(Some(ty)), Err(error) => Err(error) }),
+            result matches Ok((ty, operation, input_width, outer)) ==> {
+                &&& location_in_source(ty.origin)
+                &&& is_form_location(context.source, context.parsed.syntax.forms@[root as int], ty.origin)
+                &&& ty.ty == ResolvedPortType::Bits(outer.count)
+                &&& operation.range.start < operation.range.end <= input_width
+                &&& outer.fits((operation.range.end - operation.range.start) as u64)
+                &&& exists|base: SignalType| #[trigger] self.structure_expression_type_at_matches(
+                    context, field.field, field.shape, layouts, input, Ok((base, operation, input_width)))
+                    && base.ty == ResolvedPortType::Bits((operation.range.end - operation.range.start) as u64)
+                    && selection_chain_arguments_match(context.source, context.parsed.syntax.forms@, field.steps@,
+                        (operation.range.end - operation.range.start) as u64, base.origin, Ok(outer))
+            },
             result matches Err(error) ==> (error is Signal || error is SelectionInputType || error is SelectionArgument
                 || error is StructureExpression),
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
@@ -195,8 +231,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(field_selection_shape_matches);
             structure_expression_positions(context.source.text, context.parsed.syntax.forms@, field.field as int, field.shape);
         }
-        check_nested_selection_type(context.source, context.parsed.syntax.forms.as_slice(), root,
-            field.steps.as_slice(), field.field, Some(checked.0), expected)
+        let ghost base = checked.0;
+        let result = check_nested_selection_type(context.source, context.parsed.syntax.forms.as_slice(), root,
+            field.steps.as_slice(), field.field, Some(checked.0), expected)?;
+        let Some((ty, outer)) = result else {
+            proof { reveal(nested_selection_type_matches); }
+            unreachable!()
+        };
+        proof {
+            let width = checked.1.range.end - checked.1.range.start;
+            self.structure_expression_width_at(context, field.field, field.shape, layouts, input, (base, checked.1, checked.2));
+            self.layout_bits_port_width(layouts, base.ty->Bits_0, width);
+        }
+        Ok((ty, checked.1, checked.2, outer))
     }
 }
 

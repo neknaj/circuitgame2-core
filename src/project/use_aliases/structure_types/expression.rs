@@ -350,7 +350,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.structure_expression_width_at(context, Self::structure_expression_root(context), shape, layouts, input, checked);
     }
 
-    proof fn structure_expression_width_at(
+    pub(in crate::project::use_aliases) proof fn structure_expression_width_at(
         &self, context: &StructureExpressionContext, at: usize, shape: StructureExpressionShape,
         layouts: &StructureLayouts, input: SignalType, checked: CheckedStructureExpression,
     )

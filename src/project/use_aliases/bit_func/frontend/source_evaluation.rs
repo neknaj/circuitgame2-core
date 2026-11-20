@@ -1,6 +1,7 @@
 //! 厳格解析した関数の構文と信号の束縛から右辺の値を定める。
 
 mod determinism;
+mod field_selection;
 
 use super::*;
 use super::super::semantics::{
@@ -271,7 +272,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
     ) -> bool {
         self.ordinary_source_rhs_value(context, inputs, prior, value)
-            || (layouts matches Some(table) && self.structure_source_rhs_value(context, table, types, inputs, prior, value))
+            || (layouts matches Some(table) && (self.structure_source_rhs_value(context, table, types, inputs, prior, value)
+                || self.source_field_selection_value(context, table, types, inputs, prior, value)))
     }
 
     proof fn checked_definitions_preserve_source_values(
@@ -312,7 +314,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             if exists|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i {
                 let at = choose|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i;
-                self.structure_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
+                if scope.structures@[at].selection.is_some() {
+                    self.field_projection_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
+                } else {
+                    self.structure_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
+                }
             } else {
                 self.ordinary_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition);
             }
@@ -501,6 +507,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.bit_definition_from_source(scope, definitions, definitions.len() as int, checked),
             0 <= at < scope.structures@.len(),
             scope.structures@[at].target == definitions.len(),
+            scope.structures@[at].selection.is_none(),
         ensures self.structure_source_rhs_value(
             &SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
                 source: scope.source, parsed: scope.parsed, wiring: scope.wiring },
@@ -516,9 +523,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let range = row.operation.range;
             &&& row.target == index
             &&& bit_driver_width(scope.inputs@, definitions, row.input) == Some(row.input_width)
-            &&& contiguous_rhs_matches(checked.rhs, row.input, range.start, range.end, row.input_width)
+            &&& structure_rhs_matches(checked.rhs, row)
         };
         assert(at == j);
+        assert(contiguous_rhs_matches(checked.rhs, projection.input,
+            projection.operation.range.start, projection.operation.range.end, projection.input_width));
         let shape = self.structure_projection_widths(scope.file, scope.entry, scope.limit,
             scope.wiring, *layout, scope.types@, projection);
         driver_value_length(scope, definitions, inputs, values, projection.input, projection.input_width);

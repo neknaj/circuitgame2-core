@@ -16,7 +16,8 @@ use super::super::function_atoms::{StructureProjection, copy_location, named_sel
 #[cfg(verus_only)]
 use super::super::function_atoms::SignalType;
 use super::super::selection_arguments::{
-    CheckedBitSelection, check_selection_arguments, check_selection_chain, nested_named_selection,
+    check_selection_arguments, check_selection_chain, compose_selections, nested_named_selection,
+    select_contiguous_range,
 };
 use crate::project::{LocatedName, ProjectSource};
 use crate::project::circuits::form_location;
@@ -26,14 +27,18 @@ use crate::syntax::{Form, circuit::{NamedBuildCircuit, definition_target_atoms}}
 use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, nor_operand_matches};
 #[cfg(verus_only)]
 use super::super::{
-    TypedFuncCall, function_atoms::named_selection_matches, function_drivers::{checked_ports_and_output_bounds, expected_output_context, indexed_driver_site},
+    FuncCallOutputTypes, TypedFuncCall, function_atoms::named_selection_matches,
+    function_drivers::{checked_ports_and_output_bounds, expected_output_context, indexed_driver_site},
     port_types::typed_name_sites, selection_arguments::selection_arguments_match, single_bit_func::{bare_rhs_driver_matches, constant_operand_literal, no_operand, operand_matches, selection_rhs_driver_matches},
 };
 #[cfg(verus_only)]
-use super::super::function_atoms::{signal_type_at, structure_projection_matches, structure_projections_in_order};
+use super::super::function_atoms::{
+    signal_type_at, structure_projection_matches, structure_projection_required, structure_projections_in_order,
+};
 #[cfg(verus_only)]
 use super::super::selection_arguments::{
-    nested_named_selection_matches, selection_chain_arguments_match, selection_chain_success_excludes_error,
+    CheckedBitSelection, contiguous_selection, field_and_named_selection_disjoint, nested_named_selection_matches,
+    selection_chain_arguments_match, selection_chain_success_excludes_error, selection_composition,
     successful_selection_chain_counts_agree,
 };
 #[cfg(verus_only)]
@@ -47,7 +52,8 @@ use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_
 #[cfg(verus_only)]
 use crate::syntax::{form_spans_valid, circuit::{
     BitSelectionShape, bit_selection_shape_positions, build_definition_scope_evidence,
-    definition_target_range, indexed_entry_evidence,
+    StructureExpressionShape, bit_selection_shapes_agree, build_field_selection_signal, definition_target_range,
+    field_selection_root, field_selection_shape_matches, indexed_entry_evidence,
 }};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -223,8 +229,21 @@ fn contiguous_rhs(input: OutputDriver, start: u64, end: u64, input_width: u64) -
     if start == 0 && end == input_width {
         BitFuncRhs::Driver(input)
     } else {
-        let selection = CheckedBitSelection { start, count: end - start, stride: 1, last: end - 1 };
+        let selection = select_contiguous_range(start, end, input_width);
         BitFuncRhs::Selection { input, selection }
+    }
+}
+
+/// 構造体式の区間と、その結果から選んだビットを元の入力上の配線に対応させる。
+spec fn structure_rhs_matches(rhs: BitFuncRhs, projection: StructureProjection) -> bool {
+    let range = projection.operation.range;
+    if let Some(outer) = projection.selection {
+        rhs matches BitFuncRhs::Selection { input, selection }
+            && input == projection.input
+            && selection_composition(contiguous_selection(range.start, range.end), outer, selection)
+            && selection.fits(projection.input_width)
+    } else {
+        contiguous_rhs_matches(rhs, projection.input, range.start, range.end, projection.input_width)
     }
 }
 
@@ -440,11 +459,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == i {
             exists|j: int| 0 <= j < scope.structures@.len() && {
             let projection = #[trigger] scope.structures@[j];
-            let range = projection.operation.range;
             &&& projection.target == i
             &&& bit_driver_width(scope.inputs@, prior, projection.input) matches Some(width)
             &&& width == projection.input_width
-            &&& contiguous_rhs_matches(rhs, projection.input, range.start, range.end, width)
+            &&& structure_rhs_matches(rhs, projection)
             }
         } else { match rhs {
             BitFuncRhs::Driver(driver) =>
@@ -562,6 +580,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ==> forall|j: int| 0 <= j < scope.structures@.len() ==> (#[trigger] scope.structures@[j]).target != i)
         &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
             ==> end - first == 1 && no_operand(source, parsed, entry, definition, root, wiring, i))
+        &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
+            ==> forall|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                !#[trigger] field_selection_shape_matches(source.text, forms, root as usize, steps, at, shape))
         &&& match error {
             BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, site) =>
                 end - first != 1 && is_form_location(source, forms[root], site),
@@ -861,18 +882,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let table = scope.layouts->Some_0;
             let j = choose|j: int| 0 <= j < scope.structures@.len() && {
                 let projected = #[trigger] scope.structures@[j];
-                let range = projected.operation.range;
                 &&& projected.target == index
                 &&& bit_driver_width(scope.inputs@, prior, projected.input) == Some(projected.input_width)
-                &&& contiguous_rhs_matches(checked.rhs, projected.input, range.start, range.end, projected.input_width)
+                &&& structure_rhs_matches(checked.rhs, projected)
             };
             assert(j == at);
             assert(structure_projection_matches(self, scope.file, scope.entry, scope.limit, scope.wiring,
                 *table, scope.types@, data));
-            self.structure_projection_widths(scope.file, scope.entry, scope.limit, scope.wiring, *table, scope.types@, data);
-            assert(checked.width == data.operation.range.end - data.operation.range.start);
-            if let ResolvedPortType::Bits(width) = scope.types@[index]->Some_0.ty {
-                self.layout_bits_port_width(table, width, checked.width as int);
+            if let Some(outer) = data.selection {
+                self.field_projection_evidence(scope.file, scope.entry, scope.limit, scope.wiring, *table, scope.types@, data);
+                assert(checked.width == outer.count);
+            } else {
+                self.structure_projection_widths(scope.file, scope.entry, scope.limit, scope.wiring, *table, scope.types@, data);
+                assert(checked.width == data.operation.range.end - data.operation.range.start);
+                if let ResolvedPortType::Bits(width) = scope.types@[index]->Some_0.ty {
+                    self.layout_bits_port_width(table, width, checked.width as int);
+                }
             }
         } else {
             assert(!(exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == index));
@@ -910,7 +935,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             scope.structures@[at as int].target == prior.len(),
         ensures ({
             let projection = scope.structures@[at as int];
-            bit_driver_width(scope.inputs@, prior, projection.input) == Some(projection.input_width)
+            &&& bit_driver_width(scope.inputs@, prior, projection.input) == Some(projection.input_width)
+            &&& projection.selection matches Some(outer) ==>
+                outer.fits((projection.operation.range.end - projection.operation.range.start) as u64)
         }),
     {
         let projection = scope.structures@[at as int];
@@ -920,8 +947,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.driver_type_matches_width(scope, prior, projection.input, actual->Some_0);
         assert(structure_projection_matches(self, scope.file, scope.entry, scope.limit, scope.wiring,
             *layout, scope.types@, projection));
-        self.structure_projection_widths(scope.file, scope.entry, scope.limit, scope.wiring, *layout,
-            scope.types@, projection);
+        if projection.selection.is_some() {
+            self.field_projection_evidence(scope.file, scope.entry, scope.limit, scope.wiring, *layout,
+                scope.types@, projection);
+        } else {
+            self.structure_projection_widths(scope.file, scope.entry, scope.limit, scope.wiring, *layout,
+                scope.types@, projection);
+        }
         let ty = signal_type_at(scope.wiring, scope.types@.take(prior.len() as int), projection.input)->Some_0.ty;
         match ty {
             ResolvedPortType::Bits(bits) => self.layout_bits_port_width(layout, bits, projection.input_width as int),
@@ -953,9 +985,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         proof { self.structure_input_width_matches(scope, _prior@, at); }
         let project = &scope.structures[at];
         let range = &project.operation.range;
-        let rhs = contiguous_rhs(project.input, range.start, range.end, project.input_width);
+        let (width, rhs) = if let Some(outer) = project.selection {
+            let field = select_contiguous_range(range.start, range.end, project.input_width);
+            let selection = compose_selections(project.input_width, field, outer);
+            (selection.count, BitFuncRhs::Selection { input: project.input, selection })
+        } else {
+            (range.end - range.start, contiguous_rhs(project.input, range.start, range.end, project.input_width))
+        };
         assert(self.bit_rhs_from_source(scope, _prior@, _index as int, rhs));
-        CheckedBitDefinition { expression, width: range.end - range.start, rhs }
+        CheckedBitDefinition { expression, width, rhs }
     }
 
     /// 選択列の入力を結線から取り出し、合成した選択を一つの右辺にする。
@@ -1035,6 +1073,83 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         CheckedBitDefinition { expression, width: selection.count, rhs }
     }
 
+    /// 型検査を終えたフィールド選択には、対応する変換用の行が存在する。
+    proof fn field_selection_requires_projection(
+        &self, scope: &FuncProjection, prior: Seq<CheckedBitDefinition>, typed: FuncSignalTypes,
+        steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape,
+    )
+        requires
+            self.projection_context(scope),
+            self.projection_port_widths_match(scope),
+            self.definition_widths_match(scope, prior),
+            self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            typed.types@ == scope.types@,
+            typed.types@.len() == scope.wiring.drivers.definitions@.len(),
+            self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
+            prior.len() < scope.wiring.drivers.definitions@.len(),
+            ({
+                let site = scope.wiring.drivers.definitions@[prior.len() as int];
+                let row = scope.parsed.definitions@[site.definition as int];
+                let forms = scope.parsed.syntax.forms@;
+                let (first, end) = definition_target_range(forms, row);
+                &&& end - first == 1
+                &&& field_selection_shape_matches(scope.source.text, forms, row.expression.start, steps, at, shape)
+            }),
+        ensures exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == prior.len(),
+    {
+        let index = prior.len() as int;
+        let wiring = scope.wiring;
+        let parsed = scope.parsed;
+        let source = scope.source;
+        let forms = parsed.syntax.forms@;
+        self.checked_wiring_is_func(scope.file, scope.entry, scope.limit, *wiring);
+        let site = wiring.drivers.definitions@[index];
+        assert(indexed_driver_site(source, parsed, scope.entry as int, site));
+        assert(site.result_index == 0);
+        let row = parsed.definitions@[site.definition as int];
+        let root = row.expression.start;
+        field_selection_root(source.text, forms, root, steps, at, shape);
+        self.checked_types_keep_wiring(scope.file, scope.entry, scope.limit, typed, *wiring);
+        self.nonliteral_definition_has_no_literal_width(scope.file, scope.entry, scope.limit, &typed.literals, wiring, index);
+        if exists|direct: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, root as int, direct) {
+            let direct = choose|direct: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, root as int, direct);
+            bit_selection_shapes_agree(source.text, forms, root as int, steps[0], direct);
+            assert(false);
+        }
+        if exists|other: Seq<BitSelectionShape>, name: usize|
+            #[trigger] nested_named_selection_matches(source.text, forms, root, other, name)
+        {
+            let (other, name) = choose|other: Seq<BitSelectionShape>, name: usize|
+                #[trigger] nested_named_selection_matches(source.text, forms, root, other, name);
+            field_and_named_selection_disjoint(source.text, forms, root, steps, at, shape, other, name);
+        }
+        parsed_index_evidence(*source, *parsed);
+        build_field_selection_signal(source.text, &parsed.build_model(), scope.entry as int, site.definition as int, steps, at, shape);
+        self.checked_signal_driver(scope.file, scope.entry, scope.limit, *wiring, site.definition, row.signals.start);
+        let first = row.signals.start - parsed.entry_ranges@[scope.entry as int].signals.start;
+        if let OutputDriver::Definition(before) = wiring.signals@[first].driver {
+            assert(before < index) by {
+                if index < before {
+                    assert(wiring.drivers.definitions@[index].definition <= wiring.drivers.definitions@[before as int].definition);
+                }
+            };
+            self.driver_type_matches_width(scope, prior, OutputDriver::Definition(before), prior[before as int].width);
+            assert(typed.types@[before as int].is_some());
+        }
+        let project = self.targets.project_model();
+        let roots = choose|roots: FuncCallOutputTypes|
+            #[trigger] self.signal_type_sources(scope.file, scope.entry, scope.limit, typed.literals, wiring, roots)
+            && roots.types@.len() == wiring.drivers.definitions@.len()
+            && (forall|target: int| 0 <= target < typed.types@.len() &&
+                #[trigger] structure_projection_required(
+                    &project.sources_model()[scope.file as int], &project.circuits_model()[scope.file as int],
+                    scope.entry, wiring, typed.literals.widths@, roots.types@, typed.types@, target,
+                ) ==> exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == target);
+        assert(structure_projection_required(source, parsed, scope.entry, wiring, typed.literals.widths@,
+            roots.types@, typed.types@, index)) by { reveal(structure_projection_required); };
+    }
+
     fn project_definition(
         &self, scope: &FuncProjection<'_, 'p, 'a>, prior: &[CheckedBitDefinition<'p, 'a>], index: usize,
         projection: Option<usize>, Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
@@ -1045,6 +1160,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
             typed.types@ == scope.types@,
             typed.types@.len() == scope.wiring.drivers.definitions@.len(),
+            self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
             index == prior@.len() < scope.wiring.drivers.definitions@.len(),
             self.projection_port_widths_match(scope),
             self.projection_structures_match(scope),
@@ -1083,6 +1199,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if let Some(at) = projection {
             return Ok(self.project_structure_definition(scope, prior, index, at, expression));
         }
+        assert forall|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+            !#[trigger] field_selection_shape_matches(source.text, forms@, root, steps, at, shape) by {
+            if field_selection_shape_matches(source.text, forms@, root, steps, at, shape) {
+                self.field_selection_requires_projection(scope, prior@, typed, steps, at, shape);
+                assert(false);
+            }
+        };
         let (width, rhs) = if let Some(operand) = self.read_single_bit_operand(file, entry, limit, source, parsed, root, wiring, definition, index) {
             match operand {
                 SingleBitOperand::Constant(bit) => (1, BitFuncRhs::Constant(bit)),
@@ -1136,7 +1259,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 組み合わせ関数から、ポートの幅と定義順の右辺を取り出す。
     ///
     /// 信号の転送、定数 `0`・`1`、基底 NOR を扱う。
-    /// 最内段の入力が裸の信号名である `bit`・`slice` を扱う。入れ子の選択は配線上で一段にまとめる。
+    /// 最内段の入力が裸の信号名か、その信号を参照する `field` である `bit`・`slice` を扱う。
+    /// 入れ子の選択は配線上で一段にまとめる。
     /// `field`・`as`・`raw` は、裸の信号名を入力に取る式を扱う。
     /// 構造体型のポート間で同じ型の信号を転送するときは、宣言の総幅を使う。
     ///

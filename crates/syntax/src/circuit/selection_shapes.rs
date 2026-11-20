@@ -353,10 +353,21 @@ pub proof fn field_selection_root(
     steps: Seq<BitSelectionShape>, field: usize, shape: StructureExpressionShape,
 )
     requires field_selection_shape_matches(source, forms, root, steps, field, shape),
-    ensures bit_selection_shape_matches(source, forms, root as int, steps[0]),
+    ensures
+        bit_selection_shape_matches(source, forms, root as int, steps[0]),
+        forms[root as int] is List,
+        forms[steps[0].input.start as int] is List,
 {
     reveal(field_selection_shape_matches);
     assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 0), steps[0]));
+    bit_selection_shape_positions(source, forms, root as int, steps[0]);
+    if steps.len() == 1 {
+        assert(steps[0] == steps.last());
+        structure_expression_positions(source, forms, field as int, shape);
+    } else {
+        assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 1), steps[1]));
+        bit_selection_shape_positions(source, forms, steps[0].input.start as int, steps[1]);
+    }
 }
 
 /// 同じ右辺から取り出した選択列、末端の `field`、その引数の位置は一致する。

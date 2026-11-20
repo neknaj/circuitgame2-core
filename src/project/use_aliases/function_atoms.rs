@@ -4,11 +4,11 @@ mod field_selection;
 
 use super::function_literals::index_outputs;
 use super::function_types::FuncSignalTypeError;
-use super::selection_arguments::{check_selection_arguments, check_selection_chain, nested_named_selection};
+use super::selection_arguments::{CheckedBitSelection, check_selection_arguments, check_selection_chain, nested_named_selection};
 use super::structure_types::{StructureExpressionContext, StructureLayouts, TypedStructureOperation};
 #[cfg(verus_only)]
 use super::selection_arguments::{
-    CheckedBitSelection, nested_named_selection_matches, nested_named_selection_root, nested_named_selections_agree,
+    nested_named_selection_matches, nested_named_selection_root, nested_named_selections_agree,
     selection_arguments_match, selection_chain_arguments_match,
     successful_selection_chain_counts_agree, successful_selections_agree,
 };
@@ -27,11 +27,11 @@ use crate::project::{
     location_in_source, port_types_equal,
 };
 use crate::syntax::{AtomKind, Form};
-use crate::syntax::circuit::{BitSelectionShape, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
+use crate::syntax::circuit::{BitSelectionShape, NamedBuildCircuit, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
 use crate::syntax::circuit::field_selection_shape;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    NamedBuildCircuit, bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
+    bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
     build_bare_signal_position,
     bit_selection_path, bit_selection_step_root, build_definition_scope_evidence, build_field_selection_signal,
     build_selection_chain_signal, build_selection_input_position, build_structure_input_position,
@@ -63,6 +63,8 @@ pub(super) struct StructureProjection {
     pub(super) input: OutputDriver,
     pub(super) operation: TypedStructureOperation,
     pub(super) input_width: u64,
+    /// フィールド内の位置で指定した選択。定義の右辺全体が構造体式なら省略する。
+    pub(super) selection: Option<CheckedBitSelection>,
 }
 
 /// 定義順に集めた構造体式と、共通の配置表。
@@ -83,6 +85,41 @@ pub(super) open spec fn structure_projections_in_order(rows: Seq<StructureProjec
         }
     }
     &&& forall|a: int, b: int| 0 <= a < b < rows.len() ==> (#[trigger] rows[a]).target < (#[trigger] rows[b]).target
+}
+
+proof fn append_structure_projection(
+    rows: Seq<StructureProjection>, next: StructureProjection, count: int, inputs: int,
+)
+    requires
+        structure_projections_in_order(rows, count, inputs),
+        next.target == count,
+        structure_projections_in_order(seq![next], count + 1, inputs),
+    ensures structure_projections_in_order(rows.push(next), count + 1, inputs),
+{
+    let updated = rows.push(next);
+    assert forall|j: int| 0 <= j < updated.len() implies {
+        let row = #[trigger] updated[j];
+        &&& row.target < count + 1
+        &&& row.operation.range.start < row.operation.range.end <= row.input_width
+        &&& match row.input {
+            OutputDriver::Input(port) => port < inputs,
+            OutputDriver::Definition(prior) => prior < row.target,
+        }
+    } by {
+        if j < rows.len() {
+            assert(updated[j] == rows[j]);
+        } else {
+            assert(updated[j] == seq![next][0]);
+        }
+    };
+    assert forall|a: int, b: int| 0 <= a < b < updated.len()
+        implies (#[trigger] updated[a]).target < (#[trigger] updated[b]).target by {
+        if b == rows.len() {
+            assert(updated[a] == rows[a] && updated[b] == next);
+        } else {
+            assert(updated[a] == rows[a] && updated[b] == rows[b]);
+        }
+    };
 }
 
 #[verifier::opaque]
@@ -108,11 +145,39 @@ pub(super) closed spec fn structure_projection_matches(
     &&& wiring.signals@[first].driver == projection.input
     &&& signal_type_at(wiring, types.take(target), projection.input) matches Some(input)
     &&& types[target] matches Some(signal)
-    &&& exists|shape: StructureExpressionShape|
-        #[trigger] named_structure_expression_matches(source.text, forms, row.expression.start as int, shape)
-        && is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
-        && aliases.structure_expression_type_matches(&context, shape, &layouts, input,
-            Ok((signal, projection.operation, projection.input_width)))
+    &&& if let Some(outer) = projection.selection {
+        &&& outer.fits((projection.operation.range.end - projection.operation.range.start) as u64)
+        &&& exists|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape, field: SignalType|
+            #![trigger field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape),
+                aliases.structure_expression_type_at_matches(&context, at, shape, &layouts, input,
+                    Ok((field, projection.operation, projection.input_width)))]
+            field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape)
+            && is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
+            && aliases.structure_expression_type_at_matches(&context, at, shape, &layouts, input,
+                Ok((field, projection.operation, projection.input_width)))
+            && (field.ty matches ResolvedPortType::Bits(width)
+                && width == projection.operation.range.end - projection.operation.range.start
+                && selection_chain_arguments_match(source, forms, steps, width, field.origin, Ok(outer)))
+            && signal.ty == ResolvedPortType::Bits(outer.count)
+            && is_form_location(source, forms[row.expression.start as int], signal.origin)
+    } else {
+        exists|shape: StructureExpressionShape|
+            #[trigger] named_structure_expression_matches(source.text, forms, row.expression.start as int, shape)
+            && is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
+            && aliases.structure_expression_type_matches(&context, shape, &layouts, input,
+                Ok((signal, projection.operation, projection.input_width)))
+    }
+}
+
+proof fn structure_projection_survives_append(
+    aliases: &UseAliases, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
+    layouts: StructureLayouts, types: Seq<Option<SignalType>>, next: Option<SignalType>, projection: StructureProjection,
+)
+    requires structure_projection_matches(aliases, file, entry, limit, wiring, layouts, types, projection),
+    ensures structure_projection_matches(aliases, file, entry, limit, wiring, layouts, types.push(next), projection),
+{
+    reveal(structure_projection_matches);
+    assert(types.push(next).take(projection.target as int) =~= types.take(projection.target as int));
 }
 
 #[verifier::opaque]
@@ -127,9 +192,26 @@ pub(super) open spec fn structure_projection_required(
     let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
     &&& roots.len() > 0 && widths[target].is_none() && driver.result_index == 0 && forms[root] is List
     &&& !(exists|shape: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, root, shape))
-    &&& (exists|shape: StructureExpressionShape| #[trigger] named_structure_expression_matches(source.text, forms, root, shape))
+    &&& ((exists|shape: StructureExpressionShape| #[trigger] named_structure_expression_matches(source.text, forms, root, shape))
+        || (!(exists|steps: Seq<BitSelectionShape>, leaf: usize|
+                #[trigger] nested_named_selection_matches(source.text, forms, row.expression.start, steps, leaf))
+            && (exists|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                #[trigger] field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape))))
     &&& 0 <= first < wiring.signals@.len()
     &&& signal_type_at(wiring, types.take(target), wiring.signals@[first].driver).is_some()
+}
+
+proof fn structure_requirement_survives_append(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, wiring: &FuncWiring,
+    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, types: Seq<Option<SignalType>>,
+    next: Option<SignalType>, target: int,
+)
+    requires 0 <= target <= types.len(),
+    ensures structure_projection_required(source, parsed, entry, wiring, widths, roots, types, target)
+        == structure_projection_required(source, parsed, entry, wiring, widths, roots, types.push(next), target),
+{
+    reveal(structure_projection_required);
+    assert(types.push(next).take(target) =~= types.take(target));
 }
 
 /// 配線、定数の幅、および定数や裸の信号参照から確定した型。
@@ -456,7 +538,7 @@ proof fn nested_selection_type_successes_agree(
 fn check_nested_selection_type<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], root: usize, steps: &[BitSelectionShape], leaf: usize,
     input: Option<SignalType<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
-) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
+) -> (result: Result<Option<(SignalType<'p, 'a>, CheckedBitSelection)>, FuncSignalTypeError<'p, 'a>>)
     requires
         steps@.len() > 0,
         bit_selection_path(source.text, forms@, root, steps@, leaf),
@@ -465,8 +547,20 @@ fn check_nested_selection_type<'p, 'a>(
         input matches Some(ty) ==> location_in_source(ty.origin),
     ensures
         nested_selection_type_matches(source, forms@, root, steps@, leaf, input,
-            match expected { Some(port) => Some(*port), None => None }, result),
-        result matches Ok(Some(ty)) ==> location_in_source(ty.origin) && ty.ty is Bits,
+            match expected { Some(port) => Some(*port), None => None }, match result {
+                Ok(Some((ty, _))) => Ok(Some(ty)),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            }),
+        result matches Ok(Some((ty, selection))) ==> {
+            &&& location_in_source(ty.origin) && ty.ty == ResolvedPortType::Bits(selection.count)
+            &&& is_form_location(source, forms@[root as int], ty.origin)
+            &&& input matches Some(base)
+            &&& base.ty matches ResolvedPortType::Bits(width)
+            &&& selection_chain_arguments_match(source, forms@, steps@, width, base.origin, Ok(selection))
+            &&& selection.fits(width)
+        },
+        result == Ok(None) ==> input.is_none(),
         result matches Err(error) ==> (error is Signal || error is SelectionInputType || error is SelectionArgument),
         result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
 {
@@ -495,7 +589,7 @@ fn check_nested_selection_type<'p, 'a>(
             }));
         }
     }
-    Ok(Some(actual))
+    Ok(Some((actual, checked)))
 }
 
 #[verifier::opaque]
@@ -1023,7 +1117,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
         layouts: StructureLayouts, types: Seq<Option<SignalType>>, projection: StructureProjection,
     ) -> (shape: StructureExpressionShape)
-        requires structure_projection_matches(self, file, entry, limit, wiring, layouts, types, projection),
+        requires
+            structure_projection_matches(self, file, entry, limit, wiring, layouts, types, projection),
+            projection.selection.is_none(),
         ensures ({
             let target = projection.target as int;
             let range = projection.operation.range;
@@ -1072,6 +1168,74 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         shape
     }
 
+    /// フィールドの配置、選択の値、元の駆動元の型が、保存した行に対応することを示す。
+    pub(super) proof fn field_projection_evidence(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
+        layouts: StructureLayouts, types: Seq<Option<SignalType>>, projection: StructureProjection,
+    ) -> (evidence: (Seq<BitSelectionShape>, usize, StructureExpressionShape, SignalType<'p, 'a>))
+        requires
+            structure_projection_matches(self, file, entry, limit, wiring, layouts, types, projection),
+            projection.selection.is_some(),
+        ensures ({
+            let (steps, at, shape, field) = evidence;
+            let target = projection.target as int;
+            let range = projection.operation.range;
+            let project = self.targets.project_model();
+            let source = &project.sources_model()[file as int];
+            let parsed = &project.circuits_model()[file as int];
+            let definition = wiring.drivers.definitions@[target].definition;
+            let row = parsed.definitions@[definition as int];
+            let frame = parsed.entry_ranges@[entry as int];
+            let forms = parsed.syntax.forms@;
+            let context = StructureExpressionContext { file, entry, limit, source, parsed,
+                definition: (definition - frame.definitions.start) as usize };
+            let outer = projection.selection->Some_0;
+            let first = row.signals.start - frame.signals.start;
+            &&& signal_type_at(wiring, types.take(target), projection.input) matches Some(input)
+            &&& types[target] matches Some(signal) && signal.ty == ResolvedPortType::Bits(outer.count)
+            &&& 0 <= first < wiring.signals@.len()
+            &&& wiring.signals@[first].definition == definition && wiring.signals@[first].driver == projection.input
+            &&& is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
+            &&& field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape)
+            &&& self.structure_expression_type_at_matches(&context, at, shape, &layouts, input,
+                Ok((field, projection.operation, projection.input_width)))
+            &&& range.start < range.end <= projection.input_width
+            &&& self.layout_port_width_matches(&layouts, input.ty, projection.input_width as int)
+            &&& field.ty == ResolvedPortType::Bits((range.end - range.start) as u64)
+            &&& outer.fits((range.end - range.start) as u64)
+            &&& selection_chain_arguments_match(source, forms, steps, (range.end - range.start) as u64, field.origin, Ok(outer))
+        }),
+    {
+        reveal(structure_projection_matches);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let target = projection.target as int;
+        let definition = wiring.drivers.definitions@[target].definition;
+        let row = parsed.definitions@[definition as int];
+        let frame = parsed.entry_ranges@[entry as int];
+        let forms = parsed.syntax.forms@;
+        let context = StructureExpressionContext { file, entry, limit, source, parsed,
+            definition: (definition - frame.definitions.start) as usize };
+        let input = signal_type_at(wiring, types.take(target), projection.input)->Some_0;
+        let range = projection.operation.range;
+        let outer = projection.selection->Some_0;
+        let (steps, at, shape, field) = choose|
+            steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape, field: SignalType|
+            #![trigger field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape),
+                self.structure_expression_type_at_matches(&context, at, shape, &layouts, input,
+                    Ok((field, projection.operation, projection.input_width)))]
+            field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape)
+            && is_form_location(source, forms[shape.input.start as int], wiring.signals@[row.signals.start - frame.signals.start].site)
+            && self.structure_expression_type_at_matches(&context, at, shape, &layouts, input,
+                Ok((field, projection.operation, projection.input_width)))
+            && field.ty == ResolvedPortType::Bits((range.end - range.start) as u64)
+            && selection_chain_arguments_match(source, forms, steps, (range.end - range.start) as u64, field.origin, Ok(outer));
+        self.structure_expression_width_at(&context, at, shape, &layouts, input,
+            (field, projection.operation, projection.input_width));
+        (steps, at, shape, field)
+    }
+
     pub(super) proof fn atom_types_keep_wiring(
         &self, file: usize, entry: usize, limit: u64, typed: FuncAtomTypes, wiring: FuncWiring,
     )
@@ -1085,6 +1249,309 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.literals_preserve_arity(file, entry, limit, typed.literals);
         self.arity_preserves_wiring(file, entry, limit, typed.literals.wiring);
     }
+    /// 検査済みの先行定義から、次の定義の型と変換に使う区間を求める。
+    fn check_atom_definition(
+        &self, file: usize, entry: usize, _limit: u64, source: &'p ProjectSource<'a>, parsed: &'p NamedBuildCircuit<'a>,
+        literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>, outputs: &[Option<usize>],
+        roots: &[Option<SignalType<'p, 'a>>], types: &[Option<SignalType<'p, 'a>>], i: usize,
+        layouts: &mut Option<StructureLayouts<'p, 'a>>,
+    ) -> (result: Result<(Option<SignalType<'p, 'a>>, Option<StructureProjection>), FuncSignalTypeError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
+            ({
+                let project = self.targets.project_model();
+                &&& file < project.circuits_model().len() && file < project.sources_model().len()
+                &&& *source == project.sources_model()[file as int] && *parsed == project.circuits_model()[file as int]
+            }),
+            parsed_circuit_matches(*source, *parsed),
+            entry < parsed.syntax.entries@.len(),
+            expected_output_context(source, parsed, entry as int, wiring.drivers),
+            output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs@),
+            literals.widths@.len() == wiring.drivers.definitions@.len(),
+            roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
+            forall|j: int| 0 <= j < roots@.len() && (#[trigger] roots@[j]).is_some()
+                ==> location_in_source(roots@[j]->Some_0.origin) && self.declared_port_type(roots@[j]->Some_0.ty),
+            super::function_drivers::checked_ports_and_output_bounds(parsed.syntax.forms@, wiring.drivers),
+            forall|j: int| 0 <= j < wiring.drivers.signature.inputs@.len()
+                ==> self.declared_port_type((#[trigger] wiring.drivers.signature.inputs@[j]).ty),
+            forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
+                ==> location_in_source(types@[j]->Some_0.origin) && self.declared_port_type(types@[j]->Some_0.ty),
+            *old(layouts) matches Some(table) ==> self.structure_types_match(_limit, Ok(table)),
+            i == types@.len() < wiring.drivers.definitions@.len(),
+        ensures
+            old(layouts).is_some() ==> *final(layouts) == *old(layouts),
+            *final(layouts) matches Some(table) ==> self.structure_types_match(_limit, Ok(table)),
+            atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
+                outputs@, roots@, types@, i as int, match result { Ok((ty, _)) => Ok(ty), Err(error) => Err(error) }),
+            result matches Ok((next, projection)) ==> {
+                &&& next matches Some(ty) ==> location_in_source(ty.origin) && self.declared_port_type(ty.ty)
+                &&& structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, i as int)
+                    ==> projection.is_some()
+                &&& projection matches Some(row) ==> {
+                    &&& row.target == i
+                    &&& structure_projections_in_order(seq![row], i + 1, wiring.drivers.signature.inputs@.len() as int)
+                    &&& *final(layouts) matches Some(table)
+                    &&& structure_projection_matches(self, file, entry, _limit, wiring, table, types@.push(next), row)
+                }
+            },
+            result matches Err(error) ==> error is Signal
+                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument
+                    || error is StructureLayout || error is StructureExpression)),
+            result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
+    {
+        let driver = &wiring.drivers.definitions[i];
+        let row = &parsed.definitions[driver.definition];
+        let root = row.expression.start;
+        let forms = parsed.syntax.forms.as_slice();
+        let mut projection = None;
+        proof {
+            reveal(atom_type_step);
+            reveal(output_indices);
+            parsed_index_evidence(*source, *parsed);
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, driver.definition as int);
+        }
+        let next = if let Some(width) = literals.widths[i] {
+            Some(SignalType { ty: ResolvedPortType::Bits(width), origin: form_location(source, forms, root) })
+        } else if driver.result_index == 0 && matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
+            proof {
+                build_bare_signal_position(source.text, &parsed.build_model(), entry as int, driver.definition as int);
+                self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
+            }
+            let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
+            let bound = &wiring.signals[position];
+            proof {
+                if let OutputDriver::Definition(prior) = bound.driver {
+                    assert(prior < i) by {
+                        if i < prior {
+                            assert(wiring.drivers.definitions@[i as int].definition
+                                <= wiring.drivers.definitions@[prior as int].definition);
+                        }
+                    };
+                }
+            }
+            let actual = inherit_type(wiring, types, bound.driver);
+            if let (Some(resolved), Some(output)) = (&actual, outputs[i]) {
+                let port = &wiring.drivers.signature.outputs[output];
+                if !resolved.ty.is_same_type(&port.ty) {
+                    let error = FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
+                        reference: copy_location(&bound.site),
+                        expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
+                        actual: SignalType { ty: resolved.ty, origin: copy_location(&resolved.origin) },
+                    });
+                    assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
+                        outputs@, roots@, types@, i as int, Err(error)));
+                    return Err(error);
+                }
+            }
+            actual
+        } else if roots.is_empty() {
+            None
+        } else if driver.result_index == 0 {
+            if let Some(shape) = named_selection(source.text, forms, root) {
+                proof {
+                    assert(named_selection_matches(source.text, forms@, root as int, shape));
+                    build_selection_input_position(source.text, &parsed.build_model(), entry as int,
+                        driver.definition as int, shape);
+                    self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
+                }
+                let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
+                let bound = &wiring.signals[position];
+                proof {
+                    if let OutputDriver::Definition(prior) = bound.driver {
+                        assert(prior < i) by {
+                            if i < prior {
+                                assert(wiring.drivers.definitions@[i as int].definition
+                                    <= wiring.drivers.definitions@[prior as int].definition);
+                            }
+                        };
+                    }
+                }
+                let input = inherit_type(wiring, types, bound.driver);
+                let expected = match outputs[i] {
+                    Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                    None => None,
+                };
+                match check_selection_type(source, forms, root, &shape, input, expected) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
+                            outputs@, roots@, types@, i as int, Err(error)));
+                        return Err(error);
+                    },
+                }
+            } else if let Some(shape) = named_structure_expression(source.text, forms, root) {
+                proof {
+                    assert(named_structure_expression_matches(source.text, forms@, root as int, shape));
+                    build_structure_input_position(source.text, &parsed.build_model(), entry as int,
+                        driver.definition as int, shape);
+                    self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
+                }
+                let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
+                let bound = &wiring.signals[position];
+                proof {
+                    if let OutputDriver::Definition(prior) = bound.driver {
+                        assert(prior < i) by {
+                            if i < prior {
+                                assert(wiring.drivers.definitions@[i as int].definition
+                                    <= wiring.drivers.definitions@[prior as int].definition);
+                            }
+                        };
+                    }
+                }
+                let input = inherit_type(wiring, types, bound.driver);
+                let expected = match outputs[i] {
+                    Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                    None => None,
+                };
+                let context = StructureExpressionContext {
+                    file, entry, limit: _limit, source, parsed,
+                    definition: driver.definition - parsed.entry_ranges[entry].definitions.start,
+                };
+                let ghost expected_type = match expected { Some(port) => Some(*port), None => None };
+                if let Some(input) = input {
+                    if layouts.is_none() {
+                        match self.check_structure_types(context.limit) {
+                            Ok(table) => *layouts = Some(table),
+                            Err(error) => {
+                                let error = FuncSignalTypeError::StructureLayout(error);
+                                assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                    literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                                return Err(error);
+                            }
+                        }
+                    }
+                    let Some(table) = &*layouts else { unreachable!() };
+                    assert(self.structure_types_match(context.limit, Ok(*table)));
+                    let checked = match self.check_structure_expression_type(&context, &shape, table, input) {
+                        Ok(checked) => checked,
+                        Err(error) => {
+                            let error = FuncSignalTypeError::StructureExpression(error);
+                            assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Err(error))) by {
+                                assert(self.structure_expression_type_matches(&context, shape, table, input, Err(error->StructureExpression_0)));
+                            };
+                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                            return Err(error);
+                        },
+                    };
+                    let actual = checked.0;
+                    if let Some(port) = expected {
+                        if !actual.ty.is_same_type(&port.ty) {
+                            let error = FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
+                                reference: copy_location(&actual.origin),
+                                expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
+                                actual,
+                            });
+                            assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Err(error))) by {
+                                assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
+                            };
+                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                            return Err(error);
+                        }
+                    }
+                    assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Ok(Some(actual)))) by {
+                        assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
+                    };
+                    let stored = StructureProjection {
+                        target: i, input: bound.driver, operation: checked.1, input_width: checked.2, selection: None,
+                    };
+                    assert(structure_projection_matches(
+                        self, file, entry, _limit, wiring, *table, types@.push(Some(actual)), stored,
+                    )) by {
+                        reveal(structure_projection_matches);
+                        assert(types@.push(Some(actual)).take(i as int) =~= types@);
+                    };
+                    projection = Some(stored);
+                    Some(actual)
+                } else {
+                    None
+                }
+            } else if let Some((steps, leaf)) = nested_named_selection(source.text, forms, root) {
+                proof {
+                    let (spec_steps, spec_leaf) = choose|candidate: Seq<BitSelectionShape>, at: usize|
+                        #[trigger] nested_named_selection_matches(source.text, forms@, root, candidate, at);
+                    assert(spec_steps == steps@ && spec_leaf == leaf);
+                    reveal(nested_named_selection_matches);
+                    build_selection_chain_signal(source.text, &parsed.build_model(), entry as int,
+                        driver.definition as int, steps@, leaf);
+                    self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
+                }
+                let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
+                let bound = &wiring.signals[position];
+                proof {
+                    if let OutputDriver::Definition(prior) = bound.driver {
+                        assert(prior < i) by {
+                            if i < prior {
+                                assert(wiring.drivers.definitions@[i as int].definition
+                                    <= wiring.drivers.definitions@[prior as int].definition);
+                            }
+                        };
+                    }
+                }
+                let input = inherit_type(wiring, types, bound.driver);
+                let expected = match outputs[i] {
+                    Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                    None => None,
+                };
+                match check_nested_selection_type(source, forms, root, steps.as_slice(), leaf, input, expected) {
+                    Ok(Some((ty, _))) => Some(ty),
+                    Ok(None) => None,
+                    Err(error) => {
+                        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
+                            outputs@, roots@, types@, i as int, Err(error)));
+                        return Err(error);
+                    },
+                }
+            } else if let Some(field) = field_selection_shape(source.text, forms, root) {
+                proof {
+                    let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                        #[trigger] field_selection_shape_matches(source.text, forms@, root, steps, at, shape);
+                    field_selection_shapes_agree(source.text, forms@, root,
+                        field.steps@, field.field, field.shape, steps, at, shape);
+                }
+                let expected = match outputs[i] {
+                    Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                    None => None,
+                };
+                let context = StructureExpressionContext {
+                    file, entry, limit: _limit, source, parsed,
+                    definition: driver.definition - parsed.entry_ranges[entry].definitions.start,
+                };
+                match self.check_indexed_field_selection(&context, wiring, i, types, &field, layouts, expected) {
+                    Ok(Some((ty, stored))) => {
+                        projection = Some(stored);
+                        Some(ty)
+                    },
+                    Ok(None) => None,
+                    Err(error) => {
+                        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                            literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                        return Err(error);
+                    }
+                }
+            } else {
+                copy_signal_type(&roots[i])
+            }
+        } else {
+            copy_signal_type(&roots[i])
+        };
+        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
+            outputs@, roots@, types@, i as int, Ok(next)));
+        assert(next matches Some(ty) ==> location_in_source(ty.origin) && self.declared_port_type(ty.ty));
+        assert(structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, i as int)
+            ==> projection.is_some()) by {
+            reveal(structure_projection_required);
+        };
+        proof {
+            if let Some(row) = &projection {
+                assert(structure_projections_in_order(seq![*row], i + 1, wiring.drivers.signature.inputs@.len() as int));
+            }
+        }
+        Ok((next, projection))
+    }
+
     pub(super) fn check_atoms(
         &self, file: usize, entry: usize, _limit: u64, literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
         roots: &[Option<SignalType<'p, 'a>>],
@@ -1176,246 +1643,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 typed_prefix(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
             decreases wiring.drivers.definitions@.len() - i,
         {
-            let driver = &wiring.drivers.definitions[i];
-            let row = &parsed.definitions[driver.definition];
-            let root = row.expression.start;
-            let forms = parsed.syntax.forms.as_slice();
-            let mut projection = None;
             let ghost prior_layouts = layouts;
-            proof {
-                reveal(atom_type_step);
-                reveal(output_indices);
-                parsed_index_evidence(*source, *parsed);
-                build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, driver.definition as int);
-            }
-            let next = if let Some(width) = literals.widths[i] {
-                Some(SignalType { ty: ResolvedPortType::Bits(width), origin: form_location(source, forms, root) })
-            } else if driver.result_index == 0 && matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
-                proof {
-                    build_bare_signal_position(source.text, &parsed.build_model(), entry as int, driver.definition as int);
-                    self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
-                }
-                let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
-                let bound = &wiring.signals[position];
-                proof {
-                    if let OutputDriver::Definition(prior) = bound.driver {
-                        assert(prior < i) by {
-                            if i < prior {
-                                assert(wiring.drivers.definitions@[i as int].definition
-                                    <= wiring.drivers.definitions@[prior as int].definition);
-                            }
-                        };
-                    }
-                }
-                let actual = inherit_type(wiring, types.as_slice(), bound.driver);
-                if let (Some(resolved), Some(output)) = (&actual, outputs[i]) {
-                    let port = &wiring.drivers.signature.outputs[output];
-                    if !resolved.ty.is_same_type(&port.ty) {
-                        let error = FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
-                            reference: copy_location(&bound.site),
-                            expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
-                            actual: SignalType { ty: resolved.ty, origin: copy_location(&resolved.origin) },
-                        });
-                        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
-                            outputs@, roots@, types@, i as int, Err(error)));
-                        return Err(error);
-                    }
-                }
-                actual
-            } else if roots.is_empty() {
-                None
-            } else if driver.result_index == 0 {
-                if let Some(shape) = named_selection(source.text, forms, root) {
-                    proof {
-                        assert(named_selection_matches(source.text, forms@, root as int, shape));
-                        build_selection_input_position(source.text, &parsed.build_model(), entry as int,
-                            driver.definition as int, shape);
-                        self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
-                    }
-                    let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
-                    let bound = &wiring.signals[position];
-                    proof {
-                        if let OutputDriver::Definition(prior) = bound.driver {
-                            assert(prior < i) by {
-                                if i < prior {
-                                    assert(wiring.drivers.definitions@[i as int].definition
-                                        <= wiring.drivers.definitions@[prior as int].definition);
-                                }
-                            };
-                        }
-                    }
-                    let input = inherit_type(wiring, types.as_slice(), bound.driver);
-                    let expected = match outputs[i] {
-                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
-                        None => None,
-                    };
-                    match check_selection_type(source, forms, root, &shape, input, expected) {
-                        Ok(ty) => ty,
-                        Err(error) => {
-                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
-                                outputs@, roots@, types@, i as int, Err(error)));
-                            return Err(error);
-                        },
-                    }
-                } else if let Some(shape) = named_structure_expression(source.text, forms, root) {
-                    proof {
-                        assert(named_structure_expression_matches(source.text, forms@, root as int, shape));
-                        build_structure_input_position(source.text, &parsed.build_model(), entry as int,
-                            driver.definition as int, shape);
-                        self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
-                    }
-                    let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
-                    let bound = &wiring.signals[position];
-                    proof {
-                        if let OutputDriver::Definition(prior) = bound.driver {
-                            assert(prior < i) by {
-                                if i < prior {
-                                    assert(wiring.drivers.definitions@[i as int].definition
-                                        <= wiring.drivers.definitions@[prior as int].definition);
-                                }
-                            };
-                        }
-                    }
-                    let input = inherit_type(wiring, types.as_slice(), bound.driver);
-                    let expected = match outputs[i] {
-                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
-                        None => None,
-                    };
-                    let context = StructureExpressionContext {
-                        file, entry, limit: _limit, source, parsed,
-                        definition: driver.definition - parsed.entry_ranges[entry].definitions.start,
-                    };
-                    let ghost expected_type = match expected { Some(port) => Some(*port), None => None };
-                    if let Some(input) = input {
-                        if layouts.is_none() {
-                            match self.check_structure_types(context.limit) {
-                                Ok(table) => layouts = Some(table),
-                                Err(error) => {
-                                    let error = FuncSignalTypeError::StructureLayout(error);
-                                    assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
-                                        literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
-                                    return Err(error);
-                                }
-                            }
-                        }
-                        let Some(table) = &layouts else { unreachable!() };
-                        assert(self.structure_types_match(context.limit, Ok(*table)));
-                        let checked = match self.check_structure_expression_type(&context, &shape, table, input) {
-                            Ok(checked) => checked,
-                            Err(error) => {
-                                let error = FuncSignalTypeError::StructureExpression(error);
-                                assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Err(error))) by {
-                                    assert(self.structure_expression_type_matches(&context, shape, table, input, Err(error->StructureExpression_0)));
-                                };
-                                assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
-                                    literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
-                                return Err(error);
-                            },
-                        };
-                        let actual = checked.0;
-                        if let Some(port) = expected {
-                            if !actual.ty.is_same_type(&port.ty) {
-                                let error = FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
-                                    reference: copy_location(&actual.origin),
-                                    expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
-                                    actual,
-                                });
-                                assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Err(error))) by {
-                                    assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
-                                };
-                                assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
-                                    literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
-                                return Err(error);
-                            }
-                        }
-                        assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Ok(Some(actual)))) by {
-                            assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
-                        };
-                        let stored = StructureProjection {
-                            target: i, input: bound.driver, operation: checked.1, input_width: checked.2,
-                        };
-                        assert(structure_projection_matches(
-                            self, file, entry, _limit, wiring, *table, types@.push(Some(actual)), stored,
-                        )) by {
-                            reveal(structure_projection_matches);
-                            assert(types@.push(Some(actual)).take(i as int) =~= types@);
-                        };
-                        projection = Some(stored);
-                        Some(actual)
-                    } else {
-                        None
-                    }
-                } else if let Some((steps, leaf)) = nested_named_selection(source.text, forms, root) {
-                    proof {
-                        let (spec_steps, spec_leaf) = choose|candidate: Seq<BitSelectionShape>, at: usize|
-                            #[trigger] nested_named_selection_matches(source.text, forms@, root, candidate, at);
-                        assert(spec_steps == steps@ && spec_leaf == leaf);
-                        reveal(nested_named_selection_matches);
-                        build_selection_chain_signal(source.text, &parsed.build_model(), entry as int,
-                            driver.definition as int, steps@, leaf);
-                        self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
-                    }
-                    let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
-                    let bound = &wiring.signals[position];
-                    proof {
-                        if let OutputDriver::Definition(prior) = bound.driver {
-                            assert(prior < i) by {
-                                if i < prior {
-                                    assert(wiring.drivers.definitions@[i as int].definition
-                                        <= wiring.drivers.definitions@[prior as int].definition);
-                                }
-                            };
-                        }
-                    }
-                    let input = inherit_type(wiring, types.as_slice(), bound.driver);
-                    let expected = match outputs[i] {
-                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
-                        None => None,
-                    };
-                    match check_nested_selection_type(source, forms, root, steps.as_slice(), leaf, input, expected) {
-                        Ok(ty) => ty,
-                        Err(error) => {
-                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
-                                outputs@, roots@, types@, i as int, Err(error)));
-                            return Err(error);
-                        },
-                    }
-                } else if let Some(field) = field_selection_shape(source.text, forms, root) {
-                    proof {
-                        let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
-                            #[trigger] field_selection_shape_matches(source.text, forms@, root, steps, at, shape);
-                        field_selection_shapes_agree(source.text, forms@, root,
-                            field.steps@, field.field, field.shape, steps, at, shape);
-                    }
-                    let expected = match outputs[i] {
-                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
-                        None => None,
-                    };
-                    let context = StructureExpressionContext {
-                        file, entry, limit: _limit, source, parsed,
-                        definition: driver.definition - parsed.entry_ranges[entry].definitions.start,
-                    };
-                    match self.check_indexed_field_selection(&context, wiring, i, types.as_slice(), &field, &mut layouts, expected) {
-                        Ok(ty) => ty,
-                        Err(error) => {
-                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
-                                literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
-                            return Err(error);
-                        }
-                    }
-                } else {
-                    copy_signal_type(&roots[i])
-                }
-            } else {
-                copy_signal_type(&roots[i])
-            };
-            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
-                outputs@, roots@, types@, i as int, Ok(next)));
-            assert(next matches Some(ty) ==> location_in_source(ty.origin) && self.declared_port_type(ty.ty));
-            assert(structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, i as int)
-                ==> projection.is_some()) by {
-                reveal(structure_projection_required);
-            };
+            let (next, projection) = self.check_atom_definition(
+                file, entry, _limit, source, parsed, literals, wiring, outputs.as_slice(),
+                roots, types.as_slice(), i, &mut layouts,
+            )?;
             let ghost before = types@;
             let ghost prior = projections@;
             types.push(next);
@@ -1423,16 +1655,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 projections.push(row);
                 assert(structure_projections_in_order(projections@, i + 1, wiring.drivers.signature.inputs@.len() as int)) by {
                     assert(projections@ =~= prior.push(row));
+                    assert(structure_projections_in_order(seq![row], i + 1, wiring.drivers.signature.inputs@.len() as int));
+                    append_structure_projection(prior, row, i as int, wiring.drivers.signature.inputs@.len() as int);
                 };
             }
             proof {
                 assert forall|target: int| 0 <= target <= i &&
                     #[trigger] structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, target)
                     implies exists|j: int| 0 <= j < projections@.len() && (#[trigger] projections@[j]).target == target by {
-                    assert(types@.take(target) =~= before.take(target));
-                    assert(structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, before, target)) by {
-                        reveal(structure_projection_required);
-                    };
+                    assert(types@ =~= before.push(next));
+                    structure_requirement_survives_append(source, parsed, entry, wiring, literals.widths@, roots@, before, next, target);
                     if target < i {
                         let j = choose|j: int| 0 <= j < prior.len() && (#[trigger] prior[j]).target == target;
                         assert(projections@[j] == prior[j]);
@@ -1448,10 +1680,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         assert(prior_layouts == layouts);
                         let old_row = prior[j];
                         assert(structure_projection_matches(self, file, entry, _limit, wiring, layouts->Some_0, before, old_row));
-                        assert(structure_projection_matches(self, file, entry, _limit, wiring, layouts->Some_0, types@, old_row)) by {
-                            reveal(structure_projection_matches);
-                            assert(types@.take(old_row.target as int) =~= before.take(old_row.target as int));
-                        };
+                        assert(types@ =~= before.push(next));
+                        structure_projection_survives_append(self, file, entry, _limit, wiring, layouts->Some_0, before, next, old_row);
                     } else {
                         assert(types@ =~= before.push(next));
                     }

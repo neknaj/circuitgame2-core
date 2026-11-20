@@ -147,6 +147,29 @@ pub(super) proof fn nested_named_selections_agree(
     bit_selection_paths_agree(source, forms, root, left, lhs, right, rhs);
 }
 
+/// 選択列の末端は、裸の信号名とフィールド式の両方にはならない。
+pub(super) proof fn field_and_named_selection_disjoint(
+    source: &str, forms: Seq<Form>, root: usize,
+    steps: Seq<BitSelectionShape>, at: usize, shape: crate::syntax::circuit::StructureExpressionShape,
+    other: Seq<BitSelectionShape>, name: usize,
+)
+    requires
+        crate::syntax::circuit::field_selection_shape_matches(source, forms, root, steps, at, shape),
+        nested_named_selection_matches(source, forms, root, other, name),
+    ensures false,
+{
+    use crate::syntax::circuit::{bit_selection_excludes_structure, field_selection_shape_matches};
+    reveal(field_selection_shape_matches);
+    reveal(nested_named_selection_matches);
+    named_leaf_is_not_selection(source, forms, name);
+    if exists|selection: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, at as int, selection) {
+        let selection = choose|selection: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, at as int, selection);
+        bit_selection_excludes_structure(source, forms, at as int, selection);
+    }
+    bit_selection_paths_agree(source, forms, root, steps, at, other, name);
+    crate::syntax::circuit::structure_expression_positions(source, forms, at as int, shape);
+}
+
 /// 裸の信号名で終わる二段以上の選択式から、各段の引数位置と信号名の添字を返す。
 pub(super) fn nested_named_selection(source: &str, forms: &[Form], root: usize)
     -> (result: Option<(Vec<BitSelectionShape>, usize)>)
@@ -182,6 +205,19 @@ pub(super) open spec fn selection_composition(
 
 pub(super) open spec fn selection_position(selection: CheckedBitSelection, index: int) -> int {
     selection.start + index * selection.stride
+}
+
+/// 半開区間のビットを先頭から並べる選択を表す。
+pub(super) open spec fn contiguous_selection(start: u64, end: u64) -> CheckedBitSelection {
+    CheckedBitSelection { start, count: (end - start) as u64, stride: 1, last: (end - 1) as u64 }
+}
+
+/// 入力幅に収まる半開区間を、刻み1の選択として返す。
+pub(super) fn select_contiguous_range(start: u64, end: u64, _width: u64) -> (selection: CheckedBitSelection)
+    requires start < end <= _width,
+    ensures selection == contiguous_selection(start, end), selection.fits(_width),
+{
+    CheckedBitSelection { start, count: end - start, stride: 1, last: end - 1 }
 }
 
 /// 二段の選択を、元の入力に対する一段の選択にまとめる。

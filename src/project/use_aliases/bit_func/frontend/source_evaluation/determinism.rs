@@ -1,14 +1,17 @@
 //! 同じソースの同じ入力から得られる値が一意であることを示す。
 
 use super::*;
+use crate::syntax::circuit::{field_selection_root, field_selection_shape_matches};
+use super::super::super::super::selection_arguments::field_and_named_selection_disjoint;
 
 verus! {
 
-enum SourceRhsKind {
+enum SourceRhsKind<'p, 'a> {
     Atom,
     Nor,
     Selection(BitSelectionShape),
     NestedSelection(Seq<BitSelectionShape>, usize),
+    FieldSelection((Seq<BitSelectionShape>, usize, StructureExpressionShape, CheckedStructureExpression<'p, 'a>)),
     Structure(StructureExpressionShape),
 }
 
@@ -92,6 +95,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.source_selection_values_agree(context, other, inputs, prior, left, right),
             (SourceRhsKind::NestedSelection(a, al), SourceRhsKind::NestedSelection(b, bl)) =>
                 self.source_nested_selection_values_agree(context, other, inputs, prior, left, right, a, al, b, bl),
+            (SourceRhsKind::FieldSelection(a), SourceRhsKind::FieldSelection(b)) =>
+                self.source_field_selection_values_agree(context, other, layouts->Some_0, other_layouts->Some_0,
+                    types, inputs, prior, left, right, a, b),
             (SourceRhsKind::Structure(_), SourceRhsKind::Structure(_)) =>
                 self.source_structure_values_agree(context, other, layouts->Some_0, other_layouts->Some_0, types, inputs, prior, left, right),
             (SourceRhsKind::Nor, _) | (_, SourceRhsKind::Nor) =>
@@ -109,6 +115,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 nested_named_selection_root(context.source.text, forms, root as usize, steps, leaf);
                 bit_selection_shapes_agree(context.source.text, forms, root, steps[0], shape);
             },
+            (SourceRhsKind::FieldSelection((steps, at, shape, _)), SourceRhsKind::NestedSelection(other, name))
+            | (SourceRhsKind::NestedSelection(other, name), SourceRhsKind::FieldSelection((steps, at, shape, _))) =>
+                field_and_named_selection_disjoint(context.source.text, forms, root as usize, steps, at, shape, other, name),
+            (SourceRhsKind::FieldSelection((steps, _, _, _)), SourceRhsKind::Selection(shape))
+            | (SourceRhsKind::Selection(shape), SourceRhsKind::FieldSelection((steps, _, _, _))) =>
+                bit_selection_shapes_agree(context.source.text, forms, root, steps[0], shape),
+            (SourceRhsKind::FieldSelection((steps, _, _, _)), SourceRhsKind::Structure(_))
+            | (SourceRhsKind::Structure(_), SourceRhsKind::FieldSelection((steps, _, _, _))) =>
+                bit_selection_excludes_structure(context.source.text, forms, root, steps[0]),
             _ => {},
         }
     }
@@ -117,7 +132,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     proof fn source_rhs_kind(
         &self, context: &SourceFunc, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
         inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
-    ) -> (kind: SourceRhsKind)
+    ) -> (kind: SourceRhsKind<'p, 'a>)
         requires self.source_rhs_can_evaluate(context, layouts, types, inputs, prior, value),
         ensures ({
             let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
@@ -138,6 +153,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && nested_named_selection_matches(context.source.text, forms, root as usize, steps, leaf)
                     && exists|driver: OutputDriver, origin: LocatedName|
                         #[trigger] self.source_nested_selection_case(context, inputs, prior, value, steps, leaf, driver, origin),
+                SourceRhsKind::FieldSelection((steps, at, shape, field)) => forms[root] is List
+                    && bit_selection_shape_matches(context.source.text, forms, root, steps[0])
+                    && forms[steps[0].input.start as int] is List
+                    && field_selection_shape_matches(context.source.text, forms, root as usize, steps, at, shape)
+                    && (layouts matches Some(table) && self.source_field_selection_case(
+                        context, table, types, inputs, prior, value, steps, at, shape, field)),
                 SourceRhsKind::Structure(shape) => forms[root] is List
                     && structure_expression_matches(context.source.text, forms, root, shape)
                     && (layouts matches Some(table) && self.structure_source_rhs_value(context, table, types, inputs, prior, value)),
@@ -171,6 +192,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             SourceRhsKind::NestedSelection(steps, leaf)
         } else {
             let table = layouts->Some_0;
+            if self.source_field_selection_value(context, table, types, inputs, prior, value) {
+                let (steps, at, shape, field) = choose|
+                    steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape, field: CheckedStructureExpression|
+                    #[trigger] self.source_field_selection_case(context, table, types, inputs, prior, value, steps, at, shape, field);
+                reveal(UseAliases::source_field_selection_case);
+                assert(self.source_field_selection_case(context, table, types, inputs, prior, value, steps, at, shape, field));
+                field_selection_root(context.source.text, context.parsed.syntax.forms@, root as usize, steps, at, shape);
+                return SourceRhsKind::FieldSelection((steps, at, shape, field));
+            }
             reveal(UseAliases::structure_source_rhs_value);
             let (shape, checked) = choose|shape: StructureExpressionShape, checked: CheckedStructureExpression|
                 #[trigger] self.source_structure_case(context, table, types, inputs, prior, value, shape, checked);
