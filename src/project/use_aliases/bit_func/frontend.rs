@@ -21,10 +21,15 @@ use super::super::selection_arguments::{
 };
 use crate::project::{LocatedName, ProjectSource};
 use crate::project::circuits::form_location;
-use crate::syntax::{Form, circuit::{NamedBuildCircuit, definition_target_atoms}};
+use crate::syntax::{AtomKind, Form, circuit::{NamedBuildCircuit, definition_target_atoms}};
 
 #[cfg(verus_only)]
-use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, concat_operands_fit, nor_operand_matches};
+use super::{bit_definition_matches, bit_driver_width, bit_vector_token, checked_bit_func_available,
+    concat_operands_fit, literal_bytes, nor_operand_matches};
+#[cfg(verus_only)]
+use crate::project::literal_width::circuit_bit_literal_boundary;
+#[cfg(verus_only)]
+use crate::project::circuit_literal_width_matches;
 #[cfg(verus_only)]
 use super::super::{
     FuncCallOutputTypes, TypedFuncCall, function_atoms::named_selection_matches,
@@ -320,6 +325,10 @@ spec fn concat_type_ready(scope: &FuncProjection, index: int) -> bool {
         #[trigger] crate::syntax::circuit::concat_arguments_match(scope.source.text, scope.parsed.syntax.forms@, root as int, args)
 }
 
+spec fn bit_vector_form(form: Form) -> bool {
+    form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal)
+}
+
 fn operand_width(
     signature: &TypedRoutineSignature, inputs: &[u64], prior: &[CheckedBitDefinition], operand: SingleBitOperand,
 ) -> (width: u64)
@@ -533,6 +542,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] concat_projection_matches(scope.file, entry, scope.limit, scope.source, parsed, scope.wiring,
                     scope.types@, concat)
                 && concat.target == i && concat.operands@ == operands,
+            BitFuncRhs::BitVector => bit_vector_form(forms[root]),
         } }
     }
 
@@ -565,6 +575,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& is_form_location(scope.source, forms[row.expression.start as int], checked.expression)
         &&& self.bit_rhs_from_source(scope, prior, i, checked.rhs, checked.operands@)
         &&& bit_definition_matches(scope.inputs@, prior, checked)
+        &&& checked.rhs is BitVector ==> (scope.types@[i] matches Some(ty) && ty.ty == ResolvedPortType::Bits(checked.width))
     }
 
     #[verifier::opaque]
@@ -654,6 +665,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ==> end - first == 1 && no_operand(source, parsed, entry, definition, root, wiring, i))
         &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
             ==> !concat_type_ready(scope, i))
+        &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
+            ==> !bit_vector_form(forms[root]))
         &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
             ==> forall|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
                 !#[trigger] field_selection_shape_matches(source.text, forms, root as usize, steps, at, shape))
@@ -995,6 +1008,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         scope.wiring, scope.types@, row);
                     assert(bits == checked.width);
                 },
+                BitFuncRhs::BitVector => {},
             }
         }
         assert(scope.types@[index] matches Some(ty) && self.port_width_matches(ty.ty, checked.width, scope.layouts));
@@ -1235,7 +1249,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     fn project_definition(
         &self, scope: &FuncProjection<'_, 'p, 'a>, prior: &[CheckedBitDefinition<'p, 'a>], index: usize,
-        projection: Option<usize>, concat: Option<ConcatProjection>, Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
+        projection: Option<usize>, concat: Option<ConcatProjection>, literal_width: Option<u64>,
+        Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
     ) -> (result: Result<CheckedBitDefinition<'p, 'a>, BitFuncError<'p, 'a>>)
         requires
             self.projection_context(scope),
@@ -1243,6 +1258,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
             typed.types@ == scope.types@,
             typed.types@.len() == scope.wiring.drivers.definitions@.len(),
+            literal_width == typed.literals.widths@[index as int],
             self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
             index == prior@.len() < scope.wiring.drivers.definitions@.len(),
             self.projection_port_widths_match(scope),
@@ -1306,6 +1322,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             let checked = CheckedBitDefinition { expression, width: concat.width, rhs: BitFuncRhs::Concat,
                 operands: concat.operands };
+            assert(self.bit_definition_from_source(scope, prior@, index as int, checked));
+            return Ok(checked);
+        }
+        if matches!(forms[root], Form::Atom { kind: AtomKind::Binary | AtomKind::Hexadecimal, .. }) {
+            let ghost bytes = literal_bytes(expression);
+            proof {
+                self.checked_wiring_is_func(file, entry, limit, *wiring);
+                self.checked_types_keep_wiring(file, entry, limit, typed, *wiring);
+                assert(indexed_driver_site(source, parsed, entry as int, wiring.drivers.definitions@[index as int]));
+                assert(wiring.drivers.definitions@[index as int].result_index == 0);
+                let bits = self.bit_vector_definition_width(file, entry, limit, &typed.literals, wiring, index as int);
+                assert(literal_width == Some(bits));
+                self.checked_literal_type(file, entry, limit, typed, *wiring, index as int, bits);
+                assert(bit_vector_token(bytes)) by { reveal(form_spans_valid); };
+                crate::syntax::bit_literal_kind_has_digits(bytes);
+                let expected = choose|expected: Option<u64>|
+                    #[trigger] circuit_literal_width_matches(bytes, expected, limit, Ok(bits));
+                circuit_bit_literal_boundary(bytes, expected, limit, Ok(bits));
+            }
+            let Some(width) = literal_width else {
+                proof { assert(false); }
+                return Err(BitFuncError::Unsupported(UnsupportedBitFunc::Expression, expression));
+            };
+            let checked = CheckedBitDefinition { expression, width, rhs: BitFuncRhs::BitVector, operands: Vec::new() };
             assert(self.bit_definition_from_source(scope, prior@, index as int, checked));
             return Ok(checked);
         }
@@ -1407,6 +1447,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 構造体型のポート間で同じ型の信号を転送するときは、宣言の総幅を使う。
     ///
     /// `concat` は、型が確定した裸のビット列信号と定数 `0`・`1` を引数に取れる。
+    /// 二進・十六進リテラルを単独の右辺に置くと、型検査で決まった幅の定数配線になる。
     ///
     /// # Examples
     ///
@@ -1484,6 +1525,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         proof {
             self.checked_types_keep_wiring(file, entry, limit, typed_model, wiring);
+            self.literal_widths_fit_wiring(file, entry, limit, &typed_model.literals, &wiring);
             self.checked_wiring_is_func(file, entry, limit, wiring);
             self.targets.parsed_project_model();
         }
@@ -1568,6 +1610,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.projection_structures_match(&scope),
                 typed_model.types@ == scope.types@,
                 typed_model.types@.len() == wiring.drivers.definitions@.len(),
+                typed.literals.widths@ == typed_model.literals.widths@,
+                typed.literals.widths@.len() == wiring.drivers.definitions@.len(),
                 self.func_structure_projections_complete(file, entry, limit, typed_model, &wiring, scope.structures@),
                 scope.wiring == &wiring && *signature == wiring.drivers.signature && scope.source == source && scope.parsed == parsed,
                 scope.file == file && scope.entry == entry && scope.limit == limit,
@@ -1605,7 +1649,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
             }
             next_concat = cursor;
-            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure, concat, Ghost(typed_model)) {
+            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure, concat,
+                typed.literals.widths[i], Ghost(typed_model))
+            {
                 Ok(checked) => checked,
                 Err(error) => {
                     assert(self.projection_failure(&scope, error));

@@ -19,6 +19,10 @@ use super::selection_arguments::CheckedBitSelection;
 use crate::project::LocatedName;
 #[cfg(verus_only)]
 use crate::project::{bit_selection_matches, location_in_source};
+#[cfg(verus_only)]
+use crate::syntax::{AtomKind, bare_atom_kind, bit_literal_value_at};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -35,6 +39,8 @@ pub(super) enum BitFuncRhs {
     Selection { input: OutputDriver, selection: CheckedBitSelection },
     /// 引数順にビット列を連接する。各引数は定義の `operands` に保持する。
     Concat,
+    /// 元の二進または十六進リテラルを、確定した幅の定数配線にする。
+    BitVector,
 }
 
 /// 元ソース位置と値の幅が確定した定義。
@@ -110,6 +116,14 @@ pub(super) open spec fn concat_operands_fit(
     }
 }
 
+pub(super) open spec fn literal_bytes(location: LocatedName) -> Seq<u8> {
+    location.source.text.spec_bytes()[location.span.start as int..location.span.end as int]
+}
+
+pub(super) open spec fn bit_vector_token(bytes: Seq<u8>) -> bool {
+    bare_atom_kind(bytes) == Some(AtomKind::Binary) || bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal)
+}
+
 /// 参照する幅が定義済みで、各右辺の結果幅と定義幅が一致することを表す。
 pub(super) open spec fn bit_definition_matches(
     inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>, definition: CheckedBitDefinition,
@@ -131,6 +145,8 @@ pub(super) open spec fn bit_definition_matches(
             && crate::project::concat_prefix_width(
                 definition.operands@.map_values(|item: (SingleBitOperand, u64)| item.1),
                 definition.operands@.len()) == definition.width,
+        BitFuncRhs::BitVector => bit_vector_token(literal_bytes(definition.expression))
+            && forall|bit: nat| bit >= definition.width ==> !#[trigger] bit_literal_value_at(literal_bytes(definition.expression), bit),
     }
 }
 

@@ -8,6 +8,7 @@ verus! {
 
 enum SourceRhsKind<'p, 'a> {
     Atom,
+    BitVector,
     Nor,
     Concat(core::ops::Range<usize>, Seq<Seq<bool>>),
     Selection(BitSelectionShape),
@@ -88,6 +89,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(same_definition_driver(context.wiring.drivers.definitions@[prior.len() as int],
             other.wiring.drivers.definitions@[prior.len() as int]));
         match (a, b) {
+            (SourceRhsKind::BitVector, SourceRhsKind::BitVector) => {},
             (SourceRhsKind::Atom, SourceRhsKind::Atom) =>
                 atomic_values_agree(context, other, definition, root, inputs, prior, left, right),
             (SourceRhsKind::Nor, SourceRhsKind::Nor) =>
@@ -154,7 +156,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let forms = context.parsed.syntax.forms@;
             match kind {
                 SourceRhsKind::Atom => forms[root] is Atom
+                    && !bit_vector_form(forms[root])
                     && atomic_value(context, definition, root, inputs, prior, value),
+                SourceRhsKind::BitVector => bit_vector_form(forms[root])
+                    && source_bit_vector_value(context, types, prior.len() as int, value),
                 SourceRhsKind::Nor => forms[root] is List
                     && ordinary_call_at(context.source.text, forms, root, row.expression.end as int)
                     && self.source_nor_value(context, inputs, prior, value),
@@ -184,7 +189,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
         let root = context.parsed.definitions@[definition as int].expression.start as int;
         reveal(UseAliases::ordinary_source_rhs_value);
-        if atomic_value(context, definition, root, inputs, prior, value) {
+        if source_bit_vector_value(context, types, prior.len() as int, value) {
+            SourceRhsKind::BitVector
+        } else if atomic_value(context, definition, root, inputs, prior, value) {
+            let operand = choose|operand: SingleBitOperand|
+                #[trigger] operand_matches(context.source, context.parsed, context.entry, definition, root,
+                    context.wiring, prior.len() as int, operand)
+                && value == atom_result(inputs, prior, operand);
+            source_operand_is_atom(context.source, context.parsed, context.entry, definition, root, context.wiring,
+                prior.len() as int, operand);
             SourceRhsKind::Atom
         } else if self.source_nor_value(context, inputs, prior, value) {
             let (call, left, right) = choose|call: TypedFuncCall, left: Seq<bool>, right: Seq<bool>|

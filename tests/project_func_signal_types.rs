@@ -51,6 +51,31 @@ fn lowers_concat_in_argument_order_without_adding_gates() {
 }
 
 #[test]
+fn lowers_bit_vector_literals_at_their_checked_widths() {
+    let text = concat!(
+        "(using nor) ",
+        "(func literals (in) (out (short (bits 2)) (padded (bits 9)) (wide (bits 68)) (spelled (bits 8))) ",
+        "  (def short #x03) (def padded #b101) (def wide #x10000000000000001) ",
+        "  (def written #x03) (def spelled written))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 8, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let checked = aliases.check_bit_func(0, 1, 68).unwrap();
+    let lowered = checked.lower_bit_func(95).unwrap();
+    assert!(lowered.netlist().gates.is_empty());
+    let bits = lowered.netlist().evaluate(&[]).unwrap();
+    let ranges = lowered.outputs().ranges();
+    assert_eq!(&bits[ranges[0].clone()], &[true, true]);
+    assert_eq!(&bits[ranges[1].clone()], &[true, false, true, false, false, false, false, false, false]);
+    let mut wide = [false; 68];
+    wide[0] = true;
+    wide[64] = true;
+    assert_eq!(&bits[ranges[2].clone()], &wide);
+    assert_eq!(&bits[ranges[3].clone()], &[true, true, false, false, false, false, false, false]);
+}
+
+#[test]
 fn propagates_each_call_output_through_bare_signals() {
     let text = concat!(
         "(func pair (in (value (bits 8)) flag) (out (value (bits 8)) flag)) ",

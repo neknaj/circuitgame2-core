@@ -259,7 +259,9 @@ pub(super) proof fn source_operand_is_atom(
     wiring: &FuncWiring, prior: int, operand: SingleBitOperand,
 )
     requires operand_matches(source, parsed, entry, definition, root, wiring, prior, operand),
-    ensures 0 <= root < parsed.syntax.forms@.len() && parsed.syntax.forms@[root] is Atom,
+    ensures
+        0 <= root < parsed.syntax.forms@.len() && parsed.syntax.forms@[root] is Atom,
+        parsed.syntax.forms@[root]->Atom_kind is Name || parsed.syntax.forms@[root]->Atom_kind is Natural,
 {
 }
 

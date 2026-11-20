@@ -194,6 +194,14 @@ pub proof fn bit_literal_required_width_fits_spelling(bytes: Seq<u8>, size: BitL
     }
 }
 
+/// 二進・十六進の字句は、接頭辞の後に少なくとも一桁を持つ。
+pub proof fn bit_literal_kind_has_digits(bytes: Seq<u8>)
+    requires bare_atom_kind(bytes) == Some(AtomKind::Binary) || bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal),
+    ensures bytes.len() > 2,
+{
+    crate::atom::bit_atom_has_digits(bytes, bare_atom_kind(bytes));
+}
+
 /// 必要ビット数以上の位置には 1 がないことを示す。
 pub proof fn bit_literal_high_bits_are_zero(bytes: Seq<u8>, size: BitLiteralSize, bit: nat)
     requires bit_literal_size_matches(bytes, Some(size)), size.required_bits <= bit,

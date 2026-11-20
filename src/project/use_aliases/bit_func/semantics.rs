@@ -2,7 +2,9 @@
 
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc, OutputDriver, SingleBitOperand, checked_bit_func_available};
+use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc, OutputDriver, SingleBitOperand, checked_bit_func_available, literal_bytes};
+#[cfg(verus_only)]
+use crate::syntax::bit_literal_value_at;
 #[cfg(verus_only)]
 use crate::project::bit_selection_matches;
 
@@ -42,14 +44,17 @@ pub(super) open spec fn definition_values(rhs: BitFuncRhs, inputs: Seq<Seq<bool>
         BitFuncRhs::Selection { input, selection } =>
             Seq::new(selection.count as nat,
                 |i: int| driver_values(inputs, definitions, input)[selection.start + i * selection.stride]),
-        BitFuncRhs::Concat => Seq::empty(),
+        BitFuncRhs::Concat | BitFuncRhs::BitVector => Seq::empty(),
     }
 }
 
 pub(super) open spec fn checked_definition_values(
     definition: CheckedBitDefinition, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>,
 ) -> Seq<bool> {
-    if definition.rhs is Concat {
+    if definition.rhs is BitVector {
+        Seq::new(definition.width as nat,
+            |i: int| bit_literal_value_at(literal_bytes(definition.expression), i as nat))
+    } else if definition.rhs is Concat {
         concat_operand_values(inputs, prior, definition.operands@).flatten()
     } else {
         definition_values(definition.rhs, inputs, prior)

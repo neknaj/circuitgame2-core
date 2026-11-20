@@ -406,6 +406,15 @@ pub(super) proof fn located_name_evidence(location: LocatedName)
 {
 }
 
+pub(super) proof fn located_name_bounds(location: LocatedName)
+    requires location_in_source(location),
+    ensures
+        location.span.start < location.span.end <= location.source.text.spec_bytes().len(),
+        is_char_boundary(location.source.text.spec_bytes(), location.span.start as int),
+        is_char_boundary(location.source.text.spec_bytes(), location.span.end as int),
+{
+}
+
 pub(super) proof fn declaration_lookup_agrees(
     project: &CircuitProject, table: &DeclarationTable, key: NameKey,
 )

@@ -24,6 +24,7 @@ use crate::syntax::circuit::{
 };
 use super::super::{LoweredBitFunc, bit_func_lowering_preserves_evaluation, lowered_bit_func_result, port_values};
 use crate::netlist::{NorEvaluationError, nor_evaluation_result};
+use crate::syntax::{bit_literal_value_at, form_span};
 
 verus! {
 
@@ -273,6 +274,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, value: Seq<bool>,
     ) -> bool {
         self.ordinary_source_rhs_value(context, inputs, prior, value)
+            || source_bit_vector_value(context, types, prior.len() as int, value)
             || (layouts matches Some(table) && (self.structure_source_rhs_value(context, table, types, inputs, prior, value)
                 || self.source_field_selection_value(context, table, types, inputs, prior, value)))
     }
@@ -309,12 +311,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let prior = checked.definitions@.take(i);
             let prior_values = values.take(i);
             assert(self.bit_definition_from_source(scope, prior, i, definition));
+            assert(values[i] == checked_definition_values(definition, inputs, prior_values));
             assert forall|j: int| 0 <= j < prior_values.len() implies
                 (#[trigger] prior_values[j]).len() == prior[j].width by {
                 assert(prior_values[j] == values[j]);
                 assert(prior[j] == checked.definitions@[j]);
             };
-            if exists|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i {
+            if definition.rhs is BitVector {
+                let row = scope.parsed.definitions@[scope.wiring.drivers.definitions@[i].definition as int];
+                let root = scope.parsed.syntax.forms@[row.expression.start as int];
+                assert(self.bit_rhs_from_source(scope, prior, i, definition.rhs, definition.operands@));
+                assert(definition.expression.span == form_span(root));
+                assert(source_bit_vector_value(&context, scope.types@, i, values[i]));
+            } else if exists|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i {
                 let at = choose|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i;
                 if scope.structures@[at].selection.is_some() {
                     self.field_projection_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
@@ -324,7 +333,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             } else {
                 self.ordinary_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition);
             }
-            assert(values[i] == checked_definition_values(definition, inputs, prior_values));
         };
         assert(values.len() == scope.wiring.drivers.definitions@.len());
         assert(values.len() == scope.types@.len());
@@ -576,6 +584,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, checked: CheckedBitDefinition,
     )
         requires
+            !(checked.rhs is BitVector),
             self.projection_context(scope),
             values.len() == definitions.len() < scope.wiring.drivers.definitions@.len(),
             inputs.len() == scope.inputs@.len(),
@@ -601,6 +610,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.bit_rhs_from_source(scope, definitions, index, checked.rhs, checked.operands@));
         assert(!(exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == index));
         match checked.rhs {
+            BitFuncRhs::BitVector => { assert(false); },
             BitFuncRhs::Concat => {
                 let projection = choose|concat: ConcatProjection|
                     #[trigger] concat_projection_matches(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
@@ -688,6 +698,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
         }
     }
+}
+
+/// 元ソースのビット列リテラルを、型で指定された幅の値として読む。
+spec fn source_bit_vector_value(
+    context: &SourceFunc, types: Seq<Option<SignalType>>, index: int, value: Seq<bool>,
+) -> bool {
+    let definition = context.wiring.drivers.definitions@[index].definition;
+    let row = context.parsed.definitions@[definition as int];
+    let form = context.parsed.syntax.forms@[row.expression.start as int];
+    let span = form_span(form);
+    let bytes = context.source.text.spec_bytes()[span.start as int..span.end as int];
+    &&& bit_vector_form(form)
+    &&& types[index] matches Some(ty)
+    &&& ty.ty matches ResolvedPortType::Bits(width)
+    &&& value == Seq::new(width as nat, |bit: int| bit_literal_value_at(bytes, bit as nat))
 }
 
 spec fn source_outputs_match(

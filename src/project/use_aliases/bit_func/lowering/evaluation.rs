@@ -232,6 +232,14 @@ proof fn definition_values_match_wiring(
     let definition_ranges = lowered.layouts.definitions.ranges_model();
 
     match definition.rhs {
+        BitFuncRhs::BitVector => {
+            assert forall|bit: int| 0 <= bit < definition.width implies
+                (#[trigger] value[bit]) == checked_definition_values(definition, inputs, values)[bit] by {
+                assert(lowered.definition_wires@[range.start + bit] == Wire::Constant(
+                    bit_literal_value_at(literal_bytes(definition.expression), bit as nat)));
+            };
+            assert(value =~= checked_definition_values(definition, inputs, values));
+        },
         BitFuncRhs::Concat => {
             concat_wiring_preserves_values(source, lowered, capacity, i, input, gates);
         },

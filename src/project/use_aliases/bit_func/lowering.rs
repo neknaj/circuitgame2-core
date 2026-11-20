@@ -11,9 +11,13 @@ use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc, OutputDriver, SingleBitOperand};
 use crate::netlist::{NorGate, NorNetlist, PortBitLayout, PortBitLayoutError, Wire};
+use crate::syntax::{BitLiteral, read_bit_literal};
+use crate::project::circuits::read_source_span;
 
 #[cfg(verus_only)]
-use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, nor_operand_matches};
+use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, literal_bytes, nor_operand_matches};
+#[cfg(verus_only)]
+use crate::project::declarations::located_name_bounds;
 #[cfg(verus_only)]
 use crate::netlist::{
     gates_available, nor_evaluation_ready, output_ports_available, port_bit_layout_port, port_bit_layout_result,
@@ -21,6 +25,10 @@ use crate::netlist::{
 };
 #[cfg(verus_only)]
 use crate::project::selected_bit_in_range;
+#[cfg(verus_only)]
+use crate::syntax::bit_literal_value_at;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use crate::project::{
     concat_prefix_width,
@@ -339,6 +347,46 @@ fn append_projected_bits(
         assert forall|j: int| prior.len() <= j < wires@.len() implies (#[trigger] wires@[j])
             == projected_wire(inputs@, definitions@, prior, projection, j - prior.len()) by {
             if j < previous.len() { assert(wires@[j] == previous[j]); }
+        };
+        bit += 1;
+    }
+}
+
+/// 既存の配線を保ち、検査済みの幅だけリテラルの定数配線を低位順に追加する。
+fn append_bit_literal_wires(literal: &BitLiteral<'_>, width: usize, wires: &mut Vec<Wire>)
+    requires old(wires)@.len() + width <= usize::MAX,
+    ensures
+        final(wires)@.len() == old(wires)@.len() + width,
+        final(wires)@.take(old(wires)@.len() as int) == old(wires)@,
+        forall|bit: int| 0 <= bit < width ==>
+            (#[trigger] final(wires)@[old(wires)@.len() + bit])
+                == Wire::Constant(bit_literal_value_at(literal.word_model().spec_bytes(), bit as nat)),
+{
+    let ghost prior = old(wires)@;
+    let mut bit = 0usize;
+    assert(wires@.take(prior.len() as int) =~= prior);
+    while bit < width
+        invariant
+            bit <= width,
+            prior.len() + width <= usize::MAX,
+            wires@.len() == prior.len() + bit,
+            wires@.take(prior.len() as int) == prior,
+            forall|index: int| 0 <= index < bit ==>
+                (#[trigger] wires@[prior.len() + index])
+                    == Wire::Constant(bit_literal_value_at(literal.word_model().spec_bytes(), index as nat)),
+        decreases width - bit,
+    {
+        assert(bit <= u64::MAX);
+        let wire = Wire::Constant(literal.bit(bit as u64));
+        let ghost previous = wires@;
+        wires.push(wire);
+        assert(wires@.take(prior.len() as int) =~= prior);
+        assert forall|index: int| 0 <= index <= bit implies
+            (#[trigger] wires@[prior.len() + index])
+                == Wire::Constant(bit_literal_value_at(literal.word_model().spec_bytes(), index as nat)) by {
+            if index < bit {
+                assert(wires@[prior.len() + index] == previous[prior.len() + index]);
+            }
         };
         bit += 1;
     }
@@ -665,7 +713,7 @@ spec fn rhs_projection(rhs: BitFuncRhs, gate: usize) -> Projection {
         },
         BitFuncRhs::Constant(bit) => Projection::Wire(Wire::Constant(bit)),
         BitFuncRhs::Nor { .. } => Projection::Wire(Wire::Gate(gate)),
-        BitFuncRhs::Concat => arbitrary(),
+        BitFuncRhs::Concat | BitFuncRhs::BitVector => arbitrary(),
     }
 }
 
@@ -701,7 +749,7 @@ fn lower_rhs(
         checked_bit_func_available(source),
         layouts_result(source, capacity, Ok(*layouts)),
         index < source.definitions@.len(),
-        !(source.definitions@[index as int].rhs is Concat),
+        !(source.definitions@[index as int].rhs is Concat || source.definitions@[index as int].rhs is BitVector),
         wires@.len() == preceding_port_bits(definition_widths(source.definitions@), index as nat),
         wires_available(wires@, layouts.inputs.total_bits_model(), old(gates)@.len()),
         gates_available(old(gates)@, layouts.inputs.total_bits_model() as nat, old(gates)@.len() as int),
@@ -744,7 +792,7 @@ fn lower_rhs(
             proof { existing_wires_keep_availability(wires@, input_bits, gate as nat, gates@.len()); }
             Projection::Wire(Wire::Gate(gate))
         },
-        BitFuncRhs::Concat => {
+        BitFuncRhs::Concat | BitFuncRhs::BitVector => {
             proof { assert(false); }
             Projection::Wire(Wire::Constant(false))
         },
@@ -768,7 +816,11 @@ spec fn definition_wiring_matches(
             && gate < gates.len() == origins.len() && gates[gate as int] == expected && origins[gate as int] == i,
         None => true,
     }
-    &&& if rhs is Concat {
+    &&& if rhs is BitVector {
+        forall|bit: int| 0 <= bit < range.end - range.start ==>
+            (#[trigger] wires[range.start + bit]) == Wire::Constant(
+                bit_literal_value_at(literal_bytes(source.definitions@[i].expression), bit as nat))
+    } else if rhs is Concat {
         wires.subrange(range.start as int, range.end as int)
             == concat_operand_wires(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), prefix,
                 source.definitions@[i].operands@).flatten()
@@ -807,7 +859,13 @@ proof fn prior_definition_wiring_is_preserved(
         assert(after_gates[gate as int] == before_gates[gate as int]);
         assert(after_origins[gate as int] == before_origins[gate as int]);
     }
-    if !(rhs is Concat) {
+    if rhs is BitVector {
+        assert forall|bit: int| 0 <= bit < range.end - range.start implies
+            (#[trigger] after_wires[range.start + bit]) == Wire::Constant(
+                bit_literal_value_at(literal_bytes(source.definitions@[i].expression), bit as nat)) by {
+            assert(after_wires[range.start + bit] == before_wires[range.start + bit]);
+        };
+    } else if !(rhs is Concat) {
         assert forall|j: int| range.start <= j < range.end implies
             (#[trigger] after_wires[j]) == projected_wire(layouts.inputs.ranges_model(),
                 layouts.definitions.ranges_model(), after_wires.take(range.start as int), rhs_projection(rhs, gate), j - range.start) by {
@@ -912,7 +970,8 @@ fn lower_definition(
         source.definitions@[i as int].rhs is Nor ==>
             final(wires)@[old(wires)@.len() as int] == Wire::Gate(old(gates)@.len() as usize),
         final(wires)@.take(old(wires)@.len() as int) == old(wires)@,
-        !(source.definitions@[i as int].rhs is Concat) ==> forall|bit: int| 0 <= bit < source.definitions@[i as int].width ==>
+        !(source.definitions@[i as int].rhs is Concat || source.definitions@[i as int].rhs is BitVector)
+            ==> forall|bit: int| 0 <= bit < source.definitions@[i as int].width ==>
             (#[trigger] final(wires)@[old(wires)@.len() + bit]) == projected_wire(
                 layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), old(wires)@,
                 rhs_projection(source.definitions@[i as int].rhs, old(gates)@.len() as usize), bit,
@@ -934,6 +993,32 @@ fn lower_definition(
     let ghost before_gates = gates@;
     let ghost before_origins = gate_definitions@;
     let ghost gate = gates@.len() as usize;
+    if matches!(source.definitions[i].rhs, BitFuncRhs::BitVector) {
+        let expression = &source.definitions[i].expression;
+        proof { located_name_bounds(*expression); }
+        let text = read_source_span(expression.source.text, expression.span.start, expression.span.end);
+        assert(text.spec_bytes() == literal_bytes(*expression));
+        let Some(literal) = read_bit_literal(text) else {
+            proof { assert(false); }
+            return;
+        };
+        append_bit_literal_wires(&literal, width, wires);
+        proof {
+            reveal(wires_available);
+            assert forall|j: int| 0 <= j < wires@.len()
+                implies wire_available(#[trigger] wires@[j], input_bits as nat, gates@.len()) by {
+                if j < prior.len() {
+                    assert(wires@[j] == prior[j]);
+                } else {
+                    let bit = j - prior.len();
+                    assert(wires@[prior.len() + bit] is Constant);
+                }
+            };
+            reveal(definition_wiring_matches);
+            reveal(gate_step_matches);
+        }
+        return;
+    }
     if matches!(source.definitions[i].rhs, BitFuncRhs::Concat) {
         let operands = source.definitions[i].operands.as_slice();
         append_concat_operands(source, layouts, capacity, i, wires, operands, Ghost(gate as nat));

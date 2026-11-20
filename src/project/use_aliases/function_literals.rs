@@ -475,6 +475,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         crate::project::literal_width::fixed_bit_literal_width(bytes, expected, limit, literals.widths@[i]->Some_0);
     }
 
+    /// ビット列リテラルの右辺に、型検査で決めた幅を対応付ける。
+    pub(super) proof fn bit_vector_definition_width(
+        &self, file: usize, entry: usize, limit: u64, literals: &FuncLiteralWidths,
+        wiring: &crate::project::FuncWiring, i: int,
+    ) -> (bits: u64)
+        requires
+            self.func_literal_evidence(file, entry, limit, Ok(*literals)),
+            literals.wiring == FuncWiringResult::Checked(*wiring),
+            0 <= i < wiring.drivers.definitions@.len(),
+            wiring.drivers.definitions@[i].result_index == 0,
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let row = parsed.definitions@[wiring.drivers.definitions@[i].definition as int];
+                let form = parsed.syntax.forms@[row.expression.start as int];
+                form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal)
+            }),
+        ensures
+            literals.widths@[i] == Some(bits),
+            ({
+                let project = self.targets.project_model();
+                let source = &project.sources_model()[file as int];
+                let parsed = &project.circuits_model()[file as int];
+                let row = parsed.definitions@[wiring.drivers.definitions@[i].definition as int];
+                let span = form_span(parsed.syntax.forms@[row.expression.start as int]);
+                let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+                exists|expected: Option<u64>| #[trigger] circuit_literal_width_matches(bytes, expected, limit, Ok(bits))
+            }),
+    {
+        self.literal_width_at(file, entry, limit, literals, wiring, i);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let row = parsed.definitions@[wiring.drivers.definitions@[i].definition as int];
+        let form = parsed.syntax.forms@[row.expression.start as int];
+        let port = choose|port: Option<TypedPort>|
+            #[trigger] literal_result(source, form, port, limit, Ok(literals.widths@[i]));
+        let span = form_span(form);
+        let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+        let expected = match port { Some(port) if port.ty is Bits => Some(port.ty->Bits_0), _ => None };
+        let bits = literals.widths@[i]->Some_0;
+        assert(circuit_literal_width_matches(bytes, expected, limit, Ok(bits)));
+        bits
+    }
+
     pub(super) proof fn literal_widths_fit_wiring(
         &self, file: usize, entry: usize, limit: u64, literals: &FuncLiteralWidths, wiring: &crate::project::FuncWiring,
     )

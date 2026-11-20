@@ -84,7 +84,8 @@ pub(super) proof fn circuit_bit_literal_boundary(
 )
     requires bytes.len() > 2, circuit_literal_width_matches(bytes, expected, limit, result),
     ensures match result {
-        Ok(width) => forall|index: nat| index >= width ==> !#[trigger] bit_literal_value_at(bytes, index),
+        Ok(width) => 0 < width <= limit
+            && forall|index: nat| index >= width ==> !#[trigger] bit_literal_value_at(bytes, index),
         Err(CircuitLiteralWidthError::DoesNotFit { expected: width, required }) =>
             0 < width < required && bit_literal_value_at(bytes, (required - 1) as nat),
         _ => true,
