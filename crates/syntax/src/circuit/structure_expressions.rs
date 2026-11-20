@@ -7,7 +7,8 @@ use vstd::prelude::*;
 
 #[cfg(verus_only)]
 use super::expression_forest::{
-    expression_references, expression_signals, first_cast_reference, first_expression_children, first_named_child_signal,
+    bare_signal_index, expression_references, expression_signals, first_cast_reference, first_expression_children,
+    first_named_child_signal, list_child_signals,
 };
 #[cfg(verus_only)]
 use super::expressions::{
@@ -255,6 +256,28 @@ pub proof fn structure_cast_reference(
     let end = forms[root]->List_end as int;
     assert(expression_child_range(source, forms, root, end, shape.input.start as int, shape.input.end as int));
     first_cast_reference(source, forms, root, stop, shape.input.start as int, shape.input.end as int);
+}
+
+/// 構造体式の入力が裸の信号名なら、その式の信号索引には入力名だけが現れる。
+pub(super) proof fn structure_named_input_signals(
+    source: &str, forms: Seq<Form>, root: int, shape: StructureExpressionShape,
+)
+    requires
+        structure_expression_matches(source, forms, root, shape),
+        forms.len() <= usize::MAX,
+        shape.input.start < forms.len(),
+        forms[shape.input.start as int] is Atom,
+        forms[shape.input.start as int]->Atom_kind is Name,
+    ensures expression_signals(source, forms, root, after_form(forms, root)) == seq![shape.input.start],
+{
+    structure_expression_positions(source, forms, root, shape);
+    let head = structure_expression_head_evidence(source, forms, root, shape);
+    let end = after_form(forms, root);
+    let start = shape.input.start as int;
+    let stop = shape.input.end as int;
+    assert(expression_child_range(source, forms, root, end, start, stop));
+    list_child_signals(source, forms, root, end, start, stop, head);
+    bare_signal_index(source, forms, start, stop);
 }
 
 /// 入力が裸の信号名なら、定義の信号索引の先頭がその名前を指すことを示す。

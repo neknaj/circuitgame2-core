@@ -321,6 +321,72 @@ pub fn bit_selection_chain(
     }
 }
 
+/// 最内段の入力が `field` である選択式の構文位置。
+#[derive(Debug)]
+pub struct FieldSelectionShape {
+    /// 選択式の引数位置。外側から内側の順に並ぶ。
+    pub steps: Vec<BitSelectionShape>,
+    /// `field` のフォームを指す構文木の添字。
+    pub field: usize,
+    /// `field` の入力信号とフィールド名の位置。
+    pub shape: StructureExpressionShape,
+}
+
+/// 一段以上の選択式をたどると、裸の信号名を入力とする `field` に行き着くことを表す。
+pub open spec fn field_selection_shape_matches(
+    source: &str, forms: Seq<Form>, root: usize,
+    steps: Seq<BitSelectionShape>, field: usize, shape: StructureExpressionShape,
+) -> bool {
+    &&& steps.len() > 0
+    &&& bit_selection_path(source, forms, root, steps, field)
+    &&& structure_expression_matches(source, forms, field as int, shape)
+    &&& shape.kind is Field
+    &&& shape.input.start < forms.len()
+    &&& forms[shape.input.start as int] is Atom
+    &&& forms[shape.input.start as int]->Atom_kind is Name
+}
+
+/// 最内段の入力が裸の信号名を取る `field` なら、選択式と `field` の引数位置を返す。
+///
+/// `source` と `forms` は同じソースの本文と構文木を使う。
+/// `root` が範囲外の場合や、指定の形でなければ `None` を返す。
+pub fn field_selection_shape(source: &str, forms: &[Form], root: usize) -> (result: Option<FieldSelectionShape>)
+    ensures
+        result matches Some(found) ==> field_selection_shape_matches(
+            source, forms@, root, found.steps@, found.field, found.shape,
+        ),
+        forall|steps: Seq<BitSelectionShape>, field: usize, shape: StructureExpressionShape|
+            #[trigger] field_selection_shape_matches(source, forms@, root, steps, field, shape)
+            ==> (result matches Some(found) && found.steps@ == steps && found.field == field && found.shape == shape),
+{
+    let (steps, field) = bit_selection_chain(source, forms, root);
+    assert forall|expected: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+        #[trigger] field_selection_shape_matches(source, forms@, root, expected, at, shape)
+        implies steps@ == expected && field == at by {
+        if exists|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms@, at as int, other) {
+            let other = choose|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms@, at as int, other);
+            bit_selection_excludes_structure(source, forms@, at as int, other);
+        }
+        bit_selection_paths_agree(source, forms@, root, steps@, field, expected, at);
+    };
+    if steps.is_empty() {
+        return None;
+    }
+    let Some(shape) = structure_expression_shape(source, forms, field) else { return None; };
+    assert forall|expected: Seq<BitSelectionShape>, at: usize, other: StructureExpressionShape|
+        #[trigger] field_selection_shape_matches(source, forms@, root, expected, at, other)
+        implies shape == other by {
+        structure_expression_shapes_agree(source, forms@, field as int, shape, other);
+    };
+    if !matches!(shape.kind, StructureExpressionKind::Field { .. })
+        || shape.input.start >= forms.len()
+        || !matches!(forms[shape.input.start], Form::Atom { kind: AtomKind::Name, .. })
+    {
+        return None;
+    }
+    Some(FieldSelectionShape { steps, field, shape })
+}
+
 /// 選択式の入力区間と各自然数アトムが、同じリスト内にあることを示す。
 pub proof fn bit_selection_shape_positions(source: &str, forms: Seq<Form>, index: int, shape: BitSelectionShape)
     requires bit_selection_shape_matches(source, forms, index, shape),
@@ -402,7 +468,7 @@ pub proof fn strict_bit_selection_input(
     same_expression_head(source, forms, index + 1, candidate, Some(expected));
 }
 
-proof fn selection_path_signals(
+proof fn selection_path_preserves_signals(
     source: &str, forms: Seq<Form>, root: usize, end: int, steps: Seq<BitSelectionShape>, leaf: usize,
 )
     requires
@@ -410,15 +476,14 @@ proof fn selection_path_signals(
         root < end <= forms.len() <= usize::MAX,
         end == after_form(forms, root as int),
         bit_selection_path(source, forms, root, steps, leaf),
-        leaf < forms.len(),
-        forms[leaf as int] is Atom,
-        forms[leaf as int]->Atom_kind is Name,
-    ensures expression_signals(source, forms, root as int, end) == seq![leaf],
+    ensures
+        root <= leaf < after_form(forms, leaf as int) <= end,
+        expression_forest(source, forms, leaf as int, after_form(forms, leaf as int)),
+        expression_signals(source, forms, root as int, end)
+            == expression_signals(source, forms, leaf as int, after_form(forms, leaf as int)),
     decreases steps.len(),
 {
-    if steps.len() == 0 {
-        bare_signal_index(source, forms, root as int, end);
-    } else {
+    if steps.len() != 0 {
         let shape = steps[0];
         let start = shape.input.start as int;
         let stop = shape.input.end as int;
@@ -439,7 +504,7 @@ proof fn selection_path_signals(
                     bit_selection_step_root(root, steps, i + 1), steps[i + 1]));
             };
         };
-        selection_path_signals(source, forms, shape.input.start, stop, steps.drop_first(), leaf);
+        selection_path_preserves_signals(source, forms, shape.input.start, stop, steps.drop_first(), leaf);
         assert(expression_child_range(source, forms, root as int, end, start, stop)) by {
             reveal(bit_selection_shape_matches);
         };
@@ -477,9 +542,41 @@ pub proof fn build_selection_chain_signal(
     let root = row.expression.start;
     let end = row.expression.end as int;
     super::build::definition_expression_end(forms, row);
-    selection_path_signals(source, forms, root, end, steps, leaf);
+    selection_path_preserves_signals(source, forms, root, end, steps, leaf);
+    bare_signal_index(source, forms, leaf as int, after_form(forms, leaf as int));
     let signals = index.signals@[row.signals.start as int..row.signals.end as int];
     assert(signals.len() == 1 && signals[0] == leaf);
+}
+
+/// 選択式を含む定義の信号索引には、末端の `field` の入力信号だけが現れる。
+pub proof fn build_field_selection_signal(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int,
+    steps: Seq<BitSelectionShape>, field: usize, shape: StructureExpressionShape,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition
+            < index.entry_ranges@[entry].definitions.end <= index.definitions@.len(),
+        field_selection_shape_matches(source, index.syntax.forms@,
+            index.definitions@[definition].expression.start, steps, field, shape),
+    ensures ({
+        let frame = index.entry_ranges@[entry].signals;
+        let row = index.definitions@[definition];
+        &&& frame.start <= row.signals.start < row.signals.end <= frame.end <= index.signals@.len()
+        &&& row.signals.end == row.signals.start + 1
+        &&& index.signals@[row.signals.start as int] == shape.input.start
+    }),
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    let row = index.definitions@[definition];
+    let forms = index.syntax.forms@;
+    super::build::definition_expression_end(forms, row);
+    selection_path_preserves_signals(source, forms, row.expression.start, row.expression.end as int, steps, field);
+    super::structure_expressions::structure_named_input_signals(source, forms, field as int, shape);
+    let signals = index.signals@[row.signals.start as int..row.signals.end as int];
+    assert(signals.len() == 1 && signals[0] == shape.input.start);
 }
 
 /// 入力式が裸の信号名なら、選択式の定義に付く信号索引の先頭がその名を指す。
