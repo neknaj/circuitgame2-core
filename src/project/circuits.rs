@@ -254,11 +254,22 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
     let end = word_span.end;
     proof {
         reveal(form_spans_valid);
-        encode_utf8_valid_utf8(text@);
         assert(form_span(forms@[index as int]) == (start..end));
         assert(!(*_kind is String) ==>
             bare_atom_kind(text.spec_bytes()[start as int..end as int]) == Some(*_kind));
     }
+    (read_source_span(text, start, end), start..end)
+}
+
+/// 検査済みの UTF-8 の両端から、元のバイト範囲に対応する文字列を借りる。
+pub(super) fn read_source_span(text: &str, start: usize, end: usize) -> (word: &str)
+    requires
+        start < end <= text.spec_bytes().len(),
+        is_char_boundary(text.spec_bytes(), start as int),
+        is_char_boundary(text.spec_bytes(), end as int),
+    ensures word.spec_bytes() == text.spec_bytes()[start as int..end as int],
+{
+    proof { encode_utf8_valid_utf8(text@); }
     let (prefix, _) = text.split_at(end);
     proof {
         encode_utf8_valid_utf8(prefix@);
@@ -268,7 +279,7 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
     }
     let (_, word) = prefix.split_at(start);
     assert(word.spec_bytes() =~= text.spec_bytes()[start as int..end as int]);
-    (word, start..end)
+    word
 }
 
 pub(super) proof fn parsed_index_evidence(source: ProjectSource, parsed: NamedBuildCircuit)

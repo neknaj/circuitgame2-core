@@ -46,12 +46,16 @@ pub(crate) proof fn bit_atom_has_digits(bytes: Seq<u8>, kind: Option<AtomKind>)
         bytes.len() > 2,
         kind == Some(AtomKind::Binary) ==> forall|i: int| 2 <= i < bytes.len()
             ==> #[trigger] bytes[i] == b'0' || bytes[i] == b'1',
+        forall|i: int| 2 <= i < bytes.len() ==> digit(Radix::Hexadecimal, #[trigger] bytes[i]),
 {
     if kind == Some(AtomKind::Binary) {
         assert forall|i: int| 2 <= i < bytes.len() implies #[trigger] bytes[i] == b'0' || bytes[i] == b'1' by {
             assert(bytes[2..][i - 2] == bytes[i]);
         };
     }
+    assert forall|i: int| 2 <= i < bytes.len() implies digit(Radix::Hexadecimal, #[trigger] bytes[i]) by {
+        assert(bytes[2..][i - 2] == bytes[i]);
+    };
 }
 
 pub(crate) fn classify(atom: &str) -> (result: Option<AtomKind>)

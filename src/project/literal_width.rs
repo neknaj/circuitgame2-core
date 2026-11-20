@@ -2,7 +2,11 @@
 
 use crate::syntax::bit_literal_size;
 #[cfg(verus_only)]
-use crate::syntax::{BitLiteralSize, bit_literal_size_matches, bit_literal_written_widths_agree};
+use crate::syntax::{
+    BitLiteralSize, bit_literal_high_bits_are_zero, bit_literal_required_width_fits_spelling,
+    bit_literal_size_matches, bit_literal_top_bit_is_one,
+    bit_literal_value_at, bit_literal_written_widths_agree,
+};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -71,6 +75,38 @@ pub closed spec fn circuit_literal_width_matches(
     } else {
         exists|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
             && width_for(false, size.written_bits, size.required_bits, expected, limit, result)
+    }
+}
+
+/// 幅の検査結果を、元のリテラルで実際に 1 が立つ位置に結び付ける。
+pub(super) proof fn circuit_bit_literal_boundary(
+    bytes: Seq<u8>, expected: Option<u64>, limit: u64, result: Result<u64, CircuitLiteralWidthError>,
+)
+    requires bytes.len() > 2, circuit_literal_width_matches(bytes, expected, limit, result),
+    ensures match result {
+        Ok(width) => forall|index: nat| index >= width ==> !#[trigger] bit_literal_value_at(bytes, index),
+        Err(CircuitLiteralWidthError::DoesNotFit { expected: width, required }) =>
+            0 < width < required && bit_literal_value_at(bytes, (required - 1) as nat),
+        _ => true,
+    },
+{
+    match result {
+        Ok(width) => {
+            let size = choose|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
+                && width_for(false, size.written_bits, size.required_bits, expected, limit, result);
+            assert forall|index: nat| index >= width implies !#[trigger] bit_literal_value_at(bytes, index) by {
+                bit_literal_high_bits_are_zero(bytes, size, index);
+            };
+        },
+        Err(CircuitLiteralWidthError::DoesNotFit { expected: width, required }) => {
+            let size = choose|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
+                && width_for(false, size.written_bits, size.required_bits, expected, limit, result);
+            bit_literal_required_width_fits_spelling(bytes, size);
+            assert(expected == Some(width));
+            assert(0 < width < required && required == size.required_bits);
+            bit_literal_top_bit_is_one(bytes, size);
+        },
+        _ => {},
     }
 }
 
@@ -157,6 +193,12 @@ pub fn check_circuit_literal_width(
         circuit_literal_width_matches(word.spec_bytes(), expected, max_width, result),
         result matches Ok(width) ==> 0 < width <= max_width,
         result matches Ok(width) ==> expected.is_none() || expected == Some(width),
+        word.spec_bytes().len() > 2 ==> match result {
+            Ok(width) => forall|index: nat| index >= width ==> !#[trigger] bit_literal_value_at(word.spec_bytes(), index),
+            Err(CircuitLiteralWidthError::DoesNotFit { expected: width, required }) =>
+                0 < width < required && bit_literal_value_at(word.spec_bytes(), (required - 1) as nat),
+            _ => true,
+        },
 {
     let bytes = word.as_bytes();
     if bytes.len() == 1 && matches!(bytes[0], b'0' | b'1') {
@@ -169,6 +211,11 @@ pub fn check_circuit_literal_width(
     assert(circuit_literal_width_matches(word.spec_bytes(), expected, max_width, result)) by {
         assert(bit_literal_size_matches(word.spec_bytes(), Some(size)));
     };
+    proof {
+        if bytes@.len() > 2 {
+            circuit_bit_literal_boundary(bytes@, expected, max_width, result);
+        }
+    }
     result
 }
 
