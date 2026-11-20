@@ -96,6 +96,33 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && self.prepared_call_inputs_match(file, entry, limit, typed.types@, &wiring, Ok(()))
     }
 
+    /// 同じ関数の型検査に成功すると、定義順の型とその決定位置が一致する。
+    pub(super) proof fn checked_function_signal_types_agree(
+        &self, file: usize, entry: usize, limit: u64, left: FuncSignalTypes, right: FuncSignalTypes,
+    )
+        requires
+            self.can_resolve(),
+            left.literals.wiring is Checked,
+            right.literals.wiring is Checked,
+            self.func_signal_types_evidence(file, entry, limit, Ok(left)),
+            self.func_signal_types_evidence(file, entry, limit, Ok(right)),
+        ensures left.types@ == right.types@,
+    {
+        let l = left.literals.wiring->Checked_0;
+        let r = right.literals.wiring->Checked_0;
+        let a = self.successful_type_roots(file, entry, limit, left, l);
+        let b = self.successful_type_roots(file, entry, limit, right, r);
+        self.checked_types_keep_wiring(file, entry, limit, left, l);
+        self.checked_types_keep_wiring(file, entry, limit, right, r);
+        self.checked_func_wiring_agrees(file, entry, limit, l, r);
+        self.checked_literal_widths_agree(file, entry, limit, left.literals, right.literals);
+        self.checked_call_output_types_agree(file, entry, limit, a, b);
+        let project = self.targets.project_model();
+        self.checked_function_atom_types_agree(file, entry, limit,
+            &project.sources_model()[file as int], &project.circuits_model()[file as int], &l, &r,
+            left.literals.widths@, a.types@, left.types, right.types);
+    }
+
     pub(super) proof fn checked_literal_type(
         &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
         target: int, width: u64,

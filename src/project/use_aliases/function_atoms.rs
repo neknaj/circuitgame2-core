@@ -7,7 +7,9 @@ use super::structure_types::{StructureExpressionContext, StructureLayouts, Typed
 #[cfg(verus_only)]
 use super::selection_arguments::{CheckedBitSelection, selection_arguments_match, successful_selections_agree};
 #[cfg(verus_only)]
-use super::function_literals::output_indices;
+use super::function_literals::{output_indices, output_indices_agree};
+#[cfg(verus_only)]
+use super::function_drivers::same_definition_driver;
 #[cfg(verus_only)]
 use super::function_drivers::expected_output_context;
 use super::{FuncLiteralError, FuncLiteralWidths, FuncWiring, FuncWiringResult, OutputDriver, ResolvedPortType, UseAliases};
@@ -313,6 +315,31 @@ spec fn selection_type_matches(
     }
 }
 
+proof fn selection_type_successes_agree(
+    source: &ProjectSource, forms: Seq<Form>, root: usize, shape: BitSelectionShape,
+    input: Option<SignalType>, expected: Option<TypedPort>, first: Option<SignalType>, second: Option<SignalType>,
+)
+    requires
+        selection_type_matches(source, forms, root, shape, input, expected, Ok(first)),
+        selection_type_matches(source, forms, root, shape, input, expected, Ok(second)),
+    ensures first == second,
+{
+    if let Some(input) = input {
+        assert(input.ty is Bits);
+        let width = input.ty->Bits_0;
+        let (a, origin_a) = choose|selection: CheckedBitSelection, expression: LocatedName|
+            #[trigger] selection_arguments_match(source, forms, &shape, width, &input.origin, Ok(selection))
+            && #[trigger] is_form_location(source, forms[root as int], expression)
+            && first == Some(SignalType { ty: ResolvedPortType::Bits(selection.count), origin: expression });
+        let (b, origin_b) = choose|selection: CheckedBitSelection, expression: LocatedName|
+            #[trigger] selection_arguments_match(source, forms, &shape, width, &input.origin, Ok(selection))
+            && #[trigger] is_form_location(source, forms[root as int], expression)
+            && second == Some(SignalType { ty: ResolvedPortType::Bits(selection.count), origin: expression });
+        successful_selections_agree(source, forms, &shape, width, &input.origin, a, width, &input.origin, b);
+        assert(origin_a == origin_b);
+    }
+}
+
 fn check_selection_type<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], root: usize, shape: &BitSelectionShape,
     input: Option<SignalType<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
@@ -468,6 +495,149 @@ pub(super) closed spec fn atoms_match(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) proof fn checked_function_atom_types_agree(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        left: &FuncWiring, right: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        a: Vec<Option<SignalType>>, b: Vec<Option<SignalType>>,
+    )
+        requires
+            self.can_resolve(),
+            left.drivers.signature.inputs@ == right.drivers.signature.inputs@,
+            left.drivers.signature.outputs@ == right.drivers.signature.outputs@,
+            left.drivers.definitions@.len() == right.drivers.definitions@.len(),
+            forall|i: int| 0 <= i < left.drivers.definitions@.len() ==> same_definition_driver(
+                #[trigger] left.drivers.definitions@[i], #[trigger] right.drivers.definitions@[i]),
+            left.drivers.outputs@ == right.drivers.outputs@,
+            left.signals@ == right.signals@,
+            atoms_match(self, file, limit, source, parsed, entry as int, left, widths, roots, Ok(a)),
+            atoms_match(self, file, limit, source, parsed, entry as int, right, widths, roots, Ok(b)),
+        ensures a@ == b@,
+    {
+        let x = self.successful_atom_outputs(file, entry, limit, source, parsed, left, widths, roots, a);
+        let y = self.successful_atom_outputs(file, entry, limit, source, parsed, right, widths, roots, b);
+        output_indices_agree(&left.drivers, &right.drivers, x, y);
+        self.atom_types_prefix_agrees(file, entry, limit, source, parsed, left, right, widths, roots, x, a@, b@, a@.len());
+        assert(a@ =~= b@);
+    }
+
+    proof fn successful_atom_outputs(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, types: Vec<Option<SignalType>>,
+    ) -> (outputs: Seq<Option<usize>>)
+        requires atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+        ensures
+            output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs),
+            types@.len() == wiring.drivers.definitions@.len(),
+            typed_prefix(self, file, limit, source, parsed, entry as int, wiring, widths, outputs, roots, types@),
+    {
+        choose|outputs: Seq<Option<usize>>|
+            #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs)
+            && typed_prefix(self, file, limit, source, parsed, entry as int, wiring, widths, outputs, roots, types@)
+    }
+
+    proof fn atom_types_prefix_agrees(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        left: &FuncWiring, right: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        outputs: Seq<Option<usize>>, a: Seq<Option<SignalType>>, b: Seq<Option<SignalType>>, end: nat,
+    )
+        requires
+            self.can_resolve(),
+            left.drivers.signature.inputs@ == right.drivers.signature.inputs@,
+            left.drivers.signature.outputs@ == right.drivers.signature.outputs@,
+            left.signals@ == right.signals@,
+            forall|i: int| 0 <= i < a.len() ==> same_definition_driver(
+                #[trigger] left.drivers.definitions@[i], #[trigger] right.drivers.definitions@[i]),
+            typed_prefix(self, file, limit, source, parsed, entry as int, left, widths, outputs, roots, a),
+            typed_prefix(self, file, limit, source, parsed, entry as int, right, widths, outputs, roots, b),
+            end <= a.len() == b.len(),
+        ensures forall|i: int| 0 <= i < end ==> (#[trigger] a[i]) == (#[trigger] b[i]),
+        decreases end,
+    {
+        if end > 0 {
+            let i = (end - 1) as int;
+            self.atom_types_prefix_agrees(file, entry, limit, source, parsed, left, right, widths, roots, outputs, a, b, i as nat);
+            assert(a.take(i) =~= b.take(i));
+            reveal(typed_prefix);
+            assert(same_definition_driver(left.drivers.definitions@[i], right.drivers.definitions@[i]));
+            self.atom_types_at_agree(file, entry, limit, source, parsed, left, right, widths, roots, outputs,
+                a.take(i), i, a[i], b[i]);
+            assert forall|j: int| 0 <= j < end implies (#[trigger] a[j]) == (#[trigger] b[j]) by {
+                if j < i { assert(a[j] == b[j]); }
+            };
+        }
+    }
+
+    proof fn atom_types_at_agree(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        left: &FuncWiring, right: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        outputs: Seq<Option<usize>>, prior: Seq<Option<SignalType>>, i: int,
+        a: Option<SignalType>, b: Option<SignalType>,
+    )
+        requires
+            self.can_resolve(),
+            left.drivers.signature.inputs@ == right.drivers.signature.inputs@,
+            left.drivers.signature.outputs@ == right.drivers.signature.outputs@,
+            left.signals@ == right.signals@,
+            same_definition_driver(left.drivers.definitions@[i], right.drivers.definitions@[i]),
+            atom_type_step(self, file, limit, source, parsed, entry as int, left, widths, outputs, roots, prior, i, Ok(a)),
+            atom_type_step(self, file, limit, source, parsed, entry as int, right, widths, outputs, roots, prior, i, Ok(b)),
+        ensures a == b,
+    {
+        reveal(atom_type_step);
+        let driver = left.drivers.definitions@[i];
+        let row = parsed.definitions@[driver.definition as int];
+        let forms = parsed.syntax.forms@;
+        let root = forms[row.expression.start as int];
+        if widths[i].is_some() {
+            assert(a->Some_0.origin == b->Some_0.origin);
+        } else if driver.result_index == 0 && root is Atom && root->Atom_kind is Name {
+            // 裸の信号名はどちらの検査でも同じ駆動元の型を引き継ぐ。
+        } else if roots.len() > 0 && driver.result_index == 0 {
+            let frame = parsed.entry_ranges@[entry as int];
+            let bound = left.signals@[row.signals.start - frame.signals.start];
+            let input = signal_type_at(left, prior, bound.driver);
+            let expected = if let Some(output) = outputs[i] {
+                Some(left.drivers.signature.outputs@[output as int])
+            } else { None };
+            if exists|shape: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, row.expression.start as int, shape) {
+                let shape = choose|shape: BitSelectionShape|
+                    #[trigger] named_selection_matches(source.text, forms, row.expression.start as int, shape);
+                selection_type_successes_agree(source, forms, row.expression.start, shape, input, expected, a, b);
+            } else if exists|shape: StructureExpressionShape|
+                #[trigger] named_structure_expression_matches(source.text, forms, row.expression.start as int, shape)
+            {
+                let shape = choose|shape: StructureExpressionShape|
+                    #[trigger] named_structure_expression_matches(source.text, forms, row.expression.start as int, shape);
+                let context = StructureExpressionContext { file, entry, limit, source, parsed,
+                    definition: (driver.definition - frame.definitions.start) as usize };
+                self.structure_atom_successes_agree(&context, shape, input, expected, a, b);
+            }
+        }
+    }
+
+    proof fn structure_atom_successes_agree(
+        &self, context: &StructureExpressionContext, shape: StructureExpressionShape,
+        input: Option<SignalType>, expected: Option<TypedPort>, a: Option<SignalType>, b: Option<SignalType>,
+    )
+        requires
+            self.can_resolve(),
+            structure_atom_step(self, context, shape, input, expected, Ok(a)),
+            structure_atom_step(self, context, shape, input, expected, Ok(b)),
+        ensures a == b,
+    {
+        if let Some(input) = input {
+            let (left, x) = choose|layouts: StructureLayouts, value: super::structure_types::CheckedStructureExpression|
+                #[trigger] self.structure_types_match(context.limit, Ok(layouts))
+                && #[trigger] self.structure_expression_type_matches(context, shape, &layouts, input, Ok(value))
+                && a == Some(value.0);
+            let (right, y) = choose|layouts: StructureLayouts, value: super::structure_types::CheckedStructureExpression|
+                #[trigger] self.structure_types_match(context.limit, Ok(layouts))
+                && #[trigger] self.structure_expression_type_matches(context, shape, &layouts, input, Ok(value))
+                && b == Some(value.0);
+            self.checked_structure_expressions_agree(context, shape, &left, &right, input, x, y);
+        }
+    }
+
     proof fn successful_atom_step(
         &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
         wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
@@ -480,9 +650,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             atom_type_step(self, file, limit, source, parsed, entry as int,
                 wiring, widths, outputs, roots, types@.take(i), i, Ok(types@[i])),
     {
-        let outputs = choose|outputs: Seq<Option<usize>>|
-            #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs)
-            && typed_prefix(self, file, limit, source, parsed, entry as int, wiring, widths, outputs, roots, types@);
+        let outputs = self.successful_atom_outputs(file, entry, limit, source, parsed, wiring, widths, roots, types);
         reveal(typed_prefix);
         outputs
     }
