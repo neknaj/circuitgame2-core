@@ -54,7 +54,7 @@ use quoted_prefix::{
     quoted_prefix_starts_with_quote, quoted_prefixes_viable, quoted_stop,
 };
 #[cfg(verus_only)]
-use strict_string_error::{first_string_error, record_first_string_error};
+use strict_string_error::{first_string_error, first_string_errors_agree, record_first_string_error};
 #[cfg(verus_only)]
 use string_recovery_end::{
     recovery_scalar_width, recovery_scalar_width_matches, skip_ordinary_string_bytes, string_recovery_end_from,
@@ -211,6 +211,48 @@ spec fn lexical_step_agrees(bytes: Seq<u8>, start: int, end: int, observed: Opti
             ==> end == expected_end && observed == Some(expected)
 }
 
+/// 不正な字句の診断と、字句解析で読み飛ばす範囲との対応を表す。
+#[verifier::opaque]
+spec fn malformed_segment_matches(source: &str, span: Range<usize>, error: Error) -> bool {
+    let bytes = source.spec_bytes();
+    let start = span.start as int;
+    let end = span.end as int;
+    &&& 0 <= start < end <= bytes.len()
+    &&& if error.kind is InvalidAtom {
+        &&& span == error.span
+        &&& bare_atom_extent(bytes, start, end)
+        &&& bare_atom_kind(bytes[start..end]).is_none()
+    } else {
+        &&& bytes[start] == b'"'
+        &&& first_string_error(bytes[start..], start, error)
+        &&& end == start + string_recovery_end_from(bytes[start..], 1)
+    }
+}
+
+/// 同じ開始位置から読み飛ばす範囲と、その診断は一意に定まる。
+proof fn malformed_segments_agree(source: &str, a: Range<usize>, b: Range<usize>, left: Error, right: Error)
+    requires a.start == b.start, malformed_segment_matches(source, a, left), malformed_segment_matches(source, b, right),
+    ensures a == b, left == right,
+{
+    reveal(malformed_segment_matches);
+    reveal(bare_atom_extent);
+    let bytes = source.spec_bytes();
+    let start = a.start as int;
+    if left.kind is InvalidAtom {
+        assert(!bare_atom_delimiter(bytes[start]));
+        if a.end < b.end {
+            assert(!bare_atom_delimiter(bytes[a.end as int]));
+        } else if b.end < a.end {
+            assert(!bare_atom_delimiter(bytes[b.end as int]));
+        }
+    } else {
+        if right.kind is InvalidAtom {
+            assert(!bare_atom_delimiter(bytes[start]));
+        }
+        first_string_errors_agree(bytes[start..], start, left, right);
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct Segment {
     kind: SegmentKind,
@@ -267,7 +309,8 @@ impl<'a> Lexer<'a> {
                         && (segment.kind->Malformed_0.kind is InvalidAtom
                             || string_error_kind(segment.kind->Malformed_0.kind))
                         && strict_error::malformed_atom_extent(self.cursor.source.spec_bytes(),
-                            segment.span.start as int, segment.kind->Malformed_0))
+                            segment.span.start as int, segment.kind->Malformed_0)
+                        && malformed_segment_matches(self.cursor.source, segment.span, segment.kind->Malformed_0))
                     &&& (segment.kind is Atom ==> form_atom_matches(self.cursor.source,
                         Form::Atom { kind: segment.kind->Atom_0, span: segment.span }))
                     &&& next.needs_separator == segment.kind.is_atom()
@@ -307,6 +350,9 @@ impl<'a> Lexer<'a> {
         assert(kind is Malformed ==> strict_error::malformed_atom_extent(
             self.cursor.source.spec_bytes(), span.start as int, kind->Malformed_0)) by {
             reveal(strict_error::malformed_atom_extent);
+        };
+        assert(kind is Malformed ==> malformed_segment_matches(self.cursor.source, span, kind->Malformed_0)) by {
+            reveal(malformed_segment_matches);
         };
         proof {
             assert(segment_lexeme(kind) is Some ==> lexeme_at(
@@ -2451,7 +2497,9 @@ impl<'a> SourceCursor<'a> {
                         ==> syntax_error_evidence(self.source, kind->Quoted_0->Some_0)
                             && string_error_kind(kind->Quoted_0->Some_0.kind)
                             && first_string_error(self.source.spec_bytes()[span.start as int..],
-                                span.start as int, kind->Quoted_0->Some_0))
+                                span.start as int, kind->Quoted_0->Some_0)
+                            && span.end == span.start
+                                + string_recovery_end_from(self.source.spec_bytes()[span.start as int..], 1))
                     &&& (kind is Bare ==> kind->Bare_0.spec_bytes()
                         =~= self.source.spec_bytes()[span.start as int..span.end as int]
                         && bare_atom_extent(self.source.spec_bytes(), span.start as int, span.end as int))
@@ -2547,7 +2595,8 @@ fn split_segment(input: &str, start: usize) -> (result: (RawSegment<'_>, &str))
             RawSegment::Quoted(None) => quoted_atom(input.spec_bytes()[..input.spec_bytes().len() - result.1.spec_bytes().len()]),
             RawSegment::Quoted(Some(error)) => string_error_kind(error.kind)
                 && string_error_site(input.spec_bytes(), start as int, error)
-                && first_string_error(input.spec_bytes(), start as int, error),
+                && first_string_error(input.spec_bytes(), start as int, error)
+                && string_recovery_end_from(input.spec_bytes(), 1) == input.spec_bytes().len() - result.1.spec_bytes().len(),
         },
 {
     let first = input.as_bytes()[0];
