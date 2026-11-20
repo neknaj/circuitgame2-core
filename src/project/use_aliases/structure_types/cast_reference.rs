@@ -165,6 +165,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(UseAliases::structure_position_matches);
     }
+
+    pub(super) proof fn recognized_cast_has_resolution(
+        &self, file: usize, entry: usize, definition: usize, shape: StructureExpressionShape,
+        result: Result<Option<StructurePosition>, DefinitionReferenceError>,
+    )
+        requires
+            self.structure_cast_resolution_matches(file, entry, definition, result),
+            shape.kind is As,
+            ({
+                let project = self.targets.project_model();
+                let parsed = project.circuits_model()[file as int];
+                let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+                &&& file < project.circuits_model().len()
+                &&& entry < parsed.entry_ranges@.len()
+                &&& definition < definition_count(&parsed, entry as int)
+                &&& structure_expression_matches(project.sources_model()[file as int].text,
+                    parsed.syntax.forms@, row.expression.start as int, shape)
+            }),
+        ensures result.is_ok() && result->Ok_0.is_some() || (result matches Err(error) && error is Rejected),
+    {
+        assert(self.cast_root_is_as(file, entry, definition));
+    }
 }
 
 } // verus!

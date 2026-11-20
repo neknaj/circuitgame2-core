@@ -102,6 +102,7 @@ pub use use_aliases::{
 };
 pub use use_aliases::{
     ResolvedStructure, ResolvedStructureEntry, ResolvedStructureField, ResolvedStructures,
+    StructureExpressionTypeError,
     StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
     StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
 };

@@ -3,6 +3,7 @@
 use super::function_literals::index_outputs;
 use super::function_types::FuncSignalTypeError;
 use super::selection_arguments::check_selection_arguments;
+use super::structure_types::StructureExpressionContext;
 #[cfg(verus_only)]
 use super::selection_arguments::selection_arguments_match;
 #[cfg(verus_only)]
@@ -18,11 +19,12 @@ use crate::project::{
     location_in_source, port_types_equal,
 };
 use crate::syntax::{AtomKind, Form};
-use crate::syntax::circuit::{BitSelectionShape, bit_selection_shape};
+use crate::syntax::circuit::{BitSelectionShape, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     NamedBuildCircuit, bit_selection_shape_matches, bit_selection_shape_positions, build_bare_signal_position,
-    build_definition_scope_evidence, build_selection_input_position,
+    build_definition_scope_evidence, build_selection_input_position, build_structure_input_position,
+    structure_expression_matches, structure_expression_positions,
 };
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
@@ -136,6 +138,69 @@ pub(super) fn named_selection(source: &str, forms: &[Form], index: usize) -> (re
     } else { None }
 }
 
+pub(super) open spec fn named_structure_expression_matches(
+    source: &str, forms: Seq<Form>, index: int, shape: StructureExpressionShape,
+) -> bool {
+    &&& structure_expression_matches(source, forms, index, shape)
+    &&& shape.input.end == shape.input.start + 1
+    &&& forms[shape.input.start as int] is Atom
+    &&& forms[shape.input.start as int]->Atom_kind is Name
+}
+
+pub(super) fn named_structure_expression(
+    source: &str, forms: &[Form], index: usize,
+) -> (result: Option<StructureExpressionShape>)
+    ensures
+        result matches Some(shape) ==> named_structure_expression_matches(source, forms@, index as int, shape),
+        forall|shape: StructureExpressionShape| #[trigger] named_structure_expression_matches(source, forms@, index as int, shape)
+            <==> result == Some(shape),
+{
+    let Some(shape) = structure_expression_shape(source, forms, index) else { return None; };
+    proof { structure_expression_positions(source, forms@, index as int, shape); }
+    if shape.input.end - shape.input.start == 1
+        && matches!(forms[shape.input.start], Form::Atom { kind: AtomKind::Name, .. })
+    {
+        Some(shape)
+    } else {
+        None
+    }
+}
+
+spec fn structure_atom_step(
+    aliases: &UseAliases, context: &StructureExpressionContext, shape: StructureExpressionShape,
+    input: Option<SignalType>, expected: Option<TypedPort>, result: Result<Option<SignalType>, FuncSignalTypeError>,
+) -> bool {
+    if let Some(input) = input {
+        match result {
+            Err(FuncSignalTypeError::StructureLayout(error)) => aliases.structure_types_match(context.limit, Err(error)),
+            _ => exists|layouts: super::StructureLayouts| #[trigger] aliases.structure_types_match(context.limit, Ok(layouts))
+                && match result {
+                    Err(FuncSignalTypeError::StructureExpression(error)) =>
+                        aliases.structure_expression_type_matches(context, shape, &layouts, input, Err(error)),
+                    _ => exists|checked: super::structure_types::CheckedStructureExpression|
+                        #[trigger] aliases.structure_expression_type_matches(context, shape, &layouts, input, Ok(checked))
+                        && {
+                            let actual = checked.0;
+                            if let Some(port) = expected {
+                                if port_types_equal(actual.ty, port.ty) {
+                                    result == Ok(Some(actual))
+                                } else {
+                                    result == Err(FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
+                                        reference: actual.origin,
+                                        expected: SignalType { ty: port.ty, origin: port.annotation }, actual,
+                                    }))
+                                }
+                            } else {
+                                result == Ok(Some(actual))
+                            }
+                        },
+                },
+        }
+    } else {
+        result == Ok(None)
+    }
+}
+
 spec fn selection_type_matches(
     source: &ProjectSource, forms: Seq<Form>, root: usize, shape: BitSelectionShape,
     input: Option<SignalType>, expected: Option<TypedPort>, result: Result<Option<SignalType>, FuncSignalTypeError>,
@@ -213,6 +278,7 @@ fn check_selection_type<'p, 'a>(
 
 #[verifier::opaque]
 spec fn atom_type_step(
+    aliases: &UseAliases, file: usize, limit: u64,
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
     widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, roots: Seq<Option<SignalType>>,
     prior: Seq<Option<SignalType>>, i: int,
@@ -273,6 +339,27 @@ spec fn atom_type_step(
         &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
         &&& selection_type_matches(source, parsed.syntax.forms@, row.expression.start, shape,
             signal_type_at(wiring, prior, bound.driver), expected, result)
+    } else if roots.len() > 0 && driver.result_index == 0 && exists|shape: StructureExpressionShape|
+        #[trigger] named_structure_expression_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+    {
+        let shape = choose|shape: StructureExpressionShape|
+            #[trigger] named_structure_expression_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape);
+        let first = parsed.entry_ranges@[entry].signals.start;
+        let bound = wiring.signals@[row.signals.start - first];
+        let expected = if let Some(output) = outputs[i] {
+            Some(wiring.drivers.signature.outputs@[output as int])
+        } else { None };
+        let context = StructureExpressionContext { file, entry: entry as usize, limit, source, parsed,
+            definition: (driver.definition - parsed.entry_ranges@[entry].definitions.start) as usize };
+        &&& first <= row.signals.start < first + wiring.signals@.len()
+        &&& bound.definition == driver.definition
+        &&& is_form_location(source, parsed.syntax.forms@[shape.input.start as int], bound.site)
+        &&& match bound.driver {
+            OutputDriver::Input(input) => input < wiring.drivers.signature.inputs@.len(),
+            OutputDriver::Definition(prior_index) => prior_index < prior.len(),
+        }
+        &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
+        &&& structure_atom_step(aliases, &context, shape, signal_type_at(wiring, prior, bound.driver), expected, result)
     } else {
         result == Ok(if roots.len() == 0 { None } else { roots[i] })
     }
@@ -280,25 +367,27 @@ spec fn atom_type_step(
 
 #[verifier::opaque]
 spec fn typed_prefix(
+    aliases: &UseAliases, file: usize, limit: u64,
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
     widths: Seq<Option<u64>>, outputs: Seq<Option<usize>>, roots: Seq<Option<SignalType>>, types: Seq<Option<SignalType>>,
 ) -> bool {
     &&& types.len() <= wiring.drivers.definitions@.len()
     &&& forall|i: int| 0 <= i < types.len() ==>
-        #[trigger] atom_type_step(source, parsed, entry, wiring, widths, outputs, roots, types.take(i), i, Ok(types[i]))
+        #[trigger] atom_type_step(aliases, file, limit, source, parsed, entry, wiring, widths, outputs, roots, types.take(i), i, Ok(types[i]))
 }
 
 pub(super) closed spec fn atoms_match(
+    aliases: &UseAliases, file: usize, limit: u64,
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, wiring: &FuncWiring,
     widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, result: Result<Vec<Option<SignalType>>, FuncSignalTypeError>,
 ) -> bool {
     exists|outputs: Seq<Option<usize>>| #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs)
         && match result {
             Ok(types) => types@.len() == wiring.drivers.definitions@.len()
-                && typed_prefix(source, parsed, entry, wiring, widths, outputs, roots, types@),
+                && typed_prefix(aliases, file, limit, source, parsed, entry, wiring, widths, outputs, roots, types@),
             Err(error) => exists|prior: Seq<Option<SignalType>>| prior.len() < wiring.drivers.definitions@.len()
-                && #[trigger] typed_prefix(source, parsed, entry, wiring, widths, outputs, roots, prior)
-                && atom_type_step(source, parsed, entry, wiring, widths, outputs, roots, prior, prior.len() as int, Err(error)),
+                && #[trigger] typed_prefix(aliases, file, limit, source, parsed, entry, wiring, widths, outputs, roots, prior)
+                && atom_type_step(aliases, file, limit, source, parsed, entry, wiring, widths, outputs, roots, prior, prior.len() as int, Err(error)),
         }
 }
 
@@ -333,22 +422,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             literals.widths@.len() == wiring.drivers.definitions@.len(),
             roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
             forall|i: int| 0 <= i < roots@.len() && (#[trigger] roots@[i]).is_some()
-                ==> location_in_source(roots@[i]->Some_0.origin),
+                ==> location_in_source(roots@[i]->Some_0.origin) && self.declared_port_type(roots@[i]->Some_0.ty),
         ensures
             ({
                 let project = self.targets.project_model();
-                atoms_match(&project.sources_model()[file as int], &project.circuits_model()[file as int],
+                atoms_match(self, file, _limit, &project.sources_model()[file as int], &project.circuits_model()[file as int],
                     entry as int, wiring, literals.widths@, roots@, result)
             }),
             result matches Ok(types) ==> types@.len() == wiring.drivers.definitions@.len(),
             result matches Err(error) ==> error is Signal
-                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument)),
+                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument
+                    || error is StructureLayout || error is StructureExpression)),
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
     {
         let project = self.targets.project();
         let source = &project.sources()[file];
         let parsed = &project.circuits()[file];
         let outputs = index_outputs(&wiring.drivers);
+        let mut layouts = None;
         let mut types: Vec<Option<SignalType>> = Vec::new();
         let mut i = 0;
         proof {
@@ -367,12 +458,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 literals.widths@.len() == wiring.drivers.definitions@.len(),
                 roots@.len() == 0 || roots@.len() == wiring.drivers.definitions@.len(),
                 forall|j: int| 0 <= j < roots@.len() && (#[trigger] roots@[j]).is_some()
-                    ==> location_in_source(roots@[j]->Some_0.origin),
+                    ==> location_in_source(roots@[j]->Some_0.origin) && self.declared_port_type(roots@[j]->Some_0.ty),
                 super::function_drivers::checked_ports_and_output_bounds(parsed.syntax.forms@, wiring.drivers),
+                forall|j: int| 0 <= j < wiring.drivers.signature.inputs@.len()
+                    ==> self.declared_port_type((#[trigger] wiring.drivers.signature.inputs@[j]).ty),
                 forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
-                    ==> location_in_source(types@[j]->Some_0.origin),
+                    ==> location_in_source(types@[j]->Some_0.origin) && self.declared_port_type(types@[j]->Some_0.ty),
+                layouts matches Some(table) ==> self.structure_types_match(_limit, Ok(table)),
                 i == types@.len() <= wiring.drivers.definitions@.len(),
-                typed_prefix(source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
+                typed_prefix(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
             decreases wiring.drivers.definitions@.len() - i,
         {
             let driver = &wiring.drivers.definitions[i];
@@ -413,7 +507,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
                             actual: SignalType { ty: resolved.ty, origin: copy_location(&resolved.origin) },
                         });
-                        assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
+                        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
                             outputs@, roots@, types@, i as int, Err(error)));
                         return Err(error);
                     }
@@ -449,10 +543,88 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     match check_selection_type(source, forms, root, &shape, input, expected) {
                         Ok(ty) => ty,
                         Err(error) => {
-                            assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
+                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
                                 outputs@, roots@, types@, i as int, Err(error)));
                             return Err(error);
                         },
+                    }
+                } else if let Some(shape) = named_structure_expression(source.text, forms, root) {
+                    proof {
+                        assert(named_structure_expression_matches(source.text, forms@, root as int, shape));
+                        build_structure_input_position(source.text, &parsed.build_model(), entry as int,
+                            driver.definition as int, shape);
+                        self.checked_signal_driver(file, entry, _limit, *wiring, driver.definition, row.signals.start);
+                    }
+                    let position = row.signals.start - parsed.entry_ranges[entry].signals.start;
+                    let bound = &wiring.signals[position];
+                    proof {
+                        if let OutputDriver::Definition(prior) = bound.driver {
+                            assert(prior < i) by {
+                                if i < prior {
+                                    assert(wiring.drivers.definitions@[i as int].definition
+                                        <= wiring.drivers.definitions@[prior as int].definition);
+                                }
+                            };
+                        }
+                    }
+                    let input = inherit_type(wiring, types.as_slice(), bound.driver);
+                    let expected = match outputs[i] {
+                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                        None => None,
+                    };
+                    let context = StructureExpressionContext {
+                        file, entry, limit: _limit, source, parsed,
+                        definition: driver.definition - parsed.entry_ranges[entry].definitions.start,
+                    };
+                    let ghost expected_type = match expected { Some(port) => Some(*port), None => None };
+                    if let Some(input) = input {
+                        if layouts.is_none() {
+                            match self.check_structure_types(context.limit) {
+                                Ok(table) => layouts = Some(table),
+                                Err(error) => {
+                                    let error = FuncSignalTypeError::StructureLayout(error);
+                                    assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                        literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        let Some(table) = &layouts else { unreachable!() };
+                        assert(self.structure_types_match(context.limit, Ok(*table)));
+                        let checked = match self.check_structure_expression_type(&context, &shape, table, input) {
+                            Ok(checked) => checked,
+                            Err(error) => {
+                                let error = FuncSignalTypeError::StructureExpression(error);
+                                assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Err(error))) by {
+                                    assert(self.structure_expression_type_matches(&context, shape, table, input, Err(error->StructureExpression_0)));
+                                };
+                                assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                    literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                                return Err(error);
+                            },
+                        };
+                        let actual = checked.0;
+                        if let Some(port) = expected {
+                            if !actual.ty.is_same_type(&port.ty) {
+                                let error = FuncSignalTypeError::Signal(FuncAtomTypeError::OutputType {
+                                    reference: copy_location(&actual.origin),
+                                    expected: SignalType { ty: port.ty, origin: copy_location(&port.annotation) },
+                                    actual,
+                                });
+                                assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Err(error))) by {
+                                    assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
+                                };
+                                assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                    literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                                return Err(error);
+                            }
+                        }
+                        assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Ok(Some(actual)))) by {
+                            assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
+                        };
+                        Some(actual)
+                    } else {
+                        None
                     }
                 } else {
                     copy_signal_type(&roots[i])
@@ -460,18 +632,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             } else {
                 copy_signal_type(&roots[i])
             };
-            assert(atom_type_step(source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@, i as int, Ok(next)));
-            assert(next matches Some(ty) ==> location_in_source(ty.origin));
+            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
+                outputs@, roots@, types@, i as int, Ok(next)));
+            assert(next matches Some(ty) ==> location_in_source(ty.origin) && self.declared_port_type(ty.ty));
             let ghost before = types@;
             types.push(next);
             proof {
                 reveal(typed_prefix);
                 assert forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
-                    implies location_in_source(types@[j]->Some_0.origin) by {
+                    implies location_in_source(types@[j]->Some_0.origin) && self.declared_port_type(types@[j]->Some_0.ty) by {
                     if j < i { assert(types@[j] == before[j]); }
                 };
                 assert forall|j: int| 0 <= j < types@.len() implies
-                    #[trigger] atom_type_step(source, parsed, entry as int, wiring, literals.widths@,
+                    #[trigger] atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
                         outputs@, roots@, types@.take(j), j, Ok(types@[j])) by {
                     if j < i {
                         assert(types@.take(j) =~= before.take(j));
@@ -498,13 +671,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(FuncAtomTypeError::Literal(error)) => self.func_literal_evidence(file, entry, limit, Err(error)),
             Ok(typed) => self.func_literal_evidence(file, entry, limit, Ok(typed.literals))
                 && match typed.literals.wiring {
-                    FuncWiringResult::Checked(wiring) => atoms_match(source, parsed, entry as int, &wiring,
+                    FuncWiringResult::Checked(wiring) => atoms_match(self, file, limit, source, parsed, entry as int, &wiring,
                         typed.literals.widths@, Seq::empty(), Ok(typed.types)),
                     _ => typed.types@.len() == 0,
                 },
             Err(error) => exists|literals: FuncLiteralWidths| literals.wiring is Checked
                 && #[trigger] self.func_literal_evidence(file, entry, limit, Ok(literals))
-                && atoms_match(source, parsed, entry as int, &literals.wiring->Checked_0, literals.widths@,
+                && atoms_match(self, file, limit, source, parsed, entry as int, &literals.wiring->Checked_0, literals.widths@,
                     Seq::empty(), Err(FuncSignalTypeError::Signal(error))),
         }
     }

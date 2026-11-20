@@ -2,7 +2,8 @@
 
 use super::{
     FuncAtomTypeError, FuncCallInputsError, FuncCallOutputError, FuncCallOutputTypes,
-    FuncLiteralError, FuncLiteralWidths, FuncWiringResult, SignalType, UseAliases,
+    FuncLiteralError, FuncLiteralWidths, FuncWiringResult, SignalType, StructureExpressionTypeError,
+    StructureTypeError, UseAliases,
 };
 #[cfg(verus_only)]
 use super::{FuncWiring, function_atoms::atoms_match};
@@ -42,6 +43,10 @@ pub enum FuncSignalTypeError<'p, 'a> {
     },
     /// ビット選択の数値引数または選択範囲の違反。
     SelectionArgument(SelectionArgumentError<'p, 'a>),
+    /// 配置表を準備した際に見つかった構造体の宣言違反。
+    StructureLayout(StructureTypeError<'p, 'a>),
+    /// 構造体式の型名、入力型、幅、またはフィールドの違反。
+    StructureExpression(StructureExpressionTypeError<'p, 'a>),
     /// 直接の引数を検査した呼び出しの位置と、署名または引数に関する診断。
     CallInput(FuncCallInputsError<'p, 'a>),
 }
@@ -70,11 +75,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     spec fn propagated_types_match(
-        &self, file: usize, entry: usize, wiring: &FuncWiring, literals: FuncLiteralWidths,
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring, literals: FuncLiteralWidths,
         roots: FuncCallOutputTypes, result: Result<Vec<Option<SignalType>>, FuncSignalTypeError>,
     ) -> bool {
         let project = self.targets.project_model();
-        atoms_match(&project.sources_model()[file as int], &project.circuits_model()[file as int],
+        atoms_match(self, file, limit, &project.sources_model()[file as int], &project.circuits_model()[file as int],
             entry as int, wiring, literals.widths@, roots.types@, result)
     }
 
@@ -89,20 +94,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && exists|literals: FuncLiteralWidths| literals.wiring matches FuncWiringResult::Checked(scope)
                     && #[trigger] self.func_literal_evidence(file, entry, limit, Ok(literals))
                     && self.call_output_failure(file, entry, limit, &scope.drivers, error),
-            Err(error) if error is Signal || error is SelectionInputType || error is SelectionArgument =>
+            Err(error) if error is Signal || error is SelectionInputType || error is SelectionArgument
+                || error is StructureLayout || error is StructureExpression =>
                 exists|literals: FuncLiteralWidths, wiring: FuncWiring, roots: FuncCallOutputTypes|
                 #[trigger] self.signal_type_sources(file, entry, limit, literals, &wiring, roots)
-                && self.propagated_types_match(file, entry, &wiring, literals, roots, Err(error)),
+                && self.propagated_types_match(file, entry, limit, &wiring, literals, roots, Err(error)),
             Err(FuncSignalTypeError::CallInput(error)) => exists|literals: FuncLiteralWidths, wiring: FuncWiring,
                 roots: FuncCallOutputTypes, types: Vec<Option<SignalType>>|
                 #[trigger] self.signal_type_sources(file, entry, limit, literals, &wiring, roots)
-                && #[trigger] self.propagated_types_match(file, entry, &wiring, literals, roots, Ok(types))
+                && #[trigger] self.propagated_types_match(file, entry, limit, &wiring, literals, roots, Ok(types))
                 && self.prepared_call_inputs_match(file, entry, limit, types@, &wiring, Err(error)),
             Ok(result) => self.func_literal_evidence(file, entry, limit, Ok(result.literals))
                 && if let FuncWiringResult::Checked(wiring) = result.literals.wiring {
                     exists|roots: FuncCallOutputTypes|
                         #[trigger] self.signal_type_sources(file, entry, limit, result.literals, &wiring, roots)
-                        && self.propagated_types_match(file, entry, &wiring, result.literals, roots, Ok(result.types))
+                        && self.propagated_types_match(file, entry, limit, &wiring, result.literals, roots, Ok(result.types))
                         && self.prepared_call_inputs_match(file, entry, limit, result.types@, &wiring, Ok(()))
                 } else { result.types@.len() == 0 },
             _ => false,
@@ -113,16 +119,41 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// 右辺全体が通常呼び出しなら、出力型を左辺の名前へ順に割り当てる。
     /// 裸の信号名は入力または先行定義の型を引き継ぐ。型が分かる信号名を入力とする
-    /// `bit` と `slice` は、選択範囲を検査し、選ぶビット数を結果型の幅にする。
+    /// `bit` と `slice` は選択範囲を、`field`・`as`・`raw` は構造体の型と配置を検査する。
     /// 呼び出しの直接の引数が定数か、
     /// 型の判明した裸の信号名なら、対応する入力型と照合する。
     /// 参照先の署名が得られたら、その署名をこの検査の入出力の照合で再利用する。
     /// ほかの複合式の結果型は保留する。展開待ちは呼び出し位置を保ったまま返す。
     ///
+    /// # Examples
+    ///
+    /// 構造体を経由する定義から、フィールドの型と構造体の総幅を引き継ぐ。
+    ///
+    /// ```
+    /// use circuitgame2_core::project::{
+    ///     ResolvedPortType, SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project,
+    /// };
+    /// let project = parse_circuit_project(&[SourceSnapshot {
+    ///     path: "packet.ncg2", revision: 1,
+    ///     text: "(struct Packet (width 8) (tag (bits 3) (at 2)))
+    ///            (func unpack (in (bus (bits 8))) (out (tag (bits 3)) (raw-bus (bits 8)))
+    ///                (def packet (as Packet bus))
+    ///                (def tag (field packet tag))
+    ///                (def raw-bus (raw packet)))",
+    /// }]).unwrap();
+    /// let targets = index_use_targets(&project).unwrap();
+    /// let aliases = check_use_aliases(&targets).unwrap();
+    /// let checked = aliases.check_func_signal_types(0, 1, 8).unwrap();
+    /// assert!(matches!(checked.types[0].as_ref().unwrap().ty, ResolvedPortType::Struct { .. }));
+    /// assert!(matches!(checked.types[1].as_ref().unwrap().ty, ResolvedPortType::Bits(3)));
+    /// assert!(matches!(checked.types[2].as_ref().unwrap().ty, ResolvedPortType::Bits(8)));
+    /// ```
+    ///
     /// # Errors
     ///
-    /// 配線・入出力数・定数幅、通常呼び出しの出力、信号参照とビット選択、直接の引数の順に検査し、
-    /// 各段階で最初に見つけた違反を返す。
+    /// 配線・入出力数・定数幅、通常呼び出しの出力、定義順の型伝播、直接の引数の順に検査する。
+    /// 型が判明した信号に対する構造体式を最初に調べる時点で、プロジェクト全体の構造体の配置と循環を検査する。
+    /// その後、式ごとに `as` の型名を解決し、入力型、幅、フィールドを照合する。
     pub fn check_func_signal_types(
         &self, file: usize, entry: usize, max_width: u64,
     ) -> (result: Result<FuncSignalTypes<'p, 'a>, FuncSignalTypeError<'p, 'a>>)
@@ -168,12 +199,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(types) => types,
             Err(error) => {
                 assert(self.func_signal_types_evidence(file, entry, max_width, Err(error))) by {
-                    assert(self.propagated_types_match(file, entry, scope, literals, roots, Err(error)));
+                    assert(self.propagated_types_match(file, entry, max_width, scope, literals, roots, Err(error)));
                 };
                 return Err(error);
             },
         };
-        assert(self.propagated_types_match(file, entry, scope, literals, roots, Ok(types)));
+        assert(self.propagated_types_match(file, entry, max_width, scope, literals, roots, Ok(types)));
         let type_slice = types.as_slice();
         let checked = self.check_all_inputs_with_types(file, entry, max_width, type_slice, scope, &mut signatures);
         match checked {
@@ -184,7 +215,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
                 assert(exists|outputs: FuncCallOutputTypes|
                     #[trigger] self.signal_type_sources(file, entry, max_width, literals, scope, outputs)
-                    && self.propagated_types_match(file, entry, scope, literals, outputs, Ok(types))
+                    && self.propagated_types_match(file, entry, max_width, scope, literals, outputs, Ok(types))
                     && self.prepared_call_inputs_match(file, entry, max_width, types@, scope, Ok(()))) by {
                     assert(self.signal_type_sources(file, entry, max_width, literals, scope, roots));
                 };

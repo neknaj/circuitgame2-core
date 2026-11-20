@@ -196,10 +196,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
             call.signature is Function,
             0 <= output < call.call.target.port_counts().outputs,
-        ensures location_in_source(call.signature->Function_0.outputs@[output].annotation),
+        ensures
+            location_in_source(call.signature->Function_0.outputs@[output].annotation),
+            self.declared_port_type(call.signature->Function_0.outputs@[output].ty),
     {
         if let FuncCallTarget::Function { file: target_file, entry: target_entry, .. } = call.call.target {
             self.typed_signature_sites(target_file, target_entry, limit, call.signature->Function_0);
+            self.typed_signature_types_declared(target_file, target_entry, limit, call.signature->Function_0);
         }
     }
 

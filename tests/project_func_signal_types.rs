@@ -1,6 +1,7 @@
 use circuitgame2_core::project::{
     CallInputError, CallInputReason, FuncAtomTypeError, FuncCallInputsError, FuncSignalTypeError,
-    FuncWiringResult, ResolvedPortType, SelectionArgumentError, SourceSnapshot, check_use_aliases, index_use_targets,
+    FuncWiringResult, ResolvedPortType, SelectionArgumentError, SourceSnapshot,
+    StructureExpressionTypeError, StructureOperationError, check_use_aliases, index_use_targets,
     parse_circuit_project,
 };
 
@@ -26,6 +27,40 @@ fn propagates_each_call_output_through_bare_signals() {
         assert_eq!(&text[signal.origin.span.clone()], origin);
     }
     assert_eq!(result.types[0].as_ref().unwrap().origin.span, result.types[4].as_ref().unwrap().origin.span);
+}
+
+#[test]
+fn locates_structure_expression_errors_in_the_relevant_sources() {
+    let caller = concat!(
+        "(func cast (in x) (out (result (bits 8))) ",
+        "  (def value (as ::lib::Word x)) (def result (raw value))) ",
+        "(func field (in (value ::lib::Word)) (out result) ",
+        "  (def result (field value missing)))",
+    );
+    let library = "(namespace lib (struct Word (width 8)) (export Word))";
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "lib.ncg2", revision: 2, text: library },
+        SourceSnapshot { path: "main.ncg2", revision: 3, text: caller },
+    ]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+
+    let error = aliases.check_func_signal_types(1, 0, 8).unwrap_err();
+    let FuncSignalTypeError::StructureExpression(StructureExpressionTypeError::WidthMismatch {
+        target, declaration, input, expected: 8,
+    }) = error else { panic!("{error:?}") };
+    assert_eq!(&caller[target.span], "::lib::Word");
+    assert_eq!(declaration.source.revision, 2);
+    assert_eq!(&library[declaration.span], "Word");
+    assert!(matches!(input.ty, ResolvedPortType::Bits(1)));
+    assert_eq!(&caller[input.origin.span], "x");
+
+    let error = aliases.check_func_signal_types(1, 1, 8).unwrap_err();
+    let FuncSignalTypeError::StructureExpression(StructureExpressionTypeError::Operation {
+        site, input, reason: StructureOperationError::UnknownField(_),
+    }) = error else { panic!("{error:?}") };
+    assert_eq!(&caller[site.span], "missing");
+    assert_eq!(&caller[input.origin.span], "::lib::Word");
 }
 
 #[test]

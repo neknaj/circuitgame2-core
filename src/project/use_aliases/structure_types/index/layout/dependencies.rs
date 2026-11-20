@@ -288,6 +288,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.layout_row_result(&index, rows[i], Ok(layouts.entries_model()[i])));
     }
 
+    pub(in crate::project::use_aliases) proof fn checked_layout_positions_are_declared(&self, limit: u64, layouts: StructureLayouts)
+        requires self.structure_types_match(limit, Ok(layouts)),
+        ensures forall|i: int| 0 <= i < layouts.entries_model().len()
+            ==> self.is_structure_position((#[trigger] layouts.entries_model()[i]).position),
+    {
+        reveal(UseAliases::structure_index_matches);
+        let (index, graph) = choose|index: ResolvedStructures, graph: Seq<Vec<Option<usize>>>|
+            #[trigger] self.structure_index_matches(limit, Ok(index))
+                && #[trigger] self.dependency_rows_match(&index, graph)
+                && graph.len() == index.entries_model().len()
+                && self.layouts_for_index(&index, Ok(layouts))
+                && exists|rank: Seq<nat>| #[trigger] dependencies_in_order(graph, rank);
+        assert(self.structure_index_matches(limit, Ok(index)));
+        assert(self.layouts_for_index(&index, Ok(layouts)));
+        assert(self.layouts_before(&index, layouts.entries_model()));
+        assert forall|i: int| 0 <= i < layouts.entries_model().len()
+            implies self.is_structure_position((#[trigger] layouts.entries_model()[i]).position) by {
+            let row = index.entries_model()[i];
+            assert(self.layout_row_result(&index, row, Ok(layouts.entries_model()[i])));
+        };
+    }
+
     /// 構造体の型参照を解決し、配置と循環を検査する。
     ///
     /// `limit` は各構造体とビット列フィールドの宣言幅の上限。

@@ -24,6 +24,7 @@ mod signature_cache;
 mod single_bit_func;
 mod structure_types;
 pub use structure_types::{
+    StructureExpressionTypeError,
     ResolvedStructure, ResolvedStructureEntry, ResolvedStructureField, ResolvedStructures,
     StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
     StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,

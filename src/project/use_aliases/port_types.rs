@@ -161,6 +161,53 @@ spec fn port_request(context: &PortContext, port: CheckedPort) -> bool {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) open spec fn declared_port_type(&self, ty: ResolvedPortType) -> bool {
+        match ty {
+            ResolvedPortType::Bits(_) => true,
+            ResolvedPortType::Struct { source, form } => form.head is Struct
+                && self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+        }
+    }
+
+    proof fn typed_ports_are_declared(&self, context: &PortContext, declared: Seq<CheckedPort>, types: Seq<TypedPort>)
+        requires self.typed_ports_before(context, declared, types),
+        ensures forall|i: int| 0 <= i < types.len() ==> self.declared_port_type((#[trigger] types[i]).ty),
+    {
+        assert forall|i: int| 0 <= i < types.len() implies self.declared_port_type((#[trigger] types[i]).ty) by {
+            let port = declared[i];
+            assert(self.typed_port_evidence(context, port, types[i]));
+            if let ResolvedPortType::Struct { source, form } = types[i].ty {
+                let atom = annotation_atom(port);
+                let span = form_span(context.forms@[atom as int]);
+                let kind = context.forms@[atom as int]->Atom_kind;
+                let word = choose|word: &str| word.spec_bytes() == context.source.text.spec_bytes()[span.start as int..span.end as int]
+                    && #[trigger] self.binding_evidence(context.file,
+                        ReferenceRequest { block: context.block, word, role: ReferenceUse::StructType }, context.namespace, kind,
+                        Ok(DefinitionBinding::Declaration { source, form }));
+                let request = ReferenceRequest { block: context.block, word, role: ReferenceUse::StructType };
+                self.binding_declaration_origin(context.file, request, context.namespace, kind, source, form);
+            }
+        };
+    }
+
+    /// 解決済みの署名に含まれる構造体型は、このプロジェクトの宣言表を指す。
+    pub(super) proof fn typed_signature_types_declared(
+        &self, file: usize, entry: usize, limit: u64, signature: TypedRoutineSignature,
+    )
+        requires self.typed_signature_evidence(file, entry, limit, Ok(Some(signature))),
+        ensures
+            forall|i: int| 0 <= i < signature.inputs@.len() ==> self.declared_port_type((#[trigger] signature.inputs@[i]).ty),
+            forall|i: int| 0 <= i < signature.outputs@.len() ==> self.declared_port_type((#[trigger] signature.outputs@[i]).ty),
+    {
+        let project = self.targets.project_model();
+        let (context, declared) = choose|context: PortContext, declared: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+                && #[trigger] routine_signature_evidence(&project, file as int, entry as int, limit, Ok(Some(declared)))
+                && self.typed_after_signature(&context, &declared, Ok(Some(signature)));
+        self.typed_ports_are_declared(&context, declared.ports.inputs@, signature.inputs@);
+        self.typed_ports_are_declared(&context, declared.ports.outputs@, signature.outputs@);
+    }
+
     spec fn port_binding_evidence(
         &self, context: &PortContext, port: CheckedPort,
         binding: Result<DefinitionBinding, DefinitionReferenceReason>,

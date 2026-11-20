@@ -785,12 +785,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
             &&& checked_ports_and_output_bounds(circuits[file as int].syntax.forms@, checked)
             &&& expected_output_context(source, &circuits[file as int], entry as int, checked)
+            &&& forall|i: int| 0 <= i < checked.signature.inputs@.len()
+                ==> self.declared_port_type((#[trigger] checked.signature.inputs@[i]).ty)
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
                 ==> indexed_driver_site(source, &circuits[file as int], entry as int, #[trigger] checked.definitions@[i])
         }),
     {
         self.reveal_checked_driver_result(file, entry, max_width, checked);
         self.typed_signature_sites(file, entry, max_width, checked.signature);
+        self.typed_signature_types_declared(file, entry, max_width, checked.signature);
     }
 
     /// `func` の署名を解決し、本体の明示的な定義から出力の駆動元を求める。

@@ -2,7 +2,12 @@
 
 mod index;
 mod cast_reference;
+mod expression;
 mod port_type;
+pub use expression::StructureExpressionTypeError;
+pub(super) use expression::StructureExpressionContext;
+#[cfg(verus_only)]
+pub(super) use expression::CheckedStructureExpression;
 pub use index::{
     ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructureLayout, StructureLayoutError,
     StructureLayoutField, StructureLayouts, StructurePlacementError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
@@ -26,7 +31,7 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
-use crate::project::declarations::{form_key, located_name_evidence};
+use crate::project::declarations::{declaration_location_evidence, form_key, located_name_evidence};
 #[cfg(verus_only)]
 use crate::project::structure_declarations::checked_structure_fields;
 #[cfg(verus_only)]
@@ -146,12 +151,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         match result {
             Some(ResolvedPortType::Struct { source, form }) => {
                 let parsed = self.targets.project_model().circuits_model()[position.file as int];
+                &&& self.declared_port_type(ResolvedPortType::Struct { source, form })
                 &&& self.structure_position_matches(position, DefinitionBinding::Declaration { source, form })
                 &&& (exists|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]) == *form)
-                &&& self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form)
             },
             None => !self.is_structure_position(position),
             _ => false,
+        }
+    }
+
+    pub(super) proof fn structure_port_type_resolved(&self, position: StructurePosition, result: Option<ResolvedPortType>)
+        requires
+            self.can_resolve(),
+            self.structure_port_type_matches(position, result),
+        ensures
+            result.is_some() <==> self.is_structure_position(position),
+            result matches Some(port) ==> port is Struct && self.declared_port_type(port),
+            result matches Some(ResolvedPortType::Struct { source, form }) ==>
+                location_in_source(LocatedName { source, span: form.name.span }),
+    {
+        if let Some(ResolvedPortType::Struct { source, form }) = result {
+            self.targets.declarations_cover_project();
+            declaration_location_evidence(&self.targets.exports_model().declarations_model(), form_key(*form), source, form);
         }
     }
 

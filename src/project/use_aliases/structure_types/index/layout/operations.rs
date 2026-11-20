@@ -210,6 +210,29 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
         self.layout_entries_valid() && representation_width(self.entries@, ty, width)
     }
 
+    pub(in crate::project::use_aliases) proof fn representation_has_layout(&self, position: StructurePosition, width: int)
+        requires self.representation_width_matches(StructureFieldType::Struct(position), width),
+        ensures exists|i: int| 0 <= i < self.entries_model().len()
+            && (#[trigger] self.entries_model()[i]).position == position,
+    {
+        let i = choose|i: int| 0 <= i < self.entries@.len()
+            && (#[trigger] self.entries@[i]).position == position && self.entries@[i].width == width;
+        assert(self.entries_model()[i].position == position);
+    }
+
+    pub(in crate::project::use_aliases) proof fn unknown_operation_structure_is_missing(
+        &self, op: StructureOperation, input: StructureFieldType, position: StructurePosition,
+    )
+        requires self.structure_operation_matches(op, input, Err(StructureOperationError::UnknownStructure(position))),
+        ensures
+            (op matches StructureOperation::As(target) && target == position)
+                || input == StructureFieldType::Struct(position),
+            forall|i: int| 0 <= i < self.entries_model().len()
+                ==> (#[trigger] self.entries_model()[i]).position != position,
+    {
+        reveal(StructureLayouts::layout_matches);
+    }
+
     /// 同じ配置表で同じ型の表現幅が一意に決まることを示す。
     pub proof fn representation_width_agrees(&self, ty: StructureFieldType, a: int, b: int)
         requires
@@ -301,6 +324,9 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
         -> (result: Result<TypedStructureOperation, StructureOperationError>)
         ensures
             self.structure_operation_matches(op, input, result),
+            result matches Err(StructureOperationError::WidthMismatch { input: width, .. })
+                ==> op is As && input == StructureFieldType::Bits(width),
+            (result matches Err(StructureOperationError::UnknownField(_))) ==> op is Field,
             result matches Ok(typed) ==> {
                 &&& typed.range.start < typed.range.end
                 &&& self.representation_width_matches(typed.ty, typed.range.end - typed.range.start)

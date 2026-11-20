@@ -448,14 +448,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures
             outputs.types@.len() == wiring.drivers.definitions@.len(),
             forall|i: int| 0 <= i < outputs.types@.len() && (#[trigger] outputs.types@[i]).is_some()
-                ==> location_in_source(outputs.types@[i]->Some_0.origin),
+                ==> location_in_source(outputs.types@[i]->Some_0.origin)
+                    && self.declared_port_type(outputs.types@[i]->Some_0.ty),
     {
         let outlets = choose|outlets: Seq<Option<usize>>|
             #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outlets)
             && self.call_output_prefix(file, entry, limit, &wiring.drivers, outlets, outputs.types@);
         reveal(UseAliases::call_output_prefix);
         assert forall|i: int| 0 <= i < outputs.types@.len() && (#[trigger] outputs.types@[i]).is_some()
-            implies location_in_source(outputs.types@[i]->Some_0.origin) by {
+            implies location_in_source(outputs.types@[i]->Some_0.origin)
+                && self.declared_port_type(outputs.types@[i]->Some_0.ty) by {
             reveal(UseAliases::call_output_step);
             let drivers = &wiring.drivers;
             assert(self.call_output_step(file, entry, limit, drivers, outlets, i, Ok(outputs.types@[i])));
