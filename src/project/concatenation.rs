@@ -25,6 +25,27 @@ pub enum ConcatWidthError {
     },
 }
 
+/// 型を確定した連接式の合計幅に関する違反。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConcatResultWidthError {
+    /// 引数がない、幅が0の引数がある、または加算途中の幅が `u64` の範囲を超えた。
+    Arguments(ConcatWidthError),
+    /// 合計幅が出力側の期待幅と異なる。
+    Mismatch {
+        /// 出力側が要求した幅。
+        expected: u64,
+        /// 各引数の幅を足した値。
+        actual: u64,
+    },
+    /// 合計幅が設定上限を超える。
+    ConfiguredLimit {
+        /// 処理に設定された上限。
+        limit: u64,
+        /// 各引数の幅を足した値。
+        actual: u64,
+    },
+}
+
 /// 先頭から指定数の幅を数学上の整数で合計する。
 /// 引数を低位側から置くため、合計は次の引数を置く位置にもなる。
 #[verifier::opaque]
@@ -63,6 +84,84 @@ pub closed spec fn concat_width_matches(
             Err(ConcatWidthError::Empty) => false,
         }
     }
+}
+
+/// 合計幅を求め、期待幅、設定上限の順に照合することを表す。
+pub closed spec fn concat_result_width_matches(
+    widths: Seq<u64>, expected: Option<u64>, limit: u64, result: Result<u64, ConcatResultWidthError>,
+) -> bool {
+    match result {
+        Err(ConcatResultWidthError::Arguments(error)) => concat_width_matches(widths, u64::MAX, Err(error)),
+        _ => {
+            let total = concat_prefix_width(widths, widths.len());
+            &&& 0 < total <= u64::MAX
+            &&& concat_width_matches(widths, u64::MAX, Ok(total as u64))
+            &&& match expected {
+                Some(w) if w != total => result == Err(ConcatResultWidthError::Mismatch { expected: w, actual: total as u64 }),
+                _ if total > limit => result == Err(ConcatResultWidthError::ConfiguredLimit { limit, actual: total as u64 }),
+                _ => result == Ok(total as u64),
+            }
+        },
+    }
+}
+
+/// 同じ引数と上限からは、合計幅または最初の違反が一意に定まる。
+pub proof fn concat_width_results_agree(
+    widths: Seq<u64>, limit: u64, left: Result<u64, ConcatWidthError>, right: Result<u64, ConcatWidthError>,
+)
+    requires concat_width_matches(widths, limit, left), concat_width_matches(widths, limit, right),
+    ensures left == right,
+{
+    if widths.len() > 0 {
+        let a = concat_width_valid_prefix(widths, limit, left);
+        let b = concat_width_valid_prefix(widths, limit, right);
+        reveal(within_limit);
+        if a < b {
+            assert(0 < widths[a] && concat_prefix_width(widths, (a + 1) as nat) <= limit);
+            assert(false);
+        } else if b < a {
+            assert(0 < widths[b] && concat_prefix_width(widths, (b + 1) as nat) <= limit);
+            assert(false);
+        }
+    }
+}
+
+proof fn concat_width_valid_prefix(
+    widths: Seq<u64>, limit: u64, result: Result<u64, ConcatWidthError>,
+) -> (count: int)
+    requires widths.len() > 0, concat_width_matches(widths, limit, result),
+    ensures
+        within_limit(widths, count, limit),
+        match result {
+            Ok(_) => count == widths.len(),
+            Err(ConcatWidthError::ZeroWidth { argument }) => count == argument < widths.len()
+                && widths[count] == 0,
+            Err(ConcatWidthError::LimitExceeded { argument, .. }) => count == argument < widths.len()
+                && widths[count] > 0 && concat_prefix_width(widths, (count + 1) as nat) > limit,
+            Err(ConcatWidthError::Empty) => false,
+        },
+{
+    match result {
+        Ok(_) => widths.len() as int,
+        Err(ConcatWidthError::ZeroWidth { argument }) | Err(ConcatWidthError::LimitExceeded { argument, .. }) => argument as int,
+        Err(ConcatWidthError::Empty) => 0,
+    }
+}
+
+/// 期待幅を含む条件が同じなら、連接の合計幅または診断も一致する。
+pub proof fn concat_result_widths_agree(
+    widths: Seq<u64>, expected: Option<u64>, limit: u64,
+    left: Result<u64, ConcatResultWidthError>, right: Result<u64, ConcatResultWidthError>,
+)
+    requires
+        concat_result_width_matches(widths, expected, limit, left),
+        concat_result_width_matches(widths, expected, limit, right),
+    ensures left == right,
+{
+    let sum = concat_prefix_width(widths, widths.len()) as u64;
+    let l = if let Err(ConcatResultWidthError::Arguments(error)) = left { Err(error) } else { Ok(sum) };
+    let r = if let Err(ConcatResultWidthError::Arguments(error)) = right { Err(error) } else { Ok(sum) };
+    concat_width_results_agree(widths, u64::MAX, l, r);
 }
 
 /// 連接するビット列の幅を、引数順に加えた合計を返す。
@@ -113,6 +212,49 @@ pub fn check_concat_width(widths: &[u64], max_width: u64) -> (result: Result<u64
         argument += 1;
     }
     Ok(sum)
+}
+
+/// 各引数の幅を足し、連接式の期待幅と設定上限を照合する。
+///
+/// `expected` は連接全体の幅を指定する。個々の引数の幅は、呼び出す前に確定させる。
+///
+/// # Errors
+///
+/// 引数の幅と合計幅の表現範囲は [`check_concat_width`] と同じ順で検査する。
+/// 合計幅が求まったら、期待幅との一致を調べ、その後で設定上限を検査する。
+///
+/// # Examples
+///
+/// ```
+/// use circuitgame2_core::project::{ConcatResultWidthError, check_concat_result_width};
+///
+/// assert_eq!(check_concat_result_width(&[2, 3], Some(5), 8), Ok(5));
+/// assert_eq!(
+///     check_concat_result_width(&[2, 3], Some(4), 4),
+///     Err(ConcatResultWidthError::Mismatch { expected: 4, actual: 5 }),
+/// );
+/// ```
+pub fn check_concat_result_width(
+    widths: &[u64], expected: Option<u64>, limit: u64,
+) -> (result: Result<u64, ConcatResultWidthError>)
+    ensures
+        concat_result_width_matches(widths@, expected, limit, result),
+        result matches Ok(width) ==> 0 < width <= limit && width == concat_prefix_width(widths@, widths@.len()),
+{
+    let actual = match check_concat_width(widths, u64::MAX) {
+        Ok(actual) => actual,
+        Err(error) => return Err(ConcatResultWidthError::Arguments(error)),
+    };
+    if let Some(expected) = expected {
+        if expected != actual {
+            return Err(ConcatResultWidthError::Mismatch { expected, actual });
+        }
+    }
+    if actual > limit {
+        Err(ConcatResultWidthError::ConfiguredLimit { limit, actual })
+    } else {
+        Ok(actual)
+    }
 }
 
 } // verus!

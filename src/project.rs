@@ -21,9 +21,12 @@ mod widths;
 pub use bit_selection::{BitSelectionError, check_bit_selection, select_bits};
 #[cfg(verus_only)]
 pub use bit_selection::{bit_selection_matches, selected_bit_in_range, selected_bits_match, selected_bits_values};
-pub use concatenation::{ConcatWidthError, check_concat_width};
+pub use concatenation::{ConcatResultWidthError, ConcatWidthError, check_concat_result_width, check_concat_width};
 #[cfg(verus_only)]
-pub use concatenation::{concat_prefix_width, concat_width_matches};
+pub use concatenation::{
+    concat_prefix_width, concat_result_width_matches, concat_result_widths_agree, concat_width_matches,
+    concat_width_results_agree,
+};
 pub use literal_width::{CircuitLiteralWidthError, check_circuit_literal_width};
 #[cfg(verus_only)]
 pub use literal_width::circuit_literal_width_matches;
