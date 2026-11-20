@@ -1142,11 +1142,12 @@ proof fn same_definition_prefix(
     same_definition_prefix(source, forms, start, end, flat, references, signals,
         first, stop, first_signal, stop_signal, nested, i);
     reveal(flat_body_matches);
-    reveal(flat_definition_matches);
     reveal(definitions_before);
     let a = flat[i].form;
     let b = nested[i].definition;
-    assert(is_definition_at(source, forms, start, end, a as int));
+    assert(is_definition_at(source, forms, start, end, a as int)) by {
+        reveal(flat_definition_matches);
+    };
     assert(is_definition_at(source, forms, start, end, b as int));
     let j = choose|j: int| 0 <= j < nested.len() && (#[trigger] nested[j]).definition == a;
     let k = choose|k: int| 0 <= k < flat.len() && (#[trigger] flat[k]).form == b;

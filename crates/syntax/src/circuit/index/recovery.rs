@@ -98,6 +98,7 @@ spec fn after_node(forms: Seq<Form>, index: int) -> int
     match forms[index] { Form::List { end, .. } => end as int, _ => index + 1 }
 }
 
+#[verifier::opaque]
 spec fn checked_matches(source: &str, forms: Seq<Form>, item: RecoveredCircuitForm) -> bool {
     &&& 0 <= item.form < forms.len()
     &&& indexed_location(source, forms, item.form as int, item.namespace)
@@ -108,7 +109,8 @@ spec fn checked_matches(source: &str, forms: Seq<Form>, item: RecoveredCircuitFo
             header_matches(source, forms, item.form as int, item.namespace.is_some(), head),
         RecoveredFormOutcome::Rejected { kind, span, skipped } =>
             skipped == form_span(forms[item.form as int])
-            && header_error_evidence(source, forms, item.form as int, item.namespace.is_some(), kind, span),
+            && header_error_evidence(source, forms, item.form as int, item.namespace.is_some(), kind, span)
+            && (forall|head: Head| !#[trigger] header_matches(source, forms, item.form as int, item.namespace.is_some(), head)),
     }
 }
 
@@ -157,6 +159,74 @@ proof fn record_check(
     reveal(check_trace);
 }
 
+proof fn checked_forms_agree(
+    source: &str, forms: Seq<Form>, left: RecoveredCircuitForm, right: RecoveredCircuitForm,
+)
+    requires
+        checked_matches(source, forms, left),
+        checked_matches(source, forms, right),
+        left.form == right.form,
+        left.namespace == right.namespace,
+    ensures left == right,
+{
+    reveal(checked_matches);
+    match (left.outcome, right.outcome) {
+        (RecoveredFormOutcome::Valid(a), RecoveredFormOutcome::Valid(b)) =>
+            same_head_word(source, forms[left.form + 1], a, b),
+        (
+            RecoveredFormOutcome::Rejected { kind: a, span: a_span, .. },
+            RecoveredFormOutcome::Rejected { kind: b, span: b_span, .. },
+        ) => header_errors_agree(source, forms, left.form as int, left.namespace.is_some(), (a, a_span), (b, b_span)),
+        _ => {},
+    }
+}
+
+proof fn check_traces_agree_through(
+    source: &str, forms: Seq<Form>, left: Seq<RecoveredCircuitForm>, right: Seq<RecoveredCircuitForm>, count: int,
+)
+    requires
+        check_trace(source, forms, left, (forms.len() as int, None)),
+        check_trace(source, forms, right, (forms.len() as int, None)),
+        0 <= count <= left.len(),
+        count <= right.len(),
+    ensures forall|i: int| 0 <= i < count ==> (#[trigger] left[i]) == (#[trigger] right[i]),
+    decreases count,
+{
+    if count > 0 {
+        let i = count - 1;
+        check_traces_agree_through(source, forms, left, right, i);
+        reveal(check_trace);
+        // 先頭は同じ位置から開始し、それ以降は一つ前の判定が次の位置と所属を決める。
+        if i > 0 {
+            assert(left[i - 1] == right[i - 1]);
+        }
+        checked_forms_agree(source, forms, left[i], right[i]);
+    }
+}
+
+proof fn complete_check_traces_agree(
+    source: &str, forms: Seq<Form>, left: Seq<RecoveredCircuitForm>, right: Seq<RecoveredCircuitForm>,
+)
+    requires
+        check_trace(source, forms, left, (forms.len() as int, None)),
+        check_trace(source, forms, right, (forms.len() as int, None)),
+    ensures left == right,
+{
+    let (short, long) = if left.len() <= right.len() { (left, right) } else { (right, left) };
+    let stop = short.len() as int;
+    check_traces_agree_through(source, forms, short, long, stop);
+    if stop < long.len() {
+        reveal(check_trace);
+        if stop > 0 {
+            assert(short.last() == long[stop - 1]);
+        }
+        // 短い列を読み終えた位置は構文木の末尾なので、続くフォームはない。
+        assert(long[stop].form == forms.len());
+        assert(long[stop].form < forms.len());
+    }
+    assert(short =~= long);
+}
+
 /// 回復結果の構文木、検査した境界と所属、各診断の根拠を表す。
 pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecovery) -> bool {
     &&& (result is Complete <==> circuit_source_matches(source))
@@ -197,6 +267,32 @@ pub proof fn complete_recovery_agrees_with_index(source: &str, recovered: &Circu
 {
     if let CircuitRecovery::Complete(index) = recovered {
         circuit_indexes_agree(source, index, strict);
+    }
+}
+
+/// S 式として妥当な同じソースの回復結果は、構文木と検査結果が一致する。
+///
+/// 回路文法に適合すれば厳格索引が一致する。違反があれば各フォームの検査順と所属、
+/// 診断の種別・主範囲・関連範囲、および読み飛ばした範囲が一致する。
+pub proof fn circuit_recovery_results_agree_on_sexpr(source: &str, left: &CircuitRecovery, right: &CircuitRecovery)
+    requires
+        well_formed_sexpr(source),
+        circuit_recovery_matches(source, *left),
+        circuit_recovery_matches(source, *right),
+    ensures match (left, right) {
+        (CircuitRecovery::Complete(a), CircuitRecovery::Complete(b)) =>
+            a.forms@ == b.forms@ && a.entries@ == b.entries@,
+        (CircuitRecovery::Inspected { forms: a, checked: a_checked },
+         CircuitRecovery::Inspected { forms: b, checked: b_checked }) =>
+            a@ == b@ && a_checked@ == b_checked@,
+        _ => false,
+    },
+{
+    match (left, right) {
+        (CircuitRecovery::Complete(a), CircuitRecovery::Complete(b)) => circuit_indexes_agree(source, a, b),
+        (CircuitRecovery::Inspected { forms, checked: a }, CircuitRecovery::Inspected { checked: b, .. }) =>
+            complete_check_traces_agree(source, forms@, a@, b@),
+        _ => {},
     }
 }
 
@@ -509,6 +605,7 @@ fn inspect_circuit_forms(source: &str, forms: &[Form]) -> (checked: Vec<Recovere
             (end, None, forms.len())
         };
         proof {
+            reveal(checked_matches);
             record_check(source, forms@, checked@, item, (next as int, owner));
         }
         checked.push(item);

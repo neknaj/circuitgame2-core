@@ -8,7 +8,7 @@ mod recovery;
 use crate::{sexpr_form_model, strict_syntax_rejection, strict_token_errors_agree,
     structural_error_location, syntax_error_evidence, well_formed_sexpr};
 #[cfg(verus_only)]
-pub use recovery::{circuit_recovery_matches, complete_recovery_agrees_with_index};
+pub use recovery::{circuit_recovery_matches, circuit_recovery_results_agree_on_sexpr, complete_recovery_agrees_with_index};
 pub use recovery::{
     CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     recover_circuit_forms,
