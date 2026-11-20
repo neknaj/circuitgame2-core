@@ -78,6 +78,7 @@ pub use index::{
 pub use index::{
     basis_entry_evidence, circuit_directive_errors_agree, circuit_header_error_at, circuit_header_errors_agree,
     circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_recovery_results_agree_on_sexpr,
+    circuit_recovery_transfers_on_sexpr_bytes,
     circuit_source_error, circuit_source_errors_agree,
     circuit_token_errors_agree, first_circuit_header_error,
     circuit_source_matches, complete_recovery_agrees_with_index, export_entry_evidence, indexed_entry_evidence, indexed_location,
@@ -316,6 +317,120 @@ pub open spec fn header_error_evidence(
         && header_arguments_error(source, forms, index + 2, forms[index]->List_end as int,
             (form_span(forms[index]).end - 1) as usize, head, kind, span))
 }
+
+proof fn routine_header_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        body::routine_arguments_match(left, forms, first, end, head)
+            ==> body::routine_arguments_match(right, forms, first, end, head),
+        body::routine_arguments_error(left, forms, first, end, closing, head, error)
+            ==> body::routine_arguments_error(right, forms, first, end, closing, head, error),
+{
+    if body::routine_arguments_match(left, forms, first, end, head) {
+        let start = choose|start: int| #[trigger] ports::routine_signature_matches(left, forms, first, end, head, start)
+            && body::body_items_before(left, forms, start, end, end);
+        ports::routine_signature_agrees_on_bytes(left, right, forms, first, end, closing, head, start, error);
+        body::routine_body_agrees_on_bytes(left, right, forms, start, end, error);
+    }
+    if body::routine_arguments_error(left, forms, first, end, closing, head, error) {
+        if ports::routine_signature_error_evidence(left, forms, first, end, closing, head, error.0, error.1) {
+            ports::routine_signature_agrees_on_bytes(left, right, forms, first, end, closing, head, end, error);
+        } else {
+            let start = choose|start: int| #[trigger] ports::routine_signature_matches(left, forms, first, end, head, start)
+                && body::body_error(left, forms, start, end, error);
+            ports::routine_signature_agrees_on_bytes(left, right, forms, first, end, closing, head, start, error);
+            body::routine_body_agrees_on_bytes(left, right, forms, start, end, error);
+        }
+    }
+}
+
+proof fn form_heads_agree_on_bytes(left: &str, right: &str, forms: Seq<Form>, index: int, in_namespace: bool, head: Head)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures form_has_head(left, forms, index, in_namespace, head) == form_has_head(right, forms, index, in_namespace, head),
+{
+    reveal(head_word_matches);
+}
+
+proof fn header_arguments_agree_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        header_arguments_match(left, forms, first, end, head) == header_arguments_match(right, forms, first, end, head),
+        header_arguments_error(left, forms, first, end, closing, head, error.0, error.1)
+            == header_arguments_error(right, forms, first, end, closing, head, error.0, error.1),
+{
+    reveal(header_arguments_match);
+    reveal(header_arguments_error);
+    match head {
+        Head::Func | Head::Module | Head::ModulePart => {
+            routine_header_transfers_on_bytes(left, right, forms, first, end, closing, head, error);
+            routine_header_transfers_on_bytes(right, left, forms, first, end, closing, head, error);
+        },
+        Head::Test => test_diagnostics::test_arguments_agree_on_bytes(left, right, forms, first, end, closing, error),
+        Head::Struct => structure::structure_arguments_agree_on_bytes(left, right, forms, first, end, closing, error),
+        Head::Latch | Head::Memory =>
+            clause_diagnostics::storage_arguments_agree_on_bytes(left, right, forms, first + 1, end, closing, head, error),
+        Head::Using | Head::Namespace | Head::Use | Head::Export =>
+            directive_diagnostics::directive_arguments_agree_on_bytes(left, right, forms, first, end, closing, head, error),
+    }
+}
+
+proof fn header_error_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, in_namespace: bool,
+    error: (HeaderError, Range<usize>),
+)
+    requires
+        left.spec_bytes() == right.spec_bytes(),
+        header_error_evidence(left, forms, index, in_namespace, error.0, error.1),
+    ensures header_error_evidence(right, forms, index, in_namespace, error.0, error.1),
+{
+    if form_head_error_evidence(left, forms, index, in_namespace, error.0, error.1) {
+        reveal(head_word_matches);
+        if error.0 is UnknownHead {
+            let child = forms[index + 1];
+            assert forall|head: Head| !#[trigger] head_word_matches(right, child, head) by {
+                assert(!head_word_matches(left, child, head));
+            };
+        }
+    } else {
+        let head = choose|head: Head| #[trigger] form_has_head(left, forms, index, in_namespace, head)
+            && form_span(forms[index]).end > 0
+            && header_arguments_error(left, forms, index + 2, forms[index]->List_end as int,
+                (form_span(forms[index]).end - 1) as usize, head, error.0, error.1);
+        form_heads_agree_on_bytes(left, right, forms, index, in_namespace, head);
+        header_arguments_agree_on_bytes(left, right, forms, index + 2, forms[index]->List_end as int,
+            (form_span(forms[index]).end - 1) as usize, head, error);
+    }
+}
+
+/// 同じ UTF-8 本文と構文木なら、フォームの受理と最初の診断根拠が一致する。
+proof fn circuit_header_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, in_namespace: bool, head: Head,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        header_matches(left, forms, index, in_namespace, head) == header_matches(right, forms, index, in_namespace, head),
+        header_error_evidence(left, forms, index, in_namespace, error.0, error.1)
+            == header_error_evidence(right, forms, index, in_namespace, error.0, error.1),
+{
+    form_heads_agree_on_bytes(left, right, forms, index, in_namespace, head);
+    if form_has_head(left, forms, index, in_namespace, head) {
+        header_arguments_agree_on_bytes(left, right, forms, index + 2, forms[index]->List_end as int, 0, head, error);
+    }
+    if header_error_evidence(left, forms, index, in_namespace, error.0, error.1) {
+        header_error_transfers_on_bytes(left, right, forms, index, in_namespace, error);
+    }
+    if header_error_evidence(right, forms, index, in_namespace, error.0, error.1) {
+        header_error_transfers_on_bytes(right, left, forms, index, in_namespace, error);
+    }
+}
+
 
 /// 一つの回路フォームを検査し、種別と次の直接兄弟の添字を返す。
 ///

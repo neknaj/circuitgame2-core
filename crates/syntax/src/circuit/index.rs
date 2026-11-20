@@ -8,7 +8,8 @@ mod recovery;
 use crate::{sexpr_form_model, strict_syntax_rejection, strict_token_errors_agree,
     structural_error_location, syntax_error_evidence, well_formed_sexpr};
 #[cfg(verus_only)]
-pub use recovery::{circuit_recovery_matches, circuit_recovery_results_agree_on_sexpr, complete_recovery_agrees_with_index};
+pub use recovery::{circuit_recovery_matches, circuit_recovery_results_agree_on_sexpr, circuit_recovery_transfers_on_sexpr_bytes,
+    complete_recovery_agrees_with_index};
 pub use recovery::{
     CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     recover_circuit_forms,
@@ -358,6 +359,69 @@ spec fn index_prefix(source: &str, forms: Seq<Form>, entries: Seq<Entry>, cursor
 /// 索引は対象位置を漏れなく一度ずつ含み、種別と親の添字を入力順に保存する。
 pub closed spec fn circuit_index_matches(source: &str, forms: Seq<Form>, entries: Seq<Entry>) -> bool {
     sexpr_form_model(source) == Some(forms) && index_prefix(source, forms, entries, forms.len() as int)
+}
+
+proof fn indexed_location_agrees_on_bytes(left: &str, right: &str, forms: Seq<Form>, index: int, owner: Option<usize>)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures indexed_location(left, forms, index, owner) == indexed_location(right, forms, index, owner),
+{
+    if let Some(parent) = owner {
+        super::form_heads_agree_on_bytes(left, right, forms, parent as int, false, Head::Namespace);
+    }
+}
+
+proof fn forms_before_transfers_on_bytes(left: &str, right: &str, forms: Seq<Form>, cursor: int)
+    requires left.spec_bytes() == right.spec_bytes(), forms_before(left, forms, cursor),
+    ensures forms_before(right, forms, cursor),
+{
+    assert forall|index: int, namespace: Option<usize>| #[trigger] indexed_location(right, forms, index, namespace)
+        && index < cursor implies exists|head: Head| #[trigger] header_matches(right, forms, index, namespace.is_some(), head) by {
+        indexed_location_agrees_on_bytes(left, right, forms, index, namespace);
+        assert(indexed_location(left, forms, index, namespace));
+        let head = choose|head: Head| #[trigger] header_matches(left, forms, index, namespace.is_some(), head);
+        super::circuit_header_agrees_on_bytes(left, right, forms, index, namespace.is_some(), head,
+            (HeaderError::ExpectedList, 0..0));
+        assert(header_matches(right, forms, index, namespace.is_some(), head));
+    };
+}
+
+proof fn circuit_acceptance_agrees_on_bytes(left: &str, right: &str)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures circuit_source_matches(left) == circuit_source_matches(right),
+{
+    crate::sexpr_models_agree_on_bytes(left, right);
+    if let Some(forms) = sexpr_form_model(left) {
+        if forms_before(left, forms, forms.len() as int) {
+            forms_before_transfers_on_bytes(left, right, forms, forms.len() as int);
+        }
+        if forms_before(right, forms, forms.len() as int) {
+            forms_before_transfers_on_bytes(right, left, forms, forms.len() as int);
+        }
+    }
+}
+
+proof fn circuit_index_agrees_on_bytes(left: &str, right: &str, forms: Seq<Form>, entries: Seq<Entry>)
+    requires left.spec_bytes() == right.spec_bytes(), circuit_index_matches(left, forms, entries),
+    ensures circuit_index_matches(right, forms, entries),
+{
+    crate::sexpr_models_agree_on_bytes(left, right);
+    reveal(index_prefix);
+    assert forall|k: int| 0 <= k < entries.len() implies {
+        let entry = #[trigger] entries[k];
+        &&& indexed_location(right, forms, entry.form as int, entry.namespace)
+        &&& header_matches(right, forms, entry.form as int, entry.namespace.is_some(), entry.head)
+    } by {
+        let entry = entries[k];
+        indexed_location_agrees_on_bytes(left, right, forms, entry.form as int, entry.namespace);
+        super::circuit_header_agrees_on_bytes(left, right, forms, entry.form as int, entry.namespace.is_some(), entry.head,
+            (HeaderError::ExpectedList, 0..0));
+    };
+    assert forall|i: int, namespace: Option<usize>| #[trigger] indexed_location(right, forms, i, namespace)
+        && i < forms.len() implies exists|k: int| 0 <= k < entries.len()
+            && (#[trigger] entries[k]).form == i && entries[k].namespace == namespace by {
+        indexed_location_agrees_on_bytes(left, right, forms, i, namespace);
+        assert(indexed_location(left, forms, i, namespace));
+    };
 }
 
 pub(super) proof fn same_indexed_forms(

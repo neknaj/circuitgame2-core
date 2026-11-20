@@ -9,7 +9,7 @@ use super::clause_diagnostics::{
     type_match_excludes_error,
 };
 #[cfg(verus_only)]
-use super::clauses::enclosing_region_bounds_form;
+use super::clauses::{enclosing_region_bounds_form, named_clause_error_span, named_clause_matches};
 #[cfg(verus_only)]
 use super::{
     direct_form_in_range, directive_argument_error_span, directive_word_at, following_direct_form,
@@ -360,6 +360,122 @@ pub open spec fn structure_error_evidence(
     } else {
         kind == HeaderError::ExpectedName && directive_argument_error_span(forms, first, limit, closing, span)
     }
+}
+
+proof fn natural_section_error_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int, closing: usize, clause: Clause,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures natural_clause_error_evidence(left, forms, index, limit, closing, clause, error.0, error.1)
+        == natural_clause_error_evidence(right, forms, index, limit, closing, clause, error.0, error.1),
+{
+    let after = forms[index]->List_end as int;
+    assert forall|end: int| #[trigger] named_clause_matches(left, forms, index, limit, end, clause)
+        implies end == after by {};
+    assert forall|end: int| #[trigger] named_clause_matches(right, forms, index, limit, end, clause)
+        implies end == after by {};
+    assert(named_clause_matches(left, forms, index, limit, after, clause)
+        == named_clause_matches(right, forms, index, limit, after, clause));
+    assert(named_clause_error_span(left, forms, index, limit, closing, clause, error.1)
+        == named_clause_error_span(right, forms, index, limit, closing, clause, error.1));
+}
+
+proof fn field_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int, error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        field_matches(left, forms, index, limit) == field_matches(right, forms, index, limit),
+        field_error_evidence(left, forms, index, limit, error.0, error.1)
+            == field_error_evidence(right, forms, index, limit, error.0, error.1),
+{
+    if 0 <= index < limit <= forms.len() && forms[index] is List {
+        let end = forms[index]->List_end as int;
+        let span_end = form_span(forms[index]).end;
+        let closing = if span_end > 0 { (span_end - 1) as usize } else { 0usize };
+        let ty = index + 2;
+        let at = if ty < end <= forms.len() && forms[ty] is List { forms[ty]->List_end as int } else { ty + 1 };
+        assert forall|after: int| #[trigger] type_matches(left, forms, ty, end, after)
+            implies after == at by {};
+        assert forall|after: int| #[trigger] type_matches(right, forms, ty, end, after)
+            implies after == at by {};
+        assert(type_matches(left, forms, ty, end, at) == type_matches(right, forms, ty, end, at));
+        natural_section_error_agrees_on_bytes(left, right, forms, ty, end, closing, Clause::Bits, error);
+        natural_section_error_agrees_on_bytes(left, right, forms, at, end, closing, Clause::At, error);
+        assert(type_error_evidence(left, forms, ty, end, closing, error.0, error.1)
+            == type_error_evidence(right, forms, ty, end, closing, error.0, error.1));
+        assert(natural_clause_matches(left, forms, at, end, end, Clause::At)
+            == natural_clause_matches(right, forms, at, end, end, Clause::At));
+        assert forall|after: int| #[trigger] natural_clause_matches(left, forms, at, end, after, Clause::At)
+            implies after == at + 3 by {};
+        assert forall|after: int| #[trigger] natural_clause_matches(right, forms, at, end, after, Clause::At)
+            implies after == at + 3 by {};
+        assert(natural_clause_matches(left, forms, at, end, at + 3, Clause::At)
+            == natural_clause_matches(right, forms, at, end, at + 3, Clause::At));
+        assert(field_offset_error_evidence(left, forms, at, end, closing, error.0, error.1)
+            == field_offset_error_evidence(right, forms, at, end, closing, error.0, error.1));
+    }
+}
+
+proof fn fields_before_transfer_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, limit: int, cursor: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(), fields_match_before(left, forms, first, limit, cursor),
+    ensures fields_match_before(right, forms, first, limit, cursor),
+{
+    reveal(fields_match_before);
+    assert forall|i: int| #[trigger] direct_form_in_range(forms, first, limit, i) && i < cursor
+        implies field_matches(right, forms, i, limit) by {
+        field_agrees_on_bytes(left, right, forms, i, limit, error);
+    };
+}
+
+proof fn structure_body_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, limit: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        structure_body_matches(left, forms, first, limit) ==> structure_body_matches(right, forms, first, limit),
+        structure_body_error_evidence(left, forms, first, limit, closing, error.0, error.1)
+            ==> structure_body_error_evidence(right, forms, first, limit, closing, error.0, error.1),
+{
+    let fields = first + 3;
+    assert(natural_clause_matches(left, forms, first, limit, fields, Clause::Width)
+        == natural_clause_matches(right, forms, first, limit, fields, Clause::Width));
+    if structure_body_matches(left, forms, first, limit) {
+        fields_before_transfer_on_bytes(left, right, forms, fields, limit, limit, error);
+    }
+    natural_section_error_agrees_on_bytes(left, right, forms, first, limit, closing, Clause::Width, error);
+    if structure_body_error_evidence(left, forms, first, limit, closing, error.0, error.1)
+        && !natural_clause_error_evidence(left, forms, first, limit, closing, Clause::Width, error.0, error.1)
+    {
+        let (start, i) = choose|start: int, i: int|
+            #[trigger] natural_clause_matches(left, forms, first, limit, start, Clause::Width)
+            && #[trigger] direct_form_in_range(forms, start, limit, i)
+            && fields_match_before(left, forms, start, limit, i)
+            && field_error_evidence(left, forms, i, limit, error.0, error.1);
+        assert(start == fields);
+        fields_before_transfer_on_bytes(left, right, forms, fields, limit, i, error);
+        field_agrees_on_bytes(left, right, forms, i, limit, error);
+    }
+}
+
+/// 同じ本文と構文木では、構造体の引数の妥当性と最初の診断の根拠が一致する。
+pub(super) proof fn structure_arguments_agree_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, limit: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        structure_arguments_match(left, forms, first, limit) == structure_arguments_match(right, forms, first, limit),
+        structure_error_evidence(left, forms, first, limit, closing, error.0, error.1)
+            == structure_error_evidence(right, forms, first, limit, closing, error.0, error.1),
+{
+    structure_body_transfers_on_bytes(left, right, forms, first + 1, limit, closing, error);
+    structure_body_transfers_on_bytes(right, left, forms, first + 1, limit, closing, error);
 }
 
 /// 同じ構造体の診断根拠から、最初の違反の種別と範囲が一意に定まることを示す。

@@ -2,10 +2,12 @@
 
 use super::clauses::{
     named_clause_error_span, named_clause_matches, natural_clause_error_evidence,
-    natural_clause_matches, storage_error_evidence, type_error_evidence, type_matches,
+    natural_clause_matches, storage_arguments_match, storage_error_evidence, type_error_evidence, type_matches,
 };
 use super::{Clause, Form, Head, HeaderError, Range, form_span};
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -96,6 +98,95 @@ pub(super) proof fn type_match_excludes_error(
     if forms[index] is List {
         natural_match_excludes_error(source, forms, index, limit, closing, Clause::Bits, after, error);
     }
+}
+
+proof fn natural_clause_error_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int, closing: usize, clause: Clause,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures natural_clause_error_evidence(left, forms, index, limit, closing, clause, error.0, error.1)
+        == natural_clause_error_evidence(right, forms, index, limit, closing, clause, error.0, error.1),
+{
+    let after = forms[index]->List_end as int;
+    assert forall|end: int| #[trigger] named_clause_matches(left, forms, index, limit, end, clause)
+        implies end == after by {};
+    assert forall|end: int| #[trigger] named_clause_matches(right, forms, index, limit, end, clause)
+        implies end == after by {};
+    assert(named_clause_matches(left, forms, index, limit, after, clause)
+        == named_clause_matches(right, forms, index, limit, after, clause));
+    assert(named_clause_error_span(left, forms, index, limit, closing, clause, error.1)
+        == named_clause_error_span(right, forms, index, limit, closing, clause, error.1));
+}
+
+proof fn storage_arguments_transfer_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, limit: int, closing: usize, head: Head,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        storage_arguments_match(left, forms, first, limit, head) ==> storage_arguments_match(right, forms, first, limit, head),
+        storage_error_evidence(left, forms, first, limit, closing, head, error.0, error.1)
+            ==> storage_error_evidence(right, forms, first, limit, closing, head, error.0, error.1),
+{
+    let data = first + 3;
+    if head is Latch {
+        natural_clause_error_agrees_on_bytes(left, right, forms, first, limit, closing, Clause::Width, error);
+        assert forall|after: int| #[trigger] natural_clause_matches(left, forms, first, limit, after, Clause::Width)
+            implies after == data by {};
+        assert(natural_clause_matches(left, forms, first, limit, data, Clause::Width)
+            == natural_clause_matches(right, forms, first, limit, data, Clause::Width));
+    } else if head is Memory {
+        natural_clause_error_agrees_on_bytes(left, right, forms, first, limit, closing, Clause::Address, error);
+        assert forall|after: int| #[trigger] natural_clause_matches(left, forms, first, limit, after, Clause::Address)
+            implies after == data by {};
+        assert(natural_clause_matches(left, forms, first, limit, data, Clause::Address)
+            == natural_clause_matches(right, forms, first, limit, data, Clause::Address));
+        let value = data + 2;
+        if storage_arguments_match(left, forms, first, limit, head) {
+            assert(named_clause_matches(right, forms, data, limit, limit, Clause::Data));
+            assert(type_matches(right, forms, value, limit, limit));
+        }
+        if storage_error_evidence(left, forms, first, limit, closing, head, error.0, error.1)
+            && !natural_clause_error_evidence(left, forms, first, limit, closing, Clause::Address, error.0, error.1)
+        {
+            if error.0 == HeaderError::ExpectedClause(Clause::Data)
+                && named_clause_error_span(left, forms, data, limit, closing, Clause::Data, error.1)
+            {
+                assert(named_clause_error_span(right, forms, data, limit, closing, Clause::Data, error.1));
+            } else {
+                let data_end = forms[data]->List_end as int;
+                assert forall|end: int| #[trigger] named_clause_matches(left, forms, data, limit, end, Clause::Data)
+                    implies end == data_end by {};
+                assert(named_clause_matches(right, forms, data, limit, data_end, Clause::Data));
+                let close = (form_span(forms[data]).end - 1) as usize;
+                natural_clause_error_agrees_on_bytes(left, right, forms, value, data_end, close, Clause::Bits, error);
+                assert(type_error_evidence(left, forms, value, data_end, close, error.0, error.1)
+                    == type_error_evidence(right, forms, value, data_end, close, error.0, error.1));
+                if !type_error_evidence(left, forms, value, data_end, close, error.0, error.1) {
+                    let after = choose|after: int| #[trigger] type_matches(left, forms, value, data_end, after)
+                        && (after < data_end && error.1 == form_span(forms[after])
+                            || after == data_end && data_end < limit && error.1 == form_span(forms[data_end]));
+                    assert(type_matches(right, forms, value, data_end, after));
+                }
+            }
+        }
+    }
+}
+
+/// 同じ本文と構文木では、状態素子の引数の妥当性と最初の診断の根拠が一致する。
+pub(super) proof fn storage_arguments_agree_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, limit: int, closing: usize, head: Head,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        storage_arguments_match(left, forms, first, limit, head) == storage_arguments_match(right, forms, first, limit, head),
+        storage_error_evidence(left, forms, first, limit, closing, head, error.0, error.1)
+            == storage_error_evidence(right, forms, first, limit, closing, head, error.0, error.1),
+{
+    storage_arguments_transfer_on_bytes(left, right, forms, first, limit, closing, head, error);
+    storage_arguments_transfer_on_bytes(right, left, forms, first, limit, closing, head, error);
 }
 
 /// ラッチとメモリでは、幅とデータ型の節を検査する順序から同じ診断が得られる。

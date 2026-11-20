@@ -3,7 +3,7 @@
 use super::expressions::expression_children;
 #[cfg(verus_only)]
 use super::expressions::{
-    after_form, argument_matches, arguments_match, expression_child_range, expression_list_error, list_head_matches,
+    after_form, argument_matches, argument_shape_error, arguments_match, expression_child_range, expression_list_error, list_head_matches,
     same_expression_head, same_expression_list_error,
 };
 use super::*;
@@ -565,6 +565,89 @@ pub closed spec fn expression_forest_error(
             }
         },
     }
+}
+
+/// 同じ UTF-8 本文から得たフォーム列では、式の文法判定と最初の診断が一致する。
+pub(super) proof fn expression_forest_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, stop: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        expression_forest(left, forms, start, stop) == expression_forest(right, forms, start, stop),
+        expression_forest_error(left, forms, start, stop, error)
+            == expression_forest_error(right, forms, start, stop, error),
+    decreases stop - start,
+{
+    if 0 <= start < stop <= forms.len() {
+        match forms[start] {
+            Form::Atom { .. } => {
+                expression_forest_agrees_on_bytes(left, right, forms, start + 1, stop, error);
+            },
+            Form::List { span, end } => {
+                let next = end as int;
+                if start < next <= stop {
+                    assert forall|head: Option<ExpressionHead>|
+                        #![trigger list_head_matches(left, forms, start + 1, head)]
+                        #![trigger list_head_matches(right, forms, start + 1, head)]
+                        list_head_matches(left, forms, start + 1, head)
+                        == list_head_matches(right, forms, start + 1, head) by {};
+                    assert forall|i: int, j: int|
+                        #![trigger expression_child_range(left, forms, start, next, i, j)]
+                        #![trigger expression_child_range(right, forms, start, next, i, j)]
+                        expression_child_range(left, forms, start, next, i, j)
+                        == expression_child_range(right, forms, start, next, i, j) by {
+                        if expression_child_range(left, forms, start, next, i, j) {
+                            let head = choose|head: Option<ExpressionHead>|
+                                #[trigger] list_head_matches(left, forms, start + 1, head)
+                                && arguments_match(forms, start + 2, next, head, i, j);
+                            assert(list_head_matches(right, forms, start + 1, head));
+                        }
+                        if expression_child_range(right, forms, start, next, i, j) {
+                            let head = choose|head: Option<ExpressionHead>|
+                                #[trigger] list_head_matches(right, forms, start + 1, head)
+                                && arguments_match(forms, start + 2, next, head, i, j);
+                            assert(list_head_matches(left, forms, start + 1, head));
+                        }
+                    };
+                    if exists|i: int, j: int| #[trigger] expression_child_range(left, forms, start, next, i, j) {
+                        let (a, b) = choose|i: int, j: int|
+                            #[trigger] expression_child_range(left, forms, start, next, i, j);
+                        expression_forest_agrees_on_bytes(left, right, forms, a, b, error);
+                        expression_forest_agrees_on_bytes(left, right, forms, next, stop, error);
+                        assert forall|i: int, j: int|
+                            #[trigger] expression_child_range(left, forms, start, next, i, j)
+                            implies i == a && j == b by {
+                            same_child_interval(left, forms, start, next, a, b, i, j);
+                        };
+                    } else if span.end > 0 {
+                        let closing = (span.end - 1) as usize;
+                        assert(expression_list_error(left, forms, start, next, closing, error)
+                            == expression_list_error(right, forms, start, next, closing, error)) by {
+                            if expression_list_error(left, forms, start, next, closing, error)
+                                && !expression_list_error(right, forms, start, next, closing, error)
+                            {
+                                let head = choose|head: Option<ExpressionHead>|
+                                    #[trigger] list_head_matches(left, forms, start + 1, head)
+                                    && argument_shape_error(forms, start + 2, next, closing, head) == Some(error);
+                                assert(list_head_matches(right, forms, start + 1, head));
+                            }
+                            if expression_list_error(right, forms, start, next, closing, error)
+                                && !expression_list_error(left, forms, start, next, closing, error)
+                            {
+                                let head = choose|head: Option<ExpressionHead>|
+                                    #[trigger] list_head_matches(right, forms, start + 1, head)
+                                    && argument_shape_error(forms, start + 2, next, closing, head) == Some(error);
+                                assert(list_head_matches(left, forms, start + 1, head));
+                            }
+                        };
+                    }
+                }
+            },
+        }
+    }
+    reveal(expression_forest);
+    reveal(expression_forest_error);
 }
 
 /// 文法に適合する式列には、式列の診断が成立しない。

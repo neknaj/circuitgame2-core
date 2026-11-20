@@ -12,7 +12,7 @@ use super::clause_diagnostics::{
     type_match_excludes_error,
 };
 #[cfg(verus_only)]
-use super::clauses::{enclosing_region_bounds_form, natural_clause_matches, reference_atom};
+use super::clauses::{enclosing_region_bounds_form, natural_clause_error_evidence, natural_clause_matches, reference_atom};
 #[cfg(verus_only)]
 use super::index::indexed_entry_evidence;
 #[cfg(verus_only)]
@@ -472,6 +472,139 @@ pub open spec fn routine_signature_error_evidence(
             || (exists|out: int| #[trigger] ports_clause_matches(source, forms, first + 1, limit, out, Clause::In)
                 && ports_error_evidence(source, forms, out, limit, closing, Clause::Out, kind, span)))
     }
+}
+
+proof fn port_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        port_matches(left, forms, index, limit) == port_matches(right, forms, index, limit),
+        port_error_evidence(left, forms, index, limit, error.0, error.1)
+            == port_error_evidence(right, forms, index, limit, error.0, error.1),
+{
+    if 0 <= index < limit <= forms.len() && forms[index] is List {
+        let end = forms[index]->List_end as int;
+        let span_end = form_span(forms[index]).end;
+        let closing = if span_end > 0 { (span_end - 1) as usize } else { 0usize };
+        let ty = index + 2;
+        let type_is_list = ty < end <= forms.len() && forms[ty] is List;
+        let after = if type_is_list { forms[ty]->List_end as int } else { ty + 1 };
+        if type_is_list {
+            assert forall|n: int| #[trigger] named_clause_matches(left, forms, ty, end, n, Clause::Bits)
+                implies n == after by {};
+            assert forall|n: int| #[trigger] named_clause_matches(right, forms, ty, end, n, Clause::Bits)
+                implies n == after by {};
+            assert(named_clause_matches(left, forms, ty, end, after, Clause::Bits)
+                == named_clause_matches(right, forms, ty, end, after, Clause::Bits));
+            assert(named_clause_error_span(left, forms, ty, end, closing, Clause::Bits, error.1)
+                == named_clause_error_span(right, forms, ty, end, closing, Clause::Bits, error.1));
+            assert(natural_clause_error_evidence(left, forms, ty, end, closing, Clause::Bits, error.0, error.1)
+                == natural_clause_error_evidence(right, forms, ty, end, closing, Clause::Bits, error.0, error.1));
+        }
+        assert forall|n: int| #[trigger] type_matches(left, forms, ty, end, n)
+            implies n == after by {};
+        assert forall|n: int| #[trigger] type_matches(right, forms, ty, end, n)
+            implies n == after by {};
+        assert(type_matches(left, forms, ty, end, after) == type_matches(right, forms, ty, end, after));
+        assert(type_matches(left, forms, ty, end, end) == type_matches(right, forms, ty, end, end));
+        assert(type_error_evidence(left, forms, ty, end, closing, error.0, error.1)
+            == type_error_evidence(right, forms, ty, end, closing, error.0, error.1));
+    }
+}
+
+proof fn ports_before_transfer_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, end: int, stop: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(), ports_match_before(left, forms, start, end, stop),
+    ensures ports_match_before(right, forms, start, end, stop),
+{
+    reveal(ports_match_before);
+    assert forall|i: int| #[trigger] direct_form_in_range(forms, start, end, i) && i < stop
+        implies port_matches(right, forms, i, end) by {
+        port_agrees_on_bytes(left, right, forms, i, end, error);
+    };
+}
+
+proof fn ports_error_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int, closing: usize,
+    clause: Clause, error: (HeaderError, Range<usize>),
+)
+    requires
+        left.spec_bytes() == right.spec_bytes(),
+        ports_error_evidence(left, forms, index, limit, closing, clause, error.0, error.1),
+    ensures ports_error_evidence(right, forms, index, limit, closing, clause, error.0, error.1),
+{
+    let start = index + 2;
+    let end = forms[index]->List_end as int;
+    if error.0 == HeaderError::ExpectedClause(clause)
+        && named_clause_error_span(left, forms, index, limit, closing, clause, error.1)
+    {
+        assert(named_clause_error_span(right, forms, index, limit, closing, clause, error.1));
+    } else {
+        assert(named_clause_matches(left, forms, index, limit, end, clause));
+        assert(named_clause_matches(right, forms, index, limit, end, clause));
+        if clause is Out && start == end {
+            reveal(direct_form_in_range);
+            assert(forall|i: int| !#[trigger] direct_form_in_range(forms, start, end, i));
+        } else {
+            let port = choose|i: int| #[trigger] direct_form_in_range(forms, start, end, i)
+                && ports_match_before(left, forms, start, end, i)
+                && port_error_evidence(left, forms, i, end, error.0, error.1);
+            ports_before_transfer_on_bytes(left, right, forms, start, end, port, error);
+            port_agrees_on_bytes(left, right, forms, port, end, error);
+        }
+    }
+}
+
+proof fn port_clause_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int, after: int,
+    closing: usize, clause: Clause, error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        ports_clause_matches(left, forms, index, limit, after, clause)
+            == ports_clause_matches(right, forms, index, limit, after, clause),
+        ports_error_evidence(left, forms, index, limit, closing, clause, error.0, error.1)
+            == ports_error_evidence(right, forms, index, limit, closing, clause, error.0, error.1),
+{
+    let start = index + 2;
+    if ports_match_before(left, forms, start, after, after) {
+        ports_before_transfer_on_bytes(left, right, forms, start, after, after, error);
+    }
+    if ports_match_before(right, forms, start, after, after) {
+        ports_before_transfer_on_bytes(right, left, forms, start, after, after, error);
+    }
+    if ports_error_evidence(left, forms, index, limit, closing, clause, error.0, error.1) {
+        ports_error_transfers_on_bytes(left, right, forms, index, limit, closing, clause, error);
+    }
+    if ports_error_evidence(right, forms, index, limit, closing, clause, error.0, error.1) {
+        ports_error_transfers_on_bytes(right, left, forms, index, limit, closing, clause, error);
+    }
+}
+
+/// 同じ本文と構文木なら、署名の認識と診断根拠は一致する。
+pub(super) proof fn routine_signature_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, limit: int, closing: usize, head: Head,
+    after: int, error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        routine_signature_matches(left, forms, first, limit, head, after)
+            == routine_signature_matches(right, forms, first, limit, head, after),
+        routine_signature_error_evidence(left, forms, first, limit, closing, head, error.0, error.1)
+            == routine_signature_error_evidence(right, forms, first, limit, closing, head, error.0, error.1),
+{
+    let input = first + 1;
+    let output = forms[input]->List_end as int;
+    assert forall|out: int| #[trigger] ports_clause_matches(left, forms, input, limit, out, Clause::In)
+        implies out == output by {};
+    assert forall|out: int| #[trigger] ports_clause_matches(right, forms, input, limit, out, Clause::In)
+        implies out == output by {};
+    port_clause_agrees_on_bytes(left, right, forms, input, limit, output, closing, Clause::In, error);
+    port_clause_agrees_on_bytes(left, right, forms, output, limit, after, closing, Clause::Out, error);
 }
 
 /// 構文に適合した署名から、本体の開始位置が一意に定まることを示す。

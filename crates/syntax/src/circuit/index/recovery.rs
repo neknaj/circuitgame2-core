@@ -296,6 +296,60 @@ pub proof fn circuit_recovery_results_agree_on_sexpr(source: &str, left: &Circui
     }
 }
 
+proof fn check_trace_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, checked: Seq<RecoveredCircuitForm>, next: (int, Option<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(), check_trace(left, forms, checked, next),
+    ensures check_trace(right, forms, checked, next),
+{
+    reveal(check_trace);
+    assert forall|i: int| 0 <= i < checked.len() implies checked_matches(right, forms, #[trigger] checked[i]) by {
+        reveal(checked_matches);
+        let item = checked[i];
+        let index = item.form as int;
+        let in_namespace = item.namespace.is_some();
+        assert(checked_matches(left, forms, item));
+        super::indexed_location_agrees_on_bytes(left, right, forms, index, item.namespace);
+        if let Some(parent) = item.namespace {
+            crate::circuit::circuit_header_agrees_on_bytes(left, right, forms, parent as int, false, Head::Namespace,
+                (HeaderError::ExpectedList, 0..0));
+        }
+        match item.outcome {
+            RecoveredFormOutcome::Valid(head) => {
+                crate::circuit::circuit_header_agrees_on_bytes(left, right, forms, index, in_namespace, head,
+                    (HeaderError::ExpectedList, 0..0));
+            },
+            RecoveredFormOutcome::Rejected { kind, span, .. } => {
+                assert forall|head: Head| !#[trigger] header_matches(right, forms, index, in_namespace, head) by {
+                    crate::circuit::circuit_header_agrees_on_bytes(left, right, forms, index, in_namespace, head, (kind, span));
+                };
+                crate::circuit::circuit_header_agrees_on_bytes(left, right, forms, index, in_namespace, Head::Namespace,
+                    (kind, span));
+            },
+        }
+    };
+}
+
+/// S 式として読める本文の回復結果は、同じ UTF-8 バイト列を持つ入力の契約も満たす。
+pub proof fn circuit_recovery_transfers_on_sexpr_bytes(left: &str, right: &str, recovery: &CircuitRecovery)
+    requires
+        left.spec_bytes() == right.spec_bytes(),
+        well_formed_sexpr(left),
+        circuit_recovery_matches(left, *recovery),
+    ensures circuit_recovery_matches(right, *recovery),
+{
+    crate::sexpr_models_agree_on_bytes(left, right);
+    super::circuit_acceptance_agrees_on_bytes(left, right);
+    reveal(form_spans_valid);
+    reveal(list_source_delimiters);
+    match recovery {
+        CircuitRecovery::Complete(index) => super::circuit_index_agrees_on_bytes(left, right, index.forms@, index.entries@),
+        CircuitRecovery::Inspected { forms, checked } =>
+            check_trace_transfers_on_bytes(left, right, forms@, checked@, (forms@.len() as int, None)),
+        _ => {},
+    }
+}
+
 /// 回路フォームを検査し、回路文法に違反したフォームの後も検査を続ける。
 ///
 /// 妥当なソースでは厳格索引を返す。S 式として読めるソースでは、壊れたフォームの後にある兄弟も検査する。

@@ -213,8 +213,7 @@ spec fn lexical_step_agrees(bytes: Seq<u8>, start: int, end: int, observed: Opti
 
 /// 不正な字句の診断と、字句解析で読み飛ばす範囲との対応を表す。
 #[verifier::opaque]
-spec fn malformed_segment_matches(source: &str, span: Range<usize>, error: Error) -> bool {
-    let bytes = source.spec_bytes();
+spec fn malformed_segment_matches(bytes: Seq<u8>, span: Range<usize>, error: Error) -> bool {
     let start = span.start as int;
     let end = span.end as int;
     &&& 0 <= start < end <= bytes.len()
@@ -230,13 +229,12 @@ spec fn malformed_segment_matches(source: &str, span: Range<usize>, error: Error
 }
 
 /// 同じ開始位置から読み飛ばす範囲と、その診断は一意に定まる。
-proof fn malformed_segments_agree(source: &str, a: Range<usize>, b: Range<usize>, left: Error, right: Error)
-    requires a.start == b.start, malformed_segment_matches(source, a, left), malformed_segment_matches(source, b, right),
+proof fn malformed_segments_agree(bytes: Seq<u8>, a: Range<usize>, b: Range<usize>, left: Error, right: Error)
+    requires a.start == b.start, malformed_segment_matches(bytes, a, left), malformed_segment_matches(bytes, b, right),
     ensures a == b, left == right,
 {
     reveal(malformed_segment_matches);
     reveal(bare_atom_extent);
-    let bytes = source.spec_bytes();
     let start = a.start as int;
     if left.kind is InvalidAtom {
         assert(!bare_atom_delimiter(bytes[start]));
@@ -258,6 +256,43 @@ struct Segment {
     kind: SegmentKind,
     span: Range<usize>,
     missing_separator: bool,
+}
+
+/// 指定した位置と直前の区切り状態から、正常または不正な一字句を読む規則を表す。
+#[verifier::opaque]
+spec fn recovery_segment_at(bytes: Seq<u8>, start: int, needs_separator: bool, segment: Segment) -> bool {
+    let span = segment.span;
+    &&& 0 <= start == span.start < span.end <= bytes.len()
+    &&& is_char_boundary(bytes, start)
+    &&& is_char_boundary(bytes, span.end as int)
+    &&& lexical_step_agrees(bytes, start, span.end as int, segment_lexeme(segment.kind))
+    &&& (segment.kind matches SegmentKind::Malformed(error) ==> malformed_segment_matches(bytes, span, error))
+    &&& segment.missing_separator == (needs_separator && segment.kind.is_atom())
+}
+
+/// 同じバイト列の同じ位置と区切り状態から読む字句は、終端と診断を含めて一致する。
+proof fn recovery_segments_agree(bytes: Seq<u8>, start: int, needs_separator: bool, left: Segment, right: Segment)
+    requires
+        recovery_segment_at(bytes, start, needs_separator, left),
+        recovery_segment_at(bytes, start, needs_separator, right),
+    ensures left == right,
+{
+    reveal(recovery_segment_at);
+    reveal(lexical_step_agrees);
+    match (left.kind, right.kind) {
+        (SegmentKind::Malformed(a), SegmentKind::Malformed(b)) =>
+            malformed_segments_agree(bytes, left.span, right.span, a, b),
+        _ => {
+            // 正常な字句が成立すれば、両方の根拠が同じ正常字句を選ぶ。
+            let a = segment_lexeme(left.kind);
+            let b = segment_lexeme(right.kind);
+            if a is Some {
+                assert(lexeme_at(bytes, start, left.span.end as int, a->Some_0));
+            } else {
+                assert(lexeme_at(bytes, start, right.span.end as int, b->Some_0));
+            }
+        },
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -310,11 +345,13 @@ impl<'a> Lexer<'a> {
                             || string_error_kind(segment.kind->Malformed_0.kind))
                         && strict_error::malformed_atom_extent(self.cursor.source.spec_bytes(),
                             segment.span.start as int, segment.kind->Malformed_0)
-                        && malformed_segment_matches(self.cursor.source, segment.span, segment.kind->Malformed_0))
+                        && malformed_segment_matches(self.cursor.source.spec_bytes(), segment.span, segment.kind->Malformed_0))
                     &&& (segment.kind is Atom ==> form_atom_matches(self.cursor.source,
                         Form::Atom { kind: segment.kind->Atom_0, span: segment.span }))
                     &&& next.needs_separator == segment.kind.is_atom()
                     &&& segment.missing_separator == (self.needs_separator && segment.kind.is_atom())
+                    &&& recovery_segment_at(self.cursor.source.spec_bytes(), self.cursor.position(),
+                        self.needs_separator, segment)
                 },
             },
     {
@@ -351,7 +388,7 @@ impl<'a> Lexer<'a> {
             self.cursor.source.spec_bytes(), span.start as int, kind->Malformed_0)) by {
             reveal(strict_error::malformed_atom_extent);
         };
-        assert(kind is Malformed ==> malformed_segment_matches(self.cursor.source, span, kind->Malformed_0)) by {
+        assert(kind is Malformed ==> malformed_segment_matches(self.cursor.source.spec_bytes(), span, kind->Malformed_0)) by {
             reveal(malformed_segment_matches);
         };
         proof {
@@ -412,10 +449,12 @@ impl<'a> Lexer<'a> {
             };
         }
         let missing_separator = self.needs_separator && is_atom;
-        Some((
-            Segment { kind, span, missing_separator },
-            Self { cursor, needs_separator: is_atom },
-        ))
+        let segment = Segment { kind, span, missing_separator };
+        assert(recovery_segment_at(self.cursor.source.spec_bytes(), self.cursor.position(),
+            self.needs_separator, segment)) by {
+            reveal(recovery_segment_at);
+        };
+        Some((segment, Self { cursor, needs_separator: is_atom }))
     }
 }
 

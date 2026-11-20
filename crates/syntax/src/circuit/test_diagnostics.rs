@@ -2,7 +2,7 @@
 
 use super::expressions::{argument_error, argument_matches};
 use super::test_items::{
-    test_arguments_error, test_body_error, test_case_error,
+    test_arguments_error, test_arguments_match, test_body_error, test_body_matches, test_case_error,
     test_case_matches, test_item_arguments_error, test_item_arguments_match, test_item_error,
     test_item_head_at, test_item_head_error, test_item_matches, test_items_before,
 };
@@ -10,6 +10,194 @@ use super::test_values::{test_value_error, test_value_matches, test_values_befor
 use super::*;
 
 verus! {
+
+proof fn values_agree_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, end: int, allow_any: bool,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        forall|cursor: int| #[trigger] test_values_before(left, forms, start, end, cursor, allow_any)
+            == #[trigger] test_values_before(right, forms, start, end, cursor, allow_any),
+        test_values_error(left, forms, start, end, allow_any, error)
+            == test_values_error(right, forms, start, end, allow_any, error),
+{
+    assert forall|cursor: int| #[trigger] test_values_before(left, forms, start, end, cursor, allow_any)
+        == #[trigger] test_values_before(right, forms, start, end, cursor, allow_any) by {
+        reveal(test_values_before);
+        assert forall|index: int| #[trigger] direct_form_in_range(forms, start, end, index) && index < cursor
+            implies test_value_matches(left, forms, index, end, allow_any)
+                == test_value_matches(right, forms, index, end, allow_any) by {};
+    };
+    if test_values_error(left, forms, start, end, allow_any, error) {
+        let index = choose|index: int| #[trigger] direct_form_in_range(forms, start, end, index)
+            && test_values_before(left, forms, start, end, index, allow_any)
+            && test_value_error(left, forms, index, end, allow_any, error);
+        assert(test_value_error(right, forms, index, end, allow_any, error));
+    }
+    if test_values_error(right, forms, start, end, allow_any, error) {
+        let index = choose|index: int| #[trigger] direct_form_in_range(forms, start, end, index)
+            && test_values_before(right, forms, start, end, index, allow_any)
+            && test_value_error(right, forms, index, end, allow_any, error);
+        assert(test_value_error(left, forms, index, end, allow_any, error));
+    }
+}
+
+proof fn case_evidence_moves_between_equal_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, end: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        test_case_matches(left, forms, first, end) ==> test_case_matches(right, forms, first, end),
+        test_case_error(left, forms, first, end, closing, error) ==> test_case_error(right, forms, first, end, closing, error),
+{
+    if test_case_matches(left, forms, first, end) {
+        let input_end = choose|input_end: int| #[trigger] named_clause_matches(left, forms, first, end, input_end, Clause::In)
+            && test_values_before(left, forms, first + 2, input_end, input_end, false)
+            && named_clause_matches(left, forms, input_end, end, end, Clause::Expect)
+            && test_values_before(left, forms, input_end + 2, end, end, true);
+        values_agree_on_bytes(left, right, forms, first + 2, input_end, false, error);
+        values_agree_on_bytes(left, right, forms, input_end + 2, end, true, error);
+        assert(named_clause_matches(right, forms, first, end, input_end, Clause::In));
+        assert(named_clause_matches(right, forms, input_end, end, end, Clause::Expect));
+    }
+    if test_case_error(left, forms, first, end, closing, error)
+        && !(error.0 == HeaderError::ExpectedClause(Clause::In)
+            && named_clause_error_span(left, forms, first, end, closing, Clause::In, error.1)) {
+        let input_end = forms[first]->List_end as int;
+        values_agree_on_bytes(left, right, forms, first + 2, input_end, false, error);
+        if !test_values_error(left, forms, first + 2, input_end, false, error)
+            && !(error.0 == HeaderError::ExpectedClause(Clause::Expect)
+                && named_clause_error_span(left, forms, input_end, end, closing, Clause::Expect, error.1)) {
+            let after = forms[input_end]->List_end as int;
+            values_agree_on_bytes(left, right, forms, input_end + 2, after, true, error);
+            assert(named_clause_matches(right, forms, input_end, end, after, Clause::Expect));
+        }
+        assert(named_clause_matches(right, forms, first, end, input_end, Clause::In));
+    }
+}
+
+proof fn item_arguments_evidence_moves_between_equal_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, end: int, closing: usize, kind: TestHead,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        test_item_arguments_match(left, forms, first, end, kind) ==> test_item_arguments_match(right, forms, first, end, kind),
+        test_item_arguments_error(left, forms, first, end, closing, kind, error)
+            ==> test_item_arguments_error(right, forms, first, end, closing, kind, error),
+{
+    match kind {
+        TestHead::Case => case_evidence_moves_between_equal_bytes(left, right, forms, first, end, closing, error),
+        TestHead::Drive => values_agree_on_bytes(left, right, forms, first, end, false, error),
+        TestHead::Expect => values_agree_on_bytes(left, right, forms, first, end, true, error),
+        _ => {},
+    }
+}
+
+proof fn test_items_before_move_between_equal_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, end: int, cursor: int, first: TestHead,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(), test_items_before(left, forms, start, end, cursor, first),
+    ensures test_items_before(right, forms, start, end, cursor, first),
+{
+    reveal(test_items_before);
+    assert forall|index: int| #[trigger] direct_form_in_range(forms, start, end, index) && index < cursor
+        implies test_item_matches(right, forms, index, end, first) by {
+        assert(test_item_matches(left, forms, index, end, first));
+        let stop = forms[index]->List_end as int;
+        let kind = choose|kind: TestHead| #[trigger] test_item_head_at(left, forms, index, end, kind)
+            && (first is Case) == (kind is Case)
+            && test_item_arguments_match(left, forms, index + 2, stop, kind);
+        // 文法に適合するかの判定には閉じ括弧の位置を使わない。
+        item_arguments_evidence_moves_between_equal_bytes(left, right, forms, index + 2, stop, 0, kind, error);
+        assert(test_item_head_at(right, forms, index, end, kind));
+    };
+}
+
+proof fn item_head_error_moves_between_equal_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, end: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(), test_item_head_error(left, forms, index, end, error),
+    ensures test_item_head_error(right, forms, index, end, error),
+{
+    assert forall|kind: TestHead| #[trigger] test_item_head_at(right, forms, index, end, kind) implies false by {
+        assert(test_item_head_at(left, forms, index, end, kind));
+    };
+}
+
+proof fn test_arguments_evidence_moves_between_equal_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, end: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        test_arguments_match(left, forms, first, end) ==> test_arguments_match(right, forms, first, end),
+        test_arguments_error(left, forms, first, end, closing, error)
+            ==> test_arguments_error(right, forms, first, end, closing, error),
+{
+    let start = first + 1;
+    if test_arguments_match(left, forms, first, end) {
+        assert(test_body_matches(left, forms, start, end));
+        let head = choose|head: TestHead| #[trigger] test_item_head_at(left, forms, start, end, head)
+            && test_items_before(left, forms, start, end, end, head);
+        test_items_before_move_between_equal_bytes(left, right, forms, start, end, end, head, error);
+        assert(test_item_head_at(right, forms, start, end, head));
+    }
+    if test_arguments_error(left, forms, first, end, closing, error)
+        && argument_matches(forms, first, end, HeaderError::ExpectedReference) && start != end {
+        if test_item_head_error(left, forms, start, end, error) {
+            item_head_error_moves_between_equal_bytes(left, right, forms, start, end, error);
+        } else {
+            assert(0 <= start + 1 < forms.len());
+            let first_span = form_span(forms[start + 1]);
+            let (head, index) = choose|head: TestHead, index: int|
+                #[trigger] test_item_head_at(left, forms, start, end, head)
+                && #[trigger] direct_form_in_range(forms, start, end, index)
+                && test_items_before(left, forms, start, end, index, head)
+                && test_item_error(left, forms, index, end, head, first_span, error);
+            test_items_before_move_between_equal_bytes(left, right, forms, start, end, index, head, error);
+            assert(test_item_head_at(right, forms, start, end, head));
+            if test_item_head_error(left, forms, index, end, error) {
+                item_head_error_moves_between_equal_bytes(left, right, forms, index, end, error);
+            } else {
+                let kind = choose|kind: TestHead| #[trigger] test_item_head_at(left, forms, index, end, kind)
+                    && if (head is Case) != (kind is Case) {
+                        error == (HeaderError::MixedTestItems { first_head: (first_span.start, first_span.end) },
+                            form_span(forms[index + 1]))
+                    } else {
+                        let span = form_span(forms[index]);
+                        span.end > 0 && test_item_arguments_error(left, forms, index + 2,
+                            forms[index]->List_end as int, (span.end - 1) as usize, kind, error)
+                    };
+                if (head is Case) == (kind is Case) {
+                    item_arguments_evidence_moves_between_equal_bytes(left, right, forms, index + 2,
+                        forms[index]->List_end as int, (form_span(forms[index]).end - 1) as usize, kind, error);
+                }
+                assert(test_item_head_at(right, forms, index, end, kind));
+            }
+            assert(test_item_error(right, forms, index, end, head, first_span, error));
+        }
+    }
+}
+
+/// テストフォームの受理条件と診断の根拠は、ソースの UTF-8 バイト列で決まる。
+pub(super) proof fn test_arguments_agree_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, first: int, end: int, closing: usize,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        test_arguments_match(left, forms, first, end) == test_arguments_match(right, forms, first, end),
+        test_arguments_error(left, forms, first, end, closing, error)
+            == test_arguments_error(right, forms, first, end, closing, error),
+{
+    test_arguments_evidence_moves_between_equal_bytes(left, right, forms, first, end, closing, error);
+    test_arguments_evidence_moves_between_equal_bytes(right, left, forms, first, end, closing, error);
+}
 
 proof fn value_errors_agree(
     source: &str, forms: Seq<Form>, index: int, end: int, allow_any: bool,

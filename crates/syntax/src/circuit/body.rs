@@ -1015,6 +1015,86 @@ pub(super) open spec fn routine_arguments_error(
         && body_error(source, forms, body, end, error))
 }
 
+proof fn body_item_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, index: int, limit: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        body_item_matches(left, forms, index, limit) ==> body_item_matches(right, forms, index, limit),
+        body_item_error(left, forms, index, limit, error) ==> body_item_error(right, forms, index, limit, error),
+{
+    if 0 <= index < limit <= forms.len() && forms[index] is List {
+        let end = forms[index]->List_end as int;
+        let first = index + 2;
+        let span_end = form_span(forms[index]).end;
+        let closing = if span_end > 0 { (span_end - 1) as usize } else { 0usize };
+        assert forall|value: int| #[trigger] targets_match(forms, first, end, value) implies {
+            &&& expression_forest(left, forms, value, end) == expression_forest(right, forms, value, end)
+            &&& definition_rhs_error(left, forms, value, end, closing, error)
+                == definition_rhs_error(right, forms, value, end, closing, error)
+        } by {
+            super::expression_forest::expression_forest_agrees_on_bytes(left, right, forms, value, end, error);
+        };
+        assert forall|kind: BodyHead| #[trigger] body_head_at(left, forms, index + 1, end, kind)
+            == #[trigger] body_head_at(right, forms, index + 1, end, kind) by {};
+        assert forall|kind: BodyHead| #[trigger] body_arguments_match(left, forms, first, end, kind)
+            == #[trigger] body_arguments_match(right, forms, first, end, kind) by {
+            if kind is Def {
+                assert(body_arguments_match(left, forms, first, end, kind) == body_arguments_match(right, forms, first, end, kind));
+            }
+        };
+        assert forall|kind: BodyHead| #[trigger] body_arguments_error(left, forms, first, end, closing, kind, error)
+            == #[trigger] body_arguments_error(right, forms, first, end, closing, kind, error) by {
+            if kind is Def {
+                assert(body_arguments_error(left, forms, first, end, closing, kind, error)
+                    == body_arguments_error(right, forms, first, end, closing, kind, error));
+            }
+        };
+        if body_item_matches(left, forms, index, limit) {
+            let kind = choose|kind: BodyHead| #[trigger] body_head_at(left, forms, index + 1, end, kind)
+                && body_arguments_match(left, forms, first, end, kind);
+            assert(body_head_at(right, forms, index + 1, end, kind)
+                && body_arguments_match(right, forms, first, end, kind));
+        }
+        if body_item_error(left, forms, index, limit, error) {
+            if exists|kind: BodyHead| #[trigger] body_head_at(left, forms, index + 1, end, kind) {
+                let kind = choose|kind: BodyHead| #[trigger] body_head_at(left, forms, index + 1, end, kind)
+                    && body_arguments_error(left, forms, first, end, closing, kind, error);
+                assert(body_head_at(right, forms, index + 1, end, kind));
+                assert(body_arguments_error(right, forms, first, end, closing, kind, error));
+            } else {
+                assert forall|kind: BodyHead| !#[trigger] body_head_at(right, forms, index + 1, end, kind) by {
+                    assert(!body_head_at(left, forms, index + 1, end, kind));
+                };
+            }
+        }
+    }
+}
+
+/// 同じ UTF-8 本文と構文木なら、本体の文法判定と最初の診断が一致する。
+pub(super) proof fn routine_body_agrees_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, end: int,
+    error: (HeaderError, Range<usize>),
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        body_items_before(left, forms, start, end, end) == body_items_before(right, forms, start, end, end),
+        body_error(left, forms, start, end, error) == body_error(right, forms, start, end, error),
+{
+    assert forall|index: int| #[trigger] direct_form_in_range(forms, start, end, index) implies {
+        &&& body_item_matches(left, forms, index, end) == body_item_matches(right, forms, index, end)
+        &&& body_item_error(left, forms, index, end, error) == body_item_error(right, forms, index, end, error)
+    } by {
+        body_item_transfers_on_bytes(left, right, forms, index, end, error);
+        body_item_transfers_on_bytes(right, left, forms, index, end, error);
+    };
+    assert forall|stop: int| #[trigger] body_items_before(left, forms, start, end, stop)
+        == #[trigger] body_items_before(right, forms, start, end, stop) by {
+        reveal(body_items_before);
+    };
+}
+
 /// 署名を優先し、本体ではソース順で最初の違反を診断するため、種別と範囲が一意に定まる。
 pub(super) proof fn routine_arguments_errors_agree(
     source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
