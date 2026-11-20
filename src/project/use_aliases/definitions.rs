@@ -28,7 +28,7 @@ use crate::syntax::circuit::{
 use crate::syntax::{AtomKind, Form};
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use vstd::string::StringSliceAdditionalSpecFns;
+use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
 
 verus! {
 
@@ -535,6 +535,41 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.positioned_binding(file, entry, definition, reference, site, Err(reason)),
             Err(DefinitionReferenceError::UnknownPosition) => !self.position_exists(file, entry, definition, reference),
         }
+    }
+
+    /// 同じ参照位置に対する解決で、基底 NOR と独立宣言が同時に選ばれることはない。
+    pub(super) proof fn nor_binding_excludes_declaration(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        builtin: ResolvedDefinitionReference, declaration: ResolvedDefinitionReference,
+    )
+        requires
+            self.can_resolve(),
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(builtin)),
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(declaration)),
+            builtin.binding is Nor, declaration.binding is Declaration,
+        ensures false,
+    {
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[file as int];
+        let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+        let indexed = parsed.references@[row.references.start + reference];
+        let kind = parsed.syntax.forms@[indexed.form as int]->Atom_kind;
+        let lhs = builtin.site.request_model();
+        let rhs = declaration.site.request_model();
+        let left_scope = choose|from: Option<&str>| #[trigger] self.scope_matches(file, builtin.site.block, Ok(from))
+            && self.binding_evidence(file, lhs, from, kind, Ok(builtin.binding));
+        let right_scope = choose|from: Option<&str>| #[trigger] self.scope_matches(file, declaration.site.block, Ok(from))
+            && self.binding_evidence(file, rhs, from, kind, Ok(declaration.binding));
+        assert(kind is Name);
+        self.relative_scope_agrees(file, lhs.block, left_scope, right_scope);
+        encode_utf8_decode_utf8(lhs.word@);
+        encode_utf8_decode_utf8(rhs.word@);
+        assert(lhs.word@ == rhs.word@);
+        let bound = choose|found: Option<UnqualifiedTarget>|
+            #[trigger] self.unqualified_binding_matches(file, rhs.block, rhs.word, right_scope, found)
+                && Ok(declaration.binding) == unqualified_binding(rhs, found);
+        assert(self.unqualified_binding_matches(file, lhs.block, lhs.word, left_scope, None));
+        self.unqualified_target_excludes_missing(file, lhs.block, left_scope, rhs.word, lhs.word, bound->Some_0);
     }
 
     pub(super) proof fn valid_position_is_not_unknown(

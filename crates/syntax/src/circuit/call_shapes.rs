@@ -78,6 +78,18 @@ pub closed spec fn call_shape_matches(
     }
 }
 
+/// 同じ呼び出し参照のリスト位置、範囲、引数数は一意に定まる。
+pub proof fn indexed_call_shapes_agree(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference,
+    first: CallShape, second: CallShape,
+)
+    requires
+        call_shape_matches(source, forms, row, reference, Some(first)),
+        call_shape_matches(source, forms, row, reference, Some(second)),
+    ensures first == second,
+{
+}
+
 /// 呼び出しの構文木に直接の引数列があり、その個数が索引に記録した値と一致することを表す。
 pub closed spec fn call_arguments_match(forms: Seq<Form>, call: CallShape) -> bool {
     let form = call.form as int;

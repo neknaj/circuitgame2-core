@@ -141,7 +141,7 @@ spec fn path_outcome(
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 参照元の名前空間は、解析結果のファイルとブロックから一意に定まる。
-    proof fn relative_scope_agrees(&self, file: usize, block: Option<usize>, left: Option<&str>, right: Option<&str>)
+    pub(super) proof fn relative_scope_agrees(&self, file: usize, block: Option<usize>, left: Option<&str>, right: Option<&str>)
         requires self.can_resolve(), self.scope_matches(file, block, Ok(left)), self.scope_matches(file, block, Ok(right)),
         ensures left == right,
     {

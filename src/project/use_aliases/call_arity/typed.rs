@@ -211,6 +211,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 基底 NOR を解決できる参照では、成功した署名のどれからも同じ呼び出しを得る。
+    pub(in crate::project::use_aliases) proof fn resolved_nor_call_agrees(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        builtin: TypedFuncCall, result: Option<TypedFuncCall>,
+    )
+        requires
+            self.can_resolve(),
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(builtin))),
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(result)),
+            builtin.call.target is Nor,
+        ensures result matches Some(other) && other.call.call == builtin.call.call && other.call.target is Nor,
+    {
+        assert(self.func_call_at(file, entry, definition, reference));
+        let other = result->Some_0;
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+        let indexed = parsed.references@[row.references.start + reference];
+        let source = project.sources_model()[file as int];
+        crate::syntax::circuit::indexed_call_shapes_agree(source.text, forms, row, indexed, builtin.call.call, other.call.call);
+        if !(other.call.target is Nor) {
+            let first = choose|resolved: ResolvedDefinitionReference|
+                #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
+                    && target_ports_match(&project, resolved, builtin.call.target);
+            let second = choose|resolved: ResolvedDefinitionReference|
+                #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
+                    && target_ports_match(&project, resolved, other.call.target);
+            self.nor_binding_excludes_declaration(file, entry, definition, reference, first, second);
+        }
+    }
+
     /// 型付き署名の解決結果から、呼び出し元の構文木で引数をたどる根拠を取り出す。
     pub(in crate::project::use_aliases) proof fn typed_call_arguments_ready(
         &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64, typed: TypedFuncCall,
