@@ -333,6 +333,7 @@ pub struct FieldSelectionShape {
 }
 
 /// 一段以上の選択式をたどると、裸の信号名を入力とする `field` に行き着くことを表す。
+#[verifier::opaque]
 pub open spec fn field_selection_shape_matches(
     source: &str, forms: Seq<Form>, root: usize,
     steps: Seq<BitSelectionShape>, field: usize, shape: StructureExpressionShape,
@@ -344,6 +345,46 @@ pub open spec fn field_selection_shape_matches(
     &&& shape.input.start < forms.len()
     &&& forms[shape.input.start as int] is Atom
     &&& forms[shape.input.start as int]->Atom_kind is Name
+}
+
+/// 最外段のフォームが、選択列の先頭の引数に対応することを示す。
+pub proof fn field_selection_root(
+    source: &str, forms: Seq<Form>, root: usize,
+    steps: Seq<BitSelectionShape>, field: usize, shape: StructureExpressionShape,
+)
+    requires field_selection_shape_matches(source, forms, root, steps, field, shape),
+    ensures bit_selection_shape_matches(source, forms, root as int, steps[0]),
+{
+    reveal(field_selection_shape_matches);
+    assert(bit_selection_shape_matches(source, forms, bit_selection_step_root(root, steps, 0), steps[0]));
+}
+
+/// 同じ右辺から取り出した選択列、末端の `field`、その引数の位置は一致する。
+pub proof fn field_selection_shapes_agree(
+    source: &str, forms: Seq<Form>, root: usize,
+    left: Seq<BitSelectionShape>, lhs: usize, left_shape: StructureExpressionShape,
+    right: Seq<BitSelectionShape>, rhs: usize, right_shape: StructureExpressionShape,
+)
+    requires
+        field_selection_shape_matches(source, forms, root, left, lhs, left_shape),
+        field_selection_shape_matches(source, forms, root, right, rhs, right_shape),
+    ensures left == right, lhs == rhs, left_shape == right_shape,
+{
+    reveal(field_selection_shape_matches);
+    no_selection_at_structure(source, forms, lhs, left_shape);
+    no_selection_at_structure(source, forms, rhs, right_shape);
+    bit_selection_paths_agree(source, forms, root, left, lhs, right, rhs);
+    structure_expression_shapes_agree(source, forms, lhs as int, left_shape, right_shape);
+}
+
+proof fn no_selection_at_structure(source: &str, forms: Seq<Form>, at: usize, shape: StructureExpressionShape)
+    requires structure_expression_matches(source, forms, at as int, shape),
+    ensures !(exists|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, at as int, other)),
+{
+    if exists|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, at as int, other) {
+        let other = choose|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, at as int, other);
+        bit_selection_excludes_structure(source, forms, at as int, other);
+    }
 }
 
 /// 最内段の入力が裸の信号名を取る `field` なら、選択式と `field` の引数位置を返す。
@@ -359,14 +400,12 @@ pub fn field_selection_shape(source: &str, forms: &[Form], root: usize) -> (resu
             #[trigger] field_selection_shape_matches(source, forms@, root, steps, field, shape)
             ==> (result matches Some(found) && found.steps@ == steps && found.field == field && found.shape == shape),
 {
+    reveal(field_selection_shape_matches);
     let (steps, field) = bit_selection_chain(source, forms, root);
     assert forall|expected: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
         #[trigger] field_selection_shape_matches(source, forms@, root, expected, at, shape)
         implies steps@ == expected && field == at by {
-        if exists|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms@, at as int, other) {
-            let other = choose|other: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms@, at as int, other);
-            bit_selection_excludes_structure(source, forms@, at as int, other);
-        }
+        no_selection_at_structure(source, forms@, at, shape);
         bit_selection_paths_agree(source, forms@, root, steps@, field, expected, at);
     };
     if steps.is_empty() {
@@ -568,6 +607,7 @@ pub proof fn build_field_selection_signal(
         &&& index.signals@[row.signals.start as int] == shape.input.start
     }),
 {
+    reveal(field_selection_shape_matches);
     build_definition_scope_evidence(source, index, entry, definition);
     vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
     let row = index.definitions@[definition];

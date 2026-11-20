@@ -4,13 +4,13 @@ use super::{StructureFieldType, StructureLayouts, StructureOperation, StructureO
 use super::super::{ResolvedPortType, SignalType};
 use crate::project::{DefinitionReferenceError, LocatedName, ProjectSource};
 use crate::project::circuits::{form_location, read_indexed_atom};
-use crate::syntax::circuit::{NamedBuildCircuit, StructureExpressionKind, StructureExpressionShape};
+use crate::syntax::circuit::{FieldSelectionShape, NamedBuildCircuit, StructureExpressionKind, StructureExpressionShape};
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
 use crate::project::circuits::{is_form_location, parsed_index_evidence};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{structure_expression_matches, structure_expression_positions};
+use crate::syntax::circuit::{field_selection_shape_matches, structure_expression_matches, structure_expression_positions};
 #[cfg(verus_only)]
 use crate::syntax::form_span;
 #[cfg(verus_only)]
@@ -58,8 +58,20 @@ pub(in crate::project::use_aliases) type CheckedStructureExpression<'p, 'a> =
     (SignalType<'p, 'a>, TypedStructureOperation, u64);
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(in crate::project::use_aliases) open spec fn structure_expression_root(context: &StructureExpressionContext) -> usize {
+        let parsed = context.parsed;
+        let defs = parsed.entry_ranges@[context.entry as int].definitions;
+        parsed.definitions@[defs.start + context.definition].expression.start
+    }
+
     pub(in crate::project::use_aliases) open spec fn structure_expression_context_matches(
         &self, context: &StructureExpressionContext, shape: StructureExpressionShape,
+    ) -> bool {
+        self.structure_expression_at_matches(context, Self::structure_expression_root(context), shape)
+    }
+
+    pub(in crate::project::use_aliases) open spec fn structure_expression_at_matches(
+        &self, context: &StructureExpressionContext, at: usize, shape: StructureExpressionShape,
     ) -> bool {
         let project = self.targets.project_model();
         let parsed = context.parsed;
@@ -70,8 +82,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& {
             let defs = parsed.entry_ranges@[context.entry as int].definitions;
             &&& defs.start + context.definition < defs.end <= parsed.definitions@.len()
-            &&& structure_expression_matches(context.source.text, parsed.syntax.forms@,
-                parsed.definitions@[defs.start + context.definition].expression.start as int, shape)
+            &&& (at == Self::structure_expression_root(context) || shape.kind is Field)
+            &&& structure_expression_matches(context.source.text, parsed.syntax.forms@, at as int, shape)
         }
     }
 
@@ -194,13 +206,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, context: &StructureExpressionContext, shape: StructureExpressionShape, layouts: &StructureLayouts,
         input: SignalType, result: Result<CheckedStructureExpression, StructureExpressionTypeError>,
     ) -> bool {
+        self.structure_expression_type_at_matches(context, Self::structure_expression_root(context), shape, layouts, input, result)
+    }
+
+    /// 式の型と配置、および診断の場所を指定したフォームに結び付ける。
+    pub(in crate::project::use_aliases) closed spec fn structure_expression_type_at_matches(
+        &self, context: &StructureExpressionContext, at: usize, shape: StructureExpressionShape, layouts: &StructureLayouts,
+        input: SignalType, result: Result<CheckedStructureExpression, StructureExpressionTypeError>,
+    ) -> bool {
         if let Err(StructureExpressionTypeError::Cast(error)) = result {
             shape.kind is As
                 && self.structure_cast_resolution_matches(context.file, context.entry, context.definition, Err(error))
         } else {
-            let defs = context.parsed.entry_ranges@[context.entry as int].definitions;
-            let root = context.parsed.definitions@[defs.start + context.definition].expression.start;
-            let form = context.parsed.syntax.forms@[root as int];
+            let form = context.parsed.syntax.forms@[at as int];
             exists|op: StructureOperation, input_type: StructureFieldType|
                 #[trigger] self.structure_operation_from_source(context, shape, op)
                 && #[trigger] self.expression_port_matches(input_type, input.ty)
@@ -237,10 +255,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn checked_structure_operation(
-        &self, context: &StructureExpressionContext, shape: StructureExpressionShape,
+        &self, context: &StructureExpressionContext, at: usize, shape: StructureExpressionShape,
         layouts: &StructureLayouts, input: SignalType, checked: CheckedStructureExpression,
     ) -> (found: (StructureOperation<'a>, StructureFieldType))
-        requires self.structure_expression_type_matches(context, shape, layouts, input, Ok(checked)),
+        requires self.structure_expression_type_at_matches(context, at, shape, layouts, input, Ok(checked)),
         ensures
             self.structure_operation_from_source(context, shape, found.0),
             self.expression_port_matches(found.1, input.ty),
@@ -267,11 +285,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.structure_expression_type_matches(context, shape, right, input, Ok(second)),
         ensures first == second,
     {
-        let (a, left_input) = self.checked_structure_operation(context, shape, left, input, first);
-        let (b, right_input) = self.checked_structure_operation(context, shape, right, input, second);
+        self.checked_structure_expressions_agree_at(context, Self::structure_expression_root(context), shape,
+            left, right, input, first, second);
+    }
+
+    /// 同じ構文位置の構造体式は、配置を独立に検査しても同じ型とビット区間を持つ。
+    pub(in crate::project::use_aliases) proof fn checked_structure_expressions_agree_at(
+        &self, context: &StructureExpressionContext, at: usize, shape: StructureExpressionShape,
+        left: &StructureLayouts, right: &StructureLayouts, input: SignalType,
+        first: CheckedStructureExpression, second: CheckedStructureExpression,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(context.limit, Ok(*left)),
+            self.structure_types_match(context.limit, Ok(*right)),
+            self.structure_expression_type_at_matches(context, at, shape, left, input, Ok(first)),
+            self.structure_expression_type_at_matches(context, at, shape, right, input, Ok(second)),
+        ensures first == second,
+    {
+        let (a, left_input) = self.checked_structure_operation(context, at, shape, left, input, first);
+        let (b, right_input) = self.checked_structure_operation(context, at, shape, right, input, second);
         self.structure_input_types_agree(input.ty, left_input, right_input);
-        self.structure_expression_width_evidence(context, shape, left, input, first);
-        self.structure_expression_width_evidence(context, shape, right, input, second);
+        self.structure_expression_width_at(context, at, shape, left, input, first);
+        self.structure_expression_width_at(context, at, shape, right, input, second);
         self.layout_port_widths_agree_across_tables(context.limit, left, right, input.ty, first.2 as int, second.2 as int);
         match shape.kind {
             StructureExpressionKind::Field { .. } => {
@@ -311,6 +347,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             checked.1.range.end <= checked.2,
             !(shape.kind is Field) ==> checked.1.range.start == 0 && checked.1.range.end == checked.2,
     {
+        self.structure_expression_width_at(context, Self::structure_expression_root(context), shape, layouts, input, checked);
+    }
+
+    proof fn structure_expression_width_at(
+        &self, context: &StructureExpressionContext, at: usize, shape: StructureExpressionShape,
+        layouts: &StructureLayouts, input: SignalType, checked: CheckedStructureExpression,
+    )
+        requires self.structure_expression_type_at_matches(context, at, shape, layouts, input, Ok(checked)),
+        ensures
+            checked.1.range.start < checked.1.range.end,
+            self.layout_port_width_matches(layouts, checked.0.ty, checked.1.range.end - checked.1.range.start),
+            self.layout_port_width_matches(layouts, input.ty, checked.2 as int),
+            checked.1.range.end <= checked.2,
+            !(shape.kind is Field) ==> checked.1.range.start == 0 && checked.1.range.end == checked.2,
+    {
         let op = choose|op: StructureOperation, field: StructureFieldType|
             #[trigger] self.structure_operation_from_source(context, shape, op)
                 && #[trigger] self.expression_port_matches(field, input.ty)
@@ -336,12 +387,65 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && crate::project::location_in_source(signal.origin)
                 && operation.range.start < operation.range.end <= width,
     {
-        let source = context.source;
         let parsed = context.parsed;
         let defs = &parsed.entry_ranges[context.entry].definitions;
         let row = &parsed.definitions[defs.start + context.definition];
+        self.check_structure_expression_type_at(context, row.expression.start, shape, layouts, input)
+    }
+
+    /// 選択式の末端にあるフィールドの型と配置を検査する。
+    pub(in crate::project::use_aliases) fn check_selected_field_type(
+        &self, context: &StructureExpressionContext<'p, 'a>, field: &FieldSelectionShape,
+        layouts: &StructureLayouts<'p, 'a>, input: SignalType<'p, 'a>,
+    ) -> (result: Result<CheckedStructureExpression<'p, 'a>, StructureExpressionTypeError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            ({
+                let project = self.targets.project_model();
+                let parsed = context.parsed;
+                &&& context.file < project.sources_model().len() && context.file < project.circuits_model().len()
+                &&& *context.source == project.sources_model()[context.file as int]
+                &&& *parsed == project.circuits_model()[context.file as int]
+                &&& context.entry < parsed.entry_ranges@.len()
+                &&& {
+                    let defs = parsed.entry_ranges@[context.entry as int].definitions;
+                    &&& defs.start + context.definition < defs.end <= parsed.definitions@.len()
+                    &&& field_selection_shape_matches(context.source.text, parsed.syntax.forms@,
+                        Self::structure_expression_root(context), field.steps@, field.field, field.shape)
+                }
+            }),
+            self.structure_types_match(context.limit, Ok(*layouts)),
+            self.declared_port_type(input.ty),
+        ensures
+            self.structure_expression_type_at_matches(context, field.field, field.shape, layouts, input, result),
+            result matches Ok((signal, operation, width)) ==> self.declared_port_type(signal.ty)
+                && is_form_location(context.source, context.parsed.syntax.forms@[field.field as int], signal.origin)
+                && crate::project::location_in_source(signal.origin)
+                && operation.range.start < operation.range.end <= width,
+    {
+        reveal(field_selection_shape_matches);
+        self.check_structure_expression_type_at(context, field.field, &field.shape, layouts, input)
+    }
+
+    fn check_structure_expression_type_at(
+        &self, context: &StructureExpressionContext<'p, 'a>, root: usize, shape: &StructureExpressionShape,
+        layouts: &StructureLayouts<'p, 'a>, input: SignalType<'p, 'a>,
+    ) -> (result: Result<CheckedStructureExpression<'p, 'a>, StructureExpressionTypeError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.structure_expression_at_matches(context, root, *shape),
+            self.structure_types_match(context.limit, Ok(*layouts)),
+            self.declared_port_type(input.ty),
+        ensures
+            self.structure_expression_type_at_matches(context, root, *shape, layouts, input, result),
+            result matches Ok((signal, operation, width)) ==> self.declared_port_type(signal.ty)
+                && is_form_location(context.source, context.parsed.syntax.forms@[root as int], signal.origin)
+                && crate::project::location_in_source(signal.origin)
+                && operation.range.start < operation.range.end <= width,
+    {
+        let source = context.source;
+        let parsed = context.parsed;
         let forms = parsed.syntax.forms.as_slice();
-        let root = row.expression.start;
         proof {
             self.targets.parsed_project_model();
             parsed_index_evidence(*source, *parsed);
@@ -395,7 +499,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(layouts.structure_operation_matches(op, input_type, Err(StructureOperationError::WidthMismatch {
                     input: _width, expected,
                 })));
-                assert(self.structure_expression_type_matches(context, *shape, layouts, input, Err(error)));
+                assert(self.structure_expression_type_at_matches(context, root, *shape, layouts, input, Err(error)));
                 return Err(error);
             },
             Err(reason) => {
@@ -420,7 +524,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     _ => shape.input.start,
                 };
                 let error = StructureExpressionTypeError::Operation { site: form_location(source, forms, at), input, reason };
-                assert(self.structure_expression_type_matches(context, *shape, layouts, input, Err(error)));
+                assert(self.structure_expression_type_at_matches(context, root, *shape, layouts, input, Err(error)));
                 return Err(error);
             },
         };
@@ -441,7 +545,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
         };
         let checked = (SignalType { ty, origin: expression }, operation, input_width);
-        assert(self.structure_expression_type_matches(context, *shape, layouts, input, Ok(checked))) by {
+        assert(self.structure_expression_type_at_matches(context, root, *shape, layouts, input, Ok(checked))) by {
             assert(self.layout_port_width_matches(layouts, input.ty, input_width as int));
             assert(self.layout_port_width_matches(layouts, ty, operation.range.end - operation.range.start)) by {
                 assert(self.expression_port_matches(operation.ty, ty));

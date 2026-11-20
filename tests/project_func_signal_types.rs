@@ -117,6 +117,27 @@ fn checks_forwarded_outputs_and_preserves_unknown_composite_results() {
 }
 
 #[test]
+fn uses_the_field_type_as_the_input_to_a_selection() {
+    let text = concat!(
+        "(struct Inst (width 8) (opcode (bits 3) (at 2))) ",
+        "(func valid (in (inst Inst)) (out (y (bits 2))) (def y (slice (field inst opcode) 0 2))) ",
+        "(func invalid (in (inst Inst)) (out (y (bits 2))) (def y (slice (field inst opcode) 2 2)))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 1, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let typed = aliases.check_func_signal_types(0, 1, 8).unwrap();
+    assert!(matches!(typed.types[0].as_ref().unwrap().ty, ResolvedPortType::Bits(2)));
+
+    let error = aliases.check_func_signal_types(0, 2, 8).unwrap_err();
+    let FuncSignalTypeError::SelectionArgument(SelectionArgumentError::Outside {
+        site, width_origin, input_width: 3, ..
+    }) = error else { panic!("{error:?}") };
+    assert_eq!(&text[site.span], "2 2");
+    assert_eq!(&text[width_origin.span], "(field inst opcode)");
+}
+
+#[test]
 fn checks_and_lowers_nested_selections_through_public_apis() {
     let text = concat!(
         "(using nor) ",

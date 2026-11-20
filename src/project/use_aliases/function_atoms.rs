@@ -1,5 +1,7 @@
 //! 定数と裸の信号名から、関数の左辺に対応する型を求める。
 
+mod field_selection;
+
 use super::function_literals::index_outputs;
 use super::function_types::FuncSignalTypeError;
 use super::selection_arguments::{check_selection_arguments, check_selection_chain, nested_named_selection};
@@ -26,11 +28,14 @@ use crate::project::{
 };
 use crate::syntax::{AtomKind, Form};
 use crate::syntax::circuit::{BitSelectionShape, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
+use crate::syntax::circuit::field_selection_shape;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     NamedBuildCircuit, bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
     build_bare_signal_position,
-    build_definition_scope_evidence, build_selection_chain_signal, build_selection_input_position, build_structure_input_position,
+    bit_selection_path, bit_selection_step_root, build_definition_scope_evidence, build_field_selection_signal,
+    build_selection_chain_signal, build_selection_input_position, build_structure_input_position,
+    field_selection_root, field_selection_shape_matches, field_selection_shapes_agree,
     ordinary_call_at, ordinary_call_excludes_special_forms, structure_expression_matches, structure_expression_positions,
 };
 #[cfg(verus_only)]
@@ -453,7 +458,9 @@ fn check_nested_selection_type<'p, 'a>(
     input: Option<SignalType<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
 ) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
     requires
-        nested_named_selection_matches(source.text, forms@, root, steps@, leaf),
+        steps@.len() > 0,
+        bit_selection_path(source.text, forms@, root, steps@, leaf),
+        leaf < forms@.len(),
         form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
         input matches Some(ty) ==> location_in_source(ty.origin),
     ensures
@@ -464,7 +471,6 @@ fn check_nested_selection_type<'p, 'a>(
         result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
 {
     reveal(nested_selection_type_matches);
-    reveal(nested_named_selection_matches);
     let Some(input) = input else { return Ok(None); };
     let ResolvedPortType::Bits(width) = input.ty else {
         let reference = form_location(source, forms, leaf);
@@ -475,7 +481,7 @@ fn check_nested_selection_type<'p, 'a>(
         Err(error) => return Err(FuncSignalTypeError::SelectionArgument(error)),
     };
     proof {
-        nested_named_selection_root(source.text, forms@, root, steps@, leaf);
+        assert(bit_selection_shape_matches(source.text, forms@, bit_selection_step_root(root, steps@, 0), steps@[0]));
         bit_selection_shape_positions(source.text, forms@, root as int, steps@[0]);
     }
     let expression = form_location(source, forms, root);
@@ -595,6 +601,29 @@ spec fn atom_type_step(
         }
         &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
         &&& nested_selection_type_matches(source, parsed.syntax.forms@, row.expression.start, steps, leaf,
+            signal_type_at(wiring, prior, bound.driver), expected, result)
+    } else if roots.len() > 0 && driver.result_index == 0 && exists|
+        steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+        #[trigger] field_selection_shape_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, at, shape)
+    {
+        let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+            #[trigger] field_selection_shape_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, at, shape);
+        let first = parsed.entry_ranges@[entry].signals.start;
+        let bound = wiring.signals@[row.signals.start - first];
+        let expected = if let Some(output) = outputs[i] {
+            Some(wiring.drivers.signature.outputs@[output as int])
+        } else { None };
+        let context = StructureExpressionContext { file, entry: entry as usize, limit, source, parsed,
+            definition: (driver.definition - parsed.entry_ranges@[entry].definitions.start) as usize };
+        &&& first <= row.signals.start < first + wiring.signals@.len()
+        &&& bound.definition == driver.definition
+        &&& is_form_location(source, parsed.syntax.forms@[shape.input.start as int], bound.site)
+        &&& match bound.driver {
+            OutputDriver::Input(input) => input < wiring.drivers.signature.inputs@.len(),
+            OutputDriver::Definition(prior_index) => prior_index < prior.len(),
+        }
+        &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
+        &&& aliases.field_selection_atom_step(&context, row.expression.start, steps, at, shape,
             signal_type_at(wiring, prior, bound.driver), expected, result)
     } else {
         result == Ok(if roots.len() == 0 { None } else { roots[i] })
@@ -750,6 +779,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
                     #[trigger] nested_named_selection_matches(source.text, forms, row.expression.start, steps, leaf);
                 nested_selection_type_successes_agree(source, forms, row.expression.start, steps, leaf, input, expected, a, b);
+            } else if exists|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                #[trigger] field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape)
+            {
+                let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                    #[trigger] field_selection_shape_matches(source.text, forms, row.expression.start, steps, at, shape);
+                let context = StructureExpressionContext { file, entry, limit, source, parsed,
+                    definition: (driver.definition - frame.definitions.start) as usize };
+                self.field_selection_types_agree(&context, row.expression.start, input, expected, steps, at, shape, a, b);
             }
         }
     }
@@ -835,6 +872,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
                 #[trigger] nested_named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, leaf);
             nested_named_selection_root(source.text, parsed.syntax.forms@, row.expression.start, steps, leaf);
+            assert(false);
+        }
+        if exists|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+            #[trigger] field_selection_shape_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, at, shape)
+        {
+            let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                #[trigger] field_selection_shape_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, at, shape);
+            field_selection_root(source.text, parsed.syntax.forms@, row.expression.start, steps, at, shape);
             assert(false);
         }
         let outputs = self.successful_atom_step(file, entry, limit, source, parsed, wiring, widths, roots, types, index);
@@ -1334,6 +1379,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                                 outputs@, roots@, types@, i as int, Err(error)));
                             return Err(error);
                         },
+                    }
+                } else if let Some(field) = field_selection_shape(source.text, forms, root) {
+                    proof {
+                        let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                            #[trigger] field_selection_shape_matches(source.text, forms@, root, steps, at, shape);
+                        field_selection_shapes_agree(source.text, forms@, root,
+                            field.steps@, field.field, field.shape, steps, at, shape);
+                    }
+                    let expected = match outputs[i] {
+                        Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                        None => None,
+                    };
+                    let context = StructureExpressionContext {
+                        file, entry, limit: _limit, source, parsed,
+                        definition: driver.definition - parsed.entry_ranges[entry].definitions.start,
+                    };
+                    match self.check_indexed_field_selection(&context, wiring, i, types.as_slice(), &field, &mut layouts, expected) {
+                        Ok(ty) => ty,
+                        Err(error) => {
+                            assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                                literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                            return Err(error);
+                        }
                     }
                 } else {
                     copy_signal_type(&roots[i])

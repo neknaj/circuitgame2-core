@@ -113,7 +113,8 @@ pub use selection_shapes::{
     bit_selection_path, bit_selection_paths_agree, bit_selection_step_root, build_selection_chain_signal,
     build_selection_input_position,
     bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
-    build_field_selection_signal, field_selection_shape_matches, strict_bit_selection_has_shape, strict_bit_selection_input,
+    build_field_selection_signal, field_selection_root, field_selection_shape_matches, field_selection_shapes_agree,
+    strict_bit_selection_has_shape, strict_bit_selection_input,
 };
 use structure::validate_structure_arguments;
 pub use structure_expressions::{StructureExpressionKind, StructureExpressionShape, structure_expression_shape};
