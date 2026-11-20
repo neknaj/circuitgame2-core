@@ -2,6 +2,14 @@
 //!
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
+mod port_layout;
+
+pub use port_layout::{PortBitLayout, PortBitLayoutError};
+#[cfg(verus_only)]
+pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};
+#[cfg(verus_only)]
+pub(crate) use port_layout::preceding_port_bits_grow;
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -10,7 +18,7 @@ verus! {
 /// 1ビットの配線元。入力とゲートはそれぞれ0から番号を付ける。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Wire {
-    /// 宣言順の入力ポート。
+    /// 平坦な入力列の1ビット。
     Input(usize),
     /// 固定値を持つ配線。
     Constant(bool),
@@ -39,39 +47,39 @@ pub enum GateInput {
 /// 組み合わせ回路の評価前または評価中に検出した入力・配線の違反。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NorEvaluationError {
-    /// 入力列の長さがポート数と一致しない。
+    /// 入力列の長さが入力ビット数と一致しない。
     InputCount {
-        /// ネットリストの入力ポート数。
+        /// ネットリストの入力ビット数。
         expected: usize,
         /// 渡された入力値の数。
         actual: usize,
     },
-    /// ゲートの入力が存在する入力ポート、定数、先行ゲートのいずれも指していない。
+    /// ゲートの入力が存在する入力ビット、定数、先行ゲートのいずれも指していない。
     GateInput {
         /// 違反があるゲートの番号。
         gate: usize,
         /// 違反がある入力側。
         input: GateInput,
     },
-    /// 出力ポートの配線元が存在しない。
+    /// 出力ビットの配線元が存在しない。
     Output {
-        /// 違反がある出力ポートの番号。
+        /// 違反がある出力ビットの添字。
         output: usize,
     },
 }
 
 /// 1ビット配線で構成する組み合わせネットリスト。
 ///
-/// ゲートの入力から参照できるのは入力ポート、定数、配列内の先行ゲートである。
-/// 出力ポートはどのゲートも参照できる。出力配列はポートの宣言順とする。
+/// ゲートの入力から参照できるのは入力ビット、定数、配列内の先行ゲートである。
+/// 出力ビットはどのゲートも参照できる。入出力はポートの宣言順に並び、各ポート内は最下位ビットから並ぶ。
 /// 配線の参照先は [`Self::evaluate`] が検査する。
 #[derive(Debug, Eq, PartialEq)]
 pub struct NorNetlist {
-    /// 宣言された入力ポート数。
+    /// 平坦な入力列のビット数。
     pub input_count: usize,
     /// 参照先が参照元より先に現れる順のゲート列。
     pub gates: Vec<NorGate>,
-    /// 宣言順の出力ポートと各ポートを駆動する配線。
+    /// 平坦な出力列の各ビットを駆動する配線。
     pub outputs: Vec<Wire>,
 }
 

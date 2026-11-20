@@ -98,6 +98,12 @@ pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use use_aliases::{SelectionArgument, SelectionArgumentError};
 pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
 pub use use_aliases::LoweredSingleBitFunc;
+pub use use_aliases::{BitFuncError, BitFuncLowerError, CheckedBitFunc, LoweredBitFunc, UnsupportedBitFunc};
+#[cfg(verus_only)]
+pub use use_aliases::{
+    bit_func_evaluation, bit_func_lowering_preserves_evaluation, bit_func_evaluations_agree,
+    checked_bit_func_available, lowered_bit_func_result, port_values,
+};
 #[cfg(verus_only)]
 pub use use_aliases::{
     single_bit_evaluation_outputs_agree, single_bit_evaluation_result_agrees, single_bit_lowering_matches,

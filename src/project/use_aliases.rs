@@ -2,6 +2,13 @@
 
 mod alias_index;
 mod batch;
+mod bit_func;
+pub use bit_func::{BitFuncError, BitFuncLowerError, CheckedBitFunc, LoweredBitFunc, UnsupportedBitFunc};
+#[cfg(verus_only)]
+pub use bit_func::{
+    bit_func_evaluation, bit_func_lowering_preserves_evaluation, bit_func_evaluations_agree,
+    checked_bit_func_available, lowered_bit_func_result, port_values,
+};
 mod call_arity;
 mod definitions;
 mod function_drivers;

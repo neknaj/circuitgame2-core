@@ -232,7 +232,7 @@ spec fn one_bit_literal(source: &ProjectSource, form: Form, bit: bool) -> bool {
         == (if bit { "1" } else { "0" }).spec_bytes()
 }
 
-spec fn operand_matches(
+pub(super) closed spec fn operand_matches(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
     wiring: &FuncWiring, prior: int, operand: SingleBitOperand,
 ) -> bool {
@@ -246,7 +246,7 @@ spec fn operand_matches(
     }
 }
 
-spec fn no_operand(
+pub(super) closed spec fn no_operand(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
     wiring: &FuncWiring, prior: int,
 ) -> bool {
@@ -394,7 +394,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    spec fn unsupported_resolved_rhs(
+    pub(super) open spec fn unsupported_resolved_rhs(
         source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, start: int,
         wiring: &FuncWiring, prior: int, call: TypedFuncCall, location: LocatedName,
     ) -> bool {
@@ -411,7 +411,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    spec fn unsupported_expression(
+    pub(super) open spec fn unsupported_expression(
         &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring, prior: int, location: LocatedName,
     ) -> bool {
         let project = self.targets.project_model();
@@ -907,7 +907,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ok(checked)
     }
 
-    fn read_single_bit_operand(
+    pub(super) fn read_single_bit_operand(
         &self, _file: usize, entry: usize, _limit: u64, source: &'p ProjectSource<'a>,
         parsed: &NamedBuildCircuit<'a>, root: usize, wiring: &FuncWiring<'p, 'a>,
         definition: usize, prior: usize,
@@ -924,11 +924,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             parsed.entry_ranges@[entry as int].definitions.start <= definition
                 < parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len(),
             root < parsed.syntax.forms@.len(),
-        ensures match result {
-            Some(operand) => operand_matches(source, parsed, entry, definition, root as int, wiring, prior as int, operand)
-                && single_bit_operand_available(operand, wiring.drivers.signature.inputs@.len(), prior as nat),
-            None => no_operand(source, parsed, entry, definition, root as int, wiring, prior as int),
-        },
+        ensures
+            match result {
+                Some(operand) => operand_matches(source, parsed, entry, definition, root as int, wiring, prior as int, operand)
+                    && single_bit_operand_available(operand, wiring.drivers.signature.inputs@.len(), prior as nat),
+                None => no_operand(source, parsed, entry, definition, root as int, wiring, prior as int),
+            },
+            result matches Some(operand) ==> parsed.syntax.forms@[root as int]->Atom_kind is Name ==> operand is Driver,
     {
         let forms = parsed.syntax.forms.as_slice();
         proof {

@@ -114,14 +114,14 @@ pub(super) fn inherit_type<'p, 'a>(
     }
 }
 
-spec fn named_selection_matches(source: &str, forms: Seq<Form>, index: int, shape: BitSelectionShape) -> bool {
+pub(super) open spec fn named_selection_matches(source: &str, forms: Seq<Form>, index: int, shape: BitSelectionShape) -> bool {
     &&& bit_selection_shape_matches(source, forms, index, shape)
     &&& shape.input.end == shape.input.start + 1
     &&& forms[shape.input.start as int] is Atom
     &&& forms[shape.input.start as int]->Atom_kind is Name
 }
 
-fn named_selection(source: &str, forms: &[Form], index: usize) -> (result: Option<BitSelectionShape>)
+pub(super) fn named_selection(source: &str, forms: &[Form], index: usize) -> (result: Option<BitSelectionShape>)
     ensures
         result matches Some(shape) ==> named_selection_matches(source, forms@, index as int, shape),
         forall|shape: BitSelectionShape| #[trigger] named_selection_matches(source, forms@, index as int, shape)
