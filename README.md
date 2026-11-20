@@ -1,31 +1,51 @@
 # circuitgame2-core
 
-NCG2 の CLI と Web 向けの共通 Rust ライブラリ。現在は回路ソースの字句解析と構文解析を提供する。エディタ向けには、構文エラーを記録しながら S 式の構文木を返す回復解析も提供する。
+NCG2 の CLI と Web で共用する Rust ライブラリ。回路ソースの厳格解析とエラー回復、プロジェクト内の名前解決、回路の型・幅・結線の検査を提供する。構造体宣言の幅とフィールド型名も検査できる。
+
+ビット列を扱う `func` のうち、信号の転送、定数 `0`・`1`、基底 NOR、信号を直接指定する `bit`・`slice` からなるものをネットリストに変換して評価できる。
 
 ## 使い方
 
-開発版を試すには、利用側の `Cargo.toml` に依存関係を追加する。
+Rust 1.99.1 を使う。利用側の `Cargo.toml` に次の依存関係を追加する。
 
 ```toml
 [dependencies]
-circuitgame2-core = { git = "https://github.com/neknaj/circuitgame2-core.git" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "d4673b69a92b7b96d194c39e4322c896a4d663fb" }
 ```
 
-次のコードを `src/main.rs` に置いて `cargo run` を実行すると、回路フォームを検査し、最初の宣言が `func` であることを確かめられる。
+次のコードを `src/main.rs` に置き、`cargo run` を実行する。2入力の NOR を定義し、入力が両方 `false` のときだけ出力が `true` になることを確かめる。
 
 ```rust
-use circuitgame2_core::syntax::circuit::{Head, index_headers};
+use circuitgame2_core::project::{
+    SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project,
+};
 
 fn main() {
-    let source = "(func identity (in x) (out y) (def y x))";
-    let circuit = index_headers(source).expect("valid circuit form");
-    assert_eq!(circuit.entries[0].head, Head::Func);
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "main.ncg2",
+        revision: 1,
+        text: "(using nor) (func gate (in x y) (out z) (def z (nor x y)))",
+    }])
+    .unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let function = aliases.check_bit_func(0, 1, 8).unwrap();
+    let lowered = function.lower_bit_func(8).unwrap();
+    let netlist = lowered.netlist();
+
+    for x in [false, true] {
+        for y in [false, true] {
+            assert_eq!(netlist.evaluate(&[x, y]).unwrap(), [!(x || y)]);
+        }
+    }
 }
 ```
 
+`check_bit_func(0, 1, 8)` の `0` はプロジェクト内のファイルの添字、`1` はそのファイルの厳格索引の添字を表す。`8` はビット幅の上限。ソースでは `(using nor)` の次にある `func` を検査する。
+
 - [API リファレンス](https://neknaj.github.io/circuitgame2-core/)
-- [回路文法](https://github.com/neknaj/circuitgame2/blob/main/doc/grammar.md)
-- [NCG2 の設計文書](https://github.com/neknaj/circuitgame2/tree/main/doc)
+- [NCG2 の設計と仕様](https://neknaj.github.io/circuitgame2/docs/)
+- [不具合報告・質問](https://github.com/neknaj/circuitgame2-core/issues)
 
 ## 開発
 
