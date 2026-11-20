@@ -101,7 +101,8 @@ pub use use_aliases::{
     FuncCallTarget, TypedFuncCall,
 };
 pub use use_aliases::{
-    ResolvedStructure, ResolvedStructureField, StructureFieldType, StructurePosition, StructureResolutionError,
+    ResolvedStructure, ResolvedStructureEntry, ResolvedStructureField, ResolvedStructures,
+    StructureFieldType, StructureIndexError, StructurePosition, StructureResolutionError,
 };
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};

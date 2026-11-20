@@ -288,6 +288,15 @@ pub closed spec fn structure_declaration_result(
     }
 }
 
+pub(super) proof fn no_structure_declaration(project: &CircuitProject, file: int, entry: int, limit: u64)
+    requires structure_declaration_result(project, file, entry, limit, Ok(None)),
+    ensures !(0 <= file < project.circuits_model().len()
+        && 0 <= entry < project.circuits_model()[file].syntax.entries@.len()
+        && project.circuits_model()[file].syntax.entries@[entry].head is Struct),
+{
+    reveal(structure_declaration_result);
+}
+
 /// 数値検査に成功した宣言が、元の索引と幅の上限に対応することを示す。
 pub(super) proof fn checked_structure_fields(
     project: &CircuitProject, file: usize, entry: usize, limit: u64, declaration: StructureDeclaration,

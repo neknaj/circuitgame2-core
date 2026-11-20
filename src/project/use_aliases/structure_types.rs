@@ -1,5 +1,8 @@
 //! 構造体フィールドの型名を、フィールドを含む宣言のスコープで解決する。
 
+mod index;
+pub use index::{ResolvedStructureEntry, ResolvedStructures, StructureIndexError};
+
 use super::definitions::{ReferenceRequest, ReferenceUse};
 use super::{DefinitionBinding, DefinitionReferenceReason, UseAliases};
 use crate::project::circuits::read_indexed_atom;
