@@ -96,6 +96,7 @@ pub use use_aliases::{
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,
     IndexedDefinitionBinding, OwnedUseAliasConflict, ReferenceScopeError, RelativeResolutionError,
     RelativeTarget, ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
+    FunctionCallSite, FunctionExpansionError, FunctionExpansionOrder,
     check_use_aliases,
 };
 pub use use_aliases::{

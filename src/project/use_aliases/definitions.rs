@@ -539,6 +539,40 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(super) proof fn resolved_reference_location(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        resolved: ResolvedDefinitionReference,
+    )
+        requires self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved)),
+        ensures crate::project::circuits::name_in_source(resolved.site.source.text, resolved.site.name),
+    {
+    }
+
+    pub(super) proof fn resolved_reference_is_func_call(
+        &self, at: super::DefinitionPosition, resolved: ResolvedDefinitionReference,
+    )
+        requires self.can_resolve(), self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, Ok(resolved)),
+        ensures self.func_call_at(at.file, at.entry, at.definition, at.reference)
+            <==> (resolved.site.owner is Func && resolved.site.role is Callee),
+    {
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[at.file as int];
+        let source = project.sources_model()[at.file as int];
+        parsed_index_evidence(source, parsed);
+    }
+
+    pub(super) proof fn resolved_reference_locations_agree(
+        &self, caller: (usize, usize, usize, usize),
+        left: ResolvedDefinitionReference, right: ResolvedDefinitionReference,
+    )
+        requires
+            self.definition_resolution_evidence(caller.0, caller.1, caller.2, caller.3, Ok(left)),
+            self.definition_resolution_evidence(caller.0, caller.1, caller.2, caller.3, Ok(right)),
+        ensures *left.site.source == *right.site.source, left.site.name.span == right.site.name.span,
+    {
+    }
+
     pub(super) proof fn positioned_declarations_agree(
         &self, file: usize, entry: usize, definition: usize, reference: usize,
         left: ResolvedDefinitionReference, right: ResolvedDefinitionReference,

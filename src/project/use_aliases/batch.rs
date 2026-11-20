@@ -129,6 +129,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.resolutions_before(DefinitionPosition { file, entry: 0, definition: 0, reference: 0 }, found)
     }
 
+    pub(super) proof fn definition_binding_at(&self, found: Seq<IndexedDefinitionBinding>, i: int)
+        requires self.definition_bindings_match(found), 0 <= i < found.len(),
+        ensures ({
+            let item = found[i];
+            let at = item.position;
+            self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, Ok(item.resolved))
+        }),
+    {
+        reveal(UseAliases::resolutions_before);
+    }
+
+    pub(super) proof fn definition_binding_index(&self, found: Seq<IndexedDefinitionBinding>, at: DefinitionPosition)
+        -> (i: int)
+        requires
+            self.definition_bindings_match(found),
+            self.position_exists(at.file, at.entry, at.definition, at.reference),
+        ensures 0 <= i < found.len(), found[i].position == at,
+    {
+        reveal(UseAliases::resolutions_before);
+        let project = self.targets.project_model();
+        project.circuit_count_fits();
+        let stop = DefinitionPosition { file: project.circuits_model().len() as usize, entry: 0, definition: 0, reference: 0 };
+        assert(self.valid_reference(at) && before(at, stop));
+        choose|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == at
+    }
+
     /// 診断が、先行する参照をすべて解決した後の最初の違反に対応することを表す。
     pub closed spec fn definition_batch_error_evidence(&self, error: DefinitionBatchError) -> bool {
         &&& self.valid_reference(error.position)

@@ -1,8 +1,58 @@
 use circuitgame2_core::project::{
     AliasConflict, AliasDisposition, CircuitBasisError, DefinitionAnalysisError, DefinitionBinding,
-    DefinitionReferenceReason, SourceSnapshot, UseTargetError, analyze_definitions,
-    parse_circuit_project,
+    DefinitionReferenceReason, FunctionExpansionError, SourceSnapshot, UseTargetError,
+    analyze_definitions, check_use_aliases, index_use_targets, parse_circuit_project,
 };
+
+#[test]
+fn prepares_nested_func_calls_in_dependency_order() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot {
+            path: "caller.ncg2",
+            revision: 10,
+            text: "(func caller (in x) (out y) (def y (nor (::leaf x) x)))",
+        },
+        SourceSnapshot {
+            path: "library.ncg2",
+            revision: 20,
+            text: "(using nor) (func leaf (in x) (out x))",
+        },
+    ])
+    .unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    assert!(core::ptr::eq(plan.project(), &project));
+    assert_eq!(plan.len(), 2);
+    let (callee, _) = plan.get(0).unwrap();
+    let (caller, _) = plan.get(1).unwrap();
+    assert_eq!(plan.project().sources()[callee].revision, 20);
+    assert_eq!(plan.project().sources()[caller].revision, 10);
+    assert_eq!(plan.get(plan.len()), None);
+}
+
+#[test]
+fn expansion_cycle_diagnostic_uses_the_nested_callee_name() {
+    let caller = "; 呼び出し元\n(func caller (in x) (out y) (def y (nor (::callee x) x)))";
+    let callee = "(using nor) (func callee (in x) (out y) (def y (::caller x)))";
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "caller.ncg2", revision: 10, text: caller },
+        SourceSnapshot { path: "library.ncg2", revision: 20, text: callee },
+    ])
+    .unwrap();
+    assert!(analyze_definitions(&project).is_ok());
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let FunctionExpansionError::Cycle(cycle) = aliases.prepare_function_expansion().unwrap_err()
+    else {
+        panic!("expected a recursive call diagnostic");
+    };
+    let nested = cycle.iter().find(|site| site.location.source.revision == 10).unwrap();
+    assert_eq!(&caller[nested.location.span.clone()], "::callee");
+    assert_eq!(nested.position.reference, 1);
+    let back = cycle.iter().find(|site| site.location.source.revision == 20).unwrap();
+    assert_eq!(&callee[back.location.span.clone()], "::caller");
+}
 
 #[test]
 fn analyzes_all_definition_references_and_retains_alias_warnings() {

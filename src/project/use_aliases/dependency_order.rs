@@ -1,4 +1,4 @@
-//! 型参照に沿う順序と、元のフィールドをたどって閉じる経路を定める。
+//! 依存先が先に並ぶ順序を求め、循環があれば元の辺をたどる閉路を返す。
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -55,7 +55,7 @@ proof fn rank_decreases_along_path(
     }
 }
 
-/// すべての型参照で順位が下がるとき、同じ構造体に戻る閉路は存在しない。
+/// すべての依存辺で順位が下がるとき、同じ頂点に戻る閉路は存在しない。
 pub(super) proof fn rank_excludes_cycle(
     graph: Seq<Vec<Option<usize>>>, rank: Seq<nat>, path: Seq<DependencyEdge>,
 )
@@ -260,13 +260,29 @@ pub(super) open spec fn graph_has_cycle(graph: Seq<Vec<Option<usize>>>) -> bool 
     exists|path: Seq<DependencyEdge>| #[trigger] dependency_cycle(graph, path)
 }
 
-pub(super) fn check_dependency_order(graph: &[Vec<Option<usize>>])
-    -> (result: Result<(), Vec<DependencyEdge>>)
+pub(super) open spec fn completion_order_matches(order: Seq<usize>, ranks: Seq<nat>) -> bool {
+    forall|i: int| 0 <= i < order.len() ==> {
+        let node = #[trigger] order[i];
+        node < ranks.len() && ranks[node as int] == i
+    }
+}
+
+pub(super) open spec fn complete_dependency_order(graph: Seq<Vec<Option<usize>>>, order: Seq<usize>) -> bool {
+    exists|rank: Seq<nat>| #[trigger] dependencies_in_order(graph, rank)
+        && order.len() == graph.len() && completion_order_matches(order, rank)
+        && (forall|node: int| #![trigger rank[node]] 0 <= node < graph.len()
+            ==> rank[node] < order.len() && order[rank[node] as int] == node)
+}
+
+pub(super) fn check_dependency_order(graph: &[Vec<Option<usize>>], retain_order: bool)
+    -> (result: Result<Vec<usize>, Vec<DependencyEdge>>)
     requires dependency_graph_valid(graph@),
     ensures
         result.is_err() <==> graph_has_cycle(graph@),
         match result {
-            Ok(()) => exists|rank: Seq<nat>| #[trigger] dependencies_in_order(graph@, rank),
+            Ok(order) => if retain_order {
+                complete_dependency_order(graph@, order@)
+            } else { order@.len() == 0 && (exists|rank: Seq<nat>| #[trigger] dependencies_in_order(graph@, rank)) },
             Err(cycle) => dependency_cycle(graph@, cycle@),
         },
 {
@@ -278,15 +294,21 @@ pub(super) fn check_dependency_order(graph: &[Vec<Option<usize>>])
             i == states@.len() <= graph@.len(),
             forall|node: int| 0 <= node < i ==> (#[trigger] states@[node]) is New,
             unvisited_matches(states@, unvisited),
+            unvisited.len() == i,
+            forall|node: usize| #[trigger] unvisited.contains(node) ==> node < i,
         decreases graph@.len() - i,
     {
         states.push(Visit::New);
-        proof { unvisited = unvisited.insert(i); }
+        proof {
+            vstd::set::lemma_set_insert_len(unvisited, i);
+            unvisited = unvisited.insert(i);
+        }
         i += 1;
     }
 
     let ghost mut completed = 0nat;
     let ghost mut ranks = Seq::new(states@.len(), |_: int| 0nat);
+    let mut order = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
     let mut root = 0;
     while root < graph.len() || !stack.is_empty()
@@ -297,6 +319,13 @@ pub(super) fn check_dependency_order(graph: &[Vec<Option<usize>>])
             unvisited_matches(states@, unvisited),
             stack_matches(graph@, states@, stack@),
             completed_matches(graph@, states@, ranks, completed),
+            completed + unvisited.len() + stack@.len() == graph@.len(),
+            forall|node: usize| #[trigger] unvisited.contains(node) ==> node < graph@.len(),
+            !retain_order ==> order@.len() == 0,
+            retain_order ==> order@.len() == completed && completion_order_matches(order@, ranks)
+                && (forall|node: int| 0 <= node < states@.len() && (#[trigger] states@[node]) is Done
+                    ==> ranks[node] < order@.len() && order@[ranks[node] as int] == node)
+                && (forall|i: int| 0 <= i < order@.len() ==> states@[(#[trigger] order@[i]) as int] is Done),
             forall|node: int| 0 <= node < root ==> !((#[trigger] states@[node]) is New),
         decreases graph@.len() - root, unvisited.len(), stack@.len(), fields_left_at_top(graph@, stack@),
     {
@@ -315,10 +344,39 @@ pub(super) fn check_dependency_order(graph: &[Vec<Option<usize>>])
         let top = stack.len() - 1;
         let frame = stack[top];
         if frame.next == graph[frame.node].len() {
+            let ghost old_order = order@;
+            let ghost old_ranks = ranks;
+            let ghost old_states = states@;
             finish_visit(graph, &mut states, &mut stack, Ghost(ranks), Ghost(completed));
+            if retain_order {
+                order.push(frame.node);
+            }
             proof {
                 ranks = ranks.update(frame.node as int, completed);
                 completed = completed + 1;
+                if retain_order {
+                    assert forall|i: int| 0 <= i < order@.len() implies {
+                        let node = #[trigger] order@[i];
+                        node < ranks.len() && ranks[node as int] == i && states@[node as int] is Done
+                    } by {
+                        if i < old_order.len() {
+                            let node = old_order[i];
+                            assert(old_states[node as int] is Done);
+                            assert(old_states[frame.node as int] is Active);
+                            assert(node != frame.node);
+                            assert(ranks[node as int] == old_ranks[node as int]);
+                        }
+                    };
+                    assert(completion_order_matches(order@, ranks));
+                    assert forall|i: int| 0 <= i < order@.len()
+                        implies states@[(#[trigger] order@[i]) as int] is Done by {};
+                    assert forall|node: int| 0 <= node < states@.len() && (#[trigger] states@[node]) is Done
+                        implies ranks[node] < order@.len() && order@[ranks[node] as int] == node by {
+                        if node != frame.node {
+                            assert(old_states[node] is Done);
+                        }
+                    };
+                }
             }
             continue;
         }
@@ -348,14 +406,23 @@ pub(super) fn check_dependency_order(graph: &[Vec<Option<usize>>])
     }
 
     proof {
+        assert(unvisited =~= Set::<usize>::empty());
+        assert forall|node: int| 0 <= node < graph@.len() implies (#[trigger] states@[node]) is Done by {};
         assert forall|edge: DependencyEdge| #[trigger] dependency_edge(graph@, edge) implies
             ranks[edge.to as int] < ranks[edge.from as int] by {};
         assert(dependencies_in_order(graph@, ranks));
+        if retain_order {
+            assert(order@.len() == graph@.len() && completion_order_matches(order@, ranks));
+            assert forall|node: int| #![trigger ranks[node]] 0 <= node < graph@.len()
+                implies ranks[node] < order@.len() && order@[ranks[node] as int] == node by {
+                assert(states@[node] is Done);
+            };
+        }
         assert forall|path: Seq<DependencyEdge>| !#[trigger] dependency_cycle(graph@, path) by {
             rank_excludes_cycle(graph@, ranks, path);
         };
     }
-    Ok(())
+    Ok(order)
 }
 
 } // verus!

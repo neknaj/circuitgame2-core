@@ -9,9 +9,9 @@ pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInp
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
 
-use super::{DefinitionBinding, DefinitionReferenceError, UseAliases};
+use super::{DefinitionBinding, DefinitionReferenceError, ResolvedDefinitionReference, UseAliases};
 #[cfg(verus_only)]
-use super::ResolvedDefinitionReference;
+use super::{DefinitionPosition, FunctionCallSite};
 #[cfg(verus_only)]
 use crate::project::circuits::{parsed_index_evidence, parsed_circuit_matches};
 use crate::project::declarations::key_of;
@@ -100,13 +100,68 @@ spec fn target_ports_match(project: &CircuitProject, resolved: ResolvedDefinitio
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn func_call_at(&self, file: usize, entry: usize, definition: usize, reference: usize) -> bool {
+    pub(super) open spec fn func_call_at(&self, file: usize, entry: usize, definition: usize, reference: usize) -> bool {
         let parsed = self.targets.project_model().circuits_model()[file as int];
         let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
         let indexed = parsed.references@[parsed.definitions@[def].references.start + reference];
         self.position_exists(file, entry, definition, reference)
             && entry < parsed.syntax.entries@.len()
             && parsed.syntax.entries@[entry as int].head is Func && indexed.kind is Callee
+    }
+
+    pub(super) open spec fn func_position_matches(
+        &self, binding: DefinitionBinding, position: Option<(usize, usize)>,
+    ) -> bool {
+        match binding {
+            DefinitionBinding::Nor => position.is_none(),
+            DefinitionBinding::Declaration { source, form } => {
+                &&& position matches Some((file, entry))
+                &&& {
+                    let project = self.targets.project_model();
+                    let circuits = project.circuits_model();
+                    &&& file < circuits.len() && file < project.sources_model().len()
+                    &&& *source == project.sources_model()[file as int]
+                    &&& entry < circuits[file as int].syntax.entries@.len()
+                    &&& circuits[file as int].syntax.entries@[entry as int].head is Func
+                    &&& circuits[file as int].syntax.entries@[entry as int].form == form.form
+                    &&& form.head is Func
+                    &&& location_in_source(LocatedName { source, span: form.name.span })
+                }
+            },
+        }
+    }
+
+    /// 解決済みの呼び出し先を、関数宣言のファイルと索引項目で示す。
+    pub(super) fn resolved_func_position(
+        &self, Ghost(caller): Ghost<(usize, usize, usize, usize)>,
+        resolved: &ResolvedDefinitionReference<'p, 'a>,
+    ) -> (position: Option<(usize, usize)>)
+        requires
+            self.can_resolve(),
+            self.func_call_at(caller.0, caller.1, caller.2, caller.3),
+            self.definition_resolution_evidence(caller.0, caller.1, caller.2, caller.3, Ok(*resolved)),
+        ensures self.func_position_matches(resolved.binding, position),
+    {
+        let (source, form) = match resolved.binding {
+            DefinitionBinding::Declaration { source, form } => (source, form),
+            DefinitionBinding::Nor => return None,
+        };
+        let project = self.targets.project();
+        proof {
+            self.resolved_func_declaration(caller.0, caller.1, caller.2, caller.3, *resolved, source, form);
+            self.targets.declarations_cover_project();
+        }
+        let table = self.targets.exports().declarations();
+        let key = key_of(form);
+        let (file, name) = table.selected_declaration_position(key,
+            Ghost(*project), Ghost(*source), Ghost(*form));
+        proof { declaration_location_evidence(table, key, source, form); }
+        let circuit = &project.circuits()[file];
+        proof {
+            assert(parsed_circuit_matches(*source, *circuit));
+            parsed_index_evidence(*source, *circuit);
+        }
+        Some((file, named_build_entry(source.text, circuit, name)))
     }
 
     /// 結果が、同じ右辺の呼び出しと名前解決で選んだ署名に対応することを表す。
@@ -137,6 +192,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(None) => false,
             }
         }
+    }
+
+    /// 解決済みの関数呼び出しから、展開順の定理に使う参照位置を得る。
+    pub proof fn expansion_site_for_call(
+        &self, at: DefinitionPosition, call: FuncCallArity<'p, 'a>,
+    ) -> (site: FunctionCallSite<'p, 'a>)
+        requires
+            self.func_call_arity_evidence(at.file, at.entry, at.definition, at.reference, Ok(Some(call))),
+            call.target is Function,
+        ensures
+            self.expansion_call_in_source(site), site.position == at,
+            call.target matches FuncCallTarget::Function { file, entry, .. } && site.target == (file, entry),
+    {
+        let project = self.targets.project_model();
+        let resolved = choose|resolved: ResolvedDefinitionReference|
+            #[trigger] self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, Ok(resolved))
+                && target_ports_match(&project, resolved, call.target);
+        let file = call.target->Function_file;
+        let entry = call.target->Function_entry;
+        assert(self.func_position_matches(resolved.binding, Some((file, entry))));
+        self.expansion_site_for_binding(at, (file, entry), resolved)
     }
 
     /// `func` の右辺にある通常呼び出しを解決し、実引数数と参照先の入出力数を返す。
@@ -194,29 +270,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
         };
         let ghost resolution = resolved;
+        let position = self.resolved_func_position(Ghost((file, entry, definition, reference)), &resolved);
         let target = match resolved.binding {
             DefinitionBinding::Nor => FuncCallTarget::Nor,
             DefinitionBinding::Declaration { source, form } => {
-                proof {
-                    self.resolved_func_declaration(file, entry, definition, reference, resolution, source, form);
-                    self.targets.declarations_cover_project();
-                }
-                let table = self.targets.exports().declarations();
-                let key = key_of(form);
-                let (target_file, target_name) = table.selected_declaration_position(key,
-                    Ghost(*project), Ghost(*source), Ghost(*form));
+                let Some((target_file, target_entry)) = position else {
+                    proof { assert(false); }
+                    unreachable!()
+                };
                 let target_circuit = &circuits[target_file];
                 proof {
                     assert(parsed_circuit_matches(*source, *target_circuit));
                     parsed_index_evidence(*source, *target_circuit);
                 }
-                let target_entry = named_build_entry(source.text, target_circuit, target_name);
                 let Some(arity) = routine_arity(source.text, &target_circuit.syntax, target_entry) else {
                     proof { assert(false); }
                     unreachable!()
                 };
                 let declaration = LocatedName { source, span: form.name.span.start..form.name.span.end };
-                proof { declaration_location_evidence(table, key, source, form); }
                 FuncCallTarget::Function { arity, declaration, file: target_file, entry: target_entry }
             },
         };

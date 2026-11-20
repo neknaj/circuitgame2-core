@@ -1,9 +1,9 @@
 //! 解決した型参照を、循環検査でたどる添字へ変換する。
 
-mod order;
-
 #[cfg(verus_only)]
-use order::{dependencies_in_order, dependency_cycle, dependency_edge, dependency_graph_valid};
+use crate::project::use_aliases::dependency_order::{
+    dependencies_in_order, dependency_cycle, dependency_edge, dependency_graph_valid,
+};
 
 use super::{ResolvedStructureEntry, ResolvedStructures, StructureFieldType, UseAliases};
 use super::{StructureLayoutError, StructureLayouts, StructurePosition};
@@ -13,7 +13,7 @@ use crate::project::location_in_source;
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
 use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence};
-use order::{DependencyEdge, check_dependency_order};
+use crate::project::use_aliases::dependency_order::{DependencyEdge, check_dependency_order};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -414,8 +414,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(StructureTypeError::Layout(error)),
         };
         let graph = self.structure_dependency_graph(&index, limit);
-        match check_dependency_order(graph.as_slice()) {
-            Ok(()) => Ok(layouts),
+        match check_dependency_order(graph.as_slice(), false) {
+            Ok(_) => Ok(layouts),
             Err(cycle) => {
                 let references = self.structure_cycle_references(&index, limit, graph.as_slice(), cycle.as_slice());
                 Err(StructureTypeError::Cycle { references })

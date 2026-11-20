@@ -10,7 +10,9 @@ pub use bit_func::{
     checked_bit_func_available, lowered_bit_func_result, port_values,
 };
 mod call_arity;
+mod call_dependencies;
 mod definitions;
+mod dependency_order;
 mod function_drivers;
 mod function_atoms;
 mod function_literals;
@@ -30,6 +32,7 @@ pub use structure_types::{
     StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
 };
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
+pub use call_dependencies::{FunctionCallSite, FunctionExpansionError, FunctionExpansionOrder};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,
     FuncCallOutputError, FuncCallOutputTypes,
