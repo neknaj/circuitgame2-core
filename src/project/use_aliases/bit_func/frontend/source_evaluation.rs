@@ -8,6 +8,7 @@ use super::super::semantics::{
     contiguous_rhs_preserves_range, definition_values, driver_values,
 };
 use super::super::super::function_atoms::named_structure_expression_matches;
+use super::super::super::function_drivers::same_definition_driver;
 use super::super::super::selection_arguments::successful_selections_agree;
 use super::super::super::single_bit_func::{source_operand_is_atom, source_operands_agree};
 use super::super::super::structure_types::{CheckedStructureExpression, StructureExpressionContext};
@@ -28,6 +29,17 @@ struct SourceFunc<'w, 'p, 'a> {
     source: &'p ProjectSource<'a>,
     parsed: &'p NamedBuildCircuit<'a>,
     wiring: &'w FuncWiring<'p, 'a>,
+}
+
+spec fn same_source_bindings(context: &SourceFunc, other: &SourceFunc) -> bool {
+    &&& context.file == other.file && context.entry == other.entry && context.limit == other.limit
+    &&& context.source == other.source && context.parsed == other.parsed
+    &&& context.wiring.drivers.signature.inputs@ == other.wiring.drivers.signature.inputs@
+    &&& context.wiring.signals@ == other.wiring.signals@
+    &&& context.wiring.drivers.definitions@.len() == other.wiring.drivers.definitions@.len()
+    &&& forall|i: int| 0 <= i < context.wiring.drivers.definitions@.len() ==>
+        same_definition_driver(#[trigger] context.wiring.drivers.definitions@[i],
+            #[trigger] other.wiring.drivers.definitions@[i])
 }
 
 spec fn atomic_value(
@@ -86,22 +98,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.source_func_evaluation(file, entry, limit, typed, layouts, inputs, right),
         ensures left == right,
     {
+        self.source_func_evaluations_agree_across_checks(file, entry, limit, typed, layouts, typed, layouts, inputs, left, right);
+    }
+
+    /// 同じ関数・幅上限・入力で評価に成功すると、型と配置を別々に検査しても出力が宣言順に一致する。
+    pub proof fn source_func_evaluations_agree_across_checks(
+        &self, file: usize, entry: usize, limit: u64, typed: &FuncSignalTypes, layouts: Option<&StructureLayouts>,
+        other_typed: &FuncSignalTypes, other_layouts: Option<&StructureLayouts>,
+        inputs: Seq<Seq<bool>>, left: Seq<Seq<bool>>, right: Seq<Seq<bool>>,
+    )
+        requires
+            self.source_func_evaluation(file, entry, limit, typed, layouts, inputs, left),
+            self.source_func_evaluation(file, entry, limit, other_typed, other_layouts, inputs, right),
+        ensures left == right,
+    {
         let project = self.targets.project_model();
         let wiring = typed.literals.wiring->Checked_0;
+        let other_wiring = other_typed.literals.wiring->Checked_0;
         let source = &project.sources_model()[file as int];
         let parsed = &project.circuits_model()[file as int];
         let context = SourceFunc { file, entry, limit, source, parsed, wiring: &wiring };
+        let other = SourceFunc { file, entry, limit, source, parsed, wiring: &other_wiring };
         self.checked_types_keep_wiring(file, entry, limit, *typed, wiring);
+        self.checked_types_keep_wiring(file, entry, limit, *other_typed, other_wiring);
         self.checked_wiring_is_func(file, entry, limit, wiring);
+        self.checked_func_wiring_agrees(file, entry, limit, wiring, other_wiring);
+        self.checked_function_signal_types_agree(file, entry, limit, *typed, *other_typed);
+        assert(same_source_bindings(&context, &other));
         self.targets.parsed_project_model();
         let a = choose|values: Seq<Seq<bool>>| #[trigger]
             self.source_definitions_evaluate(&context, layouts, typed.types@, inputs, values)
                 && source_outputs_match(&wiring, inputs, values, left);
         let b = choose|values: Seq<Seq<bool>>| #[trigger]
-            self.source_definitions_evaluate(&context, layouts, typed.types@, inputs, values)
-                && source_outputs_match(&wiring, inputs, values, right);
+            self.source_definitions_evaluate(&other, other_layouts, other_typed.types@, inputs, values)
+                && source_outputs_match(&other_wiring, inputs, values, right);
         reveal(UseAliases::source_definitions_evaluate);
-        self.source_values_prefix_agrees(&context, layouts, typed.types@, inputs, a, b, a.len());
+        self.source_values_prefix_agrees(&context, &other, layouts, other_layouts, typed.types@, inputs, a, b, a.len());
         assert(a.len() == b.len());
         assert(a.take(a.len() as int) =~= a);
         assert(b.take(a.len() as int) =~= b);
@@ -109,7 +141,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(left.len() == right.len());
         assert forall|i: int| 0 <= i < left.len() implies (#[trigger] left[i]) == (#[trigger] right[i]) by {
             assert(source_output_at(&wiring, inputs, a, left, i));
-            assert(source_output_at(&wiring, inputs, b, right, i));
+            assert(source_output_at(&other_wiring, inputs, b, right, i));
         };
         assert(left =~= right);
     }
@@ -183,6 +215,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.checked_evaluation_preserves_source_values(file, entry, limit, checked,
             port_values(lowered.input_layout_model(), input), port_values(lowered.output_layout_model(), output->Ok_0@));
     }
+    /// ネットリストの出力は別に検査した型と配置でのソース評価とも宣言順に一致する。
+    pub proof fn bit_func_netlist_agrees_with_source_evaluation(
+        &self, file: usize, entry: usize, limit: u64, checked: &CheckedBitFunc,
+        capacity: usize, lowered: &LoweredBitFunc, input: Seq<bool>, output: Result<Vec<bool>, NorEvaluationError>,
+        typed: &FuncSignalTypes, layouts: Option<&StructureLayouts>, expected: Seq<Seq<bool>>,
+    )
+        requires
+            self.checked_bit_func_matches(file, entry, limit, checked),
+            checked_bit_func_available(checked),
+            lowered_bit_func_result(checked, capacity, Ok(*lowered)),
+            input.len() == lowered.input_layout_model().total_bits_model(),
+            nor_evaluation_result(lowered.netlist_model(), input, output),
+            self.source_func_evaluation(file, entry, limit, typed, layouts,
+                port_values(lowered.input_layout_model(), input), expected),
+        ensures output matches Ok(bits) && port_values(lowered.output_layout_model(), bits@) == expected,
+    {
+        self.bit_func_lowering_preserves_source_evaluation(file, entry, limit, checked, capacity, lowered, input, output);
+        let inputs = port_values(lowered.input_layout_model(), input);
+        let actual = port_values(lowered.output_layout_model(), output->Ok_0@);
+        let (other, other_layouts) = choose|other: FuncSignalTypes, other_layouts: Option<&StructureLayouts>| #[trigger]
+            self.source_func_evaluation(file, entry, limit, &other, other_layouts, inputs, actual);
+        self.source_func_evaluations_agree_across_checks(file, entry, limit, typed, layouts, &other, other_layouts,
+            inputs, expected, actual);
+    }
+
     /// 各定義の値は入力とそれ以前の定義の値を使ってソース上の順序で決まる。
     #[verifier::opaque]
     spec fn source_definitions_evaluate(
@@ -370,23 +427,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn source_structure_values_agree(
-        &self, context: &SourceFunc, layouts: &StructureLayouts, types: Seq<Option<SignalType>>,
-        inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
+        &self, context: &SourceFunc, other: &SourceFunc, layouts: &StructureLayouts, other_layouts: &StructureLayouts,
+        types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
     )
         requires
             self.can_resolve(),
+            same_source_bindings(context, other),
+            prior.len() < context.wiring.drivers.definitions@.len(),
+            self.structure_types_match(context.limit, Ok(*layouts)),
+            self.structure_types_match(context.limit, Ok(*other_layouts)),
             self.structure_source_rhs_value(context, layouts, types, inputs, prior, left),
-            self.structure_source_rhs_value(context, layouts, types, inputs, prior, right),
+            self.structure_source_rhs_value(other, other_layouts, types, inputs, prior, right),
         ensures left == right,
     {
         reveal(UseAliases::structure_source_rhs_value);
         let (shape_a, checked_a) = choose|shape: StructureExpressionShape, checked: CheckedStructureExpression|
             #[trigger] self.source_structure_case(context, layouts, types, inputs, prior, left, shape, checked);
         let (shape_b, checked_b) = choose|shape: StructureExpressionShape, checked: CheckedStructureExpression|
-            #[trigger] self.source_structure_case(context, layouts, types, inputs, prior, right, shape, checked);
+            #[trigger] self.source_structure_case(other, other_layouts, types, inputs, prior, right, shape, checked);
         reveal(UseAliases::source_structure_case);
         let index = prior.len() as int;
         let parsed = context.parsed;
+        assert(same_definition_driver(context.wiring.drivers.definitions@[index], other.wiring.drivers.definitions@[index]));
         let definition = context.wiring.drivers.definitions@[index].definition;
         let row = parsed.definitions@[definition as int];
         let frame = parsed.entry_ranges@[context.entry as int];
@@ -396,12 +458,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let input = signal_type_at(context.wiring, types.take(index), reference.driver)->Some_0;
         structure_expression_shapes_agree(context.source.text, parsed.syntax.forms@,
             row.expression.start as int, shape_a, shape_b);
-        if shape_a.kind is Field {
-            self.structure_field_expression_ranges_agree(&site, shape_a, layouts, input, checked_a, checked_b);
-        } else {
-            self.structure_expression_width_evidence(&site, shape_a, layouts, input, checked_a);
-            self.structure_expression_width_evidence(&site, shape_a, layouts, input, checked_b);
-        }
+        self.checked_structure_expressions_agree(&site, shape_a, layouts, other_layouts, input, checked_a, checked_b);
     }
 
     proof fn structure_lowering_preserves_rhs_value(

@@ -182,34 +182,6 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
     {
     }
 
-    /// 同じ構造体と名前に対する成功したフィールド選択は、同じビット区間を指す。
-    pub(in crate::project::use_aliases) proof fn structure_field_ranges_agree(
-        &self, position: StructurePosition, first_name: &str, second_name: &str,
-        first: TypedStructureOperation, second: TypedStructureOperation,
-    )
-        requires
-            first_name.spec_bytes() == second_name.spec_bytes(),
-            self.structure_operation_matches(StructureOperation::Field(first_name),
-                StructureFieldType::Struct(position), Ok(first)),
-            self.structure_operation_matches(StructureOperation::Field(second_name),
-                StructureFieldType::Struct(position), Ok(second)),
-        ensures first.range == second.range,
-    {
-        let (i, a) = self.selected_field(position, first_name, first);
-        let (j, b) = self.selected_field(position, second_name, second);
-        if i < j {
-            assert(structure_before(self.entries@[i].position, self.entries@[j].position));
-        } else if j < i {
-            assert(structure_before(self.entries@[j].position, self.entries@[i].position));
-        }
-        let fields = self.entries@[i].fields@;
-        if a < b {
-            assert(fields[a].name.spec_bytes() != second_name.spec_bytes());
-        } else if b < a {
-            assert(fields[b].name.spec_bytes() != first_name.spec_bytes());
-        }
-    }
-
     proof fn selected_field(
         &self, position: StructurePosition, name: &str, operation: TypedStructureOperation,
     ) -> (selected: (int, int))

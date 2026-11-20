@@ -13,7 +13,8 @@ enum SourceRhsKind {
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn source_values_prefix_agrees(
-        &self, context: &SourceFunc, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
+        &self, context: &SourceFunc, other: &SourceFunc, layouts: Option<&StructureLayouts>,
+        other_layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
         inputs: Seq<Seq<bool>>, a: Seq<Seq<bool>>, b: Seq<Seq<bool>>, end: nat,
     )
         requires
@@ -23,8 +24,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             forall|i: int| 0 <= i < context.wiring.drivers.definitions@.len()
                 ==> indexed_driver_site(context.source, context.parsed, context.entry as int,
                     #[trigger] context.wiring.drivers.definitions@[i]),
+            same_source_bindings(context, other),
+            self.structure_layout_for_ports(context.limit, layouts),
+            self.structure_layout_for_ports(context.limit, other_layouts),
             self.source_definitions_evaluate(context, layouts, types, inputs, a),
-            self.source_definitions_evaluate(context, layouts, types, inputs, b),
+            self.source_definitions_evaluate(other, other_layouts, types, inputs, b),
             end <= a.len(),
         ensures a.take(end as int) == b.take(end as int),
         decreases end,
@@ -34,13 +38,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(a.take(0) =~= b.take(0));
         } else {
             let i = (end - 1) as int;
-            self.source_values_prefix_agrees(context, layouts, types, inputs, a, b, i as nat);
+            self.source_values_prefix_agrees(context, other, layouts, other_layouts, types, inputs, a, b, i as nat);
             assert(self.source_definition_value(context, layouts, types, inputs, a, i));
-            assert(self.source_definition_value(context, layouts, types, inputs, b, i));
+            assert(self.source_definition_value(other, other_layouts, types, inputs, b, i));
             reveal(UseAliases::source_definition_value);
             let driver = context.wiring.drivers.definitions@[i];
             assert(indexed_driver_site(context.source, context.parsed, context.entry as int, driver));
-            self.source_rhs_values_agree(context, layouts, types, inputs, a.take(i), a[i], b[i]);
+            self.source_rhs_values_agree(context, other, layouts, other_layouts, types, inputs, a.take(i), a[i], b[i]);
             assert forall|j: int| 0 <= j < end implies
                 (#[trigger] a.take(end as int)[j]) == (#[trigger] b.take(end as int)[j]) by {
                 if j < i {
@@ -52,7 +56,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn source_rhs_values_agree(
-        &self, context: &SourceFunc, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
+        &self, context: &SourceFunc, other: &SourceFunc, layouts: Option<&StructureLayouts>,
+        other_layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
         inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
     )
         requires
@@ -62,8 +67,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             prior.len() < context.wiring.drivers.definitions@.len(),
             indexed_driver_site(context.source, context.parsed, context.entry as int,
                 context.wiring.drivers.definitions@[prior.len() as int]),
+            same_source_bindings(context, other),
+            self.structure_layout_for_ports(context.limit, layouts),
+            self.structure_layout_for_ports(context.limit, other_layouts),
             self.source_rhs_can_evaluate(context, layouts, types, inputs, prior, left),
-            self.source_rhs_can_evaluate(context, layouts, types, inputs, prior, right),
+            self.source_rhs_can_evaluate(other, other_layouts, types, inputs, prior, right),
         ensures left == right,
     {
         let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
@@ -71,16 +79,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let forms = context.parsed.syntax.forms@;
         let root = row.expression.start as int;
         let a = self.source_rhs_kind(context, layouts, types, inputs, prior, left);
-        let b = self.source_rhs_kind(context, layouts, types, inputs, prior, right);
+        let b = self.source_rhs_kind(other, other_layouts, types, inputs, prior, right);
+        assert(same_definition_driver(context.wiring.drivers.definitions@[prior.len() as int],
+            other.wiring.drivers.definitions@[prior.len() as int]));
         match (a, b) {
             (SourceRhsKind::Atom, SourceRhsKind::Atom) =>
-                atomic_values_agree(context, definition, root, inputs, prior, left, right),
+                atomic_values_agree(context, other, definition, root, inputs, prior, left, right),
             (SourceRhsKind::Nor, SourceRhsKind::Nor) =>
-                self.source_nor_values_agree(context, inputs, prior, left, right),
+                self.source_nor_values_agree(context, other, inputs, prior, left, right),
             (SourceRhsKind::Selection(_), SourceRhsKind::Selection(_)) =>
-                self.source_selection_values_agree(context, inputs, prior, left, right),
+                self.source_selection_values_agree(context, other, inputs, prior, left, right),
             (SourceRhsKind::Structure(_), SourceRhsKind::Structure(_)) =>
-                self.source_structure_values_agree(context, layouts->Some_0, types, inputs, prior, left, right),
+                self.source_structure_values_agree(context, other, layouts->Some_0, other_layouts->Some_0, types, inputs, prior, left, right),
             (SourceRhsKind::Nor, _) | (_, SourceRhsKind::Nor) =>
                 ordinary_call_excludes_special_forms(context.source.text, forms, root, row.expression.end as int),
             (SourceRhsKind::Selection(shape), SourceRhsKind::Structure(_))
@@ -145,30 +155,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn source_nor_values_agree(
-        &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
+        &self, context: &SourceFunc, other: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
     )
         requires
             parsed_circuit_matches(*context.source, *context.parsed),
             context.entry < context.parsed.syntax.entries@.len() && context.entry < context.parsed.entry_ranges@.len(),
             indexed_driver_site(context.source, context.parsed, context.entry as int,
                 context.wiring.drivers.definitions@[prior.len() as int]),
+            same_source_bindings(context, other),
+            prior.len() < context.wiring.drivers.definitions@.len(),
             self.source_nor_value(context, inputs, prior, left),
-            self.source_nor_value(context, inputs, prior, right),
+            self.source_nor_value(other, inputs, prior, right),
         ensures left == right,
     {
         let (call_a, a0, a1) = choose|call: TypedFuncCall, a: Seq<bool>, b: Seq<bool>|
             #[trigger] self.source_nor_operands(context, inputs, prior, call, a, b)
                 && left == seq![!(a[0] || b[0])];
         let (call_b, b0, b1) = choose|call: TypedFuncCall, a: Seq<bool>, b: Seq<bool>|
-            #[trigger] self.source_nor_operands(context, inputs, prior, call, a, b)
+            #[trigger] self.source_nor_operands(other, inputs, prior, call, a, b)
                 && right == seq![!(a[0] || b[0])];
         reveal(UseAliases::source_nor_operands);
         assert(self.source_nor_operands(context, inputs, prior, call_a, a0, a1));
-        assert(self.source_nor_operands(context, inputs, prior, call_b, b0, b1));
+        assert(self.source_nor_operands(other, inputs, prior, call_b, b0, b1));
+        assert(same_definition_driver(context.wiring.drivers.definitions@[prior.len() as int],
+            other.wiring.drivers.definitions@[prior.len() as int]));
         let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
         let root = context.parsed.definitions@[definition as int].expression.start as int;
-        atomic_values_agree(context, definition, root + 2, inputs, prior, a0, b0);
-        atomic_values_agree(context, definition, root + 3, inputs, prior, a1, b1);
+        atomic_values_agree(context, other, definition, root + 2, inputs, prior, a0, b0);
+        atomic_values_agree(context, other, definition, root + 3, inputs, prior, a1, b1);
     }
 
     proof fn source_selection_witness(
@@ -182,26 +196,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn source_selection_values_agree(
-        &self, context: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
+        &self, context: &SourceFunc, other: &SourceFunc, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
     )
         requires
             parsed_circuit_matches(*context.source, *context.parsed),
             context.entry < context.parsed.syntax.entries@.len() && context.entry < context.parsed.entry_ranges@.len(),
             indexed_driver_site(context.source, context.parsed, context.entry as int,
                 context.wiring.drivers.definitions@[prior.len() as int]),
+            same_source_bindings(context, other),
+            prior.len() < context.wiring.drivers.definitions@.len(),
             self.source_selection_value(context, inputs, prior, left),
-            self.source_selection_value(context, inputs, prior, right),
+            self.source_selection_value(other, inputs, prior, right),
         ensures left == right,
     {
         let (shape_a, driver_a, selection_a, origin_a) = self.source_selection_witness(context, inputs, prior, left);
-        let (shape_b, driver_b, selection_b, origin_b) = self.source_selection_witness(context, inputs, prior, right);
+        let (shape_b, driver_b, selection_b, origin_b) = self.source_selection_witness(other, inputs, prior, right);
         reveal(UseAliases::source_selection_case);
+        assert(same_definition_driver(context.wiring.drivers.definitions@[prior.len() as int],
+            other.wiring.drivers.definitions@[prior.len() as int]));
         let definition = context.wiring.drivers.definitions@[prior.len() as int].definition;
         let root = context.parsed.definitions@[definition as int].expression.start as int;
         let forms = context.parsed.syntax.forms@;
         bit_selection_shapes_agree(context.source.text, forms, root, shape_a, shape_b);
         source_operands_agree(context.source, context.parsed, context.entry, definition, shape_a.input.start as int,
-            context.wiring, prior.len() as int, SingleBitOperand::Driver(driver_a), SingleBitOperand::Driver(driver_b));
+            context.wiring, other.wiring, prior.len() as int, SingleBitOperand::Driver(driver_a), SingleBitOperand::Driver(driver_b));
         let width = driver_values(inputs, prior, driver_a).len() as u64;
         successful_selections_agree(context.source, forms, &shape_a, width, &origin_a, selection_a,
             width, &origin_b, selection_b);
@@ -210,7 +228,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 }
 
 proof fn atomic_values_agree(
-    context: &SourceFunc, definition: usize, form: int,
+    context: &SourceFunc, other: &SourceFunc, definition: usize, form: int,
     inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,
 )
     requires
@@ -218,18 +236,19 @@ proof fn atomic_values_agree(
         context.entry < context.parsed.syntax.entries@.len() && context.entry < context.parsed.entry_ranges@.len(),
         context.parsed.entry_ranges@[context.entry as int].definitions.start <= definition
             < context.parsed.entry_ranges@[context.entry as int].definitions.end,
+        same_source_bindings(context, other),
         atomic_value(context, definition, form, inputs, prior, left),
-        atomic_value(context, definition, form, inputs, prior, right),
+        atomic_value(other, definition, form, inputs, prior, right),
     ensures left == right,
 {
     let a = choose|operand: SingleBitOperand|
         #[trigger] operand_matches(context.source, context.parsed, context.entry, definition, form,
             context.wiring, prior.len() as int, operand) && left == atom_result(inputs, prior, operand);
     let b = choose|operand: SingleBitOperand|
-        #[trigger] operand_matches(context.source, context.parsed, context.entry, definition, form,
-            context.wiring, prior.len() as int, operand) && right == atom_result(inputs, prior, operand);
+        #[trigger] operand_matches(other.source, other.parsed, other.entry, definition, form,
+            other.wiring, prior.len() as int, operand) && right == atom_result(inputs, prior, operand);
     source_operands_agree(context.source, context.parsed, context.entry, definition, form,
-        context.wiring, prior.len() as int, a, b);
+        context.wiring, other.wiring, prior.len() as int, a, b);
 }
 
 } // verus!

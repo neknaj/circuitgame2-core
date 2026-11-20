@@ -262,7 +262,7 @@ pub(super) proof fn source_operand_is_atom(
 
 pub(super) proof fn source_operands_agree(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
-    wiring: &FuncWiring, prior: int, left: SingleBitOperand, right: SingleBitOperand,
+    left_wiring: &FuncWiring, right_wiring: &FuncWiring, prior: int, left: SingleBitOperand, right: SingleBitOperand,
 )
     requires
         parsed_circuit_matches(*source, *parsed),
@@ -270,8 +270,9 @@ pub(super) proof fn source_operands_agree(
         entry < parsed.entry_ranges@.len(),
         parsed.entry_ranges@[entry as int].definitions.start <= definition
             < parsed.entry_ranges@[entry as int].definitions.end,
-        operand_matches(source, parsed, entry, definition, root, wiring, prior, left),
-        operand_matches(source, parsed, entry, definition, root, wiring, prior, right),
+        left_wiring.signals@ == right_wiring.signals@,
+        operand_matches(source, parsed, entry, definition, root, left_wiring, prior, left),
+        operand_matches(source, parsed, entry, definition, root, right_wiring, prior, right),
     ensures left == right,
 {
     match (left, right) {
@@ -287,10 +288,10 @@ pub(super) proof fn source_operands_agree(
         (SingleBitOperand::Driver(a), SingleBitOperand::Driver(b)) => {
             parsed_index_evidence(*source, *parsed);
             let start = parsed.entry_ranges@[entry as int].signals.start;
-            let first = choose|i: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, i)
-                && wiring.signals@[i - start].driver == a;
-            let second = choose|i: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, i)
-                && wiring.signals@[i - start].driver == b;
+            let first = choose|i: int| #[trigger] prior_name_binding(parsed, entry, definition, root, left_wiring, prior, i)
+                && left_wiring.signals@[i - start].driver == a;
+            let second = choose|i: int| #[trigger] prior_name_binding(parsed, entry, definition, root, right_wiring, prior, i)
+                && right_wiring.signals@[i - start].driver == b;
             definition_signal_positions_agree(source.text, &parsed.build_model(), entry as int,
                 definition as int, first, second);
         },
