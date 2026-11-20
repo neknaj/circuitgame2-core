@@ -23,7 +23,7 @@ use crate::project::{FuncDrivers, FuncWiring, TypedPort, location_in_source, por
 use crate::syntax::circuit::{NamedBuildCircuit, definition_root_is_call, definition_target_atoms};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    build_definition_scope_evidence, build_entry_ranges_evidence, definition_target_range, ordinary_call_at,
+    build_definition_scope_evidence, build_entry_ranges_evidence, definition_target_range, indexed_call_arguments, ordinary_call_at,
 };
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -438,6 +438,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             index += 1;
         }
         Ok(FuncCallOutputTypes { wiring, types })
+    }
+
+    /// 解決済みの基底 NOR と同じ呼び出しから、出力型が1ビットであることを導く。
+    pub(in crate::project::use_aliases) proof fn nor_root_output_type(
+        &self, file: usize, entry: usize, limit: u64, outputs: &FuncCallOutputTypes, wiring: &FuncWiring,
+        index: int, builtin: TypedFuncCall,
+    )
+        requires
+            self.can_resolve(),
+            self.func_call_outputs_evidence(file, entry, limit, Ok(*outputs)),
+            outputs.wiring == FuncWiringResult::Checked(*wiring),
+            0 <= index < wiring.drivers.definitions@.len(),
+            builtin.call.target is Nor,
+            ({
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let source = &project.sources_model()[file as int];
+                let driver = wiring.drivers.definitions@[index];
+                let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+                &&& indexed_driver_site(source, parsed, entry as int, driver)
+                &&& builtin.call.call.form == parsed.definitions@[driver.definition as int].expression.start
+                &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(builtin)))
+            }),
+        ensures
+            outputs.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+            ({
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+                ordinary_call_at(project.sources_model()[file as int].text, parsed.syntax.forms@,
+                    row.expression.start as int, row.expression.end as int)
+            }),
+    {
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let drivers = &wiring.drivers;
+        let driver = drivers.definitions@[index];
+        let row = parsed.definitions@[driver.definition as int];
+        let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        self.typed_call_arguments_ready(file, entry, local, 0, limit, builtin);
+        indexed_call_arguments(source.text, forms, row, parsed.references@[row.references.start as int], builtin.call.call);
+        let outlets = choose|outlets: Seq<Option<usize>>|
+            #[trigger] output_indices(drivers, drivers.outputs@.len() as int, outlets)
+            && self.call_output_prefix(file, entry, limit, drivers, outlets, outputs.types@);
+        reveal(UseAliases::call_output_prefix);
+        assert(self.call_output_step(file, entry, limit, drivers, outlets, index, Ok(outputs.types@[index])));
+        reveal(UseAliases::call_output_step);
+        reveal(UseAliases::root_output_signature);
+        let root = forms[row.expression.start as int];
+        let target = LocatedName { source, span: driver.name.span };
+        let expected = if let Some(output) = outlets[index] { Some(drivers.signature.outputs@[output as int]) } else { None };
+        let (call, expression) = choose|call: TypedFuncCall, expression: LocatedName|
+            #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(call)))
+            && #[trigger] is_form_location(source, root, expression)
+            && driver.result_index < call.call.target.port_counts().outputs
+            && output_transfer(call_output_type(&call, &expression, driver.result_index as int),
+                expected, target, expression, Ok(outputs.types@[index]));
+        self.resolved_nor_call_agrees(file, entry, local, 0, limit, builtin, Some(call));
+        self.typed_call_arguments_ready(file, entry, local, 0, limit, call);
     }
 
     pub(in crate::project::use_aliases) proof fn call_outputs_fit_wiring(

@@ -124,6 +124,18 @@ pub(super) proof fn ordinary_call_bounds(source: &str, forms: Seq<Form>, call: i
 {
 }
 
+/// 通常呼び出しを、ビット選択や構造体式として解釈できないことを示す。
+pub proof fn ordinary_call_excludes_special_forms(source: &str, forms: Seq<Form>, call: int, stop: int)
+    requires ordinary_call_at(source, forms, call, stop),
+    ensures
+        forms[call] is List,
+        !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, call, shape)),
+        !(exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, call, shape)),
+{
+    super::selection_shapes::ordinary_head_excludes_selection(source, forms, call);
+    super::structure_expressions::ordinary_head_excludes_structure(source, forms, call);
+}
+
 /// 通常呼び出しの参照添字は、対応するリストの直後の先頭語を指す。
 pub(super) proof fn expression_callee_location(
     source: &str, forms: Seq<Form>, start: int, stop: int, position: int,

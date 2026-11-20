@@ -5,7 +5,7 @@ use super::function_types::FuncSignalTypeError;
 use super::selection_arguments::check_selection_arguments;
 use super::structure_types::{StructureExpressionContext, StructureLayouts, TypedStructureOperation};
 #[cfg(verus_only)]
-use super::selection_arguments::selection_arguments_match;
+use super::selection_arguments::{CheckedBitSelection, selection_arguments_match, selection_counts_agree};
 #[cfg(verus_only)]
 use super::function_literals::output_indices;
 #[cfg(verus_only)]
@@ -22,9 +22,9 @@ use crate::syntax::{AtomKind, Form};
 use crate::syntax::circuit::{BitSelectionShape, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    NamedBuildCircuit, bit_selection_shape_matches, bit_selection_shape_positions, build_bare_signal_position,
+    NamedBuildCircuit, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree, build_bare_signal_position,
     build_definition_scope_evidence, build_selection_input_position, build_structure_input_position,
-    structure_expression_matches, structure_expression_positions,
+    ordinary_call_at, ordinary_call_excludes_special_forms, structure_expression_matches, structure_expression_positions,
 };
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
@@ -468,6 +468,137 @@ pub(super) closed spec fn atoms_match(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    proof fn successful_atom_step(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        types: Vec<Option<SignalType>>, i: int,
+    ) -> (outputs: Seq<Option<usize>>)
+        requires
+            atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+            0 <= i < types@.len(),
+        ensures
+            atom_type_step(self, file, limit, source, parsed, entry as int,
+                wiring, widths, outputs, roots, types@.take(i), i, Ok(types@[i])),
+    {
+        let outputs = choose|outputs: Seq<Option<usize>>|
+            #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outputs)
+            && typed_prefix(self, file, limit, source, parsed, entry as int, wiring, widths, outputs, roots, types@);
+        reveal(typed_prefix);
+        outputs
+    }
+
+    pub(super) proof fn atom_literal_type(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        types: Vec<Option<SignalType>>, i: int, width: u64,
+    )
+        requires
+            atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+            0 <= i < types@.len(),
+            widths[i] == Some(width),
+        ensures types@[i] matches Some(ty) && ty.ty == ResolvedPortType::Bits(width),
+    {
+        let outputs = self.successful_atom_step(file, entry, limit, source, parsed, wiring, widths, roots, types, i);
+        assert(atom_type_step(self, file, limit, source, parsed, entry as int,
+            wiring, widths, outputs, roots, types@.take(i), i, Ok(types@[i])));
+        reveal(atom_type_step);
+    }
+
+    pub(super) proof fn atom_call_inherits_output_type(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        types: Vec<Option<SignalType>>, index: int,
+    )
+        requires
+            atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+            0 <= index < types@.len() && index < roots.len(),
+            widths[index].is_none(),
+            ({
+                let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+                ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int)
+            }),
+        ensures types@[index] == roots[index],
+    {
+        let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+        ordinary_call_excludes_special_forms(source.text, parsed.syntax.forms@,
+            row.expression.start as int, row.expression.end as int);
+        let outputs = self.successful_atom_step(file, entry, limit, source, parsed, wiring, widths, roots, types, index);
+        assert(atom_type_step(self, file, limit, source, parsed, entry as int,
+            wiring, widths, outputs, roots, types@.take(index), index, Ok(types@[index])));
+        reveal(atom_type_step);
+    }
+
+    pub(super) proof fn successful_selection_type(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        types: Vec<Option<SignalType>>, index: int, shape: BitSelectionShape,
+        input: SignalType, width: u64, origin: LocatedName, selection: CheckedBitSelection,
+    )
+        requires
+            atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+            0 <= index < types@.len(),
+            widths[index].is_none(),
+            roots.len() > 0,
+            ({
+                let driver = wiring.drivers.definitions@[index];
+                let row = parsed.definitions@[driver.definition as int];
+                let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+                &&& driver.result_index == 0
+                &&& named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+                &&& signal_type_at(wiring, types@.take(index), wiring.signals@[first].driver) == Some(input)
+            }),
+            selection_arguments_match(source, parsed.syntax.forms@, &shape, width, &origin, Ok(selection)),
+        ensures types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(selection.count),
+    {
+        let outputs = self.successful_atom_step(file, entry, limit, source, parsed, wiring, widths, roots, types, index);
+        assert(atom_type_step(self, file, limit, source, parsed, entry as int,
+            wiring, widths, outputs, roots, types@.take(index), index, Ok(types@[index])));
+        reveal(atom_type_step);
+        let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+        let root = row.expression.start;
+        let forms = parsed.syntax.forms@;
+        bit_selection_shape_positions(source.text, forms, root as int, shape);
+        let inferred_shape = choose|candidate: BitSelectionShape|
+            #[trigger] named_selection_matches(source.text, forms, root as int, candidate);
+        bit_selection_shapes_agree(source.text, forms, root as int, inferred_shape, shape);
+        assert(input.ty is Bits);
+        let input_width = input.ty->Bits_0;
+        let (inferred, _expression) = choose|inferred: CheckedBitSelection, expression: LocatedName|
+            #[trigger] selection_arguments_match(source, forms, &inferred_shape, input_width, &input.origin, Ok(inferred))
+            && #[trigger] is_form_location(source, forms[root as int], expression)
+            && types@[index] == Some(SignalType { ty: ResolvedPortType::Bits(inferred.count), origin: expression });
+        selection_counts_agree(source, forms, &shape, input_width, &input.origin, inferred,
+            width, &origin, selection);
+    }
+
+    /// 裸の信号名の結果型がその駆動元の型を引き継ぐことを示す。
+    pub(super) proof fn atom_bare_rhs_inherits(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        types: Vec<Option<SignalType>>, i: int,
+    )
+        requires
+            atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+            0 <= i < types@.len(),
+            ({
+                let driver = wiring.drivers.definitions@[i];
+                let row = parsed.definitions@[driver.definition as int];
+                let root = parsed.syntax.forms@[row.expression.start as int];
+                widths[i].is_none() && driver.result_index == 0 && root is Atom && root->Atom_kind is Name
+            }),
+        ensures ({
+            let row = parsed.definitions@[wiring.drivers.definitions@[i].definition as int];
+            let index = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+            &&& 0 <= index < wiring.signals@.len()
+            &&& types@[i] == signal_type_at(wiring, types@.take(i), wiring.signals@[index].driver)
+        }),
+    {
+        let outputs = self.successful_atom_step(file, entry, limit, source, parsed, wiring, widths, roots, types, i);
+        assert(atom_type_step(self, file, limit, source, parsed, entry as int,
+            wiring, widths, outputs, roots, types@.take(i), i, Ok(types@[i])));
+        reveal(atom_type_step);
+    }
+
     /// 保存した区間の長さが結果幅に一致し、選択範囲が入力幅に収まることを示す。
     pub(super) proof fn structure_projection_widths(
         &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,

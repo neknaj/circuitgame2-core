@@ -84,6 +84,16 @@ pub closed spec fn structure_expression_matches(
     }
 }
 
+pub(super) proof fn ordinary_head_excludes_structure(source: &str, forms: Seq<Form>, call: int)
+    requires list_head_matches(source, forms, call + 1, None),
+    ensures !(exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, call, shape)),
+{
+    if exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, call, shape) {
+        let shape = choose|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, call, shape);
+        same_expression_head(source, forms, call + 1, None, Some(expected_head(shape.kind)));
+    }
+}
+
 proof fn structure_shapes_agree(
     source: &str, forms: Seq<Form>, root: int, left: StructureExpressionShape, right: StructureExpressionShape,
 )

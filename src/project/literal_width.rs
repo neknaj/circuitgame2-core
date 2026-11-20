@@ -74,6 +74,26 @@ pub closed spec fn circuit_literal_width_matches(
     }
 }
 
+pub(super) proof fn fixed_bit_literal_width(
+    bytes: Seq<u8>, expected: Option<u64>, limit: u64, width: u64,
+)
+    requires
+        bytes == "0".spec_bytes() || bytes == "1".spec_bytes(),
+        circuit_literal_width_matches(bytes, expected, limit, Ok(width)),
+    ensures width == 1,
+{
+    reveal_strlit("0");
+    reveal_strlit("1");
+    let word = if bytes == "0".spec_bytes() { "0" } else { "1" };
+    assert(vstd::string::is_ascii(word)) by {
+        assert forall|i: int| 0 <= i < word@.len() implies #[trigger] word@[i] as int <= 127 by {
+            assert(i == 0);
+        };
+    };
+    vstd::string::is_ascii_spec_bytes(word);
+    assert(fixed_bit(bytes));
+}
+
 fn apply_width(
     fixed: bool, written: u128, required: u128,
     expected: Option<u64>, limit: u64,

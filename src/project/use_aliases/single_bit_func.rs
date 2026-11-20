@@ -27,7 +27,12 @@ use super::{FuncSignalTypes, TypedFuncCall, TypedPort};
 #[cfg(verus_only)]
 use super::super::location_in_source;
 #[cfg(verus_only)]
-use crate::syntax::circuit::{build_definition_scope_evidence, definition_target_range, indexed_entry_evidence};
+use crate::syntax::circuit::{
+    BitSelectionShape, build_bare_signal_position, build_definition_scope_evidence, build_selection_input_position,
+    definition_target_range, indexed_entry_evidence,
+};
+#[cfg(verus_only)]
+use super::function_atoms::named_selection_matches;
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 #[cfg(verus_only)]
@@ -244,6 +249,81 @@ pub(super) closed spec fn operand_matches(
             && exists|signal: int| prior_name_binding(parsed, entry, definition, root, wiring, prior, signal)
                 && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver,
     }
+}
+
+pub(super) proof fn constant_operand_literal(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
+    wiring: &FuncWiring, prior: int, bit: bool,
+)
+    requires operand_matches(source, parsed, entry, definition, root, wiring, prior, SingleBitOperand::Constant(bit)),
+    ensures
+        parsed.syntax.forms@[root] is Atom,
+        parsed.syntax.forms@[root]->Atom_kind is Natural,
+        ({
+            let span = form_span(parsed.syntax.forms@[root]);
+            source.text.spec_bytes()[span.start as int..span.end as int] == (if bit { "1" } else { "0" }).spec_bytes()
+        }),
+{
+}
+
+/// 裸の信号名を右辺とする定義では、配線変換と型伝播が信号索引の同じ行を参照する。
+pub(super) proof fn bare_rhs_driver_matches(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize,
+    wiring: &FuncWiring, prior: int, driver: OutputDriver,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(),
+        entry < parsed.entry_ranges@.len(),
+        parsed.entry_ranges@[entry as int].definitions.start <= definition
+            < parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len(),
+        operand_matches(source, parsed, entry, definition,
+            parsed.definitions@[definition as int].expression.start as int, wiring, prior, SingleBitOperand::Driver(driver)),
+    ensures ({
+        let row = parsed.definitions@[definition as int];
+        let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+        &&& 0 <= first < wiring.signals@.len()
+        &&& wiring.signals@[first].driver == driver
+        &&& parsed.syntax.forms@[row.expression.start as int] matches Form::Atom { kind: AtomKind::Name, .. }
+    }),
+{
+    parsed_index_evidence(*source, *parsed);
+    let row = parsed.definitions@[definition as int];
+    let root = row.expression.start as int;
+    build_bare_signal_position(source.text, &parsed.build_model(), entry as int, definition as int);
+    let signal = choose|signal: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, signal)
+        && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver;
+    assert(signal == row.signals.start);
+}
+
+/// 選択式の入力について、配線変換と型伝播が同じ駆動元を参照することを示す。
+pub(super) proof fn selection_rhs_driver_matches(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize,
+    wiring: &FuncWiring, prior: int, shape: BitSelectionShape, driver: OutputDriver,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(),
+        entry < parsed.entry_ranges@.len(),
+        parsed.entry_ranges@[entry as int].definitions.start <= definition
+            < parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len(),
+        named_selection_matches(source.text, parsed.syntax.forms@,
+            parsed.definitions@[definition as int].expression.start as int, shape),
+        operand_matches(source, parsed, entry, definition, shape.input.start as int, wiring, prior, SingleBitOperand::Driver(driver)),
+    ensures ({
+        let row = parsed.definitions@[definition as int];
+        let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+        &&& 0 <= first < wiring.signals@.len()
+        &&& wiring.signals@[first].driver == driver
+    }),
+{
+    parsed_index_evidence(*source, *parsed);
+    build_selection_input_position(source.text, &parsed.build_model(), entry as int, definition as int, shape);
+    let row = parsed.definitions@[definition as int];
+    let root = shape.input.start as int;
+    let signal = choose|signal: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, signal)
+        && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver;
+    assert(signal == row.signals.start);
 }
 
 pub(super) closed spec fn no_operand(

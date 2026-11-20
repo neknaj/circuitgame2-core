@@ -71,7 +71,7 @@ pub use expression_forest::{expression_reference_in_source, expression_source_re
 #[cfg(verus_only)]
 pub use expression_forest::{expression_forest, expression_region};
 #[cfg(verus_only)]
-pub use expression_forest::ordinary_call_at;
+pub use expression_forest::{ordinary_call_at, ordinary_call_excludes_special_forms};
 pub use index::{
     CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     index_headers, recover_circuit_forms,
@@ -107,7 +107,8 @@ pub use selection_shapes::{BitSelectionShape, BitSelectionTail, bit_selection_sh
 #[cfg(verus_only)]
 pub use selection_shapes::{
     build_selection_input_position,
-    bit_selection_shape_matches, bit_selection_shape_positions, strict_bit_selection_has_shape, strict_bit_selection_input,
+    bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
+    strict_bit_selection_has_shape, strict_bit_selection_input,
 };
 use structure::validate_structure_arguments;
 pub use structure_expressions::{StructureExpressionKind, StructureExpressionShape, structure_expression_shape};

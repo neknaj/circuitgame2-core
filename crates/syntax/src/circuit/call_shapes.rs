@@ -103,7 +103,9 @@ pub proof fn indexed_call_arguments(
     source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference, call: CallShape,
 )
     requires call_shape_matches(source, forms, row, reference, Some(call)),
-    ensures call_arguments_match(forms, call),
+    ensures
+        call_arguments_match(forms, call),
+        ordinary_call_at(source, forms, call.form as int, row.expression.end as int),
 {
     super::expression_forest::ordinary_call_bounds(source, forms, reference.form - 1, row.expression.end as int);
 }

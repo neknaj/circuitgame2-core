@@ -6,9 +6,18 @@ use super::{
     StructureTypeError, UseAliases,
 };
 #[cfg(verus_only)]
-use super::{FuncWiring, function_atoms::{
+use super::{FuncWiring, ResolvedPortType, TypedFuncCall, function_atoms::{
     atoms_match, structure_projection_matches, structure_projection_required, structure_projections_in_order,
+    signal_type_at,
 }};
+#[cfg(verus_only)]
+use crate::syntax::{AtomKind, circuit::BitSelectionShape};
+#[cfg(verus_only)]
+use super::selection_arguments::{CheckedBitSelection, selection_arguments_match};
+#[cfg(verus_only)]
+use super::function_atoms::named_selection_matches;
+#[cfg(verus_only)]
+use super::function_drivers::indexed_driver_site;
 use alloc::vec::Vec;
 use super::signature_cache::SignatureCache;
 use super::function_atoms::StructureProjections;
@@ -63,10 +72,152 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires
             self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
             typed.literals.wiring == FuncWiringResult::Checked(wiring),
-        ensures self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+        ensures
+            self.func_literal_evidence(file, entry, limit, Ok(typed.literals)),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
     {
         self.literals_preserve_arity(file, entry, limit, typed.literals);
         self.arity_preserves_wiring(file, entry, limit, typed.literals.wiring);
+    }
+
+    proof fn successful_type_roots(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
+    ) -> (roots: FuncCallOutputTypes)
+        requires
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+        ensures
+            self.signal_type_sources(file, entry, limit, typed.literals, &wiring, roots),
+            self.propagated_types_match(file, entry, limit, &wiring, typed.literals, roots, Ok(typed.types)),
+    {
+        choose|roots: FuncCallOutputTypes|
+            #[trigger] self.signal_type_sources(file, entry, limit, typed.literals, &wiring, roots)
+            && self.propagated_types_match(file, entry, limit, &wiring, typed.literals, roots, Ok(typed.types))
+            && self.prepared_call_inputs_match(file, entry, limit, typed.types@, &wiring, Ok(()))
+    }
+
+    pub(super) proof fn checked_literal_type(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
+        target: int, width: u64,
+    )
+        requires
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+            0 <= target < typed.types@.len(),
+            typed.literals.widths@[target] == Some(width),
+        ensures typed.types@[target] matches Some(ty) && ty.ty == ResolvedPortType::Bits(width),
+    {
+        let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
+        let project = self.targets.project_model();
+        self.atom_literal_type(file, entry, limit, &project.sources_model()[file as int],
+            &project.circuits_model()[file as int], &wiring, typed.literals.widths@,
+            roots.types@, typed.types, target, width);
+    }
+
+    pub(super) proof fn checked_bare_rhs_inherits(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring, target: int,
+    )
+        requires
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+            0 <= target < typed.types@.len(),
+            target < wiring.drivers.definitions@.len(),
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let driver = wiring.drivers.definitions@[target];
+                let row = parsed.definitions@[driver.definition as int];
+                let root = parsed.syntax.forms@[row.expression.start as int];
+                driver.result_index == 0 && root is Atom && root->Atom_kind is Name
+            }),
+        ensures ({
+            let parsed = self.targets.project_model().circuits_model()[file as int];
+            let row = parsed.definitions@[wiring.drivers.definitions@[target].definition as int];
+            let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+            &&& 0 <= first < wiring.signals@.len()
+            &&& typed.types@[target] == signal_type_at(&wiring, typed.types@.take(target), wiring.signals@[first].driver)
+        }),
+    {
+        let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        self.nonliteral_definition_has_no_literal_width(file, entry, limit, &typed.literals, &wiring, target);
+        self.atom_bare_rhs_inherits(file, entry, limit, source, parsed, &wiring,
+            typed.literals.widths@, roots.types@, typed.types, target);
+    }
+
+    pub(super) proof fn checked_nor_type(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
+        index: int, builtin: TypedFuncCall,
+    )
+        requires
+            self.can_resolve(),
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+            0 <= index < typed.types@.len() && index < wiring.drivers.definitions@.len(),
+            builtin.call.target is Nor,
+            ({
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let driver = wiring.drivers.definitions@[index];
+                let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+                &&& indexed_driver_site(&project.sources_model()[file as int], parsed, entry as int, driver)
+                &&& builtin.call.call.form == parsed.definitions@[driver.definition as int].expression.start
+                &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(builtin)))
+            }),
+        ensures typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+    {
+        let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
+        self.call_outputs_fit_wiring(file, entry, limit, &roots, &wiring);
+        self.nor_root_output_type(file, entry, limit, &roots, &wiring, index, builtin);
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+        crate::syntax::circuit::ordinary_call_excludes_special_forms(
+            source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int,
+        );
+        self.nonliteral_definition_has_no_literal_width(file, entry, limit, &typed.literals, &wiring, index);
+        self.atom_call_inherits_output_type(file, entry, limit, source, parsed, &wiring,
+            typed.literals.widths@, roots.types@, typed.types, index);
+    }
+
+    pub(super) proof fn checked_selection_type(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
+        index: int, shape: BitSelectionShape, input: SignalType, width: u64,
+        origin: LocatedName, selection: CheckedBitSelection,
+    )
+        requires
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+            0 <= index < typed.types@.len() && index < wiring.drivers.definitions@.len(),
+            ({
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let source = &project.sources_model()[file as int];
+                let driver = wiring.drivers.definitions@[index];
+                let row = parsed.definitions@[driver.definition as int];
+                let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+                &&& driver.result_index == 0
+                &&& named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+                &&& signal_type_at(&wiring, typed.types@.take(index), wiring.signals@[first].driver) == Some(input)
+                &&& selection_arguments_match(source, parsed.syntax.forms@, &shape, width, &origin, Ok(selection))
+            }),
+        ensures typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(selection.count),
+    {
+        let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
+        self.call_outputs_fit_wiring(file, entry, limit, &roots, &wiring);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        crate::syntax::circuit::bit_selection_shape_positions(
+            source.text, parsed.syntax.forms@,
+            parsed.definitions@[wiring.drivers.definitions@[index].definition as int].expression.start as int,
+            shape,
+        );
+        self.nonliteral_definition_has_no_literal_width(file, entry, limit, &typed.literals, &wiring, index);
+        self.successful_selection_type(file, entry, limit, source, parsed, &wiring, typed.literals.widths@,
+            roots.types@, typed.types, index, shape, input, width, origin, selection);
     }
 
     pub(super) closed spec fn signal_type_sources(

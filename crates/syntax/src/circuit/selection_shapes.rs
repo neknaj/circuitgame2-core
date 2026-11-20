@@ -2,7 +2,7 @@
 
 use super::*;
 #[cfg(verus_only)]
-use super::expression_forest::first_expression_children;
+use super::expression_forest::{expression_signals_in_order, first_expression_children};
 
 #[cfg(verus_only)]
 use super::expressions::{
@@ -67,7 +67,19 @@ pub closed spec fn bit_selection_shape_matches(
     }
 }
 
-proof fn same_shape(source: &str, forms: Seq<Form>, index: int, left: BitSelectionShape, right: BitSelectionShape)
+pub(super) proof fn ordinary_head_excludes_selection(source: &str, forms: Seq<Form>, call: int)
+    requires list_head_matches(source, forms, call + 1, None),
+    ensures !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, call, shape)),
+{
+    if exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, call, shape) {
+        let shape = choose|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, call, shape);
+        let head = match shape.tail { BitSelectionTail::Bit => ExpressionHead::Bit, _ => ExpressionHead::Slice };
+        same_expression_head(source, forms, call + 1, None, Some(head));
+    }
+}
+
+/// 同じ位置から得たビット選択の構文情報が一致することを示す。
+pub proof fn bit_selection_shapes_agree(source: &str, forms: Seq<Form>, index: int, left: BitSelectionShape, right: BitSelectionShape)
     requires
         bit_selection_shape_matches(source, forms, index, left),
         bit_selection_shape_matches(source, forms, index, right),
@@ -128,7 +140,7 @@ pub fn bit_selection_shape(source: &str, forms: &[Form], index: usize) -> (resul
     assert forall|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms@, index as int, shape)
         <==> found == Some(shape) by {
         if bit_selection_shape_matches(source, forms@, index as int, shape) {
-            same_shape(source, forms@, index as int, shape, found->Some_0);
+            bit_selection_shapes_agree(source, forms@, index as int, shape, found->Some_0);
         }
     };
     found
@@ -257,6 +269,8 @@ pub proof fn strict_bit_selection_input(
 }
 
 /// 入力式が裸の信号名なら、選択式の定義に付く信号索引の先頭がその名を指す。
+///
+/// 同じ構文木上の位置は後続の行に現れない。
 pub proof fn build_selection_input_position(
     source: &str, index: &BuildCircuitIndex, entry: int, definition: int, shape: BitSelectionShape,
 )
@@ -275,6 +289,8 @@ pub proof fn build_selection_input_position(
         let row = index.definitions@[definition];
         &&& frame.start <= row.signals.start < row.signals.end <= frame.end <= index.signals@.len()
         &&& index.signals@[row.signals.start as int] == shape.input.start
+        &&& forall|i: int| row.signals.start < i < row.signals.end ==>
+            #[trigger] index.signals@[i] > shape.input.start
     }),
 {
     build_definition_scope_evidence(source, index, entry, definition);
@@ -290,6 +306,13 @@ pub proof fn build_selection_input_position(
         source, forms, first, end, shape.input.start as int, shape.input.end as int,
     ));
     super::expression_forest::first_named_child_signal(source, forms, first, stop, shape.input.start);
+    expression_signals_in_order(source, forms, first, stop);
+    let start = row.signals.start as int;
+    let signals = index.signals@[start..row.signals.end as int];
+    assert forall|i: int| start < i < row.signals.end implies #[trigger] index.signals@[i] > shape.input.start by {
+        assert(signals[0] == shape.input.start);
+        assert(signals[i - start] == index.signals@[i]);
+    };
 }
 
 } // verus!
