@@ -7,11 +7,14 @@ use super::{CheckedSingleBitFunc, SingleBitOperand, SingleBitRhs};
 use super::super::OutputDriver;
 use crate::netlist::{NorGate, NorNetlist, Wire};
 #[cfg(verus_only)]
-use super::{SingleBitDefinition, single_bit_func_available, single_bit_operand_available, single_bit_rhs_available};
+use super::{
+    SingleBitDefinition, single_bit_driver_available, single_bit_func_available, single_bit_operand_available,
+    single_bit_rhs_available,
+};
 #[cfg(verus_only)]
 use crate::netlist::{
     NorEvaluationError, gate_values_match, gates_available, nor_evaluation, nor_evaluation_ready,
-    nor_evaluation_result, output_values_match, wire_available, wire_value,
+    nor_evaluation_result, output_ports_available, output_values_match, wire_available, wire_value,
 };
 
 verus! {
@@ -111,8 +114,8 @@ spec fn lowering_prefix<'p, 'a>(
     &&& forall|k: int, l: int| 0 <= k < l < origins.len() ==> (#[trigger] origins[k]) < (#[trigger] origins[l])
 }
 
-/// 各定義の駆動元と NOR の接続を保存し、ゲートを元の定義順に並べることを表す。
-pub closed spec fn single_bit_lowering_matches(source: &CheckedSingleBitFunc, result: &LoweredSingleBitFunc) -> bool {
+/// 各定義の駆動元と NOR の接続を保存し、ゲートは定義順、出力は宣言順に並べることを表す。
+pub closed spec fn single_bit_lowering_outputs_match(source: &CheckedSingleBitFunc, result: &LoweredSingleBitFunc) -> bool {
     let definitions = source.definitions_model();
     let wires = result.definition_wires@;
     let gates = result.netlist.gates@;
@@ -120,8 +123,19 @@ pub closed spec fn single_bit_lowering_matches(source: &CheckedSingleBitFunc, re
     &&& wires.len() == definitions.len()
     &&& result.netlist.input_count == source.inputs_model().len()
     &&& nor_evaluation_ready(result.netlist_model(), source.inputs_model().len())
-    &&& result.netlist.outputs@ == seq![driver_wire(source.output_driver_model(), wires)]
+    &&& result.netlist.outputs@.len() == source.output_drivers_model().len()
+    &&& output_wires_match(source.output_drivers_model(), wires, result.netlist.outputs@)
     &&& lowering_prefix(definitions, source.inputs_model().len(), wires, gates, result.gate_definitions@)
+}
+
+/// 出力が1本の関数について、各定義と唯一の出力の対応を表す。
+pub open spec fn single_bit_lowering_matches(source: &CheckedSingleBitFunc, result: &LoweredSingleBitFunc) -> bool {
+    source.output_drivers_model().len() == 1 && single_bit_lowering_outputs_match(source, result)
+}
+
+spec fn output_wires_match(drivers: Seq<OutputDriver>, wires: Seq<Wire>, outputs: Seq<Wire>) -> bool {
+    &&& outputs.len() <= drivers.len()
+    &&& forall|i: int| 0 <= i < outputs.len() ==> (#[trigger] outputs[i]) == driver_wire(drivers[i], wires)
 }
 
 proof fn preserve_lowering_prefix<'p, 'a>(
@@ -240,12 +254,27 @@ spec fn source_definition_values_match(
         (#[trigger] values[i]) == source_rhs_value(definitions[i].rhs, inputs, values)
 }
 
-/// 解決済みの信号と右辺を使い、各定義および出力の組み合わせ評価を定める。
-pub closed spec fn single_bit_source_evaluation(source: &CheckedSingleBitFunc, inputs: Seq<bool>, output: bool) -> bool {
+spec fn source_output_values_match(
+    drivers: Seq<OutputDriver>, inputs: Seq<bool>, definitions: Seq<bool>, outputs: Seq<bool>,
+) -> bool {
+    &&& outputs.len() == drivers.len()
+    &&& forall|i: int| 0 <= i < outputs.len()
+        ==> (#[trigger] outputs[i]) == source_driver_value(drivers[i], inputs, definitions)
+}
+
+/// 解決済みの信号と右辺から、宣言順の組み合わせ出力を定める。
+pub closed spec fn single_bit_source_outputs_evaluation(
+    source: &CheckedSingleBitFunc, inputs: Seq<bool>, outputs: Seq<bool>,
+) -> bool {
     &&& single_bit_func_available(source)
     &&& inputs.len() == source.inputs_model().len()
     &&& exists|values: Seq<bool>| #[trigger] source_definition_values_match(source.definitions_model(), inputs, values)
-        && output == source_driver_value(source.output_driver_model(), inputs, values)
+        && source_output_values_match(source.output_drivers_model(), inputs, values, outputs)
+}
+
+/// 出力が1本の関数について、唯一の出力値を定める。
+pub closed spec fn single_bit_source_evaluation(source: &CheckedSingleBitFunc, inputs: Seq<bool>, output: bool) -> bool {
+    single_bit_source_outputs_evaluation(source, inputs, seq![output])
 }
 
 proof fn source_value_agrees(
@@ -281,22 +310,42 @@ proof fn source_value_agrees(
     }
 }
 
-/// 同じ型付きの関数と入力に対し、ソースの出力値が一意に定まることを示す。
+/// 同じ型付きの関数と入力に対し、宣言順の出力列が一意に定まることを示す。
+pub proof fn single_bit_source_outputs_evaluations_agree(
+    source: &CheckedSingleBitFunc, inputs: Seq<bool>, left: Seq<bool>, right: Seq<bool>,
+)
+    requires
+        single_bit_source_outputs_evaluation(source, inputs, left),
+        single_bit_source_outputs_evaluation(source, inputs, right),
+    ensures left == right,
+{
+    let definitions = source.definitions_model();
+    let drivers = source.output_drivers_model();
+    let a = choose|values: Seq<bool>| #[trigger] source_definition_values_match(definitions, inputs, values)
+        && source_output_values_match(drivers, inputs, values, left);
+    let b = choose|values: Seq<bool>| #[trigger] source_definition_values_match(definitions, inputs, values)
+        && source_output_values_match(drivers, inputs, values, right);
+    assert forall|i: int| 0 <= i < drivers.len() implies (#[trigger] left[i]) == (#[trigger] right[i]) by {
+        let driver = drivers[i];
+        if let OutputDriver::Definition(index) = driver {
+            source_value_agrees(source, inputs, a, b, index as nat);
+        }
+    };
+    assert(left =~= right);
+}
+
+/// 同じ型付きの関数と入力に対し、唯一の出力値が等しいことを示す。
 pub proof fn single_bit_source_evaluations_agree(source: &CheckedSingleBitFunc, inputs: Seq<bool>, left: bool, right: bool)
     requires
         single_bit_source_evaluation(source, inputs, left),
         single_bit_source_evaluation(source, inputs, right),
     ensures left == right,
 {
-    let definitions = source.definitions_model();
-    let driver = source.output_driver_model();
-    let a = choose|values: Seq<bool>| #[trigger] source_definition_values_match(definitions, inputs, values)
-        && left == source_driver_value(driver, inputs, values);
-    let b = choose|values: Seq<bool>| #[trigger] source_definition_values_match(definitions, inputs, values)
-        && right == source_driver_value(driver, inputs, values);
-    if let OutputDriver::Definition(index) = driver {
-        source_value_agrees(source, inputs, a, b, index as nat);
-    }
+    let first = seq![left];
+    let second = seq![right];
+    single_bit_source_outputs_evaluations_agree(source, inputs, first, second);
+    assert(first[0] == left);
+    assert(second[0] == right);
 }
 
 spec fn wire_values_for_definitions(wires: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>) -> Seq<bool> {
@@ -317,12 +366,12 @@ proof fn operand_value_is_projected(operand: SingleBitOperand, wires: Seq<Wire>,
     }
 }
 
-/// 任意の合法な入力について、ネットリストの出力が元の定義から得た出力と一致することを示す。
-pub proof fn single_bit_lowering_preserves_evaluation(
+/// 任意の合法な入力について、ネットリストの出力列が元の定義から得た出力列と一致することを示す。
+pub proof fn single_bit_lowering_preserves_outputs_evaluation(
     source: &CheckedSingleBitFunc, lowered: &LoweredSingleBitFunc, inputs: Seq<bool>, output: Seq<bool>,
 )
-    requires single_bit_lowering_matches(source, lowered), nor_evaluation(lowered.netlist_model(), inputs, output),
-    ensures output.len() == 1, single_bit_source_evaluation(source, inputs, output[0]),
+    requires single_bit_lowering_outputs_match(source, lowered), nor_evaluation(lowered.netlist_model(), inputs, output),
+    ensures single_bit_source_outputs_evaluation(source, inputs, output),
 {
     reveal(lowering_prefix);
     reveal(nor_evaluation);
@@ -351,10 +400,50 @@ pub proof fn single_bit_lowering_preserves_evaluation(
             },
         }
     };
-    let driver = source.output_driver_model();
-    operand_value_is_projected(SingleBitOperand::Driver(driver), wires, inputs, gate_values);
-    assert(output[0] == source_driver_value(driver, inputs, values));
+    let drivers = source.output_drivers_model();
+    assert forall|i: int| 0 <= i < output.len() implies
+        (#[trigger] output[i]) == source_driver_value(drivers[i], inputs, values) by {
+        let driver = drivers[i];
+        assert(ports[i] == driver_wire(driver, wires));
+        operand_value_is_projected(SingleBitOperand::Driver(driver), wires, inputs, gate_values);
+    };
     assert(source_definition_values_match(definitions, inputs, values)) by { reveal(source_definition_values_match); };
+}
+
+/// 出力が1本の関数について、ネットリストの出力値が元の定義から得た値と一致することを示す。
+pub proof fn single_bit_lowering_preserves_evaluation(
+    source: &CheckedSingleBitFunc, lowered: &LoweredSingleBitFunc, inputs: Seq<bool>, output: Seq<bool>,
+)
+    requires
+        single_bit_lowering_matches(source, lowered),
+        nor_evaluation(lowered.netlist_model(), inputs, output),
+    ensures output.len() == 1, single_bit_source_evaluation(source, inputs, output[0]),
+{
+    single_bit_lowering_preserves_outputs_evaluation(source, lowered, inputs, output);
+    assert(output =~= seq![output[0]]);
+}
+
+/// 入力数が署名どおりなら評価は成功し、宣言順の出力列はソースの評価値に等しい。
+pub proof fn single_bit_evaluation_outputs_agree(
+    source: &CheckedSingleBitFunc, lowered: &LoweredSingleBitFunc, inputs: Seq<bool>,
+    result: Result<Vec<bool>, NorEvaluationError>,
+)
+    requires
+        single_bit_lowering_outputs_match(source, lowered),
+        inputs.len() == source.inputs_model().len(),
+        nor_evaluation_result(lowered.netlist_model(), inputs, result),
+    ensures result matches Ok(outputs)
+        && single_bit_source_outputs_evaluation(source, inputs, outputs@)
+        && (forall|expected: Seq<bool>| #[trigger] single_bit_source_outputs_evaluation(source, inputs, expected)
+            ==> expected == outputs@),
+{
+    if let Ok(outputs) = result {
+        single_bit_lowering_preserves_outputs_evaluation(source, lowered, inputs, outputs@);
+        assert forall|expected: Seq<bool>| #[trigger] single_bit_source_outputs_evaluation(source, inputs, expected)
+            implies expected == outputs@ by {
+            single_bit_source_outputs_evaluations_agree(source, inputs, expected, outputs@);
+        };
+    }
 }
 
 /// 入力数が署名どおりなら評価は成功し、唯一の出力はソースの評価値に等しい。
@@ -410,13 +499,17 @@ impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
     ///
     /// ```
     /// use circuitgame2_core::project::{
-    ///     SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project,
+    ///     SingleBitFuncError, SourceSnapshot, UnsupportedSingleBitFunc, check_use_aliases,
+    ///     index_use_targets, parse_circuit_project,
     /// };
     ///
     /// let text = "(using nor)
     ///     (func buffer (in x) (out x))
     ///     (func twice (in x) (out y)
-    ///         (def first (nor x 0)) (def alias first) (def y (nor alias 0)))";
+    ///         (def first (nor x 0)) (def alias first) (def y (nor alias 0)))
+    ///     (func mixed (in x z) (out b x a z)
+    ///         (def a 0) (def b (nor z z)))
+    ///     (func wide (in (x (bits 8)) (y (bits 7))) (out (y (bits 7)) (x (bits 8))))";
     /// let project = parse_circuit_project(&[SourceSnapshot {
     ///     path: "main.ncg2", revision: 1, text,
     /// }]).unwrap();
@@ -431,10 +524,25 @@ impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
     /// assert_eq!(twice.gate_definitions(), &[0, 2]);
     /// assert_eq!(twice.netlist().evaluate(&[false]).unwrap(), vec![false]);
     /// assert_eq!(twice.netlist().evaluate(&[true]).unwrap(), vec![true]);
+    ///
+    /// let mixed = aliases.check_single_bit_func_outputs(0, 3, 8).unwrap().lower();
+    /// assert_eq!(mixed.gate_definitions(), &[1]);
+    /// assert_eq!(mixed.netlist().evaluate(&[true, false]).unwrap(), vec![true, true, false, false]);
+    /// assert_eq!(mixed.netlist().evaluate(&[false, true]).unwrap(), vec![false, false, false, true]);
+    ///
+    /// assert!(matches!(aliases.check_single_bit_func(0, 4, 8),
+    ///     Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::OutputCount, _))));
+    /// let error = aliases.check_single_bit_func_outputs(0, 4, 8).unwrap_err();
+    /// let SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::PortType, site) = error else {
+    ///     panic!("{error:?}");
+    /// };
+    /// assert_eq!(&text[site.span.clone()], "y");
+    /// assert!(site.span.start > text.rfind("(out").unwrap());
     /// ```
     pub fn lower(&self) -> (result: LoweredSingleBitFunc)
         ensures
-            single_bit_lowering_matches(self, &result),
+            single_bit_lowering_outputs_match(self, &result),
+            self.output_drivers_model().len() == 1 ==> single_bit_lowering_matches(self, &result),
             nor_evaluation_ready(result.netlist_model(), self.inputs_model().len()),
     {
         proof { use_type_invariant(self); }
@@ -475,14 +583,40 @@ impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
             }
             i += 1;
         }
-        let driver = self.output_driver();
-        let out = lower_driver(driver, wires.as_slice());
         proof {
             reveal(lowering_prefix);
-            assert(wire_available(out, input_count as nat, gates@.len()));
+            assert(gates_available(gates@, input_count as nat, gates@.len() as int));
         }
+        let drivers = self.output_drivers();
         let mut outputs = Vec::new();
-        outputs.push(out);
+        let mut i = 0;
+        while i < drivers.len()
+            invariant
+                drivers@ == self.output_drivers_model(),
+                input_count == self.inputs_model().len(),
+                single_bit_func_available(self),
+                wires@.len() == definitions@.len() == self.definitions_model().len(),
+                forall|j: int| 0 <= j < wires@.len()
+                    ==> wire_available(#[trigger] wires@[j], input_count as nat, gates@.len()),
+                i == outputs@.len() <= drivers@.len(),
+                output_wires_match(drivers@, wires@, outputs@),
+                output_ports_available(outputs@, input_count as nat, gates@.len(), i as int),
+            decreases drivers@.len() - i,
+        {
+            let driver = drivers[i];
+            let out = lower_driver(driver, wires.as_slice());
+            proof { operand_wire_is_available(SingleBitOperand::Driver(driver), wires@, input_count as nat, gates@.len()); }
+            let ghost previous = outputs@;
+            outputs.push(out);
+            assert forall|j: int| 0 <= j < outputs@.len()
+                implies (#[trigger] outputs@[j]) == driver_wire(drivers@[j], wires@)
+                    && wire_available(outputs@[j], input_count as nat, gates@.len()) by {
+                if j < i {
+                    assert(outputs@[j] == previous[j]);
+                }
+            };
+            i += 1;
+        }
         LoweredSingleBitFunc {
             netlist: NorNetlist { input_count, gates, outputs },
             definition_wires: wires,

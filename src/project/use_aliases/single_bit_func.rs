@@ -4,8 +4,11 @@ mod lowering;
 pub use lowering::LoweredSingleBitFunc;
 #[cfg(verus_only)]
 pub use lowering::{
-    single_bit_evaluation_result_agrees, single_bit_lowering_matches, single_bit_lowering_preserves_evaluation,
-    single_bit_source_evaluation, single_bit_source_evaluations_agree,
+    single_bit_evaluation_outputs_agree, single_bit_evaluation_result_agrees, single_bit_lowering_matches,
+    single_bit_lowering_outputs_match,
+    single_bit_lowering_preserves_evaluation, single_bit_lowering_preserves_outputs_evaluation,
+    single_bit_source_evaluation, single_bit_source_evaluations_agree, single_bit_source_outputs_evaluation,
+    single_bit_source_outputs_evaluations_agree,
 };
 
 use super::{FuncSignalTypeError, FuncWiring, FuncWiringResult, OutputDriver, ResolvedPortType, UseAliases};
@@ -72,8 +75,8 @@ pub struct CheckedSingleBitFunc<'p, 'a> {
     declaration: LocatedName<'p, 'a>,
     inputs: Vec<LocatedName<'p, 'a>>,
     definitions: Vec<SingleBitDefinition<'p, 'a>>,
-    output: LocatedName<'p, 'a>,
-    output_driver: OutputDriver,
+    outputs: Vec<LocatedName<'p, 'a>>,
+    output_drivers: Vec<OutputDriver>,
 }
 
 impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
@@ -95,15 +98,31 @@ impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
         ensures definitions@ == self.definitions_model(),
     { self.definitions.as_slice() }
 
-    /// 出力名の位置を返す。
+    /// 最初の出力名の位置を返す。出力位置の一覧は [`Self::outputs`] を使う。
     pub fn output(&self) -> (site: &LocatedName<'p, 'a>)
         ensures *site == self.output_model(),
-    { &self.output }
+    {
+        proof { use_type_invariant(self); }
+        &self.outputs[0]
+    }
 
-    /// 唯一の出力を駆動する入力または定義を返す。
+    /// 最初の出力を駆動する入力または定義を返す。
     pub fn output_driver(&self) -> (driver: OutputDriver)
         ensures driver == self.output_driver_model(),
-    { self.output_driver }
+    {
+        proof { use_type_invariant(self); }
+        self.output_drivers[0]
+    }
+
+    /// 出力名の位置を宣言順に返す。
+    pub fn outputs(&self) -> (ports: &[LocatedName<'p, 'a>])
+        ensures ports@ == self.outputs_model(),
+    { self.outputs.as_slice() }
+
+    /// 各出力の駆動元を、出力名と同じ順序で返す。
+    pub fn output_drivers(&self) -> (drivers: &[OutputDriver])
+        ensures drivers@ == self.output_drivers_model(),
+    { self.output_drivers.as_slice() }
 
     /// 宣言全体の元ソース位置を表す。
     pub closed spec fn declaration_model(&self) -> LocatedName<'p, 'a> { self.declaration }
@@ -111,10 +130,14 @@ impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
     pub closed spec fn inputs_model(&self) -> Seq<LocatedName<'p, 'a>> { self.inputs@ }
     /// 定義順の右辺を表す。
     pub closed spec fn definitions_model(&self) -> Seq<SingleBitDefinition<'p, 'a>> { self.definitions@ }
-    /// 出力名の位置を表す。
-    pub closed spec fn output_model(&self) -> LocatedName<'p, 'a> { self.output }
-    /// 出力を駆動する入力または定義を表す。
-    pub closed spec fn output_driver_model(&self) -> OutputDriver { self.output_driver }
+    /// 最初の出力名の位置を表す。
+    pub open spec fn output_model(&self) -> LocatedName<'p, 'a> { self.outputs_model()[0] }
+    /// 最初の出力を駆動する入力または定義を表す。
+    pub open spec fn output_driver_model(&self) -> OutputDriver { self.output_drivers_model()[0] }
+    /// 宣言順の出力名の位置を表す。
+    pub closed spec fn outputs_model(&self) -> Seq<LocatedName<'p, 'a>> { self.outputs@ }
+    /// 出力名と同じ順序の駆動元を表す。
+    pub closed spec fn output_drivers_model(&self) -> Seq<OutputDriver> { self.output_drivers@ }
 }
 
 /// 現段階の降下で扱わない構文または型。
@@ -122,7 +145,7 @@ impl<'p, 'a> CheckedSingleBitFunc<'p, 'a> {
 pub enum UnsupportedSingleBitFunc {
     /// 入力または出力に1ビット以外の型がある。
     PortType,
-    /// 出力の本数が1本ではない。
+    /// 出力の本数が検査入口の条件に合わない。
     OutputCount,
     /// 本体に複数結果の定義がある。
     DefinitionOutputCount,
@@ -172,7 +195,11 @@ pub open spec fn single_bit_rhs_available(rhs: SingleBitRhs, inputs: nat, defini
 
 /// すべての右辺と出力が、利用可能な駆動元だけを参照することを表す。
 pub open spec fn single_bit_func_available(checked: &CheckedSingleBitFunc) -> bool {
-    &&& single_bit_driver_available(checked.output_driver_model(), checked.inputs_model().len(), checked.definitions_model().len())
+    &&& 0 < checked.output_drivers_model().len() == checked.outputs_model().len()
+    &&& forall|i: int| 0 <= i < checked.output_drivers_model().len() ==>
+        single_bit_driver_available(
+            #[trigger] checked.output_drivers_model()[i], checked.inputs_model().len(), checked.definitions_model().len(),
+        )
     &&& forall|i: int| 0 <= i < checked.definitions_model().len()
         ==> single_bit_rhs_available((#[trigger] checked.definitions_model()[i]).rhs, checked.inputs_model().len(), i as nat)
 }
@@ -247,46 +274,46 @@ proof fn operand_excludes_missing(
     }
 }
 
-spec fn one_bit_input_types_before(ports: Seq<TypedPort>, stop: int) -> bool {
+spec fn one_bit_port_types_before(ports: Seq<TypedPort>, stop: int) -> bool {
     &&& 0 <= stop <= ports.len()
     &&& forall|i: int| 0 <= i < stop ==> (#[trigger] ports[i]).ty == ResolvedPortType::Bits(1)
 }
 
-spec fn one_bit_input_matches(source: &ProjectSource, forms: Seq<Form>, port: TypedPort, site: LocatedName) -> bool {
+spec fn one_bit_port_matches(source: &ProjectSource, forms: Seq<Form>, port: TypedPort, site: LocatedName) -> bool {
     &&& port.ty == ResolvedPortType::Bits(1)
     &&& port.declared.site.name < forms.len()
     &&& is_form_location(source, forms[port.declared.site.name as int], site)
 }
 
-spec fn one_bit_inputs_match(source: &ProjectSource, forms: Seq<Form>, ports: Seq<TypedPort>, sites: Seq<LocatedName>) -> bool {
+spec fn one_bit_port_locations_match(source: &ProjectSource, forms: Seq<Form>, ports: Seq<TypedPort>, sites: Seq<LocatedName>) -> bool {
     &&& sites.len() <= ports.len()
     &&& forall|i: int| 0 <= i < sites.len()
-        ==> one_bit_input_matches(source, forms, ports[i], #[trigger] sites[i])
+        ==> one_bit_port_matches(source, forms, ports[i], #[trigger] sites[i])
 }
 
-proof fn input_locations_preserve_types(
+proof fn port_locations_preserve_types(
     source: &ProjectSource, forms: Seq<Form>, ports: Seq<TypedPort>, sites: Seq<LocatedName>,
 )
-    requires one_bit_inputs_match(source, forms, ports, sites),
-    ensures one_bit_input_types_before(ports, sites.len() as int),
+    requires one_bit_port_locations_match(source, forms, ports, sites),
+    ensures one_bit_port_types_before(ports, sites.len() as int),
 {
     assert forall|i: int| 0 <= i < sites.len() implies (#[trigger] ports[i]).ty == ResolvedPortType::Bits(1) by {
-        assert(one_bit_input_matches(source, forms, ports[i], sites[i]));
+        assert(one_bit_port_matches(source, forms, ports[i], sites[i]));
     };
 }
 
-proof fn one_bit_inputs_append(
+proof fn append_one_bit_port_location(
     source: &ProjectSource, forms: Seq<Form>, ports: Seq<TypedPort>, before: Seq<LocatedName>, site: LocatedName,
 )
     requires
-        one_bit_inputs_match(source, forms, ports, before),
+        one_bit_port_locations_match(source, forms, ports, before),
         before.len() < ports.len(),
-        one_bit_input_matches(source, forms, ports[before.len() as int], site),
-    ensures one_bit_inputs_match(source, forms, ports, before.push(site)),
+        one_bit_port_matches(source, forms, ports[before.len() as int], site),
+    ensures one_bit_port_locations_match(source, forms, ports, before.push(site)),
 {
     let next = before.push(site);
     assert forall|i: int| 0 <= i < next.len()
-        implies one_bit_input_matches(source, forms, ports[i], #[trigger] next[i]) by {
+        implies one_bit_port_matches(source, forms, ports[i], #[trigger] next[i]) by {
         if i < before.len() { assert(next[i] == before[i]); }
     };
 }
@@ -337,8 +364,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 検査した入出力、定義、参照先を元の宣言に対応させる。
+    /// 検査した1本の出力と、入力・定義・参照先を元の宣言に対応させる。
     pub closed spec fn single_bit_func_matches(
+        &self, file: usize, entry: usize, limit: u64, checked: &CheckedSingleBitFunc,
+    ) -> bool {
+        checked.output_drivers_model().len() == 1 && self.single_bit_func_outputs_match(file, entry, limit, checked)
+    }
+
+    /// 検査した入出力、定義、参照先を元の宣言に対応させる。
+    pub closed spec fn single_bit_func_outputs_match(
         &self, file: usize, entry: usize, limit: u64, checked: &CheckedSingleBitFunc,
     ) -> bool {
         let project = self.targets.project_model();
@@ -351,11 +385,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let signature = wiring.drivers.signature;
             &&& is_form_location(source, forms[parsed.syntax.entries@[entry as int].form as int], checked.declaration)
             &&& signature.inputs@.len() == checked.inputs@.len()
-            &&& signature.outputs@.len() == 1
-            &&& signature.outputs@[0].ty == ResolvedPortType::Bits(1)
-            &&& is_form_location(source, forms[signature.outputs@[0].declared.site.name as int], checked.output)
-            &&& checked.output_driver == wiring.drivers.outputs@[0]
-            &&& one_bit_inputs_match(source, forms, signature.inputs@, checked.inputs@)
+            &&& 0 < signature.outputs@.len() == checked.outputs@.len()
+            &&& checked.output_drivers@ == wiring.drivers.outputs@
+            &&& one_bit_port_locations_match(source, forms, signature.outputs@, checked.outputs@)
+            &&& one_bit_port_locations_match(source, forms, signature.inputs@, checked.inputs@)
             &&& checked.definitions@.len() == wiring.drivers.definitions@.len()
             &&& self.checked_definitions_match(file, entry, limit, &wiring, checked.definitions@)
         }
@@ -475,32 +508,44 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     spec fn subset_violation(
         &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
-        kind: UnsupportedSingleBitFunc, location: LocatedName, candidate: int,
+        single_output: bool, kind: UnsupportedSingleBitFunc, location: LocatedName, candidate: int,
     ) -> bool {
         let project = self.targets.project_model();
         let source = &project.sources_model()[file as int];
         let parsed = &project.circuits_model()[file as int];
         let forms = parsed.syntax.forms@;
         let signature = &wiring.drivers.signature;
+        let output_count = signature.outputs@.len();
+        let accepted_count = 0 < output_count && (!single_output || output_count == 1);
         &&& file < project.sources_model().len() && file < project.circuits_model().len()
         &&& entry < parsed.syntax.entries@.len() && entry < parsed.entry_ranges@.len()
         &&& location_in_source(location) && *location.source == *source
-        &&& (kind != UnsupportedSingleBitFunc::OutputCount ==> signature.outputs@.len() == 1)
-        &&& (kind == UnsupportedSingleBitFunc::PortType && candidate >= 0 ==>
-            signature.outputs@[0].ty == ResolvedPortType::Bits(1)
-                && one_bit_input_types_before(signature.inputs@, candidate))
+        &&& (kind != UnsupportedSingleBitFunc::OutputCount ==> accepted_count)
+        &&& (kind == UnsupportedSingleBitFunc::PortType ==> if candidate < 0 {
+            one_bit_port_types_before(signature.outputs@, -candidate - 1)
+        } else {
+            one_bit_port_types_before(signature.outputs@, output_count as int)
+                && one_bit_port_types_before(signature.inputs@, candidate)
+        })
         &&& ((kind == UnsupportedSingleBitFunc::DefinitionOutputCount || kind == UnsupportedSingleBitFunc::Expression) ==>
-            signature.outputs@[0].ty == ResolvedPortType::Bits(1)
-                && one_bit_input_types_before(signature.inputs@, signature.inputs@.len() as int)
+            one_bit_port_types_before(signature.outputs@, output_count as int)
+                && one_bit_port_types_before(signature.inputs@, signature.inputs@.len() as int)
                 && self.supported_definitions_before(file, entry, limit, wiring, candidate))
         &&& match kind {
-            UnsupportedSingleBitFunc::OutputCount => signature.outputs@.len() != 1
+            UnsupportedSingleBitFunc::OutputCount => !accepted_count
                 && is_form_location(source, forms[parsed.syntax.entries@[entry as int].form as int], location),
             UnsupportedSingleBitFunc::PortType => {
-                let port = if candidate == -1 { signature.outputs@[0] } else { signature.inputs@[candidate] };
-                (candidate == -1 && signature.outputs@.len() == 1 || 0 <= candidate < signature.inputs@.len())
-                    && port.ty != ResolvedPortType::Bits(1)
-                    && is_form_location(source, forms[port.declared.site.name as int], location)
+                let (ports, index) = if candidate < 0 {
+                    (signature.outputs@, -candidate - 1)
+                } else {
+                    (signature.inputs@, candidate)
+                };
+                &&& 0 <= index < ports.len()
+                &&& {
+                    let port = ports[index];
+                    port.ty != ResolvedPortType::Bits(1)
+                        && is_form_location(source, forms[port.declared.site.name as int], location)
+                }
             },
             UnsupportedSingleBitFunc::DefinitionOutputCount => {
                 let definition = wiring.drivers.definitions@[candidate].definition;
@@ -528,24 +573,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub closed spec fn single_bit_func_unsupported(
         &self, file: usize, entry: usize, limit: u64, kind: UnsupportedSingleBitFunc, location: LocatedName,
     ) -> bool {
+        self.unsupported_in_output_mode(file, entry, limit, true, kind, location)
+    }
+
+    /// 複数出力を扱う検査入口について、最初の未対応箇所とその種別を表す。
+    pub closed spec fn single_bit_func_outputs_unsupported(
+        &self, file: usize, entry: usize, limit: u64, kind: UnsupportedSingleBitFunc, location: LocatedName,
+    ) -> bool {
+        self.unsupported_in_output_mode(file, entry, limit, false, kind, location)
+    }
+
+    spec fn unsupported_in_output_mode(
+        &self, file: usize, entry: usize, limit: u64, single_output: bool,
+        kind: UnsupportedSingleBitFunc, location: LocatedName,
+    ) -> bool {
         exists|wiring: FuncWiring, candidate: int| #![trigger
             self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
-            self.subset_violation(file, entry, limit, &wiring, kind, location, candidate)]
+            self.subset_violation(file, entry, limit, &wiring, single_output, kind, location, candidate)]
             self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring)))
-                && self.subset_violation(file, entry, limit, &wiring, kind, location, candidate)
+                && self.subset_violation(file, entry, limit, &wiring, single_output, kind, location, candidate)
                 && ((kind == UnsupportedSingleBitFunc::DefinitionOutputCount || kind == UnsupportedSingleBitFunc::Expression)
                     ==> !self.definition_supported(file, entry, limit, &wiring, candidate))
     }
 
     proof fn unsupported_at(
         &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
-        kind: UnsupportedSingleBitFunc, location: LocatedName, candidate: int,
+        single_output: bool, kind: UnsupportedSingleBitFunc, location: LocatedName, candidate: int,
     )
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
-            self.subset_violation(file, entry, limit, wiring, kind, location, candidate),
-        ensures self.single_bit_func_unsupported(file, entry, limit, kind, location),
+            self.subset_violation(file, entry, limit, wiring, single_output, kind, location, candidate),
+        ensures self.unsupported_in_output_mode(file, entry, limit, single_output, kind, location),
     {
         if (kind == UnsupportedSingleBitFunc::DefinitionOutputCount || kind == UnsupportedSingleBitFunc::Expression)
             && self.definition_supported(file, entry, limit, wiring, candidate) {
@@ -557,33 +616,74 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 選択した宣言の型・結線を検査し、対応する1ビットの右辺を取り出す。
-    ///
-    /// 右辺は裸の信号、定数 `0`・`1`、またはそれらを直接引数に取る基底 NOR を扱う。
-    /// 出力は1本とし、入力を直接公開する出力も受理する。
-    ///
-    /// # Errors
-    ///
-    /// 既存の型・結線検査の違反を先に返す。展開待ちや対応する形式に収まらない箇所にも元ソース位置を返す。
-    pub fn check_single_bit_func(
-        &self, file: usize, entry: usize, limit: u64,
-    ) -> (result: Result<CheckedSingleBitFunc<'p, 'a>, SingleBitFuncError<'p, 'a>>)
-        requires self.can_resolve(),
-        ensures match result {
-            Ok(checked) => single_bit_func_available(&checked) && self.single_bit_func_matches(file, entry, limit, &checked),
+    /// 検査の結果を、元の宣言または検出した違反の根拠に対応させる。
+    pub open spec fn single_bit_func_result(
+        &self, file: usize, entry: usize, limit: u64, single_output: bool,
+        result: Result<CheckedSingleBitFunc<'p, 'a>, SingleBitFuncError<'p, 'a>>,
+    ) -> bool {
+        match result {
+            Ok(checked) => single_bit_func_available(&checked) && if single_output {
+                self.single_bit_func_matches(file, entry, limit, &checked)
+                    && checked.output_drivers_model().len() == 1
+            } else {
+                self.single_bit_func_outputs_match(file, entry, limit, &checked)
+            },
             Err(SingleBitFuncError::Check(error)) => self.func_signal_types_evidence(file, entry, limit, Err(error)),
             Err(SingleBitFuncError::Call(position, error)) =>
                 position.file == file && position.entry == entry
                 && self.func_call_signature_evidence(file, entry, position.definition, position.reference, limit, Err(error)),
-            Err(SingleBitFuncError::Unsupported(kind, location)) =>
-                self.single_bit_func_unsupported(file, entry, limit, kind, location),
+            Err(SingleBitFuncError::Unsupported(kind, location)) => if single_output {
+                self.single_bit_func_unsupported(file, entry, limit, kind, location)
+            } else {
+                self.single_bit_func_outputs_unsupported(file, entry, limit, kind, location)
+            },
             Err(SingleBitFuncError::NotFunc) => exists|typed: FuncSignalTypes|
                 #[trigger] self.func_signal_types_evidence(file, entry, limit, Ok(typed))
                 && typed.literals.wiring is NotFunc,
             Err(SingleBitFuncError::NeedsExpansion(location)) => exists|typed: FuncSignalTypes|
                 #[trigger] self.func_signal_types_evidence(file, entry, limit, Ok(typed))
                 && typed.literals.wiring == FuncWiringResult::NeedsExpansion(location),
-        },
+        }
+    }
+
+    /// 出力が1本の `func` を検査する。
+    ///
+    /// 右辺とポートの条件は [`Self::check_single_bit_func_outputs`] に従う。
+    ///
+    /// # Errors
+    ///
+    /// 既存の型・結線検査に成功したあと、出力が1本でなければ未対応を返す。
+    pub fn check_single_bit_func(
+        &self, file: usize, entry: usize, limit: u64,
+    ) -> (result: Result<CheckedSingleBitFunc<'p, 'a>, SingleBitFuncError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures self.single_bit_func_result(file, entry, limit, true, result),
+    {
+        self.check_single_bit_func_with_output_count(file, entry, limit, true)
+    }
+
+    /// 入出力の各ポートが1ビットの `func` を検査し、出力を宣言順に保持する。
+    ///
+    /// 右辺は信号、定数 `0`・`1`、またはそれらを引数に取る基底 NOR を扱う。
+    /// 出力への入力の直結と、1本以上の出力を受理する。
+    ///
+    /// # Errors
+    ///
+    /// 型・結線検査の違反を先に返す。展開待ちと、対応する形式から外れる箇所にも元ソース位置を返す。
+    pub fn check_single_bit_func_outputs(
+        &self, file: usize, entry: usize, limit: u64,
+    ) -> (result: Result<CheckedSingleBitFunc<'p, 'a>, SingleBitFuncError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures self.single_bit_func_result(file, entry, limit, false, result),
+    {
+        self.check_single_bit_func_with_output_count(file, entry, limit, false)
+    }
+
+    fn check_single_bit_func_with_output_count(
+        &self, file: usize, entry: usize, limit: u64, single_output: bool,
+    ) -> (result: Result<CheckedSingleBitFunc<'p, 'a>, SingleBitFuncError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures self.single_bit_func_result(file, entry, limit, single_output, result),
     {
         let typed = match self.check_func_signal_types(file, entry, limit) {
             Ok(typed) => typed,
@@ -615,18 +715,55 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let declaration_index = parsed.syntax.entries[entry].form;
         let declaration = form_location(source, forms, declaration_index);
         let signature = &wiring.drivers.signature;
-        if signature.outputs.len() != 1 {
-            proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::OutputCount, declaration, -1); }
+        let output_count = signature.outputs.len();
+        if output_count == 0 || (single_output && output_count != 1) {
+            proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::OutputCount, declaration, -1); }
             return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::OutputCount, declaration));
         }
-        let output = &signature.outputs[0];
-        let output_name = output.declared.site.name;
-        let output_site = form_location(source, forms, output_name);
-        if !matches!(output.ty, ResolvedPortType::Bits(1)) {
-            proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::PortType, output_site, -1); }
-            return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::PortType, output_site));
+        let mut outputs = Vec::new();
+        let mut output_drivers = Vec::new();
+        let mut i = 0;
+        while i < output_count
+            invariant
+                *signature == wiring.drivers.signature,
+                output_count == signature.outputs@.len(),
+                output_count == wiring.drivers.outputs@.len(),
+                0 < output_count && (!single_output || output_count == 1),
+                self.can_resolve(),
+                *project == self.targets.project_model(),
+                *source == project.sources_model()[file as int],
+                *parsed == project.circuits_model()[file as int],
+                file < project.sources_model().len(), file < project.circuits_model().len(),
+                entry < parsed.syntax.entries@.len(), entry < parsed.entry_ranges@.len(),
+                forms@ == parsed.syntax.forms@,
+                form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+                self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
+                super::port_types::typed_name_sites(forms@, signature.outputs@),
+                i == outputs@.len() == output_drivers@.len() <= output_count,
+                one_bit_port_locations_match(source, forms@, signature.outputs@, outputs@),
+                output_drivers@ == wiring.drivers.outputs@.take(i as int),
+            decreases output_count - i,
+        {
+            let port = &signature.outputs[i];
+            let location = form_location(source, forms, port.declared.site.name);
+            if !matches!(port.ty, ResolvedPortType::Bits(1)) {
+                proof {
+                    port_locations_preserve_types(source, forms@, signature.outputs@, outputs@);
+                    self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::PortType, location, -(i as int) - 1);
+                }
+                return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::PortType, location));
+            }
+            let ghost previous = outputs@;
+            outputs.push(location);
+            output_drivers.push(wiring.drivers.outputs[i]);
+            proof {
+                append_one_bit_port_location(source, forms@, signature.outputs@, previous, location);
+                assert(output_drivers@ =~= wiring.drivers.outputs@.take(i + 1));
+            }
+            i += 1;
         }
-        let output_driver = wiring.drivers.outputs[0];
+        assert(output_drivers@ =~= wiring.drivers.outputs@);
+        proof { port_locations_preserve_types(source, forms@, signature.outputs@, outputs@); }
 
         let mut inputs = Vec::new();
         let mut i = 0;
@@ -645,9 +782,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 *project == self.targets.project_model(),
                 *source == project.sources_model()[file as int], *parsed == project.circuits_model()[file as int],
                 entry < parsed.entry_ranges@.len(), entry < parsed.syntax.entries@.len(),
-                one_bit_inputs_match(source, forms@, signature.inputs@, inputs@),
-                signature.outputs@.len() == 1,
-                signature.outputs@[0].ty == ResolvedPortType::Bits(1),
+                one_bit_port_locations_match(source, forms@, signature.inputs@, inputs@),
+                0 < signature.outputs@.len() && (!single_output || signature.outputs@.len() == 1),
+                one_bit_port_types_before(signature.outputs@, signature.outputs@.len() as int),
             decreases signature.inputs@.len() - i,
         {
             let port = &signature.inputs[i];
@@ -655,18 +792,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let location = form_location(source, forms, name);
             if !matches!(port.ty, ResolvedPortType::Bits(1)) {
                 proof {
-                    input_locations_preserve_types(source, forms@, signature.inputs@, inputs@);
-                    self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::PortType, location, i as int);
+                    port_locations_preserve_types(source, forms@, signature.inputs@, inputs@);
+                    self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::PortType, location, i as int);
                 }
                 return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::PortType, location));
             }
             let ghost previous = inputs@;
             inputs.push(location);
-            proof { one_bit_inputs_append(source, forms@, signature.inputs@, previous, location); }
+            proof { append_one_bit_port_location(source, forms@, signature.inputs@, previous, location); }
             i += 1;
         }
 
-        proof { input_locations_preserve_types(source, forms@, signature.inputs@, inputs@); }
+        proof { port_locations_preserve_types(source, forms@, signature.inputs@, inputs@); }
         let mut definitions = Vec::new();
         let mut i = 0;
         while i < wiring.drivers.definitions.len()
@@ -682,9 +819,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 entry < parsed.entry_ranges@.len(), entry < parsed.syntax.entries@.len(),
                 i == definitions@.len() <= wiring.drivers.definitions@.len(),
                 self.checked_definitions_match(file, entry, limit, wiring, definitions@),
-                signature.outputs@.len() == 1,
-                signature.outputs@[0].ty == ResolvedPortType::Bits(1),
-                one_bit_input_types_before(signature.inputs@, signature.inputs@.len() as int),
+                0 < signature.outputs@.len() && (!single_output || signature.outputs@.len() == 1),
+                one_bit_port_types_before(signature.outputs@, signature.outputs@.len() as int),
+                one_bit_port_types_before(signature.inputs@, signature.inputs@.len() as int),
                 forall|j: int| 0 <= j < i ==>
                     single_bit_rhs_available((#[trigger] definitions@[j]).rhs, signature.inputs@.len(), j as nat),
                 *signature == wiring.drivers.signature,
@@ -704,7 +841,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let targets = definition_target_atoms(forms, row);
             proof { self.checked_definitions_are_supported(file, entry, limit, wiring, definitions@); }
             if targets.end - targets.start != 1 {
-                proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::DefinitionOutputCount, expression, i as int); }
+                proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::DefinitionOutputCount, expression, i as int); }
                 return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::DefinitionOutputCount, expression));
             }
             let rhs = if let Some(operand) = self.read_single_bit_operand(file, entry, limit, source, parsed, root, wiring, definition, i) {
@@ -715,29 +852,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let call = match result {
                     Ok(Some(call)) => call,
                     Ok(None) => {
-                        proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::Expression, expression, i as int); }
+                        proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::Expression, expression, i as int); }
                         return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::Expression, expression));
                     },
                     Err(error) => return Err(SingleBitFuncError::Call(
                         DefinitionPosition { file, entry, definition: local, reference: 0 }, error)),
                 };
                 if call.call.call.form != root || call.call.call.arguments != 2 || !matches!(call.call.target, FuncCallTarget::Nor) {
-                    proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::Expression, expression, i as int); }
+                    proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::Expression, expression, i as int); }
                     return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::Expression, expression));
                 }
                 let Some(left) = self.read_single_bit_operand(file, entry, limit, source, parsed, root + 2, wiring, definition, i) else {
                     let argument = form_location(source, forms, root + 2);
-                    proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::Expression, argument, i as int); }
+                    proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::Expression, argument, i as int); }
                     return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::Expression, argument));
                 };
                 let Some(right) = self.read_single_bit_operand(file, entry, limit, source, parsed, root + 3, wiring, definition, i) else {
                     let argument = form_location(source, forms, root + 3);
-                    proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::Expression, argument, i as int); }
+                    proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::Expression, argument, i as int); }
                     return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::Expression, argument));
                 };
                 SingleBitRhs::Nor { left, right }
             } else {
-                proof { self.unsupported_at(file, entry, limit, wiring, UnsupportedSingleBitFunc::Expression, expression, i as int); }
+                proof { self.unsupported_at(file, entry, limit, wiring, single_output, UnsupportedSingleBitFunc::Expression, expression, i as int); }
                 return Err(SingleBitFuncError::Unsupported(UnsupportedSingleBitFunc::Expression, expression));
             };
             assert(self.checked_rhs_matches(file, entry, limit, wiring, i as int, rhs));
@@ -760,15 +897,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         assert(self.checked_definitions_match(file, entry, limit, wiring, definitions@));
         assert(self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))));
-        let checked = CheckedSingleBitFunc { declaration, inputs, definitions, output: output_site, output_driver };
+        assert forall|j: int| 0 <= j < output_drivers@.len()
+            implies single_bit_driver_available(#[trigger] output_drivers@[j], inputs@.len(), definitions@.len()) by {};
+        let checked = CheckedSingleBitFunc { declaration, inputs, definitions, outputs, output_drivers };
         assert(checked.inputs@.len() == wiring.drivers.signature.inputs@.len());
         assert(checked.definitions@.len() == wiring.drivers.definitions@.len());
         assert(is_form_location(source, parsed.syntax.forms@[parsed.syntax.entries@[entry as int].form as int], checked.declaration));
-        assert(is_form_location(source, parsed.syntax.forms@[wiring.drivers.signature.outputs@[0].declared.site.name as int], checked.output));
-        assert(wiring.drivers.signature.outputs@.len() == 1);
-        assert(wiring.drivers.signature.outputs@[0].ty == ResolvedPortType::Bits(1));
-        assert(checked.output_driver == wiring.drivers.outputs@[0]);
-        assert(self.single_bit_func_matches(file, entry, limit, &checked));
+        assert(self.single_bit_func_outputs_match(file, entry, limit, &checked));
         Ok(checked)
     }
 

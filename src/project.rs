@@ -99,8 +99,11 @@ pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
 pub use use_aliases::LoweredSingleBitFunc;
 #[cfg(verus_only)]
 pub use use_aliases::{
-    single_bit_evaluation_result_agrees, single_bit_lowering_matches, single_bit_lowering_preserves_evaluation,
-    single_bit_source_evaluation, single_bit_source_evaluations_agree,
+    single_bit_evaluation_outputs_agree, single_bit_evaluation_result_agrees, single_bit_lowering_matches,
+    single_bit_lowering_outputs_match,
+    single_bit_lowering_preserves_evaluation, single_bit_lowering_preserves_outputs_evaluation,
+    single_bit_source_evaluation, single_bit_source_evaluations_agree, single_bit_source_outputs_evaluation,
+    single_bit_source_outputs_evaluations_agree,
 };
 
 pub use use_aliases::{CheckedSingleBitFunc, SingleBitDefinition, SingleBitFuncError, SingleBitOperand, SingleBitRhs, UnsupportedSingleBitFunc};
