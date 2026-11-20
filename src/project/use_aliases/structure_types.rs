@@ -1,6 +1,7 @@
 //! 構造体フィールドの型名を、フィールドを含む宣言のスコープで解決する。
 
 mod index;
+mod cast_reference;
 pub use index::{
     ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructureLayout, StructureLayoutError,
     StructureLayoutField, StructureLayouts, StructurePlacementError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
@@ -15,14 +16,14 @@ use crate::project::{
     check_structure_declaration,
 };
 use crate::syntax::Form;
-use crate::syntax::circuit::named_build_entry;
+use crate::syntax::circuit::{NamedForm, named_build_entry};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
 use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
-use crate::project::declarations::located_name_evidence;
+use crate::project::declarations::{form_key, located_name_evidence};
 #[cfg(verus_only)]
 use crate::project::structure_declarations::checked_structure_fields;
 #[cfg(verus_only)]
@@ -119,7 +120,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 scope.forms@[at as int]->Atom_kind, binding)
     }
 
-    spec fn structure_position_matches(&self, position: StructurePosition, binding: DefinitionBinding) -> bool {
+    pub(super) closed spec fn structure_position_matches(&self, position: StructurePosition, binding: DefinitionBinding) -> bool {
         let project = self.targets.project_model();
         &&& binding matches DefinitionBinding::Declaration { source, form }
         &&& position.file < project.sources_model().len()
@@ -131,6 +132,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& entries[position.entry as int].head is Struct
             &&& entries[position.entry as int].form == form.form
         }
+    }
+
+    /// 解決済みの構造体宣言を、同じプロジェクトの配置表で使う位置に変換する。
+    pub(super) fn resolved_structure_position(
+        &self, source: &ProjectSource<'a>, declaration: &NamedForm<'a>,
+    ) -> (position: StructurePosition)
+        requires
+            self.can_resolve(),
+            declaration.head is Struct,
+            self.targets.exports_model().declarations_model().declaration_at(form_key(*declaration), source, declaration),
+        ensures self.structure_position_matches(position, DefinitionBinding::Declaration { source, form: declaration }),
+    {
+        proof { self.targets.declarations_cover_project(); }
+        let project = self.targets.project();
+        let table = self.targets.exports().declarations();
+        let (file, name) = table.selected_declaration_position(key_of(declaration),
+            Ghost(*project), Ghost(*source), Ghost(*declaration));
+        let parsed = &project.circuits()[file];
+        proof {
+            assert(parsed_circuit_matches(*source, *parsed));
+            parsed_index_evidence(*source, *parsed);
+        }
+        let entry = named_build_entry(source.text, parsed, name);
+        StructurePosition { file, entry }
     }
 
     spec fn structure_field_matches(&self, scope: &StructureScope, declared: DeclaredField, field: ResolvedStructureField) -> bool {
@@ -187,19 +212,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let DefinitionBinding::Declaration { source: declaration_source, form: declaration } = binding else { unreachable!() };
                 proof {
                     self.binding_declaration_origin(scope.file, request, scope.namespace, atom_kind, declaration_source, declaration);
-                    self.targets.declarations_cover_project();
                 }
-                let project = self.targets.project();
-                let table = self.targets.exports().declarations();
-                let (file, name) = table.selected_declaration_position(key_of(declaration),
-                    Ghost(*project), Ghost(*declaration_source), Ghost(*declaration));
-                let parsed = &project.circuits()[file];
-                proof {
-                    assert(parsed_circuit_matches(*declaration_source, *parsed));
-                    parsed_index_evidence(*declaration_source, *parsed);
-                }
-                let entry = named_build_entry(declaration_source.text, parsed, name);
-                let target = StructurePosition { file, entry };
+                let target = self.resolved_structure_position(declaration_source, declaration);
                 assert(self.structure_position_matches(target, binding));
                 StructureFieldType::Struct(target)
             },

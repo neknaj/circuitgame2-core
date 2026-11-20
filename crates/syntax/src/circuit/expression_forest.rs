@@ -238,6 +238,28 @@ proof fn list_reference_order(
     same_expression_head(source, forms, start + 1, builtin, witness);
 }
 
+pub(super) proof fn first_cast_reference(
+    source: &str, forms: Seq<Form>, root: int, stop: int, child_start: int, child_stop: int,
+)
+    requires
+        0 <= root && root + 2 < forms[root]->List_end <= stop <= forms.len(),
+        expression_child_range(source, forms, root, forms[root]->List_end as int, child_start, child_stop),
+        list_head_matches(source, forms, root + 1, Some(ExpressionHead::As)),
+    ensures
+        expression_references(source, forms, root, stop).len() > 0,
+        expression_references(source, forms, root, stop)[0]
+            == (ExpressionReference {
+                kind: ExpressionReferenceKind::CastType, form: (root + 2) as usize, span: form_span(forms[root + 2]),
+            }),
+{
+    let end = forms[root]->List_end as int;
+    assert forall|i: int, j: int| #[trigger] expression_child_range(source, forms, root, end, i, j)
+        implies i == child_start && j == child_stop by {
+        same_child_interval(source, forms, root, end, child_start, child_stop, i, j);
+    };
+    list_reference_order(source, forms, root, stop, end, child_start, child_stop, Some(ExpressionHead::As));
+}
+
 /// 式の値として参照される無修飾の信号名を、元ソース順の構文木添字で表す。
 #[verifier::opaque]
 pub closed spec fn expression_signals(source: &str, forms: Seq<Form>, start: int, stop: int) -> Seq<usize>

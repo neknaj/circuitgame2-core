@@ -6,13 +6,15 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
-use super::expression_forest::first_expression_children;
+use super::expression_forest::{expression_references, first_cast_reference, first_expression_children};
 #[cfg(verus_only)]
 use super::expressions::{
     after_form, argument_matches, arguments_match, expression_child_range, list_head_matches, same_expression_head,
 };
 #[cfg(verus_only)]
 use super::{HeaderError, expression_forest, expression_head_spelling, form_span, form_spans_valid, is_char_boundary};
+#[cfg(verus_only)]
+use super::{ExpressionReference, ExpressionReferenceKind};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
@@ -204,6 +206,30 @@ pub proof fn structure_expression_positions(
             StructureExpressionKind::Raw => true,
         },
 {
+}
+
+/// 右辺全体が `as` のとき、構造体の型名が参照列の先頭にあることを示す。
+pub proof fn structure_cast_reference(
+    source: &str, forms: Seq<Form>, root: int, stop: int, shape: StructureExpressionShape,
+)
+    requires
+        structure_expression_matches(source, forms, root, shape),
+        shape.kind is As,
+        expression_forest(source, forms, root, stop),
+        0 <= root < stop <= forms.len(),
+    ensures
+        expression_references(source, forms, root, stop).len() > 0,
+        ({
+            let target = shape.kind->As_target;
+            expression_references(source, forms, root, stop)[0] == (ExpressionReference {
+                kind: ExpressionReferenceKind::CastType, form: target, span: form_span(forms[target as int]),
+            })
+        }),
+{
+    first_expression_children(source, forms, root, stop);
+    let end = forms[root]->List_end as int;
+    assert(expression_child_range(source, forms, root, end, shape.input.start as int, shape.input.end as int));
+    first_cast_reference(source, forms, root, stop, shape.input.start as int, shape.input.end as int);
 }
 
 /// 文法に適合する構造体操作から位置を取り出せることと、その入力式が文法に適合することを示す。

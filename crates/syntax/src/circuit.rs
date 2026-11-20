@@ -113,7 +113,7 @@ use structure::validate_structure_arguments;
 pub use structure_expressions::{StructureExpressionKind, StructureExpressionShape, structure_expression_shape};
 #[cfg(verus_only)]
 pub use structure_expressions::{
-    strict_structure_expression_has_shape, structure_expression_matches, structure_expression_positions,
+    strict_structure_expression_has_shape, structure_cast_reference, structure_expression_matches, structure_expression_positions,
 };
 pub use structure::sites::{FieldSite, FieldTypeSite, StructureSites, structure_sites};
 #[cfg(verus_only)]

@@ -779,6 +779,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.binding_declaration_origin(file, result.site.request_model(), from, kind, source, form);
     }
 
+    /// `as` の型参照が解決したとき、参照先は共有宣言表にある構造体である。
+    pub(super) proof fn resolved_cast_declaration(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        result: ResolvedDefinitionReference,
+    )
+        requires
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(result)),
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                parsed.references@[parsed.definitions@[def].references.start + reference].kind is CastType
+            }),
+        ensures
+            result.binding matches DefinitionBinding::Declaration { source, form }
+                && form.head is Struct
+                && self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+    {
+        let parsed = self.targets.project_model().circuits_model()[file as int];
+        let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        let indexed = parsed.references@[parsed.definitions@[def].references.start + reference];
+        let kind = parsed.syntax.forms@[indexed.form as int]->Atom_kind;
+        let request = result.site.request_model();
+        let from = choose|from: Option<&str>| #[trigger] self.scope_matches(file, result.site.block, Ok(from))
+            && self.binding_evidence(file, request, from, kind, Ok(result.binding));
+        self.struct_binding_is_struct(file, request, from, kind, result.binding);
+        if let DefinitionBinding::Declaration { source, form } = result.binding {
+            self.binding_declaration_origin(file, request, from, kind, source, form);
+        }
+    }
+
     /// 定義の右辺にある回路名または型名を、その定義のスコープで解決する。
     ///
     /// `file` はソース一覧、`entry` は各ファイルの厳格索引の添字。
