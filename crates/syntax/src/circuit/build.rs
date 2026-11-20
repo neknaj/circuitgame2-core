@@ -330,14 +330,39 @@ pub proof fn definition_signal_positions_agree(
         }),
     ensures left == right,
 {
+    definition_signal_positions_in_order(source, index, entry, definition);
+    if left < right {
+        assert(index.signals@[left] < index.signals@[right]);
+    } else if right < left {
+        assert(index.signals@[right] < index.signals@[left]);
+    }
+}
+
+/// 定義の信号索引は、同じ右辺の構文位置が増える順に並ぶ。
+pub proof fn definition_signal_positions_in_order(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition < index.entry_ranges@[entry].definitions.end,
+    ensures ({
+        let row = index.definitions@[definition];
+        forall|i: int, j: int| row.signals.start <= i < j < row.signals.end
+            ==> #[trigger] index.signals@[i] < #[trigger] index.signals@[j]
+    }),
+{
     build_definition_scope_evidence(source, index, entry, definition);
     vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
     let row = index.definitions@[definition];
     let start = row.signals.start as int;
     let signals = index.signals@[start..row.signals.end as int];
     expression_signals_in_order(source, index.syntax.forms@, row.expression.start as int, row.expression.end as int);
-    assert(signals[left - start] == index.signals@[left]);
-    assert(signals[right - start] == index.signals@[right]);
+    assert forall|i: int, j: int| start <= i < j < row.signals.end
+        implies #[trigger] index.signals@[i] < #[trigger] index.signals@[j] by {
+        assert(signals[i - start] == index.signals@[i]);
+        assert(signals[j - start] == index.signals@[j]);
+    };
 }
 
 /// 右辺全体が裸の名前なら、その定義の信号索引に当該アトムだけが含まれることを示す。

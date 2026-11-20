@@ -240,6 +240,9 @@ pub fn check_concat_result_width(
     ensures
         concat_result_width_matches(widths@, expected, limit, result),
         result matches Ok(width) ==> 0 < width <= limit && width == concat_prefix_width(widths@, widths@.len()),
+        result matches Ok(width) ==> expected matches Some(requested) ==> width == requested,
+        result matches Err(ConcatResultWidthError::Mismatch { expected: requested, actual })
+            ==> expected == Some(requested) && requested != actual,
 {
     let actual = match check_concat_width(widths, u64::MAX) {
         Ok(actual) => actual,

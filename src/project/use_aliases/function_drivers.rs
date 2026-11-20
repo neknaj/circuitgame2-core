@@ -863,6 +863,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ==> self.declared_port_type((#[trigger] checked.signature.outputs@[i]).ty)
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
                 ==> indexed_driver_site(source, &circuits[file as int], entry as int, #[trigger] checked.definitions@[i])
+            &&& forall|i: int, j: int| 0 <= i < j < checked.definitions@.len()
+                ==> (#[trigger] checked.definitions@[i]).definition <= (#[trigger] checked.definitions@[j]).definition
         }),
     {
         self.reveal_checked_driver_result(file, entry, max_width, checked);

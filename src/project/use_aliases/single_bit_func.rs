@@ -30,7 +30,7 @@ use super::super::location_in_source;
 use crate::syntax::circuit::{
     BitSelectionShape, build_bare_signal_position, build_definition_scope_evidence, build_selection_chain_signal,
     build_selection_input_position,
-    definition_signal_positions_agree, definition_target_range, indexed_entry_evidence,
+    definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range, indexed_entry_evidence,
 };
 #[cfg(verus_only)]
 use super::function_atoms::named_selection_matches;
@@ -473,7 +473,7 @@ pub(super) closed spec fn no_operand(
         !#[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, signal))
 }
 
-proof fn operand_excludes_missing(
+pub(super) proof fn operand_excludes_missing(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
     wiring: &FuncWiring, prior: int, operand: SingleBitOperand,
 )
@@ -487,6 +487,45 @@ proof fn operand_excludes_missing(
             && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver;
         assert(!prior_name_binding(parsed, entry, definition, root, wiring, prior, signal));
     }
+}
+
+/// 同じ信号索引と入力数を持つ結線では、引数の駆動元を引き継げる。
+pub(super) proof fn operand_transfers(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
+    left: &FuncWiring, right: &FuncWiring, prior: int, operand: SingleBitOperand,
+)
+    requires
+        left.signals@ == right.signals@,
+        left.drivers.signature.inputs@.len() == right.drivers.signature.inputs@.len(),
+        operand_matches(source, parsed, entry, definition, root, left, prior, operand),
+    ensures operand_matches(source, parsed, entry, definition, root, right, prior, operand),
+{
+    if let SingleBitOperand::Driver(driver) = operand {
+        let start = parsed.entry_ranges@[entry as int].signals.start;
+        let position = choose|position: int| prior_name_binding(parsed, entry, definition, root, left, prior, position)
+            && left.signals@[position - start].driver == driver;
+        assert(prior_name_binding(parsed, entry, definition, root, right, prior, position));
+    }
+}
+
+/// 右辺の信号索引にある名前から、先行する駆動元を得る。
+pub(super) proof fn indexed_name_is_operand(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
+    wiring: &FuncWiring, prior: int, position: int,
+)
+    requires
+        0 <= root < parsed.syntax.forms@.len(),
+        parsed.syntax.forms@[root] matches Form::Atom { kind: AtomKind::Name, .. },
+        parsed.definitions@[definition as int].signals.start <= position
+            < parsed.definitions@[definition as int].signals.end <= parsed.signals@.len(),
+        parsed.signals@[position] == root,
+        0 <= position - parsed.entry_ranges@[entry as int].signals.start < wiring.signals@.len(),
+        single_bit_driver_available(wiring.signals@[position - parsed.entry_ranges@[entry as int].signals.start].driver,
+            wiring.drivers.signature.inputs@.len(), prior as nat),
+    ensures operand_matches(source, parsed, entry, definition, root, wiring, prior,
+        SingleBitOperand::Driver(wiring.signals@[position - parsed.entry_ranges@[entry as int].signals.start].driver)),
+{
+    assert(prior_name_binding(parsed, entry, definition, root, wiring, prior, position));
 }
 
 spec fn one_bit_port_types_before(ports: Seq<TypedPort>, stop: int) -> bool {
@@ -1166,8 +1205,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         } else if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
             let row = &parsed.definitions[definition];
             let frame = &parsed.entry_ranges[entry];
-            let mut i = row.signals.start;
-            while i < row.signals.end
+            proof { definition_signal_positions_in_order(source.text, &parsed.build_model(), entry as int, definition as int); }
+            let mut first = row.signals.start;
+            let mut end = row.signals.end;
+            while first < end
                 invariant
                     self.can_resolve(),
                     self.func_wiring_evidence(_file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -1179,26 +1220,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     *frame == parsed.entry_ranges@[entry as int],
                     frame.definitions.start <= definition < frame.definitions.end <= parsed.definitions@.len(),
                     *row == parsed.definitions@[definition as int],
-                    row.signals.start <= i <= row.signals.end <= parsed.signals@.len(),
-                    forall|signal: int| signal < i
-                        ==> !#[trigger] prior_name_binding(parsed, entry, definition, root as int, wiring, prior as int, signal),
-
+                    row.signals.start <= first <= end <= row.signals.end <= parsed.signals@.len(),
+                    forall|i: int, j: int| row.signals.start <= i < j < row.signals.end
+                        ==> #[trigger] parsed.signals@[i] < #[trigger] parsed.signals@[j],
+                    forall|signal: int| row.signals.start <= signal < row.signals.end && (signal < first || end <= signal)
+                        ==> #[trigger] parsed.signals@[signal] != root,
                     root < parsed.syntax.forms@.len(),
                     parsed.syntax.forms@[root as int] is Atom
                         && parsed.syntax.forms@[root as int]->Atom_kind is Name,
-                decreases row.signals.end - i,
+                decreases end - first,
             {
-                if parsed.signals[i] == root {
-                    proof { self.checked_signal_driver(_file, entry, _limit, *wiring, definition, i); }
-                    let pos = i - frame.signals.start;
+                let middle = first + (end - first) / 2;
+                if parsed.signals[middle] < root {
+                    first = middle + 1;
+                } else if root < parsed.signals[middle] {
+                    end = middle;
+                } else {
+                    proof { self.checked_signal_driver(_file, entry, _limit, *wiring, definition, middle); }
+                    let pos = middle - frame.signals.start;
                     let driver = wiring.signals[pos].driver;
                     if driver_available(driver, wiring.drivers.signature.inputs.len(), prior) {
-                        assert(prior_name_binding(parsed, entry, definition, root as int, wiring, prior as int, i as int));
+                        assert(prior_name_binding(parsed, entry, definition, root as int, wiring, prior as int, middle as int));
                         return Some(SingleBitOperand::Driver(driver));
                     }
+                    assert forall|signal: int|
+                        !#[trigger] prior_name_binding(parsed, entry, definition, root as int, wiring, prior as int, signal) by {
+                        if row.signals.start <= signal < row.signals.end && signal != middle {
+                            assert(parsed.signals@[signal] != root);
+                        }
+                    };
+                    return None;
                 }
-                assert(!prior_name_binding(parsed, entry, definition, root as int, wiring, prior as int, i as int));
-                i += 1;
             }
             None
         } else {

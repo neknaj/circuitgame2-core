@@ -6,6 +6,30 @@ use circuitgame2_core::project::{
 };
 
 #[test]
+fn exposes_concat_types_and_diagnostic_sites() {
+    let text = concat!(
+        "(using nor) ",
+        "(struct Word (width 4)) ",
+        "(func accepted (in (lo (bits 2)) (hi (bits 3))) (out (y (bits 6))) ",
+        "  (def y (concat lo 1 hi))) ",
+        "(func rejected (in (word Word)) (out y) ",
+        "  (def y (concat (nor 0 1) word)))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 7, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let accepted = aliases.check_func_signal_types(0, 2, 6).unwrap();
+    let signal = accepted.types[0].as_ref().unwrap();
+    assert!(matches!(signal.ty, ResolvedPortType::Bits(6)));
+    assert_eq!(&text[signal.origin.span.clone()], "(concat lo 1 hi)");
+
+    let error = aliases.check_func_signal_types(0, 3, 6).unwrap_err();
+    let FuncSignalTypeError::ConcatInputType { reference, actual } = error else { panic!("{error:?}") };
+    assert_eq!(&text[reference.span], "word");
+    assert_eq!(&text[actual.origin.span], "Word");
+}
+
+#[test]
 fn propagates_each_call_output_through_bare_signals() {
     let text = concat!(
         "(func pair (in (value (bits 8)) flag) (out (value (bits 8)) flag)) ",

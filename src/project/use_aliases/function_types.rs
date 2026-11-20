@@ -27,6 +27,7 @@ use super::function_atoms::StructureProjections;
 #[cfg(verus_only)]
 use super::function_atoms::StructureProjection;
 use super::selection_arguments::SelectionArgumentError;
+use crate::project::ConcatResultWidthError;
 use crate::project::LocatedName;
 use vstd::prelude::*;
 
@@ -60,6 +61,20 @@ pub enum FuncSignalTypeError<'p, 'a> {
     },
     /// ビット選択の数値引数または選択範囲の違反。
     SelectionArgument(SelectionArgumentError<'p, 'a>),
+    /// 連接の引数がビット列型に合わない。
+    ConcatInputType {
+        /// 連接の引数のソース範囲。
+        reference: LocatedName<'p, 'a>,
+        /// 引数の型と、その型を決めた位置。
+        actual: SignalType<'p, 'a>,
+    },
+    /// 連接の合計幅を表せないか、設定上限を超えた。
+    ConcatWidth {
+        /// 連接式全体のソース範囲。
+        expression: LocatedName<'p, 'a>,
+        /// 幅の検査で見つかった違反。
+        reason: ConcatResultWidthError,
+    },
     /// 配置表を準備した際に見つかった構造体の宣言違反。
     StructureLayout(StructureTypeError<'p, 'a>),
     /// 構造体式の型名、入力型、幅、またはフィールドの違反。
@@ -326,7 +341,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && #[trigger] self.func_literal_evidence(file, entry, limit, Ok(literals))
                     && self.call_output_failure(file, entry, limit, &scope.drivers, error),
             Err(error) if error is Signal || error is SelectionInputType || error is SelectionArgument
-                || error is StructureLayout || error is StructureExpression =>
+                || error is ConcatInputType || error is ConcatWidth || error is StructureLayout || error is StructureExpression =>
                 exists|literals: FuncLiteralWidths, wiring: FuncWiring, roots: FuncCallOutputTypes|
                 #[trigger] self.signal_type_sources(file, entry, limit, literals, &wiring, roots)
                 && self.propagated_types_match(file, entry, limit, &wiring, literals, roots, Err(error)),
@@ -352,6 +367,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 裸の信号名は入力または先行定義の型を引き継ぐ。`bit` と `slice` の最内段の入力が
     /// 型の分かる裸の信号名、またはその信号の `field` なら、内側から順に選択範囲を検査する。
     /// 裸の信号名を入力とする `field`・`as`・`raw` は構造体の型と配置を検査する。
+    /// `concat` では、型が判明した裸のビット列信号と定数 `0`・`1` の幅を足す。
+    /// 幅が未確定の引数があっても、型が判明した引数は調べ、最初の型違反を返す。
     /// 呼び出しの直接の引数が定数か、
     /// 型の判明した裸の信号名なら、対応する入力型と照合する。
     /// 参照先の署名が得られたら、その署名をこの検査の入出力の照合で再利用する。

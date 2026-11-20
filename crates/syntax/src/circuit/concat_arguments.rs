@@ -66,6 +66,24 @@ pub fn concat_argument_range(source: &str, forms: &[Form], root: usize) -> (resu
     range
 }
 
+/// 同じ連接式から得る引数範囲は一意に定まる。
+pub proof fn concat_argument_ranges_agree(
+    source: &str, forms: Seq<Form>, root: int, left: Range<usize>, right: Range<usize>,
+)
+    requires concat_arguments_match(source, forms, root, left), concat_arguments_match(source, forms, root, right),
+    ensures left == right,
+{
+}
+
+pub(super) proof fn ordinary_head_excludes_concat(
+    source: &str, forms: Seq<Form>, root: int, range: Range<usize>,
+)
+    requires list_head_matches(source, forms, root + 1, None), concat_arguments_match(source, forms, root, range),
+    ensures false,
+{
+    same_expression_head(source, forms, root + 1, None, Some(ExpressionHead::Concat));
+}
+
 fn read_concat_argument_range(source: &str, forms: &[Form], root: usize) -> (result: Option<Range<usize>>)
     ensures
         result matches Some(range) ==> concat_arguments_match(source, forms@, root as int, range),

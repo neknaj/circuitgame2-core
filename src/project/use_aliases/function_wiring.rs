@@ -494,6 +494,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
                 ==> indexed_driver_site(&project.sources_model()[file as int], &circuits[file as int],
                     entry as int, #[trigger] wiring.drivers.definitions@[i])
+            &&& forall|i: int, j: int| 0 <= i < j < wiring.drivers.definitions@.len()
+                ==> (#[trigger] wiring.drivers.definitions@[i]).definition <= (#[trigger] wiring.drivers.definitions@[j]).definition
         }),
     {
         self.checked_driver_sources(file, entry, max_width, wiring.drivers);

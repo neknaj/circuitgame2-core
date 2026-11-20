@@ -39,7 +39,7 @@ pub use body::{DefinitionReferences, first_routine_expansion};
 pub use concat_arguments::concat_argument_range;
 #[cfg(verus_only)]
 pub use concat_arguments::{
-    concat_arguments_evidence, concat_arguments_match, following_concat_argument, indexed_concat_argument_signal,
+    concat_argument_ranges_agree, concat_arguments_evidence, concat_arguments_match, following_concat_argument, indexed_concat_argument_signal,
     strict_concat_has_argument_range,
 };
 use build::BuildRows;
@@ -61,7 +61,7 @@ pub use build::{
 pub use build::{
     build_bare_signal_position, build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
     build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
-    definition_expression_region, definition_signal_positions_agree, definition_target_range,
+    definition_expression_region, definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
     definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};

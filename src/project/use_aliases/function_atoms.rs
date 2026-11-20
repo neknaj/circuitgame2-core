@@ -1,7 +1,11 @@
 //! 定数と裸の信号名から、関数の左辺に対応する型を求める。
 
 mod field_selection;
+mod concat;
 
+use concat::ConcatContext;
+#[cfg(verus_only)]
+use concat::{concat_atom_step, concat_successes_agree};
 use super::function_literals::index_outputs;
 use super::function_types::FuncSignalTypeError;
 use super::selection_arguments::{CheckedBitSelection, check_selection_arguments, check_selection_chain, nested_named_selection};
@@ -29,6 +33,7 @@ use crate::project::{
 use crate::syntax::{AtomKind, Form};
 use crate::syntax::circuit::{BitSelectionShape, NamedBuildCircuit, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
 use crate::syntax::circuit::field_selection_shape;
+use crate::syntax::circuit::concat_argument_range;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
@@ -37,6 +42,7 @@ use crate::syntax::circuit::{
     build_selection_chain_signal, build_selection_input_position, build_structure_input_position,
     field_selection_root, field_selection_shape_matches, field_selection_shapes_agree,
     ordinary_call_at, ordinary_call_excludes_special_forms, structure_expression_matches, structure_expression_positions,
+    concat_argument_ranges_agree, concat_arguments_match,
 };
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
@@ -719,6 +725,20 @@ spec fn atom_type_step(
         &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
         &&& aliases.field_selection_atom_step(&context, row.expression.start, steps, at, shape,
             signal_type_at(wiring, prior, bound.driver), expected, result)
+    } else if roots.len() > 0 && driver.result_index == 0 && exists|arguments: core::ops::Range<usize>|
+        #[trigger] concat_arguments_match(source.text, parsed.syntax.forms@, row.expression.start as int, arguments)
+    {
+        let arguments = choose|arguments: core::ops::Range<usize>|
+            #[trigger] concat_arguments_match(source.text, parsed.syntax.forms@, row.expression.start as int, arguments);
+        let expected = if let Some(output) = outputs[i] {
+            Some(wiring.drivers.signature.outputs@[output as int])
+        } else { None };
+        let context = ConcatContext { file, entry: entry as usize, limit, source, parsed, wiring, index: i as usize };
+        &&& parsed_circuit_matches(*source, *parsed)
+        &&& entry < parsed.syntax.entries@.len()
+        &&& parsed.entry_ranges@[entry].definitions.start <= driver.definition < parsed.entry_ranges@[entry].definitions.end
+        &&& outputs[i] matches Some(output) ==> output < wiring.drivers.signature.outputs@.len()
+        &&& concat_atom_step(&context, prior, row.expression.start, arguments, expected, result)
     } else {
         result == Ok(if roots.len() == 0 { None } else { roots[i] })
     }
@@ -840,6 +860,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures a == b,
     {
         reveal(atom_type_step);
+        vstd::std_specs::vec::axiom_spec_len(&left.drivers.definitions);
         let driver = left.drivers.definitions@[i];
         let row = parsed.definitions@[driver.definition as int];
         let forms = parsed.syntax.forms@;
@@ -881,6 +902,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let context = StructureExpressionContext { file, entry, limit, source, parsed,
                     definition: (driver.definition - frame.definitions.start) as usize };
                 self.field_selection_types_agree(&context, row.expression.start, input, expected, steps, at, shape, a, b);
+            } else if exists|arguments: core::ops::Range<usize>|
+                #[trigger] concat_arguments_match(source.text, forms, row.expression.start as int, arguments)
+            {
+                let arguments = choose|arguments: core::ops::Range<usize>|
+                    #[trigger] concat_arguments_match(source.text, forms, row.expression.start as int, arguments);
+                assert(0 <= i < left.drivers.definitions@.len() <= usize::MAX);
+                assert((i as usize) as int == i);
+                assert(left.drivers.definitions@[i].definition == right.drivers.definitions@[i].definition);
+                let l = ConcatContext { file, entry, limit, source, parsed, wiring: left, index: i as usize };
+                let r = ConcatContext { file, entry, limit, source, parsed, wiring: right, index: i as usize };
+                concat_successes_agree(&l, &r, prior, row.expression.start, arguments, expected, a, b);
             }
         }
     }
@@ -1296,7 +1328,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
             },
             result matches Err(error) ==> error is Signal
-                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument
+                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument || error is ConcatInputType || error is ConcatWidth
                     || error is StructureLayout || error is StructureExpression)),
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
     {
@@ -1531,6 +1563,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         return Err(error);
                     }
                 }
+            } else if let Some(arguments) = concat_argument_range(source.text, forms, root) {
+                proof {
+                    let selected = choose|range: core::ops::Range<usize>|
+                        #[trigger] concat_arguments_match(source.text, forms@, root as int, range);
+                    concat_argument_ranges_agree(source.text, forms@, root as int, arguments, selected);
+                }
+                let expected = match outputs[i] {
+                    Some(output) => Some(&wiring.drivers.signature.outputs[output]),
+                    None => None,
+                };
+                let context = ConcatContext { file, entry, limit: _limit, source, parsed, wiring, index: i };
+                match self.check_concat_type(&context, types, root, Ghost(row.expression.end), arguments, expected) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring,
+                            literals.widths@, outputs@, roots@, types@, i as int, Err(error)));
+                        return Err(error);
+                    },
+                }
             } else {
                 copy_signal_type(&roots[i])
             }
@@ -1597,7 +1648,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && (#[trigger] projections.entries@[j]).target == target
             },
             result matches Err(error) ==> error is Signal
-                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument
+                || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument || error is ConcatInputType || error is ConcatWidth
                     || error is StructureLayout || error is StructureExpression)),
             result matches Err(FuncSignalTypeError::Signal(error)) ==> error is OutputType,
     {
