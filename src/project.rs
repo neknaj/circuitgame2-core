@@ -17,9 +17,9 @@ mod use_aliases;
 mod use_targets;
 mod widths;
 
-pub use bit_selection::{BitSelectionError, check_bit_selection};
+pub use bit_selection::{BitSelectionError, check_bit_selection, select_bits};
 #[cfg(verus_only)]
-pub use bit_selection::{bit_selection_matches, selected_bit_in_range};
+pub use bit_selection::{bit_selection_matches, selected_bit_in_range, selected_bits_match, selected_bits_values};
 pub use concatenation::{ConcatWidthError, check_concat_width};
 #[cfg(verus_only)]
 pub use concatenation::{concat_prefix_width, concat_width_matches};
