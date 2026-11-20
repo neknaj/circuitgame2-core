@@ -1,7 +1,10 @@
 //! 構造体フィールドの型名を、フィールドを含む宣言のスコープで解決する。
 
 mod index;
-pub use index::{ResolvedStructureEntry, ResolvedStructures, StructureIndexError};
+pub use index::{
+    ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructureLayout, StructureLayoutError,
+    StructureLayoutField, StructureLayouts, StructurePlacementError,
+};
 
 use super::definitions::{ReferenceRequest, ReferenceUse};
 use super::{DefinitionBinding, DefinitionReferenceReason, UseAliases};

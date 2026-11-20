@@ -1,5 +1,8 @@
 //! 解決済みの構造体を宣言位置で検索できるように集める。
 
+mod layout;
+pub use layout::{StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts, StructurePlacementError};
+
 use super::{ResolvedStructure, StructurePosition, StructureResolutionError, UseAliases};
 use alloc::vec::Vec;
 use vstd::prelude::*;

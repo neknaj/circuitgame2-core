@@ -25,7 +25,8 @@ mod single_bit_func;
 mod structure_types;
 pub use structure_types::{
     ResolvedStructure, ResolvedStructureEntry, ResolvedStructureField, ResolvedStructures,
-    StructureFieldType, StructureIndexError, StructurePosition, StructureResolutionError,
+    StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
+    StructurePlacementError, StructurePosition, StructureResolutionError,
 };
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{

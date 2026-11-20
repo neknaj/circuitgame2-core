@@ -160,6 +160,13 @@ impl<'a> CircuitProject<'a> {
         self.sources.as_slice()
     }
 
+    /// 構文解析済みファイルの件数を実行時の添字型で表せることを示す。
+    pub(super) proof fn circuit_count_fits(&self)
+        ensures self.circuits_model().len() <= usize::MAX,
+    {
+        vstd::std_specs::vec::axiom_spec_len(&self.circuits);
+    }
+
     /// `sources()` と同じ順に並ぶ構文木と名前索引を返す。
     pub fn circuits(&self) -> (circuits: &[NamedBuildCircuit<'a>])
         ensures circuits@ == self.circuits_model(),
