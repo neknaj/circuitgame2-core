@@ -8,7 +8,10 @@ use super::declarations::located_name_evidence;
 #[cfg(verus_only)]
 use super::location_in_source;
 #[cfg(verus_only)]
-use super::widths::{checked_name_sites, checked_width_sites, routine_port_widths_evidence};
+use super::widths::{
+    checked_name_sites, checked_width_sites, routine_port_widths_agree, routine_port_widths_evidence,
+    routine_widths_success_excludes_other,
+};
 use super::{
     CheckedPort, CircuitProject, DeclaredPortType, LocatedName, PortWidthError, ProjectSource,
     RoutinePortWidths, check_routine_port_widths,
@@ -393,6 +396,180 @@ pub(super) proof fn checked_signature_ports(
         routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
         && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(signature)));
     super::widths::checked_width_entry_exists(project, file, entry, max_width, widths);
+}
+
+proof fn port_name_bytes_agree(
+    source: &str, forms: Seq<Form>, ports: Seq<CheckedPort>, left: Seq<NameSite>, right: Seq<NameSite>,
+)
+    requires
+        left.len() == right.len(),
+        names_for_ports(source, forms, ports, left),
+        names_for_ports(source, forms, ports, right),
+    ensures forall|i: int| 0 <= i < left.len() ==>
+        (#[trigger] left[i]).word.spec_bytes() == (#[trigger] right[i]).word.spec_bytes(),
+{
+}
+
+/// 同じ署名の二つの検査結果は、ポートの順序と幅、および共有する入力の対応まで一致する。
+pub(super) proof fn checked_routine_signatures_agree(
+    project: &CircuitProject, file: int, entry: int, max_width: u64,
+    left: CheckedRoutineSignature, right: CheckedRoutineSignature,
+)
+    requires
+        routine_signature_evidence(project, file, entry, max_width, Ok(Some(left))),
+        routine_signature_evidence(project, file, entry, max_width, Ok(Some(right))),
+    ensures
+        left.ports.inputs@ == right.ports.inputs@,
+        left.ports.outputs@ == right.ports.outputs@,
+        left.output_sources@ == right.output_sources@,
+{
+    let source = &project.sources_model()[file];
+    let forms = project.circuits_model()[file].syntax.forms@;
+    let (left_widths, left_inputs, left_outputs) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
+        && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(left)));
+    let (right_widths, right_inputs, right_outputs) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
+        && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(right)));
+    routine_port_widths_agree(project, file, entry, max_width, left_widths, right_widths);
+    port_name_bytes_agree(source.text, forms, left_widths.inputs@, left_inputs, right_inputs);
+    port_name_bytes_agree(source.text, forms, left_widths.outputs@, left_outputs, right_outputs);
+    let left_sources = left.output_sources@;
+    let right_sources = right.output_sources@;
+    assert forall|i: int| 0 <= i < left_sources.len() implies
+        (#[trigger] left_sources[i]) == (#[trigger] right_sources[i]) by {
+        assert(output_matches(left_widths.inputs@, left_inputs, left_widths.outputs@[i],
+            left_outputs[i], left_sources[i]));
+        assert(output_matches(right_widths.inputs@, right_inputs, right_widths.outputs@[i],
+            right_outputs[i], right_sources[i]));
+        match (left_sources[i], right_sources[i]) {
+            (OutputSource::Input { port: a, .. }, OutputSource::Input { port: b, .. }) => {
+                assert(same_names(left_inputs[b as int], left_outputs[i]));
+                assert(a == b);
+            },
+            (OutputSource::Input { port, .. }, OutputSource::Body) => {
+                assert(same_names(right_inputs[port as int], right_outputs[i]));
+            },
+            (OutputSource::Body, OutputSource::Input { port, .. }) => {
+                assert(same_names(left_inputs[port as int], left_outputs[i]));
+            },
+            _ => {},
+        }
+    };
+    assert(left_sources =~= right_sources);
+}
+
+proof fn unique_names_exclude_duplicate(
+    source: &ProjectSource, names: Seq<NameSite>, direction: PortDirection, error: RoutineSignatureError,
+)
+    requires unique_prefix(names, names.len() as int),
+    ensures !duplicate_for(source, names, direction, error),
+{
+    if let RoutineSignatureError::Duplicate { first, later, .. } = error {
+        if duplicate_for(source, names, direction, error) {
+            let (a, b) = choose|i: int, j: int| 0 <= i < j < names.len()
+                && (#[trigger] names[i]).span == first.span && (#[trigger] names[j]).span == later.span
+                && names[i].word.spec_bytes() == names[j].word.spec_bytes() && unique_prefix(names, j);
+            assert(!same_names(names[a], names[b]));
+        }
+    }
+}
+
+proof fn same_names_preserve_unique(left: Seq<NameSite>, right: Seq<NameSite>)
+    requires
+        left.len() == right.len(),
+        unique_prefix(left, left.len() as int),
+        forall|i: int| 0 <= i < right.len() ==>
+            (#[trigger] left[i]).word.spec_bytes() == (#[trigger] right[i]).word.spec_bytes(),
+    ensures unique_prefix(right, right.len() as int),
+{
+    assert forall|i: int, j: int| 0 <= i < j < right.len() implies
+        (#[trigger] right[i]).word.spec_bytes() != (#[trigger] right[j]).word.spec_bytes() by {
+        assert(!same_names(left[i], left[j]));
+        assert(same_names(left[i], right[i]) && same_names(left[j], right[j]));
+    };
+}
+
+proof fn connections_exclude_width_error(
+    source: &ProjectSource, forms: Seq<Form>, widths: &RoutinePortWidths, error_widths: &RoutinePortWidths,
+    inputs: Seq<NameSite>, outputs: Seq<NameSite>, error_inputs: Seq<NameSite>,
+    error_outputs: Seq<NameSite>, connections: Seq<OutputSource>, error: RoutineSignatureError,
+)
+    requires
+        inputs.len() == widths.inputs@.len(),
+        outputs.len() == widths.outputs@.len(),
+        error_widths.inputs@ == widths.inputs@,
+        error_widths.outputs@ == widths.outputs@,
+        error_inputs.len() == inputs.len(),
+        error_outputs.len() == outputs.len(),
+        forall|i: int| 0 <= i < inputs.len() ==>
+            (#[trigger] inputs[i]).word.spec_bytes() == (#[trigger] error_inputs[i]).word.spec_bytes(),
+        forall|i: int| 0 <= i < outputs.len() ==>
+            (#[trigger] outputs[i]).word.spec_bytes() == (#[trigger] error_outputs[i]).word.spec_bytes(),
+        unique_prefix(inputs, inputs.len() as int),
+        connections.len() == outputs.len(),
+        connections_match(widths, inputs, outputs, connections),
+    ensures !shared_width_error(source, forms, error_widths, error_inputs, error_outputs, error),
+{
+    if let RoutineSignatureError::SharedWidthMismatch { expected, actual, input, output } = error {
+        if shared_width_error(source, forms, error_widths, error_inputs, error_outputs, error) {
+            let (a, b) = choose|i: int, j: int| 0 <= i < error_inputs.len() && 0 <= j < error_outputs.len()
+                && same_names(#[trigger] error_inputs[i], #[trigger] error_outputs[j])
+                && widths.inputs@[i].ty == DeclaredPortType::Bits(actual)
+                && widths.outputs@[j].ty == DeclaredPortType::Bits(expected)
+                && input.span == form_span(forms[width_atom(widths.inputs@[i]) as int])
+                && output.span == form_span(forms[width_atom(widths.outputs@[j]) as int])
+                && exists|prefix: Seq<OutputSource>| prefix.len() == j
+                    && #[trigger] connections_match(error_widths, error_inputs, error_outputs, prefix);
+            assert(same_names(inputs[a], outputs[b]));
+            assert(output_matches(widths.inputs@, inputs, widths.outputs@[b], outputs[b], connections[b]));
+            match connections[b] {
+                OutputSource::Input { port, .. } => {
+                    assert(a == port);
+                    assert(actual == expected);
+                },
+                OutputSource::Body => assert(!same_names(inputs[a], outputs[b])),
+            }
+        }
+    }
+}
+
+/// 署名を受理したときは、幅、名前の重複、共有配線の診断が成立しない。
+pub(super) proof fn checked_signature_success_excludes_other(
+    project: &CircuitProject, file: int, entry: int, max_width: u64,
+    success: CheckedRoutineSignature, other: Result<Option<CheckedRoutineSignature>, RoutineSignatureError>,
+)
+    requires
+        routine_signature_evidence(project, file, entry, max_width, Ok(Some(success))),
+        routine_signature_evidence(project, file, entry, max_width, other),
+    ensures other is Ok && other->Ok_0 is Some,
+{
+    checked_signature_ports(project, file, entry, max_width, success);
+    match other {
+        Ok(None) => routine_widths_success_excludes_other(project, file, entry, max_width, success.ports, Ok(None)),
+        Err(RoutineSignatureError::Width(error)) =>
+            routine_widths_success_excludes_other(project, file, entry, max_width, success.ports, Err(error)),
+        Err(error) => {
+            let source = &project.sources_model()[file];
+            let forms = project.circuits_model()[file].syntax.forms@;
+            let (a_widths, a_inputs, a_outputs) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+                routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
+                && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, Ok(Some(success)));
+            let (b_widths, b_inputs, b_outputs) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+                routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(widths)))
+                && #[trigger] checked_signature_evidence(source, forms, &widths, inputs, outputs, other);
+            routine_port_widths_agree(project, file, entry, max_width, a_widths, b_widths);
+            port_name_bytes_agree(source.text, forms, a_widths.inputs@, a_inputs, b_inputs);
+            port_name_bytes_agree(source.text, forms, a_widths.outputs@, a_outputs, b_outputs);
+            same_names_preserve_unique(a_inputs, b_inputs);
+            same_names_preserve_unique(a_outputs, b_outputs);
+            unique_names_exclude_duplicate(source, b_inputs, PortDirection::Input, error);
+            unique_names_exclude_duplicate(source, b_outputs, PortDirection::Output, error);
+            connections_exclude_width_error(source, forms, &a_widths, &b_widths, a_inputs, a_outputs, b_inputs, b_outputs,
+                success.output_sources@, error);
+        },
+        _ => {},
+    }
 }
 
 pub(super) proof fn signature_check_skips_non_routines(project: &CircuitProject, file: int, entry: int, max_width: u64)

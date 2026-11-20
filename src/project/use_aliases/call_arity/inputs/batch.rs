@@ -1,6 +1,7 @@
 //! 関数の配線と型を共有し、右辺に現れる呼び出しの引数を検査する。
 
 use super::{CallInputError, FuncAtomTypeError, FuncAtomTypes, FuncWiring, FuncWiringResult, UseAliases};
+use crate::project::use_aliases::signature_cache::SignatureCache;
 use crate::project::{DefinitionPosition, SignalType};
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
@@ -99,13 +100,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn check_definition_input_types(
         &self, file: usize, entry: usize, definition: usize, max_width: u64,
         types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>,
+        signatures: &mut SignatureCache<'p, 'a>,
     ) -> (result: Result<(), (usize, CallInputError<'p, 'a>)>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
             types@.len() == wiring.drivers.definitions@.len(),
             definition < definition_count(&self.targets.project_model().circuits_model()[file as int], entry as int),
-        ensures ({
+            old(signatures).matches(self, max_width),
+        ensures final(signatures).matches(self, max_width),
+        ({
             let parsed = &self.targets.project_model().circuits_model()[file as int];
             let count = reference_count(parsed, entry as int, definition as int);
             match result {
@@ -139,9 +143,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 *parsed == self.targets.project_model().circuits_model()[file as int],
                 reference <= stop == reference_count(parsed, entry as int, definition as int),
                 self.input_refs_before(file, entry, definition, reference as int, max_width, types@, wiring),
+                signatures.matches(self, max_width),
             decreases stop - reference,
         {
-            let _value = match self.check_call_inputs_with_types(file, entry, definition, reference, max_width, types, wiring, false) {
+            let _value = match self.check_call_inputs_with_types(file, entry, definition, reference, max_width, types, wiring, false, signatures) {
                 Ok(value) => value,
                 Err(error) => return Err((reference, error)),
             };
@@ -182,7 +187,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         let FuncWiringResult::Checked(ref wiring) = typed.literals.wiring else { return Ok(typed); };
         proof { self.atom_types_keep_wiring(file, entry, max_width, typed, *wiring); }
-        match self.check_all_inputs_with_types(file, entry, max_width, typed.types.as_slice(), wiring) {
+        let mut signatures = SignatureCache::new();
+        match self.check_all_inputs_with_types(file, entry, max_width, typed.types.as_slice(), wiring, &mut signatures) {
             Ok(()) => Ok(typed),
             Err(error) => {
                 assert(self.all_func_call_inputs_evidence(file, entry, max_width, Err(error))) by {
@@ -196,12 +202,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(in crate::project::use_aliases) fn check_all_inputs_with_types(
         &self, file: usize, entry: usize, max_width: u64,
         types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>,
+        signatures: &mut SignatureCache<'p, 'a>,
     ) -> (result: Result<(), FuncCallInputsError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
             types@.len() == wiring.drivers.definitions@.len(),
+            old(signatures).matches(self, max_width),
         ensures self.prepared_call_inputs_match(file, entry, max_width, types@, wiring, result),
+            final(signatures).matches(self, max_width),
     {
         let project = self.targets.project();
         proof {
@@ -224,9 +233,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 *parsed == self.targets.project_model().circuits_model()[file as int],
                 definition <= stop == definition_count(parsed, entry as int),
                 self.input_definitions_before(file, entry, definition as int, max_width, types@, wiring),
+                signatures.matches(self, max_width),
             decreases stop - definition,
         {
-            if let Err((reference, error)) = self.check_definition_input_types(file, entry, definition, max_width, types, wiring) {
+            if let Err((reference, error)) = self.check_definition_input_types(file, entry, definition, max_width, types, wiring, signatures) {
                 let position = DefinitionPosition { file, entry, definition, reference };
                 return Err(FuncCallInputsError::Call { position, error });
             }

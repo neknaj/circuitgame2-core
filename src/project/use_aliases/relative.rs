@@ -7,13 +7,19 @@ use crate::project::ExportTable;
 use crate::project::resolution::has_resolution;
 #[cfg(verus_only)]
 use crate::project::declarations::{declaration_key_evidence, form_key};
+#[cfg(verus_only)]
+use crate::project::{circuits::parsed_index_evidence, name_keys::key_view};
+#[cfg(verus_only)]
+use super::definitions::unqualified_target;
 use crate::project::{
     AbsoluteResolutionError, AbsoluteTarget, LocatedName, NameKey, ProjectSource,
 };
 use crate::syntax::circuit::NamedForm;
 use crate::syntax::split_relative_path;
 #[cfg(verus_only)]
-use crate::syntax::{AtomKind, bare_atom_kind, relative_path_parts};
+use crate::syntax::{AtomKind, bare_atom_kind, relative_path_parts, relative_path_parts_agree};
+#[cfg(verus_only)]
+use crate::syntax::circuit::named_forms_match;
 use alloc::string::String;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -91,20 +97,25 @@ spec fn tail_matches(
     result: Result<RelativeTarget, RelativeResolutionError>,
 ) -> bool {
     let spelling = parent_spelling(head, middle);
-    exists|parent: &str| #[trigger] parent@ == spelling && {
-        let key = NameKey { parent: Some(parent), name };
-        match result {
-            Ok(RelativeTarget::Declaration { source, form }) =>
-                has_resolution(table, key, from, Ok(AbsoluteTarget::Declaration { source, form })),
-            Ok(RelativeTarget::Namespace { parent: path, name: observed, introduced_at }) =>
-                path@ == spelling && observed == name
-                    && has_resolution(table, key, from, Ok(AbsoluteTarget::Namespace { key, introduced_at })),
-            Err(RelativeResolutionError::Missing) =>
-                has_resolution(table, key, from, Err(AbsoluteResolutionError::Missing)),
-            Err(RelativeResolutionError::Private(location)) =>
-                has_resolution(table, key, from, Err(AbsoluteResolutionError::Private(location))),
-            _ => false,
-        }
+    exists|parent: &str| #[trigger] parent@ == spelling && tail_result_at(table, parent, name, from, result)
+}
+
+spec fn tail_result_at(
+    table: &ExportTable, parent: &str, name: &str, from: Option<&str>,
+    result: Result<RelativeTarget, RelativeResolutionError>,
+) -> bool {
+    let key = NameKey { parent: Some(parent), name };
+    match result {
+        Ok(RelativeTarget::Declaration { source, form }) =>
+            has_resolution(table, key, from, Ok(AbsoluteTarget::Declaration { source, form })),
+        Ok(RelativeTarget::Namespace { parent: path, name: observed, introduced_at }) =>
+            path@ == parent@ && observed == name
+                && has_resolution(table, key, from, Ok(AbsoluteTarget::Namespace { key, introduced_at })),
+        Err(RelativeResolutionError::Missing) =>
+            has_resolution(table, key, from, Err(AbsoluteResolutionError::Missing)),
+        Err(RelativeResolutionError::Private(location)) =>
+            has_resolution(table, key, from, Err(AbsoluteResolutionError::Private(location))),
+        _ => false,
     }
 }
 
@@ -129,6 +140,81 @@ spec fn path_outcome(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 参照元の名前空間は、解析結果のファイルとブロックから一意に定まる。
+    proof fn relative_scope_agrees(&self, file: usize, block: Option<usize>, left: Option<&str>, right: Option<&str>)
+        requires self.can_resolve(), self.scope_matches(file, block, Ok(left)), self.scope_matches(file, block, Ok(right)),
+        ensures left == right,
+    {
+        if let Some(block) = block {
+            let project = self.targets.project_model();
+            self.targets.parsed_project_model();
+            let parsed = project.circuits_model()[file as int];
+            let names = parsed.names@;
+            let a = choose|i: int| 0 <= i < names.len()
+                && #[trigger] super::is_namespace_block(names[i], block) && names[i].name.word == left->Some_0;
+            let b = choose|i: int| 0 <= i < names.len()
+                && #[trigger] super::is_namespace_block(names[i], block) && names[i].name.word == right->Some_0;
+            parsed_index_evidence(project.sources_model()[file as int], parsed);
+            reveal(named_forms_match);
+            assert(a == b);
+        }
+    }
+
+    /// 相対パスが独立宣言を指すなら、同じスコープとパスで他の結果は成立しない。
+    pub(super) proof fn relative_declaration_resolution_agrees(
+        &self, file: usize, block: Option<usize>, left_path: &str, right_path: &str,
+        source: &ProjectSource, form: &NamedForm, outcome: Result<RelativeTarget, RelativeResolutionError>,
+    )
+        requires
+            self.can_resolve(),
+            left_path@ == right_path@,
+            self.relative_resolution_matches(file, block, left_path,
+                Ok(RelativeTarget::Declaration { source, form })),
+            self.relative_resolution_matches(file, block, right_path, outcome),
+            !matches!(outcome, Err(RelativeResolutionError::Scope(_) | RelativeResolutionError::InvalidPath)),
+        ensures outcome == Ok(RelativeTarget::Declaration { source, form }),
+    {
+        let table = &self.targets.exports_model();
+        let left = Ok(RelativeTarget::Declaration { source, form });
+        let (lh, lm, ln, lf, lb) = choose|head: &str, middle: Option<&str>, name: &str,
+            from: Option<&str>, binding: Option<UnqualifiedTarget>|
+            #![trigger relative_path_parts(left_path, head, middle, name), self.unqualified_binding_matches(file, block, head, from, binding)]
+            relative_path_parts(left_path, head, middle, name) && self.scope_matches(file, block, Ok(from))
+                && self.unqualified_binding_matches(file, block, head, from, binding)
+                && path_outcome(table, from, binding, middle, name, left);
+        let (rh, rm, rn, rf, rb) = choose|head: &str, middle: Option<&str>, name: &str,
+            from: Option<&str>, binding: Option<UnqualifiedTarget>|
+            #![trigger relative_path_parts(right_path, head, middle, name), self.unqualified_binding_matches(file, block, head, from, binding)]
+            relative_path_parts(right_path, head, middle, name) && self.scope_matches(file, block, Ok(from))
+                && self.unqualified_binding_matches(file, block, head, from, binding)
+                && path_outcome(table, from, binding, middle, name, outcome);
+        relative_path_parts_agree(left_path, lh, lm, ln, right_path, rh, rm, rn);
+        self.relative_scope_agrees(file, block, lf, rf);
+        let la = unqualified_target(lb->Some_0);
+        if rb.is_none() {
+            self.unqualified_target_excludes_missing(file, block, lf, lh, rh, lb->Some_0);
+        }
+        let ra = unqualified_target(rb->Some_0);
+        self.unqualified_targets_agree(file, block, lf, lh, rh, lb->Some_0, rb->Some_0);
+        let lk = la->Namespace_key;
+        let rk = ra->Namespace_key;
+        assert(parent_spelling(lk, lm) == parent_spelling(rk, rm));
+        let lp = choose|parent: &str| #[trigger] parent@ == parent_spelling(lk, lm)
+            && tail_result_at(table, parent, ln, lf, left);
+        let rp = choose|parent: &str| #[trigger] parent@ == parent_spelling(rk, rm)
+            && tail_result_at(table, parent, rn, rf, outcome);
+        let left_key = NameKey { parent: Some(lp), name: ln };
+        let right_key = NameKey { parent: Some(rp), name: rn };
+        let resolved = match outcome {
+            Ok(RelativeTarget::Declaration { source, form }) => Ok(AbsoluteTarget::Declaration { source, form }),
+            Ok(RelativeTarget::Namespace { introduced_at, .. }) => Ok(AbsoluteTarget::Namespace { key: right_key, introduced_at }),
+            Err(RelativeResolutionError::Missing) => Err(AbsoluteResolutionError::Missing),
+            Err(RelativeResolutionError::Private(at)) => Err(AbsoluteResolutionError::Private(at)),
+            _ => { assert(false); arbitrary() },
+        };
+        self.declaration_resolution_excludes_other_outcomes(left_key, right_key, lf, source, form, resolved);
+    }
+
     pub(super) proof fn relative_declaration_evidence(
         &self, file: usize, block: Option<usize>, path: &str, source: &ProjectSource, form: &NamedForm,
     )

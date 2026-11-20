@@ -98,7 +98,7 @@ pub use ports::{
     routine_signature_error_evidence, routine_signature_matches,
 };
 #[cfg(verus_only)]
-pub use ports::{port_site_evidence, routine_ports_availability, routine_ports_match};
+pub use ports::{port_site_evidence, routine_ports_agree, routine_ports_availability, routine_ports_match};
 use structure::validate_structure_arguments;
 #[cfg(verus_only)]
 pub use structure::{

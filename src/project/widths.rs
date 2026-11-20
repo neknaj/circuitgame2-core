@@ -8,7 +8,7 @@ use crate::syntax::circuit::{CircuitForms, PortSite, PortTypeSite, RoutinePorts,
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     RoutineArity, port_site_evidence, routine_arity_matches, routine_arity_port_counts,
-    routine_ports_availability, routine_ports_match,
+    routine_ports_agree, routine_ports_availability, routine_ports_match,
 };
 #[cfg(verus_only)]
 use crate::syntax::{
@@ -174,6 +174,102 @@ pub closed spec fn routine_port_widths_evidence(
         }
     } else {
         result == Ok(None)
+    }
+}
+
+proof fn checked_ports_agree(
+    source: &str, syntax: &CircuitForms, ports: Seq<PortSite>, max_width: u64,
+    left: Seq<CheckedPort>, right: Seq<CheckedPort>,
+)
+    requires
+        left.len() == right.len(),
+        checked_before(source, syntax, ports, left, max_width),
+        checked_before(source, syntax, ports, right, max_width),
+    ensures left == right,
+{
+    assert forall|i: int| 0 <= i < left.len() implies (#[trigger] left[i]) == (#[trigger] right[i]) by {
+        assert(port_matches(source, syntax, ports[i], max_width, left[i]));
+        assert(port_matches(source, syntax, ports[i], max_width, right[i]));
+    };
+    assert(left =~= right);
+}
+
+/// 同じ宣言と幅上限で検査したポートは、元の添字と幅または型参照が一致する。
+pub(super) proof fn routine_port_widths_agree(
+    project: &CircuitProject, file: int, entry: int, max_width: u64,
+    left: RoutinePortWidths, right: RoutinePortWidths,
+)
+    requires
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(left))),
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(right))),
+    ensures left.inputs@ == right.inputs@, left.outputs@ == right.outputs@,
+{
+    let source = &project.sources_model()[file];
+    let syntax = &project.circuits_model()[file].syntax;
+    let a = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
+        && left.inputs@.len() == ports.inputs@.len() && left.outputs@.len() == ports.outputs@.len()
+        && checked_before(source.text, syntax, ports.inputs@, left.inputs@, max_width)
+        && checked_before(source.text, syntax, ports.outputs@, left.outputs@, max_width);
+    let b = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
+        && right.inputs@.len() == ports.inputs@.len() && right.outputs@.len() == ports.outputs@.len()
+        && checked_before(source.text, syntax, ports.inputs@, right.inputs@, max_width)
+        && checked_before(source.text, syntax, ports.outputs@, right.outputs@, max_width);
+    routine_ports_agree(source.text, syntax, entry, a, b);
+    checked_ports_agree(source.text, syntax, a.inputs@, max_width, left.inputs@, right.inputs@);
+    checked_ports_agree(source.text, syntax, a.outputs@, max_width, left.outputs@, right.outputs@);
+}
+
+proof fn checked_ports_exclude_width_error(
+    source: &ProjectSource, syntax: &CircuitForms, ports: Seq<PortSite>, max_width: u64,
+    checked: Seq<CheckedPort>, error: PortWidthError,
+)
+    requires
+        checked.len() == ports.len(),
+        checked_before(source.text, syntax, ports, checked, max_width),
+    ensures !error_in_ports(source, syntax, ports, max_width, error),
+{
+    if error_in_ports(source, syntax, ports, max_width, error) {
+        let index = choose|i: int| 0 <= i < ports.len()
+            && #[trigger] that_width_failed(source, syntax, ports[i], max_width, error)
+            && forall|prior: int| 0 <= prior < i ==> port_ok(source.text, syntax, #[trigger] ports[prior], max_width);
+        assert(port_matches(source.text, syntax, ports[index], max_width, checked[index]));
+        assert(port_ok(source.text, syntax, ports[index], max_width));
+        assert(false);
+    }
+}
+
+/// 同じ宣言と幅上限で幅検査に成功したとき、対象外や幅の診断の根拠は成立しない。
+pub(super) proof fn routine_widths_success_excludes_other(
+    project: &CircuitProject, file: int, entry: int, max_width: u64,
+    success: RoutinePortWidths, other: Result<Option<RoutinePortWidths>, PortWidthError>,
+)
+    requires
+        routine_port_widths_evidence(project, file, entry, max_width, Ok(Some(success))),
+        routine_port_widths_evidence(project, file, entry, max_width, other),
+    ensures other is Ok && other->Ok_0 is Some,
+{
+    let source = &project.sources_model()[file];
+    let syntax = &project.circuits_model()[file].syntax;
+    let ports = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
+        && success.inputs@.len() == ports.inputs@.len() && success.outputs@.len() == ports.outputs@.len()
+        && checked_before(source.text, syntax, ports.inputs@, success.inputs@, max_width)
+        && checked_before(source.text, syntax, ports.outputs@, success.outputs@, max_width);
+    match other {
+        Ok(Some(_)) => {},
+        Ok(None) => {
+            routine_ports_availability(source.text, syntax, entry, Some(ports));
+            routine_ports_availability(source.text, syntax, entry, None);
+        },
+        Err(error) => {
+            let failing = choose|failing: RoutinePorts|
+                #[trigger] routine_ports_match(source.text, syntax, entry, Some(failing))
+                && (error_in_ports(source, syntax, failing.inputs@, max_width, error)
+                    || (all_ports_ok(source.text, syntax, failing.inputs@, max_width)
+                        && error_in_ports(source, syntax, failing.outputs@, max_width, error)));
+            routine_ports_agree(source.text, syntax, entry, ports, failing);
+            checked_ports_exclude_width_error(source, syntax, ports.inputs@, max_width, success.inputs@, error);
+            checked_ports_exclude_width_error(source, syntax, ports.outputs@, max_width, success.outputs@, error);
+        },
     }
 }
 

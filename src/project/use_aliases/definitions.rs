@@ -4,17 +4,21 @@ use super::{RelativeResolutionError, RelativeTarget, UnqualifiedTarget, UseAlias
 #[cfg(verus_only)]
 use crate::project::absolute_resolution_evidence;
 #[cfg(verus_only)]
-use crate::project::declarations::{declaration_key_evidence, form_key};
+use crate::project::declarations::{declaration_key_evidence, declaration_sites_agree, form_key, same_declaration_key};
 #[cfg(verus_only)]
 use crate::project::resolution::absolute_declaration_evidence;
 #[cfg(verus_only)]
-use crate::project::NameKey;
+use crate::project::name_keys::key_view;
+#[cfg(verus_only)]
+use crate::project::resolution::{declaration_exists, direct_targets_agree, has_resolution};
+#[cfg(verus_only)]
+use crate::project::{NameKey, same_target};
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
 use crate::project::circuits::read_indexed_atom;
 use crate::project::{AbsoluteResolutionError, AbsoluteTarget, LocatedName, ProjectSource};
 #[cfg(verus_only)]
-use crate::syntax::bare_atom_kind;
+use crate::syntax::{absolute_path_parts, absolute_path_parts_agree, bare_atom_kind};
 use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite, NamedForm};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
@@ -268,7 +272,129 @@ spec fn absolute_outcome(
     }
 }
 
+pub(super) open spec fn unqualified_target<'p, 'a, 'q>(target: UnqualifiedTarget<'_, 'p, 'a, 'q>) -> AbsoluteTarget<'p, 'a, 'q> {
+    match target {
+        UnqualifiedTarget::Alias(directive) => directive.target,
+        UnqualifiedTarget::Direct(target) => target,
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 同じスコープで同じ名前を引くと、同じ宣言または名前空間を参照する。
+    pub(super) proof fn unqualified_targets_agree(
+        &self, file: usize, block: Option<usize>, from: Option<&str>, left_name: &str, right_name: &str,
+        left: UnqualifiedTarget, right: UnqualifiedTarget,
+    )
+        requires
+            left_name@ == right_name@,
+            self.unqualified_binding_matches(file, block, left_name, from, Some(left)),
+            self.unqualified_binding_matches(file, block, right_name, from, Some(right)),
+        ensures same_target(unqualified_target(left), unqualified_target(right)),
+    {
+        let items = self.directives_model();
+        match (left, right) {
+            (UnqualifiedTarget::Alias(a), UnqualifiedTarget::Alias(b)) => {
+                let i = choose|i: int| 0 <= i < items.len()
+                    && #[trigger] super::alias_in_scope(items[i], file, block, left_name)
+                    && items[i] == *a
+                    && (forall|j: int| 0 <= j < i ==> !super::alias_in_scope(#[trigger] items[j], file, block, left_name));
+                let j = choose|j: int| 0 <= j < items.len()
+                    && #[trigger] super::alias_in_scope(items[j], file, block, right_name)
+                    && items[j] == *b
+                    && (forall|i: int| 0 <= i < j ==> !super::alias_in_scope(#[trigger] items[i], file, block, right_name));
+                if i < j {
+                    assert(!super::alias_in_scope(items[i], file, block, right_name));
+                } else if j < i {
+                    assert(!super::alias_in_scope(items[j], file, block, left_name));
+                }
+            },
+            (UnqualifiedTarget::Direct(a), UnqualifiedTarget::Direct(b)) => {
+                let table = &self.targets.exports_model().declarations_model();
+                let key = NameKey { parent: from, name: left_name };
+                let other = NameKey { parent: from, name: right_name };
+                match b {
+                    AbsoluteTarget::Declaration { source, form } => {
+                        same_declaration_key(table, other, key, source, form);
+                        direct_targets_agree(table, key, Some(a), Some(b));
+                    },
+                    AbsoluteTarget::Namespace { key: b, .. } => {
+                        match a {
+                            AbsoluteTarget::Namespace { key: a, .. } => { assert(key_view(a) == key_view(b)); },
+                            AbsoluteTarget::Declaration { source, form } => {
+                                same_declaration_key(table, key, other, source, form);
+                                assert(declaration_exists(table, other));
+                            },
+                        }
+                    },
+                }
+            },
+            (UnqualifiedTarget::Alias(a), UnqualifiedTarget::Direct(_)) => {
+                let i = choose|i: int| 0 <= i < items.len()
+                    && #[trigger] super::alias_in_scope(items[i], file, block, left_name) && items[i] == *a;
+                assert(!super::alias_in_scope(items[i], file, block, right_name));
+            },
+            (UnqualifiedTarget::Direct(_), UnqualifiedTarget::Alias(b)) => {
+                let i = choose|i: int| 0 <= i < items.len()
+                    && #[trigger] super::alias_in_scope(items[i], file, block, right_name) && items[i] == *b;
+                assert(!super::alias_in_scope(items[i], file, block, left_name));
+            },
+        }
+    }
+
+    /// 同じスコープと名前で、束縛がある場合とない場合は両立しない。
+    pub(super) proof fn unqualified_target_excludes_missing(
+        &self, file: usize, block: Option<usize>, from: Option<&str>, bound: &str, missing: &str,
+        found: UnqualifiedTarget,
+    )
+        requires
+            bound@ == missing@,
+            self.unqualified_binding_matches(file, block, bound, from, Some(found)),
+            self.unqualified_binding_matches(file, block, missing, from, None),
+        ensures false,
+    {
+        let table = &self.targets.exports_model().declarations_model();
+        let left = NameKey { parent: from, name: bound };
+        let right = NameKey { parent: from, name: missing };
+        match found {
+            UnqualifiedTarget::Alias(item) => {
+                let items = self.directives_model();
+                let i = choose|i: int| 0 <= i < items.len()
+                    && #[trigger] super::alias_in_scope(items[i], file, block, bound) && items[i] == *item;
+                assert(!super::alias_in_scope(items[i], file, block, missing));
+            },
+            UnqualifiedTarget::Direct(AbsoluteTarget::Declaration { source, form }) => {
+                same_declaration_key(table, left, right, source, form);
+                assert(declaration_exists(table, right));
+            },
+            UnqualifiedTarget::Direct(AbsoluteTarget::Namespace { introduced_at, .. }) => {
+                table.same_namespace_key(left, right, introduced_at);
+            },
+        }
+    }
+
+    /// 同じ参照元と完全修飾キーで独立宣言を参照できるなら、その宣言以外の解決結果は成立しない。
+    pub(super) proof fn declaration_resolution_excludes_other_outcomes(
+        &self, left: NameKey, right: NameKey, from: Option<&str>, source: &ProjectSource, form: &NamedForm,
+        outcome: Result<AbsoluteTarget, AbsoluteResolutionError>,
+    )
+        requires
+            self.can_resolve(),
+            key_view(left) == key_view(right),
+            has_resolution(&self.targets.exports_model(), left, from, Ok(AbsoluteTarget::Declaration { source, form })),
+            has_resolution(&self.targets.exports_model(), right, from, outcome),
+        ensures outcome == Ok(AbsoluteTarget::Declaration { source, form }),
+    {
+        let exports = &self.targets.exports_model();
+        let table = &exports.declarations_model();
+        exports.same_publication_key(left, right);
+        same_declaration_key(table, left, right, source, form);
+        assert(declaration_exists(table, right));
+        if let Ok(AbsoluteTarget::Declaration { source: other_source, form: other_form }) = outcome {
+            self.targets.declarations_cover_project();
+            declaration_sites_agree(&self.targets.project_model(), table, right, source, form, other_source, other_form);
+        }
+    }
+
     pub(super) proof fn struct_binding_is_struct(
         &self, file: usize, request: ReferenceRequest, from: Option<&str>, kind: AtomKind,
         binding: DefinitionBinding,
@@ -459,6 +585,135 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 absolute_declaration_evidence(table, request.word, from, source, form);
             },
             _ => { assert(false); },
+        }
+    }
+
+    /// 同じ構造体型の参照について、宣言元のソースと構文項目は一意に定まる。
+    pub(super) proof fn struct_bindings_agree(
+        &self, file: usize, left_request: ReferenceRequest, right_request: ReferenceRequest,
+        left_from: Option<&str>, right_from: Option<&str>, kind: AtomKind,
+        left_source: &ProjectSource, left_form: &NamedForm, right_source: &ProjectSource, right_form: &NamedForm,
+    )
+        requires
+            self.can_resolve(),
+            left_request.role is StructType, right_request.role is StructType,
+            left_request.block == right_request.block, left_request.word@ == right_request.word@,
+            left_from == right_from,
+            self.binding_evidence(file, left_request, left_from, kind,
+                Ok(DefinitionBinding::Declaration { source: left_source, form: left_form })),
+            self.binding_evidence(file, right_request, right_from, kind,
+                Ok(DefinitionBinding::Declaration { source: right_source, form: right_form })),
+        ensures left_source == right_source, left_form == right_form,
+    {
+        let left = Ok(DefinitionBinding::Declaration { source: left_source, form: left_form });
+        let right = Ok(DefinitionBinding::Declaration { source: right_source, form: right_form });
+        let table = &self.targets.exports_model().declarations_model();
+        let left_key = form_key(*left_form);
+        let right_key = form_key(*right_form);
+        match kind {
+            AtomKind::Name => {
+                let a = choose|found: Option<UnqualifiedTarget>|
+                    #[trigger] self.unqualified_binding_matches(file, left_request.block, left_request.word, left_from, found)
+                        && left == unqualified_binding(left_request, found);
+                let b = choose|found: Option<UnqualifiedTarget>|
+                    #[trigger] self.unqualified_binding_matches(file, right_request.block, right_request.word, right_from, found)
+                        && right == unqualified_binding(right_request, found);
+                self.unqualified_targets_agree(file, left_request.block, left_from,
+                    left_request.word, right_request.word, a->Some_0, b->Some_0);
+            },
+            AtomKind::RelativePath => self.relative_declaration_resolution_agrees(
+                file, left_request.block, left_request.word, right_request.word, left_source, left_form,
+                Ok(RelativeTarget::Declaration { source: right_source, form: right_form })),
+            AtomKind::AbsolutePath => {
+                let exports = &self.targets.exports_model();
+                let a = Ok(AbsoluteTarget::Declaration { source: left_source, form: left_form });
+                let b = Ok(AbsoluteTarget::Declaration { source: right_source, form: right_form });
+                let ak = choose|key: NameKey| #[trigger] absolute_path_parts(left_request.word, key.parent, key.name)
+                    && has_resolution(exports, key, left_from, a);
+                let bk = choose|key: NameKey| #[trigger] absolute_path_parts(right_request.word, key.parent, key.name)
+                    && has_resolution(exports, key, right_from, b);
+                absolute_path_parts_agree(left_request.word, ak.parent, ak.name, right_request.word, bk.parent, bk.name);
+                declaration_key_evidence(table, ak, left_source, left_form);
+                declaration_key_evidence(table, bk, right_source, right_form);
+            },
+            _ => { assert(false); },
+        }
+        assert(key_view(left_key) == key_view(right_key));
+        self.binding_declaration_origin(file, left_request, left_from, kind, left_source, left_form);
+        self.binding_declaration_origin(file, right_request, right_from, kind, right_source, right_form);
+        same_declaration_key(table, right_key, left_key, right_source, right_form);
+        self.targets.declarations_cover_project();
+        declaration_sites_agree(&self.targets.project_model(), table, left_key, left_source, left_form, right_source, right_form);
+    }
+
+    /// 同じスコープと構造体型名で、宣言への解決成功と失敗は両立しない。
+    pub(super) proof fn struct_binding_excludes_error(
+        &self, file: usize, success: ReferenceRequest, failure: ReferenceRequest,
+        success_from: Option<&str>, failure_from: Option<&str>, kind: AtomKind,
+        source: &ProjectSource, form: &NamedForm, reason: DefinitionReferenceReason,
+    )
+        requires
+            self.can_resolve(),
+            success.role is StructType, failure.role is StructType,
+            success.block == failure.block, success.word@ == failure.word@,
+            success_from == failure_from,
+            self.binding_evidence(file, success, success_from, kind, Ok(DefinitionBinding::Declaration { source, form })),
+            self.binding_evidence(file, failure, failure_from, kind, Err(reason)),
+        ensures false,
+    {
+        let binding = DefinitionBinding::Declaration { source, form };
+        self.struct_binding_is_struct(file, success, success_from, kind, binding);
+        let exports = &self.targets.exports_model();
+        let table = &exports.declarations_model();
+        match kind {
+            AtomKind::Name => {
+                let good = choose|found: Option<UnqualifiedTarget>|
+                    #[trigger] self.unqualified_binding_matches(file, success.block, success.word, success_from, found)
+                        && Ok(binding) == unqualified_binding(success, found);
+                let bad = choose|found: Option<UnqualifiedTarget>|
+                    #[trigger] self.unqualified_binding_matches(file, failure.block, failure.word, failure_from, found)
+                        && Err(reason) == unqualified_binding(failure, found);
+                let a = good->Some_0;
+                if let Some(b) = bad {
+                    self.unqualified_targets_agree(file, success.block, success_from, success.word, failure.word, a, b);
+                    let target = unqualified_target(b);
+                    let other_source = target->Declaration_source;
+                    let other_form = target->Declaration_form;
+                    let left_key = form_key(*form);
+                    let right_key = form_key(*other_form);
+                    self.binding_declaration_origin(file, success, success_from, kind, source, form);
+                    match b {
+                        UnqualifiedTarget::Alias(item) => absolute_declaration_evidence(exports,
+                            item.site.reference.word, item.site.namespace, other_source, other_form),
+                        UnqualifiedTarget::Direct(_) => declaration_key_evidence(table,
+                            NameKey { parent: failure_from, name: failure.word }, other_source, other_form),
+                    }
+                    same_declaration_key(table, right_key, left_key, other_source, other_form);
+                    self.targets.declarations_cover_project();
+                    declaration_sites_agree(&self.targets.project_model(), table,
+                        left_key, source, form, other_source, other_form);
+                } else {
+                    self.unqualified_target_excludes_missing(file, success.block, success_from, success.word, failure.word, a);
+                }
+            },
+            AtomKind::RelativePath => {
+                let bad = choose|found: Result<RelativeTarget, RelativeResolutionError>|
+                    #[trigger] self.relative_resolution_matches(file, failure.block, failure.word, found)
+                        && relative_binding(failure, found, Err(reason));
+                self.relative_declaration_resolution_agrees(file, success.block, success.word, failure.word, source, form, bad);
+            },
+            AtomKind::AbsolutePath => {
+                let bad = choose|found: Result<AbsoluteTarget, AbsoluteResolutionError>|
+                    #[trigger] absolute_resolution_evidence(exports, failure.word, failure_from, found)
+                        && absolute_outcome(failure, found, Err(reason));
+                let a = choose|key: NameKey| #[trigger] absolute_path_parts(success.word, key.parent, key.name)
+                    && has_resolution(exports, key, success_from, Ok(AbsoluteTarget::Declaration { source, form }));
+                let b = choose|key: NameKey| #[trigger] absolute_path_parts(failure.word, key.parent, key.name)
+                    && has_resolution(exports, key, failure_from, bad);
+                absolute_path_parts_agree(success.word, a.parent, a.name, failure.word, b.parent, b.name);
+                self.declaration_resolution_excludes_other_outcomes(a, b, success_from, source, form, bad);
+            },
+            _ => {},
         }
     }
 

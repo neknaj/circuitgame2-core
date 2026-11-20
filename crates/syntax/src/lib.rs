@@ -58,7 +58,7 @@ use crate::boundary::{Boundary, after_ascii, split_at_boundary, split_first_scal
 use alloc::vec::Vec;
 use atom::classify;
 #[cfg(verus_only)]
-pub use atom::{absolute_path_parts, bare_atom_kind, relative_path_parts};
+pub use atom::{absolute_path_parts, absolute_path_parts_agree, bare_atom_kind, relative_path_parts, relative_path_parts_agree};
 pub use atom::{split_absolute_path, split_relative_path};
 use core::ops::Range;
 use vstd::prelude::*;

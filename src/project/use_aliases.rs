@@ -12,6 +12,7 @@ mod function_wiring;
 mod local_signal_index;
 mod port_types;
 mod relative;
+mod signature_cache;
 pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,

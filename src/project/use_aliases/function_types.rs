@@ -7,6 +7,7 @@ use super::{
 #[cfg(verus_only)]
 use super::{FuncWiring, function_atoms::atoms_match};
 use alloc::vec::Vec;
+use super::signature_cache::SignatureCache;
 use vstd::prelude::*;
 
 verus! {
@@ -88,6 +89,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 右辺全体が通常呼び出しなら、出力型を左辺の名前へ順に割り当てる。
     /// 裸の信号名は入力または先行定義の型を引き継ぐ。呼び出しの直接の引数が定数か、
     /// 型の判明した裸の信号名なら、対応する入力型と照合する。
+    /// 参照先の署名が得られたら、その署名をこの検査の入出力の照合で再利用する。
     /// ほかの複合式の結果型は保留する。展開待ちは呼び出し位置を保ったまま返す。
     ///
     /// # Errors
@@ -110,7 +112,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         proof { self.literals_preserve_arity(file, entry, max_width, literals); }
         let ghost prepared = literals;
         let FuncLiteralWidths { wiring: prepared_wiring, widths: literal_widths } = literals;
-        let outputs = match self.check_call_outputs_with_arity(file, entry, max_width, prepared_wiring) {
+        let mut signatures = SignatureCache::new();
+        let outputs = match self.check_call_outputs_with_arity(file, entry, max_width, prepared_wiring, &mut signatures) {
             Ok(outputs) => outputs,
             Err(error) => {
                 assert(self.func_signal_types_evidence(file, entry, max_width, Err(FuncSignalTypeError::CallOutput(error)))) by {
@@ -145,7 +148,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         assert(self.propagated_types_match(file, entry, scope, literals, roots, Ok(types)));
         let type_slice = types.as_slice();
-        let checked = self.check_all_inputs_with_types(file, entry, max_width, type_slice, scope);
+        let checked = self.check_all_inputs_with_types(file, entry, max_width, type_slice, scope, &mut signatures);
         match checked {
             Ok(()) => {
                 proof {

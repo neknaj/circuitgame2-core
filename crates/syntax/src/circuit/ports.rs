@@ -683,6 +683,69 @@ pub closed spec fn routine_ports_match(
     }
 }
 
+proof fn port_sites_agree_through(
+    source: &str, forms: Seq<Form>, first: int, stop: int, left: Seq<PortSite>, right: Seq<PortSite>, count: int,
+)
+    requires
+        port_sites_before(source, forms, first, stop, stop, left),
+        port_sites_before(source, forms, first, stop, stop, right),
+        0 <= count <= left.len(),
+        count <= right.len(),
+    ensures forall|i: int| 0 <= i < count ==> (#[trigger] left[i]) == (#[trigger] right[i]),
+    decreases count,
+{
+    if count > 0 {
+        let i = count - 1;
+        port_sites_agree_through(source, forms, first, stop, left, right, i);
+        let a = left[i];
+        let b = right[i];
+        assert(direct_form_in_range(forms, first, stop, a.form as int));
+        assert(direct_form_in_range(forms, first, stop, b.form as int));
+        let j = choose|j: int| 0 <= j < right.len() && (#[trigger] right[j]).form == a.form;
+        let k = choose|k: int| 0 <= k < left.len() && (#[trigger] left[k]).form == b.form;
+        // 位置順が同じ先行部分に、現在のポートの位置は現れない。
+        assert(i <= j) by {
+            if j < i {
+                assert(left[j] == right[j]);
+                assert(left[j].form < a.form);
+            }
+        };
+        assert(i <= k) by {
+            if k < i {
+                assert(left[k] == right[k]);
+                assert(right[k].form < b.form);
+            }
+        };
+        if j > i {
+            assert(b.form < a.form);
+            assert(k > i);
+            assert(a.form < b.form);
+        }
+        assert(a.form == b.form);
+        assert(port_site_matches(source, forms, a) && port_site_matches(source, forms, b));
+        assert(a == b);
+    }
+}
+
+/// 同じ構文木の署名から得たポートは、順序、構文木の添字、型指定が一致する。
+pub proof fn routine_ports_agree(
+    source: &str, syntax: &CircuitForms, entry: int, left: RoutinePorts, right: RoutinePorts,
+)
+    requires
+        routine_ports_match(source, syntax, entry, Some(left)),
+        routine_ports_match(source, syntax, entry, Some(right)),
+    ensures left.inputs@ == right.inputs@, left.outputs@ == right.outputs@,
+{
+    let forms = syntax.forms@;
+    let first = syntax.entries@[entry].form + 3;
+    let out = forms[first]->List_end as int;
+    let end = forms[out]->List_end as int;
+    port_sites_agree_through(source, forms, first + 2, out, left.inputs@, right.inputs@, left.inputs@.len() as int);
+    port_sites_agree_through(source, forms, out + 2, end, left.outputs@, right.outputs@, left.outputs@.len() as int);
+    assert(left.inputs@ =~= right.inputs@);
+    assert(left.outputs@ =~= right.outputs@);
+}
+
 pub(super) proof fn routine_port_list_counts(
     source: &str, syntax: &CircuitForms, entry: int, ports: RoutinePorts, layout: RoutineLayout,
 )

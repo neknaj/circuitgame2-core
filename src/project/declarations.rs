@@ -332,6 +332,15 @@ pub(super) proof fn declaration_key_evidence(
 {
 }
 
+/// 内容が同じキーは、同じ独立宣言の位置に対応する。
+pub(super) proof fn same_declaration_key(
+    table: &DeclarationTable, left: NameKey, right: NameKey, source: &ProjectSource, form: &NamedForm,
+)
+    requires key_view(left) == key_view(right), table.declaration_at(left, source, form),
+    ensures table.declaration_at(right, source, form),
+{
+}
+
 /// 衝突のない宣言表で、同じキーを持つ独立宣言のソースと構文項目が一致する。
 pub(super) proof fn declaration_sites_agree(
     project: &CircuitProject, table: &DeclarationTable, key: NameKey,
@@ -655,6 +664,23 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
                 &&& *item.source == *location.source
                 &&& portion_matches(*item.form, key, location.span)
             }
+    }
+
+    /// 内容が同じキーは、同じ名前空間の導入箇所に対応する。
+    pub(super) proof fn same_namespace_key(&self, left: NameKey, right: NameKey, location: LocatedName)
+        requires key_view(left) == key_view(right), self.namespace_at(left, location),
+        ensures self.namespace_at(right, location),
+    {
+        let item = choose|i: int| 0 <= i < self.occurrences@.len() && {
+            let item = #[trigger] self.occurrences@[i];
+            &&& item.form.head is Namespace
+            &&& *item.source == *location.source
+            &&& portion_matches(*item.form, left, location.span)
+        };
+        let form = *self.occurrences@[item].form;
+        let (lo, hi) = choose|lo: int, hi: int| #[trigger] namespace_component(form.name.word, left, lo, hi)
+            && location.span.start == form.name.span.start + lo && location.span.end == form.name.span.start + hi;
+        super::name_keys::namespace_components_agree(form.name.word, left, right, lo, hi);
     }
 
     /// 範囲が指定された名前空間の最初の導入箇所を指すことを表す。

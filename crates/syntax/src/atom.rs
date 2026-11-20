@@ -7,7 +7,7 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
-use vstd::utf8::{encode_utf8_valid_utf8, is_char_boundary_iff_not_is_continuation_byte};
+use vstd::utf8::{encode_utf8_decode_utf8, encode_utf8_valid_utf8, is_char_boundary_iff_not_is_continuation_byte};
 
 verus! {
 
@@ -273,6 +273,96 @@ pub closed spec fn relative_path_parts(path: &str, head: &str, middle: Option<&s
     &&& head.spec_bytes() == bytes.take(at)
     &&& colon_pair(bytes, at)
     &&& body_path_parts(bytes.skip(at + 2), middle, name)
+}
+
+proof fn component_has_no_colon(bytes: Seq<u8>, at: int)
+    requires name_component(bytes), 0 <= at < bytes.len(),
+    ensures bytes[at] != b':',
+{
+}
+
+proof fn body_path_parts_agree(
+    bytes: Seq<u8>, left_parent: Option<&str>, left: &str, right_parent: Option<&str>, right: &str,
+)
+    requires body_path_parts(bytes, left_parent, left), body_path_parts(bytes, right_parent, right),
+    ensures left@ == right@,
+        match (left_parent, right_parent) {
+            (Some(a), Some(b)) => a@ == b@,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    match (left_parent, right_parent) {
+        (Some(a), Some(b)) => {
+            let i = a.spec_bytes().len() as int;
+            let j = b.spec_bytes().len() as int;
+            // 短い親パスを選ぶと、末尾の名前に後続の区切り記号が残る。
+            if i < j {
+                component_has_no_colon(left.spec_bytes(), j - i - 1);
+                assert(left.spec_bytes()[j - i - 1] == bytes[j + 1]);
+            } else if j < i {
+                component_has_no_colon(right.spec_bytes(), i - j - 1);
+                assert(right.spec_bytes()[i - j - 1] == bytes[i + 1]);
+            }
+            encode_utf8_decode_utf8(a@);
+            encode_utf8_decode_utf8(b@);
+        },
+        (Some(a), None) => component_has_no_colon(right.spec_bytes(), a.spec_bytes().len() as int),
+        (None, Some(b)) => component_has_no_colon(left.spec_bytes(), b.spec_bytes().len() as int),
+        (None, None) => {},
+    }
+    encode_utf8_decode_utf8(left@);
+    encode_utf8_decode_utf8(right@);
+}
+
+/// 同じ完全修飾名から切り出した親パスと末尾の名前は、文字列の内容が一致する。
+pub proof fn absolute_path_parts_agree(
+    left_path: &str, left_parent: Option<&str>, left: &str,
+    right_path: &str, right_parent: Option<&str>, right: &str,
+)
+    requires
+        left_path@ == right_path@,
+        absolute_path_parts(left_path, left_parent, left),
+        absolute_path_parts(right_path, right_parent, right),
+    ensures left@ == right@,
+        match (left_parent, right_parent) {
+            (Some(a), Some(b)) => a@ == b@,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    body_path_parts_agree(left_path.spec_bytes().skip(2), left_parent, left, right_parent, right);
+}
+
+/// 同じ相対パスを分解した先頭の名前、中間のパス、末尾の名前は内容が一致する。
+pub proof fn relative_path_parts_agree(
+    left_path: &str, left_head: &str, left_middle: Option<&str>, left: &str,
+    right_path: &str, right_head: &str, right_middle: Option<&str>, right: &str,
+)
+    requires
+        left_path@ == right_path@,
+        relative_path_parts(left_path, left_head, left_middle, left),
+        relative_path_parts(right_path, right_head, right_middle, right),
+    ensures left_head@ == right_head@, left@ == right@,
+        match (left_middle, right_middle) {
+            (Some(a), Some(b)) => a@ == b@,
+            (None, None) => true,
+            _ => false,
+        },
+{
+    let i = left_head.spec_bytes().len() as int;
+    let j = right_head.spec_bytes().len() as int;
+    let bytes = left_path.spec_bytes();
+    if i < j {
+        component_has_no_colon(right_head.spec_bytes(), i);
+        assert(right_head.spec_bytes()[i] == bytes[i]);
+    } else if j < i {
+        component_has_no_colon(left_head.spec_bytes(), j);
+        assert(left_head.spec_bytes()[j] == bytes[j]);
+    }
+    encode_utf8_decode_utf8(left_head@);
+    encode_utf8_decode_utf8(right_head@);
+    body_path_parts_agree(bytes.skip(i + 2), left_middle, left, right_middle, right);
 }
 
 spec fn last_colon_at(bytes: Seq<u8>, at: int) -> bool {

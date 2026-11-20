@@ -8,7 +8,7 @@ use super::declarations::{
     declaration_key_equivalence, declaration_lookup_agrees, located_name_evidence,
 };
 #[cfg(verus_only)]
-use super::name_keys::{key_bytes, key_views_agree};
+use super::name_keys::{key_bytes, key_view, key_views_agree};
 use super::{
     CircuitProject, DeclarationTable, LocatedName, NameConflict, NameKey, ProjectSource,
     index_declarations,
@@ -401,6 +401,14 @@ impl<'p, 'a> ExportTable<'p, 'a> {
     /// 完全修飾名で指定した独立宣言が公開されていることを表す。
     pub closed spec fn publishes(&self, key: NameKey) -> bool {
         published(self.names@, key)
+    }
+
+    /// 内容が同じ完全修飾キーでは、公開指定の有無が一致する。
+    pub(super) proof fn same_publication_key(&self, left: NameKey, right: NameKey)
+        requires key_view(left) == key_view(right),
+        ensures self.publishes(left) == self.publishes(right),
+    {
+        key_views_agree(left, right);
     }
 
     /// 完全修飾名で指定した独立宣言が公開されているかを返す。

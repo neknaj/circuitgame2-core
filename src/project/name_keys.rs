@@ -111,6 +111,14 @@ pub closed spec fn namespace_component(path: &str, key: NameKey, start: int, end
     &&& (end == bytes.len() || bytes_at(bytes, end, separator))
 }
 
+/// 内容が同じキーは、同じパス内の成分範囲に対応する。
+pub(super) proof fn namespace_components_agree(path: &str, left: NameKey, right: NameKey, start: int, end: int)
+    requires key_view(left) == key_view(right), namespace_component(path, left, start, end),
+    ensures namespace_component(path, right, start, end),
+{
+    key_views_agree(left, right);
+}
+
 /// 同じキーに対応する名前空間成分の開始位置と終了位置が一致する。
 pub(super) proof fn namespace_component_bounds_agree(
     path: &str, key: NameKey, left_start: int, left_end: int, right_start: int, right_end: int,

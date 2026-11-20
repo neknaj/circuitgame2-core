@@ -1,8 +1,12 @@
 //! 通常呼び出しが返す型を、定義の左辺の名前順に対応付ける。
 
-use super::{FuncArityError, FuncCallSignatureError, TypedFuncCall, UseAliases};
+use super::{FuncArityError, FuncCallArity, FuncCallSignatureError, UseAliases};
+use super::typed::{cached_signature, signature_port};
 #[cfg(verus_only)]
-use super::FuncCallSignature;
+use super::typed::{cached_call_available, cached_call_model};
+use super::super::signature_cache::SignatureCache;
+#[cfg(verus_only)]
+use super::{FuncCallSignature, TypedFuncCall};
 use super::super::function_atoms::copy_location;
 use super::super::function_drivers::name_location;
 #[cfg(verus_only)]
@@ -125,9 +129,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn read_root_output_signature(
         &self, file: usize, entry: usize, definition: usize, max_width: u64,
         source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>,
-    ) -> (result: Result<Option<TypedFuncCall<'p, 'a>>, FuncCallOutputError<'p, 'a>>)
+        cache: &mut SignatureCache<'p, 'a>,
+    ) -> (result: Result<Option<FuncCallArity<'p, 'a>>, FuncCallOutputError<'p, 'a>>)
         requires
             self.can_resolve(),
+            old(cache).matches(self, max_width),
             file < self.targets.project_model().circuits_model().len(),
             file < self.targets.project_model().sources_model().len(),
             *source == self.targets.project_model().sources_model()[file as int],
@@ -136,7 +142,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             entry < parsed.syntax.entries@.len(), entry < parsed.entry_ranges@.len(),
             parsed.syntax.entries@[entry as int].head is Func,
             definition < parsed.entry_ranges@[entry as int].definitions.end - parsed.entry_ranges@[entry as int].definitions.start,
-        ensures self.root_output_signature(file, entry, definition, max_width, result),
+        ensures
+            final(cache).matches(self, max_width),
+            match result {
+                Ok(Some(call)) => cached_call_available(final(cache), call)
+                    && self.root_output_signature(file, entry, definition, max_width,
+                        Ok(Some(cached_call_model(final(cache), call)))),
+                Ok(None) => self.root_output_signature(file, entry, definition, max_width, Ok(None)),
+                Err(error) => self.root_output_signature(file, entry, definition, max_width, Err(error)),
+            },
     {
         proof {
             reveal(UseAliases::root_output_signature);
@@ -150,18 +164,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if !definition_root_is_call(source.text, forms, row, parsed.references.as_slice()) {
             return Ok(None);
         }
-        let resolved = self.resolve_func_call_signature(file, entry, definition, 0, max_width);
+        let resolved = self.prepare_func_call_signature(file, entry, definition, 0, max_width, cache);
         let call = match resolved {
             Ok(Some(call)) => call,
             Ok(None) => {
-                proof { self.call_has_signature_result(file, entry, definition, 0, max_width, resolved); }
+                proof { self.call_has_signature_result(file, entry, definition, 0, max_width, Ok(None)); }
                 unreachable!()
             },
             Err(error) => return Err(FuncCallOutputError::Signature(error)),
         };
         let targets = definition_target_atoms(forms, row);
         let expected = targets.end - targets.start;
-        let actual = call.call.target.ports().outputs;
+        let actual = call.target.ports().outputs;
         if actual != expected {
             return Err(FuncCallOutputError::Count {
                 call: form_location(source, forms, row.expression.start), targets: expected, outputs: actual,
@@ -285,14 +299,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(wiring) => wiring,
             Err(error) => return Err(FuncCallOutputError::Caller(error)),
         };
-        self.check_call_outputs_with_arity(file, entry, max_width, wiring)
+        let mut signatures = SignatureCache::new();
+        self.check_call_outputs_with_arity(file, entry, max_width, wiring, &mut signatures)
     }
 
     pub(in crate::project::use_aliases) fn check_call_outputs_with_arity(
         &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiringResult<'p, 'a>,
+        signatures: &mut SignatureCache<'p, 'a>,
     ) -> (result: Result<FuncCallOutputTypes<'p, 'a>, FuncCallOutputError<'p, 'a>>)
         requires self.can_resolve(), self.func_arity_evidence(file, entry, max_width, Ok(wiring)),
+            old(signatures).matches(self, max_width),
         ensures
+            final(signatures).matches(self, max_width),
             self.func_call_outputs_evidence(file, entry, max_width, result),
             result matches Ok(outputs) ==> outputs.wiring == wiring,
             result matches Err(error) ==> !(error is Caller),
@@ -314,7 +332,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let outlets = index_outputs(drivers);
         let mut types = Vec::new();
         let mut index = 0;
-        let mut cached: Option<(usize, Option<TypedFuncCall>)> = None;
+        let mut cached: Option<(usize, Option<FuncCallArity>)> = None;
         proof { reveal(UseAliases::call_output_prefix); }
         while index < drivers.definitions.len()
             invariant
@@ -333,8 +351,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 output_indices(drivers, drivers.outputs@.len() as int, outlets@),
                 index == types@.len() <= drivers.definitions@.len(),
                 self.call_output_prefix(file, entry, max_width, drivers, outlets@, types@),
+                signatures.matches(self, max_width),
                 cached matches Some((definition, signature))
-                    ==> self.root_output_signature(file, entry, definition, max_width, Ok(signature)),
+                    ==> match signature {
+                        Some(call) => cached_call_available(signatures, call)
+                            && self.root_output_signature(file, entry, definition, max_width,
+                                Ok(Some(cached_call_model(signatures, call)))),
+                        None => self.root_output_signature(file, entry, definition, max_width, Ok(None)),
+                    },
             decreases drivers.definitions@.len() - index,
         {
             let driver = &drivers.definitions[index];
@@ -348,7 +372,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             // 同じ左辺に並ぶ名前には、同じ呼び出し先の署名を使う。
             if !matches!(cached, Some((previous, _)) if previous == definition) {
-                match self.read_root_output_signature(file, entry, definition, max_width, source, parsed) {
+                match self.read_root_output_signature(file, entry, definition, max_width, source, parsed, signatures) {
                     Ok(signature) => cached = Some((definition, signature)),
                     Err(error) => {
                         proof {
@@ -365,8 +389,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 unreachable!()
             };
             let result = if let Some(call) = signature {
-                proof { self.typed_call_arguments_ready(file, entry, definition, 0, max_width, *call); }
-                let Some(port) = call.signature.port(PortDirection::Output, driver.result_index) else {
+                let ghost model = cached_call_model(signatures, *call);
+                proof { self.typed_call_arguments_ready(file, entry, definition, 0, max_width, model); }
+                let signature = cached_signature(signatures, call);
+                let Some(port) = signature_port(signature, PortDirection::Output, driver.result_index) else {
                     proof { assert(false); }
                     unreachable!()
                 };
@@ -377,7 +403,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     None => copy_location(&expression),
                 };
                 let actual = SignalType { ty: port.ty, origin };
-                assert(actual == call_output_type(call, &expression, driver.result_index as int));
+                assert(actual == call_output_type(&model, &expression, driver.result_index as int));
                 if let Some(output) = outlets[index] {
                     let expected = &drivers.signature.outputs[output];
                     if !actual.ty.is_same_type(&expected.ty) {

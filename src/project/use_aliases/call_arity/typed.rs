@@ -1,6 +1,7 @@
 //! 呼び出し先の宣言を、その宣言が属するスコープで型解決する。
 
 use super::{DefinitionReferenceError, FuncCallArity, FuncCallTarget, UseAliases};
+use super::super::signature_cache::SignatureCache;
 #[cfg(verus_only)]
 use super::{ResolvedDefinitionReference, target_ports_match};
 use crate::project::{LocatedName, PortDirection, ResolvedPortType, TypedRoutineSignature, TypedSignatureError};
@@ -35,43 +36,59 @@ pub struct CallPortType<'s, 'p, 'a> {
 impl<'p, 'a> FuncCallSignature<'p, 'a> {
     /// 入力または出力の宣言順にポート型を参照する。添字が範囲外なら `None`。
     pub fn port<'s>(&'s self, direction: PortDirection, index: usize) -> (port: Option<CallPortType<'s, 'p, 'a>>)
-        ensures match self {
-            FuncCallSignature::Nor =>
-                if index < (if direction is Input { 2usize } else { 1usize }) {
-                    port == Some(CallPortType { ty: ResolvedPortType::Bits(1), annotation: None })
-                } else { port.is_none() },
-            FuncCallSignature::Function(signature) => {
-                let ports = if direction is Input { signature.inputs@ } else { signature.outputs@ };
-                if index < ports.len() {
-                    let selected = ports[index as int];
-                    port matches Some(port) && port.ty == selected.ty
-                        && (port.annotation matches Some(annotation) && *annotation == selected.annotation)
-                } else { port.is_none() }
-            },
-        },
+        ensures signature_port_matches(*self, direction, index, port),
     {
         match self {
-            Self::Nor => {
-                let count = if matches!(direction, PortDirection::Input) { 2 } else { 1 };
-                if index < count {
-                    Some(CallPortType { ty: ResolvedPortType::Bits(1), annotation: None })
-                } else {
-                    None
-                }
-            },
-            Self::Function(signature) => {
-                let ports = match direction {
-                    PortDirection::Input => &signature.inputs,
-                    PortDirection::Output => &signature.outputs,
-                };
-                if index >= ports.len() {
-                    return None;
-                }
-                let selected = &ports[index];
-                Some(CallPortType { ty: selected.ty, annotation: Some(&selected.annotation) })
-            },
+            Self::Nor => signature_port(None, direction, index),
+            Self::Function(signature) => signature_port(Some(signature), direction, index),
         }
     }
+}
+
+/// ポート型と注釈の参照が、宣言順の指定位置に対応することを表す。
+pub open spec fn signature_port_matches(
+    signature: FuncCallSignature, direction: PortDirection, index: usize, port: Option<CallPortType>,
+) -> bool {
+    match signature {
+        FuncCallSignature::Nor =>
+            if index < (if direction is Input { 2usize } else { 1usize }) {
+                port == Some(CallPortType { ty: ResolvedPortType::Bits(1), annotation: None })
+            } else { port.is_none() },
+        FuncCallSignature::Function(signature) => {
+            let ports = if direction is Input { signature.inputs@ } else { signature.outputs@ };
+            if index < ports.len() {
+                let selected = ports[index as int];
+                port matches Some(port) && port.ty == selected.ty
+                    && (port.annotation matches Some(annotation) && *annotation == selected.annotation)
+            } else { port.is_none() }
+        },
+    }
+}
+
+/// 解決済みの署名からポートを借用する。`None` は基底 NOR の署名を表す。
+pub(super) fn signature_port<'s, 'p, 'a>(
+    signature: Option<&'s TypedRoutineSignature<'p, 'a>>, direction: PortDirection, index: usize,
+) -> (port: Option<CallPortType<'s, 'p, 'a>>)
+    ensures signature_port_matches(match signature {
+        None => FuncCallSignature::Nor,
+        Some(signature) => FuncCallSignature::Function(*signature),
+    }, direction, index, port),
+{
+    let Some(signature) = signature else {
+        let count = if matches!(direction, PortDirection::Input) { 2 } else { 1 };
+        return if index < count {
+            Some(CallPortType { ty: ResolvedPortType::Bits(1), annotation: None })
+        } else { None };
+    };
+    let ports = match direction {
+        PortDirection::Input => &signature.inputs,
+        PortDirection::Output => &signature.outputs,
+    };
+    if index >= ports.len() {
+        return None;
+    }
+    let selected = &ports[index];
+    Some(CallPortType { ty: selected.ty, annotation: Some(&selected.annotation) })
 }
 
 /// 呼び出し元の式と、解決した参照先の型付き署名。
@@ -95,6 +112,44 @@ pub enum FuncCallSignatureError<'p, 'a> {
         /// 署名の違反と、宣言側で該当する位置。
         error: TypedSignatureError<'p, 'a>,
     },
+}
+
+/// 再利用する署名の参照を、公開の呼び出し検査結果に対応づける。
+pub(in crate::project::use_aliases) open spec fn cached_call_model<'p, 'a>(
+    cache: &SignatureCache<'p, 'a>, call: FuncCallArity<'p, 'a>,
+) -> TypedFuncCall<'p, 'a> {
+    let signature = match call.target {
+        FuncCallTarget::Nor => FuncCallSignature::Nor,
+        FuncCallTarget::Function { file, entry, .. } =>
+            FuncCallSignature::Function(cache.signatures()[(file, entry)]),
+    };
+    TypedFuncCall { call, signature }
+}
+
+/// 関数の署名が既に登録されているか、基底 NOR の呼び出しであることを表す。
+pub(super) open spec fn cached_call_available(cache: &SignatureCache, call: FuncCallArity) -> bool {
+    call.target matches FuncCallTarget::Function { file, entry, .. }
+        ==> cache.signatures().contains_key((file, entry))
+}
+
+/// 登録済みの呼び出し先の署名を借用する。`None` は基底 NOR を表す。
+pub(super) fn cached_signature<'s, 'p, 'a>(
+    cache: &'s SignatureCache<'p, 'a>, call: &FuncCallArity<'p, 'a>,
+) -> (signature: Option<&'s TypedRoutineSignature<'p, 'a>>)
+    requires cached_call_available(cache, *call),
+    ensures match signature {
+        None => cached_call_model(cache, *call).signature is Nor,
+        Some(signature) => cached_call_model(cache, *call).signature == FuncCallSignature::Function(*signature),
+    },
+{
+    match &call.target {
+        FuncCallTarget::Nor => None,
+        FuncCallTarget::Function { file, entry, .. } => {
+            let signature = cache.get(*file, *entry);
+            assert(signature.is_some());
+            signature
+        },
+    }
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -239,6 +294,61 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
         };
         Ok(Some(TypedFuncCall { call, signature }))
+    }
+
+    /// 呼び出し先を解決し、関数の型付き署名を必要なときだけ登録する。
+    ///
+    /// # Errors
+    ///
+    /// 名前解決と署名検査は通常の呼び出し検査と同じ順に行い、診断には現在の呼び出し位置を使う。
+    pub(in crate::project::use_aliases) fn prepare_func_call_signature(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64,
+        cache: &mut SignatureCache<'p, 'a>,
+    ) -> (result: Result<Option<FuncCallArity<'p, 'a>>, FuncCallSignatureError<'p, 'a>>)
+        requires self.can_resolve(), old(cache).matches(self, max_width),
+        ensures
+            final(cache).matches(self, max_width),
+            forall|place: (usize, usize)| #[trigger] old(cache).signatures().contains_key(place) ==>
+                final(cache).signatures().contains_key(place)
+                    && final(cache).signatures()[place] == old(cache).signatures()[place],
+            match result {
+                Ok(Some(call)) => {
+                    &&& self.func_call_signature_evidence(file, entry, definition, reference, max_width,
+                        Ok(Some(cached_call_model(final(cache), call))))
+                    &&& call.target matches FuncCallTarget::Function { file, entry, .. }
+                        ==> final(cache).signatures().contains_key((file, entry))
+                },
+                Ok(None) => self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(None)),
+                Err(error) => self.func_call_signature_evidence(file, entry, definition, reference, max_width, Err(error)),
+            },
+    {
+        let call = match self.resolve_func_call_arity(file, entry, definition, reference) {
+            Ok(Some(call)) => call,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(FuncCallSignatureError::Reference(error)),
+        };
+        if let FuncCallTarget::Function { file: target_file, entry: target_entry, arity: _arity, .. } = &call.target {
+            proof { self.selected_function_arity(file, entry, definition, reference, call,
+                *target_file, *target_entry, *_arity); }
+            match cache.prepare(self, *target_file, *target_entry, max_width) {
+                Ok(true) => {
+                    proof {
+                        let target = (*target_file, *target_entry);
+                        let signature = cache.signatures()[target];
+                        self.typed_signature_arity(*target_file, *target_entry, max_width, signature, *_arity);
+                    }
+                },
+                Ok(false) => {
+                    proof {
+                        self.typed_signature_skips_non_routines(*target_file, *target_entry, max_width);
+                        assert(false);
+                    }
+                    unreachable!()
+                },
+                Err(error) => return Err(FuncCallSignatureError::Signature { call, error }),
+            }
+        }
+        Ok(Some(call))
     }
 }
 

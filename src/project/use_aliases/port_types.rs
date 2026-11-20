@@ -15,7 +15,10 @@ use crate::project::location_in_source;
 #[cfg(verus_only)]
 use crate::project::name_keys::key_view;
 #[cfg(verus_only)]
-use crate::project::signatures::{checked_signature_ports, routine_signature_evidence};
+use crate::project::signatures::{
+    checked_routine_signatures_agree, checked_signature_ports, checked_signature_success_excludes_other,
+    routine_signature_evidence,
+};
 #[cfg(verus_only)]
 use crate::project::widths::{checked_name_sites, checked_width_counts, checked_width_sites, reference_kind};
 use crate::project::{
@@ -25,13 +28,17 @@ use crate::project::{
 use crate::syntax::Form;
 use crate::syntax::circuit::{NamedForm, PortTypeSite};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{RoutineArity, indexed_entry_evidence, namespace_name_evidence, routine_arity_matches};
+use crate::syntax::circuit::{
+    RoutineArity, indexed_entry_evidence, named_forms_match, namespace_name_evidence, routine_arity_matches,
+};
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
+#[cfg(verus_only)]
+use vstd::utf8::encode_utf8_decode_utf8;
 
 verus! {
 
@@ -124,6 +131,14 @@ struct PortContext<'p, 'a> {
     namespace: Option<&'a str>,
     source: &'p ProjectSource<'a>,
     forms: &'p [Form],
+}
+
+spec fn same_port_context(left: &PortContext, right: &PortContext) -> bool {
+    &&& left.file == right.file
+    &&& left.block == right.block
+    &&& left.namespace == right.namespace
+    &&& left.source == right.source
+    &&& left.forms@ == right.forms@
 }
 
 spec fn annotation_atom(port: CheckedPort) -> usize {
@@ -305,6 +320,233 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] self.port_context_evidence(file, entry, &context)
                     && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
                     && self.typed_after_signature(&context, &signature, result),
+        }
+    }
+
+    proof fn port_contexts_agree(&self, file: usize, entry: usize, left: &PortContext, right: &PortContext)
+        requires
+            self.can_resolve(),
+            self.port_context_evidence(file, entry, left),
+            self.port_context_evidence(file, entry, right),
+        ensures same_port_context(left, right),
+    {
+        if let Some(block) = left.block {
+            let project = self.targets.project_model();
+            let source = project.sources_model()[file as int];
+            let parsed = project.circuits_model()[file as int];
+            let names = parsed.names@;
+            let left_path = left.namespace->Some_0;
+            let right_path = right.namespace->Some_0;
+            let a = choose|i: int| 0 <= i < names.len() && #[trigger] super::is_namespace_block(names[i], block)
+                && names[i].name.word == left_path;
+            let b = choose|i: int| 0 <= i < names.len() && #[trigger] super::is_namespace_block(names[i], block)
+                && names[i].name.word == right_path;
+            self.targets.parsed_project_model();
+            parsed_index_evidence(source, parsed);
+            reveal(named_forms_match);
+            assert(a == b);
+        }
+    }
+
+    proof fn typed_ports_agree(
+        &self, left_context: &PortContext, right_context: &PortContext, ports: Seq<CheckedPort>,
+        left: Seq<TypedPort>, right: Seq<TypedPort>,
+    )
+        requires
+            self.can_resolve(),
+            same_port_context(left_context, right_context),
+            left.len() == right.len(),
+            self.typed_ports_before(left_context, ports, left),
+            self.typed_ports_before(right_context, ports, right),
+        ensures left == right,
+    {
+        assert forall|i: int| 0 <= i < left.len() implies (#[trigger] left[i]) == (#[trigger] right[i]) by {
+            let port = ports[i];
+            assert(self.typed_port_evidence(left_context, port, left[i]));
+            assert(self.typed_port_evidence(right_context, port, right[i]));
+            if port.ty is Named {
+                let at = annotation_atom(port);
+                let span = form_span(left_context.forms@[at as int]);
+                let bytes = left_context.source.text.spec_bytes()[span.start as int..span.end as int];
+                let kind = left_context.forms@[at as int]->Atom_kind;
+                let a = DefinitionBinding::Declaration { source: left[i].ty->Struct_source, form: left[i].ty->Struct_form };
+                let b = DefinitionBinding::Declaration { source: right[i].ty->Struct_source, form: right[i].ty->Struct_form };
+                let left_word = choose|word: &str| word.spec_bytes() == bytes
+                    && #[trigger] self.binding_evidence(left_context.file,
+                        ReferenceRequest { block: left_context.block, word, role: ReferenceUse::StructType },
+                        left_context.namespace, kind, Ok(a));
+                let right_word = choose|word: &str| word.spec_bytes() == bytes
+                    && #[trigger] self.binding_evidence(right_context.file,
+                        ReferenceRequest { block: right_context.block, word, role: ReferenceUse::StructType },
+                        right_context.namespace, kind, Ok(b));
+                encode_utf8_decode_utf8(left_word@);
+                encode_utf8_decode_utf8(right_word@);
+                assert(left_word@ == right_word@);
+                self.struct_bindings_agree(left_context.file,
+                    ReferenceRequest { block: left_context.block, word: left_word, role: ReferenceUse::StructType },
+                    ReferenceRequest { block: right_context.block, word: right_word, role: ReferenceUse::StructType },
+                    left_context.namespace, right_context.namespace, kind, a->Declaration_source, a->Declaration_form,
+                    b->Declaration_source, b->Declaration_form);
+            }
+        };
+        assert(left =~= right);
+    }
+
+    /// 同じ解決環境と幅上限で署名の解決に成功した結果は、型、注釈範囲、共有配線まで一致する。
+    pub(super) proof fn typed_routine_signatures_agree(
+        &self, file: usize, entry: usize, max_width: u64, left: TypedRoutineSignature, right: TypedRoutineSignature,
+    )
+        requires
+            self.can_resolve(),
+            self.typed_signature_evidence(file, entry, max_width, Ok(Some(left))),
+            self.typed_signature_evidence(file, entry, max_width, Ok(Some(right))),
+        ensures
+            left.inputs@ == right.inputs@,
+            left.outputs@ == right.outputs@,
+            left.output_inputs@ == right.output_inputs@,
+    {
+        let project = &self.targets.project_model();
+        let (a_context, a_signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
+            && self.typed_after_signature(&context, &signature, Ok(Some(left)));
+        let (b_context, b_signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
+            && self.typed_after_signature(&context, &signature, Ok(Some(right)));
+        self.port_contexts_agree(file, entry, &a_context, &b_context);
+        checked_routine_signatures_agree(project, file as int, entry as int, max_width, a_signature, b_signature);
+        let ports = a_signature.ports;
+        assert(self.typed_ports_before(&a_context, ports.inputs@, left.inputs@));
+        assert(self.typed_ports_before(&b_context, ports.inputs@, right.inputs@));
+        self.typed_ports_agree(&a_context, &b_context, ports.inputs@, left.inputs@, right.inputs@);
+        assert(self.typed_ports_before(&a_context, ports.outputs@, left.outputs@));
+        assert(self.typed_ports_before(&b_context, ports.outputs@, right.outputs@));
+        self.typed_ports_agree(&a_context, &b_context, ports.outputs@, left.outputs@, right.outputs@);
+        let a_connections = left.output_inputs@;
+        let b_connections = right.output_inputs@;
+        let sources = a_signature.output_sources@;
+        assert(shared_types_before(sources, left.inputs@, left.outputs@, a_connections));
+        assert(shared_types_before(sources, right.inputs@, right.outputs@, b_connections));
+        assert forall|i: int| 0 <= i < a_connections.len() implies
+            (#[trigger] a_connections[i]) == (#[trigger] b_connections[i]) by {
+            match sources[i] {
+                OutputSource::Body => assert(a_connections[i].is_none() && b_connections[i].is_none()),
+                OutputSource::Input { port, .. } =>
+                    assert(a_connections[i] == Some(port) && b_connections[i] == Some(port)),
+            }
+        };
+        assert(a_connections =~= b_connections);
+    }
+
+    proof fn typed_port_excludes_error(
+        &self, success_context: &PortContext, error_context: &PortContext, port: CheckedPort,
+        success: TypedPort, direction: PortDirection, error: TypedSignatureError,
+    )
+        requires
+            self.can_resolve(),
+            same_port_context(success_context, error_context),
+            self.typed_port_evidence(success_context, port, success),
+        ensures !self.type_error_evidence(error_context, port, direction, error),
+    {
+        if self.type_error_evidence(error_context, port, direction, error) {
+            let at = annotation_atom(port);
+            let span = form_span(success_context.forms@[at as int]);
+            let bytes = success_context.source.text.spec_bytes()[span.start as int..span.end as int];
+            let kind = success_context.forms@[at as int]->Atom_kind;
+            let source = success.ty->Struct_source;
+            let form = success.ty->Struct_form;
+            let reason = error->TypeReference_reason;
+            let success_word = choose|word: &str| word.spec_bytes() == bytes
+                && #[trigger] self.binding_evidence(success_context.file,
+                    ReferenceRequest { block: success_context.block, word, role: ReferenceUse::StructType },
+                    success_context.namespace, kind, Ok(DefinitionBinding::Declaration { source, form }));
+            let error_word = choose|word: &str| word.spec_bytes() == bytes
+                && #[trigger] self.binding_evidence(error_context.file,
+                    ReferenceRequest { block: error_context.block, word, role: ReferenceUse::StructType },
+                    error_context.namespace, kind, Err(reason));
+            encode_utf8_decode_utf8(success_word@);
+            encode_utf8_decode_utf8(error_word@);
+            assert(success_word@ == error_word@);
+            self.struct_binding_excludes_error(success_context.file,
+                ReferenceRequest { block: success_context.block, word: success_word, role: ReferenceUse::StructType },
+                ReferenceRequest { block: error_context.block, word: error_word, role: ReferenceUse::StructType },
+                success_context.namespace, error_context.namespace, kind, source, form, reason);
+        }
+    }
+
+    proof fn typed_ports_exclude_first_error(
+        &self, success_context: &PortContext, error_context: &PortContext, ports: Seq<CheckedPort>,
+        success: Seq<TypedPort>, direction: PortDirection, error: TypedSignatureError,
+    )
+        requires
+            self.can_resolve(),
+            same_port_context(success_context, error_context),
+            success.len() == ports.len(),
+            self.typed_ports_before(success_context, ports, success),
+        ensures !self.first_port_type_error(error_context, ports, direction, error),
+    {
+        if self.first_port_type_error(error_context, ports, direction, error) {
+            let (i, _) = choose|i: int, earlier: Seq<TypedPort>| 0 <= i < ports.len() && earlier.len() == i
+                && #[trigger] self.type_error_evidence(error_context, ports[i], direction, error)
+                && #[trigger] self.typed_ports_before(error_context, ports, earlier);
+            self.typed_port_excludes_error(
+                success_context, error_context, ports[i], success[i], direction, error,
+            );
+        }
+    }
+
+    /// 署名の型解決に成功すれば、対象外の結果と、署名・参照・共有配線の診断は成立しない。
+    pub(super) proof fn typed_signature_success_excludes_other(
+        &self, file: usize, entry: usize, max_width: u64, success: TypedRoutineSignature,
+        other: Result<Option<TypedRoutineSignature>, TypedSignatureError>,
+    )
+        requires
+            self.can_resolve(),
+            self.typed_signature_evidence(file, entry, max_width, Ok(Some(success))),
+            self.typed_signature_evidence(file, entry, max_width, other),
+        ensures other is Ok && other->Ok_0 is Some,
+    {
+        let project = &self.targets.project_model();
+        let (a_context, a_signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
+            && self.typed_after_signature(&context, &signature, Ok(Some(success)));
+        match other {
+            Ok(None) => checked_signature_success_excludes_other(
+                project, file as int, entry as int, max_width, a_signature, Ok(None),
+            ),
+            Err(TypedSignatureError::Signature(error)) => checked_signature_success_excludes_other(
+                project, file as int, entry as int, max_width, a_signature, Err(error),
+            ),
+            Err(error) => {
+                let (b_context, b_signature) = choose|context: PortContext, signature: CheckedRoutineSignature|
+                    #[trigger] self.port_context_evidence(file, entry, &context)
+                    && #[trigger] routine_signature_evidence(project, file as int, entry as int, max_width, Ok(Some(signature)))
+                    && self.typed_after_signature(&context, &signature, other);
+                self.port_contexts_agree(file, entry, &a_context, &b_context);
+                checked_routine_signatures_agree(project, file as int, entry as int, max_width, a_signature, b_signature);
+                let ports = a_signature.ports;
+                let sources = a_signature.output_sources@;
+                assert(self.typed_ports_before(&a_context, ports.inputs@, success.inputs@));
+                assert(self.typed_ports_before(&a_context, ports.outputs@, success.outputs@));
+                if error is TypeReference {
+                    self.typed_ports_exclude_first_error(&a_context, &b_context, ports.inputs@,
+                        success.inputs@, PortDirection::Input, error);
+                    self.typed_ports_exclude_first_error(&a_context, &b_context, ports.outputs@,
+                        success.outputs@, PortDirection::Output, error);
+                } else {
+                    let (inputs, outputs) = choose|inputs: Seq<TypedPort>, outputs: Seq<TypedPort>|
+                        inputs.len() == ports.inputs@.len() && outputs.len() == ports.outputs@.len()
+                        && #[trigger] self.typed_ports_before(&b_context, ports.inputs@, inputs)
+                        && #[trigger] self.typed_ports_before(&b_context, ports.outputs@, outputs)
+                        && first_shared_type_mismatch(sources, inputs, outputs, error);
+                    self.typed_ports_agree(&a_context, &b_context, ports.inputs@, success.inputs@, inputs);
+                    self.typed_ports_agree(&a_context, &b_context, ports.outputs@, success.outputs@, outputs);
+                    shared_connections_exclude_type_error(sources, inputs, outputs, success.output_inputs@, error);
+                }
+            },
+            _ => {},
         }
     }
 
@@ -523,6 +765,31 @@ spec fn first_shared_type_mismatch(
                 _ => false,
             })
             && earlier.len() == i && #[trigger] shared_types_before(sources, inputs, outputs, earlier)
+}
+
+proof fn shared_connections_exclude_type_error(
+    sources: Seq<OutputSource>, inputs: Seq<TypedPort>, outputs: Seq<TypedPort>, connections: Seq<Option<usize>>,
+    error: TypedSignatureError,
+)
+    requires
+        connections.len() == outputs.len(),
+        shared_types_before(sources, inputs, outputs, connections),
+    ensures !first_shared_type_mismatch(sources, inputs, outputs, error),
+{
+    if let TypedSignatureError::SharedTypeMismatch { input, output } = error {
+        if first_shared_type_mismatch(sources, inputs, outputs, error) {
+            let (i, _) = choose|i: int, earlier: Seq<Option<usize>>| 0 <= i < outputs.len() && i < sources.len()
+                && (match #[trigger] sources[i] {
+                    OutputSource::Input { port, .. } => port < inputs.len()
+                        && input == inputs[port as int] && output == outputs[i],
+                    _ => false,
+                })
+                && earlier.len() == i && #[trigger] shared_types_before(sources, inputs, outputs, earlier);
+            let port = sources[i]->Input_port;
+            assert(connections[i] == Some(port));
+            assert(port_types_equal(inputs[port as int].ty, outputs[i].ty));
+        }
+    }
 }
 
 fn copy_typed_port<'p, 'a>(port: &TypedPort<'p, 'a>) -> (copy: TypedPort<'p, 'a>)

@@ -1,8 +1,11 @@
 //! 呼び出しの直接の引数に、宣言順で対応する入力型を照合する。
 
 use super::{CallPortType, FuncCallArity, FuncCallSignatureError, TypedFuncCall, UseAliases};
-#[cfg(verus_only)]
 use super::FuncCallSignature;
+use super::typed::{cached_signature, signature_port};
+#[cfg(verus_only)]
+use super::typed::cached_call_model;
+use super::super::signature_cache::SignatureCache;
 use super::super::function_atoms::{copy_location, inherit_type};
 #[cfg(verus_only)]
 use super::super::function_atoms::signal_type_at;
@@ -242,16 +245,15 @@ spec fn arguments_match(
     let count = call.call.call.arguments;
     &&& count == call.call.target.port_counts().inputs
     &&& match result {
-        Ok(Some(output)) => output.call == *call
-            && (!collect ==> output.inputs@.len() == 0)
-            && exists|visited: Seq<usize>, values: Seq<Option<SignalType>>|
+        Ok(output) => exists|visited: Seq<usize>, values: Seq<Option<SignalType>>|
                 #[trigger] argument_prefix(call, forms, scope, types, slots, start, limit, visited, values, last)
-                    && values.len() == count && (collect ==> output.inputs@ == values),
+                    && values.len() == count && if collect {
+                        output matches Some(output) && output.call == *call && output.inputs@ == values
+                    } else { output.is_none() },
         Err(error) => exists|visited: Seq<usize>, values: Seq<Option<SignalType>>, at: usize|
             #[trigger] argument_prefix(call, forms, scope, types, slots, start, limit, visited, values, at)
                 && visited.len() < count
                 && argument_result(call, forms, scope, types, slots, start, at, visited.len() as usize, limit, Err(error)),
-        _ => false,
     }
 }
 
@@ -262,14 +264,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         result: Result<Option<CheckedCallInputs>, CallInputError>,
     ) -> bool {
         match result {
-            Ok(None) => self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(None)),
+            Ok(None) if collect => self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(None)),
             Err(CallInputError::Caller(_)) => false,
             Err(CallInputError::Signature(error)) =>
                 self.func_call_signature_evidence(file, entry, definition, reference, limit, Err(error)),
             Err(CallInputError::Count(arity)) => arity.call.arguments != arity.target.port_counts().inputs
                 && exists|call: TypedFuncCall| call.call == arity
                     && #[trigger] self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
-            _ => exists|call: TypedFuncCall|
+            _ => (result == Ok(None) && self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(None)))
+                || exists|call: TypedFuncCall|
                 #[trigger] self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
                     && arguments_match(&self.targets.project_model().circuits_model()[file as int], entry,
                         definition, scope, types, &call, limit, collect, result),
@@ -310,28 +313,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         let FuncWiringResult::Checked(ref wiring) = typed.literals.wiring else { return Ok(None); };
         proof { self.atom_types_keep_wiring(file, entry, max_width, typed, *wiring); }
-        self.check_call_inputs_with_types(file, entry, definition, reference, max_width, typed.types.as_slice(), wiring, true)
+        let mut signatures = SignatureCache::new();
+        self.check_call_inputs_with_types(file, entry, definition, reference, max_width, typed.types.as_slice(), wiring, true,
+            &mut signatures)
     }
 
     /// 呼び出し元の配線と型を再利用し、必要な場合だけ引数の型を実行時の配列に残す。
     fn check_call_inputs_with_types(
         &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64,
         types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>, collect: bool,
+        signatures: &mut SignatureCache<'p, 'a>,
     ) -> (result: Result<Option<CheckedCallInputs<'p, 'a>>, CallInputError<'p, 'a>>)
         requires
             self.can_resolve(), self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
             types@.len() == wiring.drivers.definitions@.len(),
+            old(signatures).matches(self, max_width),
         ensures self.scoped_input_result(file, entry, definition, reference, max_width, types@, wiring, collect, result),
+            final(signatures).matches(self, max_width),
     {
-        let call = match self.resolve_func_call_signature(file, entry, definition, reference, max_width) {
-            Ok(Some(call)) => call,
-            Ok(None) => return Ok(None),
-            Err(error) => return Err(CallInputError::Signature(error)),
+        let (arity, owned) = if collect {
+            match self.resolve_func_call_signature(file, entry, definition, reference, max_width) {
+                Ok(Some(TypedFuncCall { call, signature })) => (call, Some(signature)),
+                Ok(None) => return Ok(None),
+                Err(error) => return Err(CallInputError::Signature(error)),
+            }
+        } else {
+            match self.prepare_func_call_signature(file, entry, definition, reference, max_width, signatures) {
+                Ok(Some(call)) => (call, None),
+                Ok(None) => return Ok(None),
+                Err(error) => return Err(CallInputError::Signature(error)),
+            }
         };
-        let count = call.call.target.ports().inputs;
-        if count != call.call.call.arguments {
-            return Err(CallInputError::Count(call.call));
+        let ghost call = match &owned {
+            Some(signature) => TypedFuncCall { call: arity, signature: *signature },
+            None => cached_call_model(signatures, arity),
+        };
+        let count = arity.target.ports().inputs;
+        if count != arity.call.arguments {
+            return Err(CallInputError::Count(arity));
         }
+        let signature = match &owned {
+            Some(FuncCallSignature::Nor) => None,
+            Some(FuncCallSignature::Function(signature)) => Some(signature),
+            None => cached_signature(signatures, &arity),
+        };
         let project = self.targets.project();
         proof {
             self.checked_wiring_is_func(file, entry, max_width, *wiring);
@@ -350,7 +375,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let absolute = frame.definitions.start + definition;
         let row = &parsed.definitions[absolute];
         let ref_pos = row.references.start + reference;
-        let mut remaining = call_argument_range(forms, &call.call.call);
+        let mut remaining = call_argument_range(forms, &arity.call);
         let mut ordinal = 0;
         let mut inputs: Vec<Option<SignalType>> = Vec::new();
         let ghost slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
@@ -364,6 +389,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while remaining.start < remaining.end
             invariant
                 self.can_resolve(), *project == self.targets.project_model(),
+                signatures.matches(self, max_width),
+                arity == call.call,
+                owned.is_some() == collect,
+                owned matches Some(signature) ==> signature == call.signature,
+                match signature {
+                    None => call.signature is Nor,
+                    Some(signature) => call.signature == FuncCallSignature::Function(*signature),
+                },
                 file < project.circuits_model().len(), file < project.sources_model().len(),
                 *source == project.sources_model()[file as int], *parsed == project.circuits_model()[file as int],
                 *source == *call.call.source, forms@ == parsed.syntax.forms@,
@@ -401,14 +434,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 proof { assert(false); }
                 unreachable!()
             };
-            let Some(port) = call.signature.port(PortDirection::Input, ordinal) else {
+            let Some(port) = signature_port(signature, PortDirection::Input, ordinal) else {
                 proof { assert(false); }
                 unreachable!()
             };
             assert(input_port_matches(&call, ordinal as int, port));
             let root = argument.start;
             let known = if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
-                let pos = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), ref_pos, &call.call.call,
+                let pos = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), ref_pos, &arity.call,
                     parsed.signals.as_slice(), root);
                 proof { self.checked_signal_driver(file, entry, max_width, *wiring, absolute, pos); }
                 let bound = &wiring.signals[pos - frame.signals.start];
@@ -473,7 +506,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             remaining.start = argument.end;
             ordinal += 1;
         }
-        let result = Ok(Some(CheckedCallInputs { call, inputs }));
+        let result = Ok(if let Some(signature) = owned {
+            Some(CheckedCallInputs { call: TypedFuncCall { call: arity, signature }, inputs })
+        } else { None });
         proof {
             exhausted_call_arguments(forms@, remaining, count - ordinal);
             assert(arguments_match(parsed, entry, definition, wiring, types@, &call, max_width, collect, result));
