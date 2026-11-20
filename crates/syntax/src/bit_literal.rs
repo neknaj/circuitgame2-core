@@ -47,6 +47,13 @@ pub closed spec fn bit_literal_size_matches(bytes: Seq<u8>, result: Option<BitLi
     }
 }
 
+/// 同じ字句の表記幅は基数と先頭の 0 を含む桁数から決まる。
+pub proof fn bit_literal_written_widths_agree(bytes: Seq<u8>, left: BitLiteralSize, right: BitLiteralSize)
+    requires bit_literal_size_matches(bytes, Some(left)), bit_literal_size_matches(bytes, Some(right)),
+    ensures left.written_bits == right.written_bits,
+{
+}
+
 fn first_nonzero(bytes: &[u8]) -> (at: usize)
     requires 2 <= bytes@.len(),
     ensures first_significant(bytes@, at as int),

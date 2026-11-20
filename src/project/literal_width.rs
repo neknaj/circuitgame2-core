@@ -2,7 +2,7 @@
 
 use crate::syntax::bit_literal_size;
 #[cfg(verus_only)]
-use crate::syntax::{BitLiteralSize, bit_literal_size_matches};
+use crate::syntax::{BitLiteralSize, bit_literal_size_matches, bit_literal_written_widths_agree};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -71,6 +71,24 @@ pub closed spec fn circuit_literal_width_matches(
     } else {
         exists|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
             && width_for(false, size.written_bits, size.required_bits, expected, limit, result)
+    }
+}
+
+/// 同じ字句と期待幅を検査した二つの成功結果は、同じ幅を返す。
+pub(super) proof fn successful_literal_widths_agree(
+    bytes: Seq<u8>, expected: Option<u64>, limit: u64, left: u64, right: u64,
+)
+    requires
+        circuit_literal_width_matches(bytes, expected, limit, Ok(left)),
+        circuit_literal_width_matches(bytes, expected, limit, Ok(right)),
+    ensures left == right,
+{
+    if !fixed_bit(bytes) && expected.is_none() {
+        let a = choose|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
+            && width_for(false, size.written_bits, size.required_bits, expected, limit, Ok(left));
+        let b = choose|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
+            && width_for(false, size.written_bits, size.required_bits, expected, limit, Ok(right));
+        bit_literal_written_widths_agree(bytes, a, b);
     }
 }
 

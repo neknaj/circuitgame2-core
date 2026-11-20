@@ -2,7 +2,9 @@
 
 use super::{FuncArityError, FuncDrivers, FuncWiringResult, OutputDriver, ResolvedPortType, TypedPort, UseAliases};
 #[cfg(verus_only)]
-use super::function_drivers::expected_output_context;
+use super::function_drivers::{expected_output_context, same_definition_driver};
+#[cfg(verus_only)]
+use crate::project::literal_width::successful_literal_widths_agree;
 use crate::project::circuits::read_indexed_atom;
 #[cfg(verus_only)]
 use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
@@ -67,6 +69,32 @@ pub(super) open spec fn output_indices(drivers: &FuncDrivers, prefix: int, map: 
         &&& forall|prior: int| 0 <= prior < prefix && (at is None || prior < at->Some_0)
             ==> !drives_result(#[trigger] drivers.outputs@[prior], driver)
     }
+}
+
+/// 出力の駆動元が同じなら、各定義に対応する最初の出力位置が一致する。
+pub(super) proof fn output_indices_agree(
+    left: &FuncDrivers, right: &FuncDrivers, a: Seq<Option<usize>>, b: Seq<Option<usize>>,
+)
+    requires
+        left.outputs@ == right.outputs@,
+        left.definitions@.len() == right.definitions@.len(),
+        output_indices(left, left.outputs@.len() as int, a),
+        output_indices(right, right.outputs@.len() as int, b),
+    ensures a == b,
+{
+    reveal(output_indices);
+    assert forall|i: int| 0 <= i < a.len() implies (#[trigger] a[i]) == (#[trigger] b[i]) by {
+        match (a[i], b[i]) {
+            (Some(x), Some(y)) => {
+                if x < y { assert(!drives_result(right.outputs@[x as int], i)); }
+                if y < x { assert(!drives_result(left.outputs@[y as int], i)); }
+            },
+            (Some(x), None) => assert(!drives_result(right.outputs@[x as int], i)),
+            (None, Some(y)) => assert(!drives_result(left.outputs@[y as int], i)),
+            _ => {},
+        }
+    };
+    assert(a =~= b);
 }
 
 pub(super) open spec fn drives_result(output: OutputDriver, driver: int) -> bool {
@@ -295,6 +323,74 @@ fn check_literals<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 同じ関数で成功した定数検査では、幅が付く定義とその幅が一致する。
+    pub(super) proof fn checked_literal_widths_agree(
+        &self, file: usize, entry: usize, limit: u64, left: FuncLiteralWidths, right: FuncLiteralWidths,
+    )
+        requires
+            self.can_resolve(),
+            left.wiring is Checked,
+            right.wiring is Checked,
+            self.func_literal_evidence(file, entry, limit, Ok(left)),
+            self.func_literal_evidence(file, entry, limit, Ok(right)),
+        ensures left.widths@ == right.widths@,
+    {
+        let l = left.wiring->Checked_0;
+        let r = right.wiring->Checked_0;
+        self.literals_preserve_arity(file, entry, limit, left);
+        self.literals_preserve_arity(file, entry, limit, right);
+        self.arity_preserves_wiring(file, entry, limit, left.wiring);
+        self.arity_preserves_wiring(file, entry, limit, right.wiring);
+        self.checked_func_wiring_agrees(file, entry, limit, l, r);
+        let ld = &l.drivers;
+        let rd = &r.drivers;
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let a = self.checked_literal_output_map(file, entry, limit, &left, &l);
+        let b = self.checked_literal_output_map(file, entry, limit, &right, &r);
+        output_indices_agree(ld, rd, a, b);
+        reveal(literal_prefix);
+        assert forall|i: int| 0 <= i < left.widths@.len() implies
+            (#[trigger] left.widths@[i]) == (#[trigger] right.widths@[i]) by {
+            assert(same_definition_driver(ld.definitions@[i], rd.definitions@[i]));
+            assert(driver_literal_result(source, parsed, ld, a, i, limit, Ok(left.widths@[i])));
+            assert(driver_literal_result(source, parsed, rd, b, i, limit, Ok(right.widths@[i])));
+            reveal(driver_literal_result);
+            if let (Some(x), Some(y)) = (left.widths@[i], right.widths@[i]) {
+                let form = parsed.syntax.forms@[parsed.definitions@[ld.definitions@[i].definition as int].expression.start as int];
+                let span = form_span(form);
+                let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+                let port = match a[i] { Some(port) => Some(ld.signature.outputs@[port as int]), None => None };
+                let expected = match port { Some(port) if port.ty is Bits => Some(port.ty->Bits_0), _ => None };
+                successful_literal_widths_agree(bytes, expected, limit, x, y);
+            }
+        };
+        assert(left.widths@ =~= right.widths@);
+    }
+
+    proof fn checked_literal_output_map(
+        &self, file: usize, entry: usize, limit: u64, literals: &FuncLiteralWidths, wiring: &crate::project::FuncWiring,
+    ) -> (map: Seq<Option<usize>>)
+        requires
+            literals.wiring == FuncWiringResult::Checked(*wiring),
+            self.func_literal_evidence(file, entry, limit, Ok(*literals)),
+        ensures
+            output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, map),
+            ({
+                let project = self.targets.project_model();
+                literal_prefix(&project.sources_model()[file as int], &project.circuits_model()[file as int],
+                    &wiring.drivers, map, limit, literals.widths@)
+            }),
+    {
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let drivers = &wiring.drivers;
+        choose|map: Seq<Option<usize>>| #[trigger] output_indices(drivers, drivers.outputs@.len() as int, map)
+            && literal_prefix(source, parsed, drivers, map, limit, literals.widths@)
+    }
+
     proof fn literal_width_at(
         &self, file: usize, entry: usize, limit: u64, literals: &FuncLiteralWidths,
         wiring: &crate::project::FuncWiring, i: int,
@@ -319,9 +415,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let source = &project.sources_model()[file as int];
         let parsed = &project.circuits_model()[file as int];
         let drivers = &wiring.drivers;
-        let map = choose|map: Seq<Option<usize>>|
-            #[trigger] output_indices(drivers, drivers.outputs@.len() as int, map)
-            && literal_prefix(source, parsed, drivers, map, limit, literals.widths@);
+        let map = self.checked_literal_output_map(file, entry, limit, literals, wiring);
         reveal(literal_prefix);
         assert(driver_literal_result(source, parsed, drivers, map, i, limit, Ok(literals.widths@[i])));
         reveal(driver_literal_result);
