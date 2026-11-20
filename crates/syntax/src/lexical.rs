@@ -203,18 +203,30 @@ pub open spec fn sexpr_input_derivation(bytes: Seq<u8>, witness: InputDerivation
     &&& forall|i: int| 0 <= i < lexemes.len() ==> #[trigger] input_lexeme_valid(bytes, witness, i)
 }
 
+/// 括弧と字句の規則に従う導出が存在することを表す。
+#[verifier::opaque]
+pub open spec fn well_formed_sexpr_bytes(bytes: Seq<u8>) -> bool {
+    exists|witness: InputDerivation| #[trigger] sexpr_input_derivation(bytes, witness)
+}
+
 #[verifier::opaque]
 pub open spec fn well_formed_sexpr(source: &str) -> bool {
-    exists|witness: InputDerivation| #[trigger] sexpr_input_derivation(source.spec_bytes(), witness)
+    well_formed_sexpr_bytes(source.spec_bytes())
+}
+
+/// バイト列から、字句と括弧の規則に従う導出を選ぶ。
+#[verifier::opaque]
+pub open spec fn chosen_input_derivation_bytes(bytes: Seq<u8>) -> Option<InputDerivation> {
+    if well_formed_sexpr_bytes(bytes) {
+        Some(choose|witness: InputDerivation| #[trigger] sexpr_input_derivation(bytes, witness))
+    } else {
+        None
+    }
 }
 
 #[verifier::opaque]
 pub open spec fn chosen_input_derivation(source: &str) -> Option<InputDerivation> {
-    if well_formed_sexpr(source) {
-        Some(choose|witness: InputDerivation| #[trigger] sexpr_input_derivation(source.spec_bytes(), witness))
-    } else {
-        None
-    }
+    chosen_input_derivation_bytes(source.spec_bytes())
 }
 
 pub(super) proof fn choose_input_derivation(source: &str) -> (witness: Option<InputDerivation>)
@@ -224,7 +236,9 @@ pub(super) proof fn choose_input_derivation(source: &str) -> (witness: Option<In
         witness is Some ==> sexpr_input_derivation(source.spec_bytes(), witness->Some_0),
 {
     reveal(well_formed_sexpr);
+    reveal(well_formed_sexpr_bytes);
     reveal(chosen_input_derivation);
+    reveal(chosen_input_derivation_bytes);
     chosen_input_derivation(source)
 }
 
@@ -364,6 +378,7 @@ pub(super) proof fn seal_scanned_input(source: &str, prefix: InputDerivation, ne
     reveal(scanned_input_prefix);
     reveal(sexpr_input_derivation);
     reveal(well_formed_sexpr);
+    reveal(well_formed_sexpr_bytes);
     assert(sexpr_input_derivation(source.spec_bytes(), prefix));
 }
 

@@ -24,13 +24,15 @@ pub use natural::{decimal_natural_value, natural_u64_matches};
 #[cfg(verus_only)]
 mod form_model;
 #[cfg(verus_only)]
-pub use form_model::sexpr_form_model;
+pub use form_model::{sexpr_form_model, sexpr_models_agree_on_bytes};
 #[cfg(verus_only)]
 mod lexical;
 #[cfg(verus_only)]
 mod strict_error;
 #[cfg(verus_only)]
 mod strict_string_error;
+#[cfg(verus_only)]
+mod string_recovery_end;
 #[cfg(verus_only)]
 pub use strict_error::{strict_syntax_rejection, strict_token_errors_agree};
 #[cfg(verus_only)]
@@ -53,6 +55,11 @@ use quoted_prefix::{
 };
 #[cfg(verus_only)]
 use strict_string_error::{first_string_error, record_first_string_error};
+#[cfg(verus_only)]
+use string_recovery_end::{
+    recovery_scalar_width, recovery_scalar_width_matches, skip_ordinary_string_bytes, string_recovery_end_from,
+    string_recovery_end_after_escape, string_recovery_end_at_stop,
+};
 
 use crate::boundary::{Boundary, after_ascii, split_at_boundary, split_first_scalar};
 use alloc::vec::Vec;
@@ -68,7 +75,7 @@ use vstd::string::StringSliceAdditionalSpecFns;
 use vstd::utf8::{
     encode_utf8_valid_utf8, is_char_boundary, is_char_boundary_iff_not_is_continuation_byte,
     is_char_boundary_start_end_of_seq, is_continuation_byte, length_of_first_scalar, valid_utf8,
-    valid_utf8_split,
+    valid_first_scalar, valid_utf8_split,
 };
 
 verus! {
@@ -2654,6 +2661,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         is_suffix(input.spec_bytes(), result.0.spec_bytes()),
         result.0.spec_bytes().len() < input.spec_bytes().len(),
         is_char_boundary(input.spec_bytes(), input.spec_bytes().len() - result.0.spec_bytes().len()),
+        string_recovery_end_from(input.spec_bytes(), 1) == input.spec_bytes().len() - result.0.spec_bytes().len(),
         match result.1 {
             Some(error) => string_error_kind(error.kind)
                 && string_error_site(input.spec_bytes(), start as int, error)
@@ -2668,7 +2676,10 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
     let ghost mut pieces: Seq<Seq<u8>> = Seq::empty();
     let ghost mut eof_stop = 1int;
     assert(pieces.flatten() =~= input.spec_bytes()[1..1]);
-    proof { initialize_quoted_prefixes(input.spec_bytes()); }
+    proof {
+        initialize_quoted_prefixes(input.spec_bytes());
+        assert(input.spec_bytes().len() - remaining.spec_bytes().len() == 1);
+    }
     loop
         invariant_except_break
             quoted_prefixes_viable(input.spec_bytes(),
@@ -2682,6 +2693,8 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             start + length <= usize::MAX,
             is_suffix(input.spec_bytes(), remaining.spec_bytes()),
             remaining.spec_bytes().len() < length,
+            string_recovery_end_from(input.spec_bytes(), 1)
+                == string_recovery_end_from(input.spec_bytes(), length - remaining.spec_bytes().len()),
             match error {
                 Some(error) => error.kind is InvalidEscape
                     && string_error_site(input.spec_bytes(), start as int, error)
@@ -2690,6 +2703,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
             },
         ensures
             remaining.spec_bytes().len() == 0,
+            string_recovery_end_from(input.spec_bytes(), 1) == length,
             forall|close: int| !#[trigger] quoted_prefix_at(input.spec_bytes(), close),
             error.is_none() ==> 1 <= eof_stop <= length
                 && (eof_stop == length || (eof_stop + 1 == length && input.spec_bytes()[eof_stop] == 92))
@@ -2709,6 +2723,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 assert(input.spec_bytes()[i] == piece[i - from]);
             };
             advance_quoted_prefixes_over_ordinary(input.spec_bytes(), from, to, error.is_none());
+            skip_ordinary_string_bytes(input.spec_bytes(), from, to);
             if error.is_none() {
                 assert(string_body_piece(piece));
                 extend_body(input.spec_bytes(), pieces, piece, from, to);
@@ -2722,6 +2737,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
         if bytes.len() == 0 {
             proof {
                 quoted_stop(input.spec_bytes(), relative, error.is_none());
+                string_recovery_end_at_stop(input.spec_bytes(), relative);
                 if error.is_none() {
                     eof_stop = relative;
                     quoted_prefix::derive_quoted_body(input.spec_bytes(), 1, eof_stop, pieces);
@@ -2737,6 +2753,7 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 proof {
                     quoted_stop(input.spec_bytes(), relative, error.is_none());
                     suffix_boundary(input, tail);
+                    string_recovery_end_at_stop(input.spec_bytes(), relative);
                     if error.is_none() {
                         encode_utf8_valid_utf8(input@);
                         valid_utf8_split(input.spec_bytes(), relative + 1);
@@ -2751,7 +2768,10 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 return (tail, error);
             }
             b'\r' | b'\n' => {
-                proof { quoted_stop(input.spec_bytes(), relative, error.is_none()); }
+                proof {
+                    quoted_stop(input.spec_bytes(), relative, error.is_none());
+                    string_recovery_end_at_stop(input.spec_bytes(), relative);
+                }
                 if error.is_none() {
                     error = Some(Error { kind: ErrorKind::NewlineInString { opening: start }, span: position..position + 1 });
                     proof {
@@ -2769,9 +2789,13 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                 proof { escape_at_quoted_prefixes(input.spec_bytes(), relative, clean); }
                 remaining = after_ascii(remaining);
                 proof { suffix_transitive(input.spec_bytes(), before_slash, remaining.spec_bytes()); }
+                let ghost escaped_text = remaining;
                 let escaped_bytes = remaining.as_bytes();
                 if escaped_bytes.len() == 0 {
                     proof {
+                        assert(relative + 1 == length);
+                        string_recovery_end_after_escape(input.spec_bytes(), relative, length as int);
+                        string_recovery_end_at_stop(input.spec_bytes(), length as int);
                         if clean {
                             eof_stop = relative;
                             quoted_prefix::derive_quoted_body(input.spec_bytes(), 1, eof_stop, pieces);
@@ -2808,6 +2832,15 @@ fn scan_string(input: &str, start: usize) -> (result: (&str, Option<Error>))
                     remaining = suffix;
                 }
                 proof {
+                    let next = length - remaining.spec_bytes().len();
+                    if escaped != b'\r' && escaped != b'\n' {
+                        let escaped_suffix = input.spec_bytes()[(relative + 1)..];
+                        encode_utf8_valid_utf8(escaped_text@);
+                        assert(valid_first_scalar(escaped_suffix)) by { reveal_with_fuel(valid_utf8, 2); };
+                        recovery_scalar_width_matches(escaped_suffix);
+                        assert(next == relative + 1 + recovery_scalar_width(input.spec_bytes()[relative + 1]));
+                    }
+                    string_recovery_end_after_escape(input.spec_bytes(), relative, next);
                     if escaped == 34 || escaped == 92 {
                         assert(length - remaining.spec_bytes().len() == relative + 2);
                         assert(error.is_none() == clean);

@@ -1,7 +1,9 @@
 use super::{
-    Form, InputDerivation, Lexeme, LexemeKind, form_span, lexical::chosen_input_derivation,
+    Form, InputDerivation, Lexeme, LexemeKind, form_span,
+    lexical::{chosen_input_derivation, chosen_input_derivation_bytes, well_formed_sexpr},
 };
 use vstd::prelude::*;
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -41,15 +43,32 @@ pub(super) open spec fn form_model_prefix(lexemes: Seq<Lexeme>, count: int) -> (
     }
 }
 
+/// 妥当な字句導出から、平坦な構文木を得る。
+#[verifier::opaque]
+pub(super) open spec fn sexpr_form_model_bytes(bytes: Seq<u8>) -> Option<Seq<Form>> {
+    match chosen_input_derivation_bytes(bytes) {
+        Some(witness) => Some(form_model_prefix(witness.lexemes, witness.lexemes.len() as int).0),
+        None => None,
+    }
+}
+
 /// 妥当な入力について、厳格解析と回復解析が共通に返す構文木を定める。
 ///
 /// 妥当でない入力には `None` を返す。両モードが共有する字句導出は、解析モードに依存せず入力から選ぶ。
 #[verifier::opaque]
 pub closed spec fn sexpr_form_model(source: &str) -> Option<Seq<Form>> {
-    match chosen_input_derivation(source) {
-        Some(witness) => Some(form_model_prefix(witness.lexemes, witness.lexemes.len() as int).0),
-        None => None,
-    }
+    sexpr_form_model_bytes(source.spec_bytes())
+}
+
+/// 元の UTF-8 バイト列が同じであれば、S 式としての妥当性と構文木のモデルが一致する。
+pub proof fn sexpr_models_agree_on_bytes(left: &str, right: &str)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        well_formed_sexpr(left) == well_formed_sexpr(right),
+        sexpr_form_model(left) == sexpr_form_model(right),
+{
+    reveal(well_formed_sexpr);
+    reveal(sexpr_form_model);
 }
 
 #[verifier::opaque]
@@ -123,6 +142,8 @@ pub(super) proof fn model_finishes(
     ensures sexpr_form_model(source) == Some(forms),
 {
     reveal(sexpr_form_model);
+    reveal(sexpr_form_model_bytes);
+    reveal(chosen_input_derivation);
     reveal(model_matches);
 }
 
