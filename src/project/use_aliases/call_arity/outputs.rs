@@ -10,10 +10,10 @@ use super::{FuncCallSignature, TypedFuncCall};
 use super::super::function_atoms::copy_location;
 use super::super::function_drivers::name_location;
 #[cfg(verus_only)]
-use super::super::function_drivers::{expected_output_context, indexed_driver_site};
+use super::super::function_drivers::{expected_output_context, indexed_driver_site, same_definition_driver};
 use super::super::function_literals::index_outputs;
 #[cfg(verus_only)]
-use super::super::function_literals::output_indices;
+use super::super::function_literals::{output_indices, output_indices_agree};
 use crate::project::{FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
@@ -440,6 +440,156 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ok(FuncCallOutputTypes { wiring, types })
     }
 
+    /// 同じ関数の呼び出し出力の型を二度求めると、定義ごとの型と注釈位置が一致する。
+    pub(in crate::project::use_aliases) proof fn checked_call_output_types_agree(
+        &self, file: usize, entry: usize, limit: u64, left: FuncCallOutputTypes, right: FuncCallOutputTypes,
+    )
+        requires
+            self.can_resolve(),
+            left.wiring is Checked,
+            right.wiring is Checked,
+            self.func_call_outputs_evidence(file, entry, limit, Ok(left)),
+            self.func_call_outputs_evidence(file, entry, limit, Ok(right)),
+        ensures left.types@ == right.types@,
+    {
+        let l = left.wiring->Checked_0;
+        let r = right.wiring->Checked_0;
+        self.arity_preserves_wiring(file, entry, limit, left.wiring);
+        self.arity_preserves_wiring(file, entry, limit, right.wiring);
+        self.checked_func_wiring_agrees(file, entry, limit, l, r);
+        let a = self.checked_call_output_map(file, entry, limit, &left, &l);
+        let b = self.checked_call_output_map(file, entry, limit, &right, &r);
+        output_indices_agree(&l.drivers, &r.drivers, a, b);
+        self.checked_wiring_is_func(file, entry, limit, l);
+        self.checked_wiring_is_func(file, entry, limit, r);
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        parsed_index_evidence(*source, *parsed);
+        reveal(output_indices);
+        reveal(UseAliases::call_output_prefix);
+        assert forall|i: int| 0 <= i < left.types@.len() implies
+            (#[trigger] left.types@[i]) == (#[trigger] right.types@[i]) by {
+            assert(same_definition_driver(l.drivers.definitions@[i], r.drivers.definitions@[i]));
+            assert(indexed_driver_site(source, parsed, entry as int, l.drivers.definitions@[i]));
+            assert(indexed_driver_site(source, parsed, entry as int, r.drivers.definitions@[i]));
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int,
+                l.drivers.definitions@[i].definition as int);
+            self.call_output_steps_agree(file, entry, limit, &l.drivers, &r.drivers, a, b, i,
+                left.types@[i], right.types@[i]);
+        };
+        assert(left.types@ =~= right.types@);
+    }
+
+    proof fn checked_call_output_map(
+        &self, file: usize, entry: usize, limit: u64, outputs: &FuncCallOutputTypes, wiring: &FuncWiring,
+    ) -> (map: Seq<Option<usize>>)
+        requires
+            outputs.wiring == FuncWiringResult::Checked(*wiring),
+            self.func_call_outputs_evidence(file, entry, limit, Ok(*outputs)),
+        ensures
+            self.func_arity_evidence(file, entry, limit, Ok(outputs.wiring)),
+            outputs.types@.len() == wiring.drivers.definitions@.len(),
+            output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, map),
+            self.call_output_prefix(file, entry, limit, &wiring.drivers, map, outputs.types@),
+    {
+        choose|outlets: Seq<Option<usize>>|
+            #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outlets)
+            && self.call_output_prefix(file, entry, limit, &wiring.drivers, outlets, outputs.types@)
+    }
+
+    spec fn valid_call_output_step(
+        &self, file: usize, entry: usize, drivers: &FuncDrivers, outlets: Seq<Option<usize>>, i: int,
+    ) -> bool {
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        &&& file < project.circuits_model().len() && file < project.sources_model().len()
+        &&& entry < parsed.entry_ranges@.len()
+        &&& 0 <= i < drivers.definitions@.len() && i < outlets.len()
+        &&& indexed_driver_site(source, parsed, entry as int, drivers.definitions@[i])
+        &&& parsed.definitions@[drivers.definitions@[i].definition as int].expression.start < parsed.syntax.forms@.len()
+        &&& (outlets[i] matches Some(port) ==> port < drivers.signature.outputs@.len())
+    }
+
+    proof fn call_output_steps_agree(
+        &self, file: usize, entry: usize, limit: u64, left: &FuncDrivers, right: &FuncDrivers,
+        a: Seq<Option<usize>>, b: Seq<Option<usize>>, i: int,
+        first: Option<SignalType>, second: Option<SignalType>,
+    )
+        requires
+            self.can_resolve(),
+            self.valid_call_output_step(file, entry, left, a, i),
+            self.valid_call_output_step(file, entry, right, b, i),
+            same_definition_driver(left.definitions@[i], right.definitions@[i]),
+            self.call_output_step(file, entry, limit, left, a, i, Ok(first)),
+            self.call_output_step(file, entry, limit, right, b, i, Ok(second)),
+        ensures first == second,
+    {
+        let x = self.checked_root_output(file, entry, limit, left, a, i, first);
+        let y = self.checked_root_output(file, entry, limit, right, b, i, second);
+        if let (Some((call_a, site_a)), Some((call_b, site_b))) = (x, y) {
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[file as int];
+            let driver = left.definitions@[i];
+            let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+            assert(site_a == site_b);
+            self.successful_call_output_signatures_agree(file, entry, local, 0, limit, call_a, call_b);
+        }
+    }
+
+    proof fn checked_root_output(
+        &self, file: usize, entry: usize, limit: u64, drivers: &FuncDrivers, outlets: Seq<Option<usize>>,
+        i: int, value: Option<SignalType>,
+    ) -> (found: Option<(TypedFuncCall<'p, 'a>, LocatedName<'p, 'a>)>)
+        requires
+            self.valid_call_output_step(file, entry, drivers, outlets, i),
+            self.call_output_step(file, entry, limit, drivers, outlets, i, Ok(value)),
+        ensures ({
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[file as int];
+            let source = &project.sources_model()[file as int];
+            let driver = drivers.definitions@[i];
+            let row = parsed.definitions@[driver.definition as int];
+            let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+            let root = row.expression.start as int;
+            &&& found.is_some() <==> ordinary_call_at(source.text, parsed.syntax.forms@, root, row.expression.end as int)
+            &&& match found {
+                Some((call, expression)) =>
+                    self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(call)))
+                    && is_form_location(source, parsed.syntax.forms@[root], expression)
+                    && value == Some(call_output_type(&call, &expression, driver.result_index as int)),
+                None => value.is_none(),
+            }
+        }),
+    {
+        reveal(UseAliases::call_output_step);
+        reveal(UseAliases::root_output_signature);
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let driver = drivers.definitions@[i];
+        let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let row = parsed.definitions@[driver.definition as int];
+        let root = parsed.syntax.forms@[row.expression.start as int];
+        let target = LocatedName { source, span: driver.name.span };
+        let expected = match outlets[i] { Some(port) => Some(drivers.signature.outputs@[port as int]), None => None };
+        if value.is_some() {
+            let witness = choose|call: TypedFuncCall, expression: LocatedName|
+                #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(call)))
+                && #[trigger] is_form_location(source, root, expression)
+                && driver.result_index < call.call.target.port_counts().outputs
+                && output_transfer(call_output_type(&call, &expression, driver.result_index as int),
+                    expected, target, expression, Ok(value));
+            assert(ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int));
+            Some(witness)
+        } else {
+            assert(!ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int));
+            None
+        }
+    }
+
     /// 解決済みの基底 NOR と同じ呼び出しから、出力型が1ビットであることを導く。
     pub(in crate::project::use_aliases) proof fn nor_root_output_type(
         &self, file: usize, entry: usize, limit: u64, outputs: &FuncCallOutputTypes, wiring: &FuncWiring,
@@ -481,9 +631,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
         self.typed_call_arguments_ready(file, entry, local, 0, limit, builtin);
         indexed_call_arguments(source.text, forms, row, parsed.references@[row.references.start as int], builtin.call.call);
-        let outlets = choose|outlets: Seq<Option<usize>>|
-            #[trigger] output_indices(drivers, drivers.outputs@.len() as int, outlets)
-            && self.call_output_prefix(file, entry, limit, drivers, outlets, outputs.types@);
+        let outlets = self.checked_call_output_map(file, entry, limit, outputs, wiring);
         reveal(UseAliases::call_output_prefix);
         assert(self.call_output_step(file, entry, limit, drivers, outlets, index, Ok(outputs.types@[index])));
         reveal(UseAliases::call_output_step);
@@ -512,9 +660,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ==> location_in_source(outputs.types@[i]->Some_0.origin)
                     && self.declared_port_type(outputs.types@[i]->Some_0.ty),
     {
-        let outlets = choose|outlets: Seq<Option<usize>>|
-            #[trigger] output_indices(&wiring.drivers, wiring.drivers.outputs@.len() as int, outlets)
-            && self.call_output_prefix(file, entry, limit, &wiring.drivers, outlets, outputs.types@);
+        let outlets = self.checked_call_output_map(file, entry, limit, outputs, wiring);
         reveal(UseAliases::call_output_prefix);
         assert forall|i: int| 0 <= i < outputs.types@.len() && (#[trigger] outputs.types@[i]).is_some()
             implies location_in_source(outputs.types@[i]->Some_0.origin)

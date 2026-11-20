@@ -15,6 +15,8 @@ use crate::project::resolution::{declaration_exists, direct_targets_agree, has_r
 use crate::project::{NameKey, same_target};
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
+#[cfg(verus_only)]
+use crate::project::sources::source_ordinals_agree;
 use crate::project::circuits::read_indexed_atom;
 use crate::project::{AbsoluteResolutionError, AbsoluteTarget, LocatedName, ProjectSource};
 #[cfg(verus_only)]
@@ -23,7 +25,7 @@ use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite, NamedForm}
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence,
-    expression_reference_in_source, namespace_name_evidence,
+    expression_reference_in_source, indexed_entry_evidence, namespace_name_evidence,
 };
 use crate::syntax::{AtomKind, Form};
 use vstd::prelude::*;
@@ -537,6 +539,72 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(super) proof fn positioned_declarations_agree(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        left: ResolvedDefinitionReference, right: ResolvedDefinitionReference,
+    )
+        requires
+            self.can_resolve(),
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(left)),
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(right)),
+            left.binding is Declaration,
+            right.binding is Declaration,
+        ensures left.binding == right.binding,
+    {
+        let parsed = self.targets.project_model().circuits_model()[file as int];
+        let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+        let indexed = parsed.references@[row.references.start + reference];
+        let kind = parsed.syntax.forms@[indexed.form as int]->Atom_kind;
+        let lhs = left.site.request_model();
+        let rhs = right.site.request_model();
+        let a = choose|from: Option<&str>| #[trigger] self.scope_matches(file, left.site.block, Ok(from))
+            && self.binding_evidence(file, lhs, from, kind, Ok(left.binding));
+        let b = choose|from: Option<&str>| #[trigger] self.scope_matches(file, right.site.block, Ok(from))
+            && self.binding_evidence(file, rhs, from, kind, Ok(right.binding));
+        self.relative_scope_agrees(file, lhs.block, a, b);
+        encode_utf8_decode_utf8(lhs.word@);
+        encode_utf8_decode_utf8(rhs.word@);
+        self.declaration_bindings_agree(file, lhs, rhs, a, b, kind,
+            left.binding->Declaration_source, left.binding->Declaration_form,
+            right.binding->Declaration_source, right.binding->Declaration_form);
+    }
+
+    pub(super) proof fn declaration_positions_agree(
+        &self, left_file: usize, left_entry: usize, right_file: usize, right_entry: usize,
+    )
+        requires
+            self.can_resolve(),
+            ({
+                let project = self.targets.project_model();
+                let sources = project.sources_model();
+                let circuits = project.circuits_model();
+                &&& left_file < sources.len() && right_file < sources.len()
+                &&& left_file < circuits.len() && right_file < circuits.len()
+                &&& sources[left_file as int] == sources[right_file as int]
+                &&& left_entry < circuits[left_file as int].syntax.entries@.len()
+                &&& right_entry < circuits[right_file as int].syntax.entries@.len()
+                &&& circuits[left_file as int].syntax.entries@[left_entry as int].form
+                    == circuits[right_file as int].syntax.entries@[right_entry as int].form
+            }),
+        ensures left_file == right_file && left_entry == right_entry,
+    {
+        let project = self.targets.project_model();
+        self.targets.parsed_project_model();
+        source_ordinals_agree(project.sources_model(), left_file as int, right_file as int);
+        let parsed = project.circuits_model()[left_file as int];
+        let source = project.sources_model()[left_file as int];
+        parsed_index_evidence(source, parsed);
+        let entries = parsed.syntax.entries@;
+        let forms = parsed.syntax.forms@;
+        if left_entry < right_entry {
+            indexed_entry_evidence(source.text, forms, entries, right_entry as int);
+            assert(entries[left_entry as int].form < entries[right_entry as int].form);
+        } else if right_entry < left_entry {
+            indexed_entry_evidence(source.text, forms, entries, left_entry as int);
+            assert(entries[right_entry as int].form < entries[left_entry as int].form);
+        }
+    }
+
     /// 同じ参照位置に対する解決で、基底 NOR と独立宣言が同時に選ばれることはない。
     pub(super) proof fn nor_binding_excludes_declaration(
         &self, file: usize, entry: usize, definition: usize, reference: usize,
@@ -623,15 +691,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 同じ構造体型の参照について、宣言元のソースと構文項目は一意に定まる。
-    pub(super) proof fn struct_bindings_agree(
+    /// 同じ参照が独立宣言へ解決されるとき、宣言元のソースと構文項目が一致する。
+    pub(super) proof fn declaration_bindings_agree(
         &self, file: usize, left_request: ReferenceRequest, right_request: ReferenceRequest,
         left_from: Option<&str>, right_from: Option<&str>, kind: AtomKind,
         left_source: &ProjectSource, left_form: &NamedForm, right_source: &ProjectSource, right_form: &NamedForm,
     )
         requires
             self.can_resolve(),
-            left_request.role is StructType, right_request.role is StructType,
+            left_request.role == right_request.role,
             left_request.block == right_request.block, left_request.word@ == right_request.word@,
             left_from == right_from,
             self.binding_evidence(file, left_request, left_from, kind,

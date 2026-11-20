@@ -459,7 +459,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 encode_utf8_decode_utf8(left_word@);
                 encode_utf8_decode_utf8(right_word@);
                 assert(left_word@ == right_word@);
-                self.struct_bindings_agree(left_context.file,
+                self.declaration_bindings_agree(left_context.file,
                     ReferenceRequest { block: left_context.block, word: left_word, role: ReferenceUse::StructType },
                     ReferenceRequest { block: right_context.block, word: right_word, role: ReferenceUse::StructType },
                     left_context.namespace, right_context.namespace, kind, a->Declaration_source, a->Declaration_form,

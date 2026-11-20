@@ -34,8 +34,7 @@ use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
 use crate::project::declarations::{declaration_location_evidence, form_key, located_name_evidence};
 #[cfg(verus_only)]
 use crate::project::structure_declarations::{checked_structure_fields, structure_declarations_agree};
-#[cfg(verus_only)]
-use crate::project::sources::source_ordinals_agree;
+
 #[cfg(verus_only)]
 use vstd::utf8::encode_utf8_decode_utf8;
 #[cfg(verus_only)]
@@ -231,21 +230,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.structure_position_matches(right, binding),
         ensures left == right,
     {
-        let project = self.targets.project_model();
-        self.targets.parsed_project_model();
-        source_ordinals_agree(project.sources_model(), left.file as int, right.file as int);
-        let parsed = project.circuits_model()[left.file as int];
-        let source = project.sources_model()[left.file as int];
-        parsed_index_evidence(source, parsed);
-        let entries = parsed.syntax.entries@;
-        let forms = parsed.syntax.forms@;
-        if left.entry < right.entry {
-            indexed_entry_evidence(source.text, forms, entries, right.entry as int);
-            assert(entries[left.entry as int].form < entries[right.entry as int].form);
-        } else if right.entry < left.entry {
-            indexed_entry_evidence(source.text, forms, entries, left.entry as int);
-            assert(entries[right.entry as int].form < entries[left.entry as int].form);
-        }
+        self.declaration_positions_agree(left.file, left.entry, right.file, right.entry);
     }
 
     /// 解決済みの構造体宣言を、同じプロジェクトの配置表で使う位置に変換する。
@@ -447,7 +432,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ReferenceRequest { block: b.block, word, role: ReferenceUse::StructType }, b.namespace, kind, Ok(y));
             encode_utf8_decode_utf8(lw@);
             encode_utf8_decode_utf8(rw@);
-            self.struct_bindings_agree(a.file,
+            self.declaration_bindings_agree(a.file,
                 ReferenceRequest { block: a.block, word: lw, role: ReferenceUse::StructType },
                 ReferenceRequest { block: b.block, word: rw, role: ReferenceUse::StructType },
                 a.namespace, b.namespace, kind, x->Declaration_source, x->Declaration_form,

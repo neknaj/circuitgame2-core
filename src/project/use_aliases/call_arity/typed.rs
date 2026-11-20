@@ -262,6 +262,52 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 同じ呼び出し位置で得た型付き署名は、宣言順の出力型と注釈まで一致する。
+    pub(in crate::project::use_aliases) proof fn successful_call_output_signatures_agree(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        left: TypedFuncCall, right: TypedFuncCall,
+    )
+        requires
+            self.can_resolve(),
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(left))),
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(right))),
+        ensures
+            left.call.call == right.call.call,
+            match (left.signature, right.signature) {
+                (FuncCallSignature::Nor, FuncCallSignature::Nor) => true,
+                (FuncCallSignature::Function(a), FuncCallSignature::Function(b)) => a.outputs@ == b.outputs@,
+                _ => false,
+            },
+    {
+        if left.call.target is Nor {
+            self.resolved_nor_call_agrees(file, entry, definition, reference, limit, left, Some(right));
+        } else if right.call.target is Nor {
+            self.resolved_nor_call_agrees(file, entry, definition, reference, limit, right, Some(left));
+        } else {
+            let project = self.targets.project_model();
+            let parsed = project.circuits_model()[file as int];
+            let forms = parsed.syntax.forms@;
+            let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+            let indexed = parsed.references@[row.references.start + reference];
+            let source = project.sources_model()[file as int];
+            crate::syntax::circuit::indexed_call_shapes_agree(source.text, forms, row, indexed, left.call.call, right.call.call);
+            let a = choose|resolved: ResolvedDefinitionReference|
+                #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
+                    && target_ports_match(&project, resolved, left.call.target);
+            let b = choose|resolved: ResolvedDefinitionReference|
+                #[trigger] self.definition_resolution_evidence(file, entry, definition, reference, Ok(resolved))
+                    && target_ports_match(&project, resolved, right.call.target);
+            self.positioned_declarations_agree(file, entry, definition, reference, a, b);
+            let left_file = left.call.target->Function_file;
+            let left_entry = left.call.target->Function_entry;
+            let right_file = right.call.target->Function_file;
+            let right_entry = right.call.target->Function_entry;
+            self.declaration_positions_agree(left_file, left_entry, right_file, right_entry);
+            self.typed_routine_signatures_agree(left_file, left_entry, limit,
+                left.signature->Function_0, right.signature->Function_0);
+        }
+    }
+
     /// 型付き署名の解決結果から、呼び出し元の構文木で引数をたどる根拠を取り出す。
     pub(in crate::project::use_aliases) proof fn typed_call_arguments_ready(
         &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64, typed: TypedFuncCall,
