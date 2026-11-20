@@ -53,7 +53,8 @@ pub use build::{
 #[cfg(verus_only)]
 pub use build::{
     build_bare_signal_position, build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
-    build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique, definition_target_range,
+    build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
+    definition_signal_positions_agree, definition_target_range,
     definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
@@ -107,7 +108,7 @@ pub use selection_shapes::{BitSelectionShape, BitSelectionTail, bit_selection_sh
 #[cfg(verus_only)]
 pub use selection_shapes::{
     build_selection_input_position,
-    bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
+    bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
     strict_bit_selection_has_shape, strict_bit_selection_input,
 };
 use structure::validate_structure_arguments;
@@ -115,7 +116,7 @@ pub use structure_expressions::{StructureExpressionKind, StructureExpressionShap
 #[cfg(verus_only)]
 pub use structure_expressions::{
     build_structure_input_position, strict_structure_expression_has_shape, structure_cast_reference,
-    structure_expression_matches, structure_expression_positions,
+    structure_expression_matches, structure_expression_positions, structure_expression_shapes_agree,
 };
 pub use structure::sites::{FieldSite, FieldTypeSite, StructureSites, structure_sites};
 #[cfg(verus_only)]

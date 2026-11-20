@@ -67,6 +67,21 @@ pub closed spec fn bit_selection_shape_matches(
     }
 }
 
+/// ビット選択と構造体式は、同じ位置のリストを同時に解釈できない。
+pub proof fn bit_selection_excludes_structure(
+    source: &str, forms: Seq<Form>, root: int, shape: BitSelectionShape,
+)
+    requires bit_selection_shape_matches(source, forms, root, shape),
+    ensures !(exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, root, shape)),
+{
+    if exists|other: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, root, other) {
+        let other = choose|other: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, root, other);
+        let dedicated = super::structure_expressions::structure_expression_head_evidence(source, forms, root, other);
+        let selection = match shape.tail { BitSelectionTail::Bit => ExpressionHead::Bit, _ => ExpressionHead::Slice };
+        same_expression_head(source, forms, root + 1, Some(selection), Some(dedicated));
+    }
+}
+
 pub(super) proof fn ordinary_head_excludes_selection(source: &str, forms: Seq<Form>, call: int)
     requires list_head_matches(source, forms, call + 1, None),
     ensures !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, call, shape)),

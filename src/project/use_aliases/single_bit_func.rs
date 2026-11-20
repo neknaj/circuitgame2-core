@@ -29,7 +29,7 @@ use super::super::location_in_source;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     BitSelectionShape, build_bare_signal_position, build_definition_scope_evidence, build_selection_input_position,
-    definition_target_range, indexed_entry_evidence,
+    definition_signal_positions_agree, definition_target_range, indexed_entry_evidence,
 };
 #[cfg(verus_only)]
 use super::function_atoms::named_selection_matches;
@@ -248,6 +248,53 @@ pub(super) closed spec fn operand_matches(
         SingleBitOperand::Driver(driver) => forms[root] matches Form::Atom { kind: AtomKind::Name, .. }
             && exists|signal: int| prior_name_binding(parsed, entry, definition, root, wiring, prior, signal)
                 && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver,
+    }
+}
+
+pub(super) proof fn source_operand_is_atom(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
+    wiring: &FuncWiring, prior: int, operand: SingleBitOperand,
+)
+    requires operand_matches(source, parsed, entry, definition, root, wiring, prior, operand),
+    ensures 0 <= root < parsed.syntax.forms@.len() && parsed.syntax.forms@[root] is Atom,
+{
+}
+
+pub(super) proof fn source_operands_agree(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize, root: int,
+    wiring: &FuncWiring, prior: int, left: SingleBitOperand, right: SingleBitOperand,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(),
+        entry < parsed.entry_ranges@.len(),
+        parsed.entry_ranges@[entry as int].definitions.start <= definition
+            < parsed.entry_ranges@[entry as int].definitions.end,
+        operand_matches(source, parsed, entry, definition, root, wiring, prior, left),
+        operand_matches(source, parsed, entry, definition, root, wiring, prior, right),
+    ensures left == right,
+{
+    match (left, right) {
+        (SingleBitOperand::Constant(a), SingleBitOperand::Constant(b)) => {
+            if a != b {
+                reveal_strlit("0");
+                reveal_strlit("1");
+                encode_utf8_decode_utf8("0"@);
+                encode_utf8_decode_utf8("1"@);
+                assert("0"@ != "1"@);
+            }
+        },
+        (SingleBitOperand::Driver(a), SingleBitOperand::Driver(b)) => {
+            parsed_index_evidence(*source, *parsed);
+            let start = parsed.entry_ranges@[entry as int].signals.start;
+            let first = choose|i: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, i)
+                && wiring.signals@[i - start].driver == a;
+            let second = choose|i: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, i)
+                && wiring.signals@[i - start].driver == b;
+            definition_signal_positions_agree(source.text, &parsed.build_model(), entry as int,
+                definition as int, first, second);
+        },
+        _ => {},
     }
 }
 

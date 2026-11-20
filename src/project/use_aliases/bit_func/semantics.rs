@@ -112,6 +112,20 @@ pub(super) proof fn bit_func_evaluation_intro(
 {
 }
 
+pub(super) proof fn bit_func_evaluation_values(
+    source: &CheckedBitFunc, inputs: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
+) -> (values: Seq<Seq<bool>>)
+    requires bit_func_evaluation(source, inputs, outputs),
+    ensures
+        checked_bit_func_available(source),
+        bit_func_inputs_match(source, inputs),
+        bit_func_definitions_match(source, inputs, values),
+        bit_func_outputs_match(source, inputs, values, outputs),
+{
+    choose|values: Seq<Seq<bool>>| #[trigger] bit_func_definitions_match(source, inputs, values)
+        && bit_func_outputs_match(source, inputs, values, outputs)
+}
+
 proof fn definition_values_prefix_agree(
     source: &CheckedBitFunc, inputs: Seq<Seq<bool>>, left: Seq<Seq<bool>>, right: Seq<Seq<bool>>, end: nat,
 )

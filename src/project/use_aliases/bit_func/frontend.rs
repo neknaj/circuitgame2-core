@@ -1,5 +1,8 @@
 //! 検査済みの構文、結線、型からビット列の組み合わせ回路を取り出す。
 
+#[cfg(verus_only)]
+mod source_evaluation;
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -478,27 +481,33 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// 入出力ポート、定義順、右辺の各参照が、検査した元の関数と対応することを表す。
     pub closed spec fn checked_bit_func_matches(&self, file: usize, entry: usize, limit: u64, checked: &CheckedBitFunc) -> bool {
+        exists|typed: FuncSignalTypes, layouts: Option<&StructureLayouts>, structures: Vec<StructureProjection>|
+            #![trigger self.func_signal_types_evidence(file, entry, limit, Ok(typed)), self.structure_layout_for_ports(limit, layouts), structures@]
+            self.checked_bit_func_projection(file, entry, limit, checked, typed, layouts, structures)
+    }
+
+    spec fn checked_bit_func_projection(
+        &self, file: usize, entry: usize, limit: u64, checked: &CheckedBitFunc,
+        typed: FuncSignalTypes, layouts: Option<&StructureLayouts>, structures: Vec<StructureProjection>,
+    ) -> bool {
         let project = self.targets.project_model();
         let source = &project.sources_model()[file as int];
         let parsed = &project.circuits_model()[file as int];
-        exists|typed: FuncSignalTypes, layouts: Option<&StructureLayouts>, structures: Vec<StructureProjection>|
-            #![trigger self.func_signal_types_evidence(file, entry, limit, Ok(typed)), self.structure_layout_for_ports(limit, layouts), structures@]
-            self.func_signal_types_evidence(file, entry, limit, Ok(typed))
-            && self.structure_layout_for_ports(limit, layouts)
-            && (typed.literals.wiring matches FuncWiringResult::Checked(wiring)
-            && {
-                let scope = FuncProjection { file, entry, limit, source, parsed, wiring: &wiring,
-                    inputs: &checked.input_widths, outputs: &checked.output_widths, layouts, types: &typed.types, structures: &structures };
-                &&& self.projection_context(&scope)
-                &&& self.projection_port_widths_match(&scope)
-                &&& self.projection_structures_match(&scope)
-                &&& self.func_structure_projections_complete(file, entry, limit, typed, &wiring, structures@)
-                &&& checked.signature == wiring.drivers.signature
-                &&& checked.definitions@.len() == wiring.drivers.definitions@.len()
-                &&& self.definition_prefix(&scope, checked.definitions@)
-                &&& self.definition_widths_match(&scope, checked.definitions@)
-                &&& checked.output_drivers@ == wiring.drivers.outputs@
-            })
+        &&& self.func_signal_types_evidence(file, entry, limit, Ok(typed))
+        &&& self.structure_layout_for_ports(limit, layouts)
+        &&& typed.literals.wiring matches FuncWiringResult::Checked(wiring) && {
+            let scope = FuncProjection { file, entry, limit, source, parsed, wiring: &wiring,
+                inputs: &checked.input_widths, outputs: &checked.output_widths, layouts, types: &typed.types, structures: &structures };
+            &&& self.projection_context(&scope)
+            &&& self.projection_port_widths_match(&scope)
+            &&& self.projection_structures_match(&scope)
+            &&& self.func_structure_projections_complete(file, entry, limit, typed, &wiring, structures@)
+            &&& checked.signature == wiring.drivers.signature
+            &&& checked.definitions@.len() == wiring.drivers.definitions@.len()
+            &&& self.definition_prefix(&scope, checked.definitions@)
+            &&& self.definition_widths_match(&scope, checked.definitions@)
+            &&& checked.output_drivers@ == wiring.drivers.outputs@
+        }
     }
 
     spec fn definition_error(

@@ -8,6 +8,7 @@ use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_synt
 #[cfg(verus_only)]
 use super::expression_forest::{
     bare_signal_index, expression_forest, expression_references, expression_signal_evidence, expression_signals,
+    expression_signals_in_order,
 };
 use super::*;
 
@@ -297,6 +298,33 @@ pub proof fn build_signal_evidence(
     vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
     expression_signal_evidence(source, index.syntax.forms@, row.expression.start as int,
         row.expression.end as int, offset);
+}
+
+/// 同じ定義の中で同じ構文位置を指す信号索引の行は一意に定まる。
+pub proof fn definition_signal_positions_agree(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int, left: int, right: int,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(),
+        entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition < index.entry_ranges@[entry].definitions.end,
+        ({
+            let row = index.definitions@[definition];
+            &&& row.signals.start <= left < row.signals.end
+            &&& row.signals.start <= right < row.signals.end
+            &&& index.signals@[left] == index.signals@[right]
+        }),
+    ensures left == right,
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    let row = index.definitions@[definition];
+    let start = row.signals.start as int;
+    let signals = index.signals@[start..row.signals.end as int];
+    expression_signals_in_order(source, index.syntax.forms@, row.expression.start as int, row.expression.end as int);
+    assert(signals[left - start] == index.signals@[left]);
+    assert(signals[right - start] == index.signals@[right]);
 }
 
 /// 右辺全体が裸の名前なら、その定義の信号索引に当該アトムだけが含まれることを示す。

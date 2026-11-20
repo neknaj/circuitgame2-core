@@ -202,6 +202,45 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 同じフィールド式と入力型を同じ配置で検査すると、選ぶビット区間が一致する。
+    pub(in crate::project::use_aliases) proof fn structure_field_expression_ranges_agree(
+        &self, context: &StructureExpressionContext, shape: StructureExpressionShape,
+        layouts: &StructureLayouts, input: SignalType, first: CheckedStructureExpression,
+        second: CheckedStructureExpression,
+    )
+        requires
+            self.can_resolve(),
+            shape.kind is Field,
+            self.structure_expression_type_matches(context, shape, layouts, input, Ok(first)),
+            self.structure_expression_type_matches(context, shape, layouts, input, Ok(second)),
+        ensures first.1.range == second.1.range,
+    {
+        let (a, first_type) = self.checked_structure_operation(context, shape, layouts, input, first);
+        let (b, second_type) = self.checked_structure_operation(context, shape, layouts, input, second);
+        let first_name = a->Field_0;
+        let second_name = b->Field_0;
+        layouts.checked_field_requires_structure(first_name, first_type, first.1);
+        layouts.checked_field_requires_structure(second_name, second_type, second.1);
+        self.structure_port_positions_agree(input.ty, first_type->Struct_0, second_type->Struct_0);
+        layouts.structure_field_ranges_agree(first_type->Struct_0, first_name, second_name, first.1, second.1);
+    }
+
+    proof fn checked_structure_operation(
+        &self, context: &StructureExpressionContext, shape: StructureExpressionShape,
+        layouts: &StructureLayouts, input: SignalType, checked: CheckedStructureExpression,
+    ) -> (found: (StructureOperation<'a>, StructureFieldType))
+        requires self.structure_expression_type_matches(context, shape, layouts, input, Ok(checked)),
+        ensures
+            self.structure_operation_from_source(context, shape, found.0),
+            self.expression_port_matches(found.1, input.ty),
+            layouts.structure_operation_matches(found.0, found.1, Ok(checked.1)),
+    {
+        choose|op: StructureOperation<'a>, field: StructureFieldType|
+            #[trigger] self.structure_operation_from_source(context, shape, op)
+            && #[trigger] self.expression_port_matches(field, input.ty)
+            && layouts.structure_operation_matches(op, field, Ok(checked.1))
+    }
+
     /// 式の結果幅と入力上の選択範囲を、型の表現幅に結び付ける。
     pub(in crate::project::use_aliases) proof fn structure_expression_width_evidence(
         &self, context: &StructureExpressionContext, shape: StructureExpressionShape, layouts: &StructureLayouts,

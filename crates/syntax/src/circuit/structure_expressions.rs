@@ -84,6 +84,17 @@ pub closed spec fn structure_expression_matches(
     }
 }
 
+pub(super) proof fn structure_expression_head_evidence(
+    source: &str, forms: Seq<Form>, root: int, shape: StructureExpressionShape,
+) -> (head: ExpressionHead)
+    requires structure_expression_matches(source, forms, root, shape),
+    ensures
+        head is Field || head is As || head is Raw,
+        list_head_matches(source, forms, root + 1, Some(head)),
+{
+    expected_head(shape.kind)
+}
+
 pub(super) proof fn ordinary_head_excludes_structure(source: &str, forms: Seq<Form>, call: int)
     requires list_head_matches(source, forms, call + 1, None),
     ensures !(exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, call, shape)),
@@ -94,7 +105,8 @@ pub(super) proof fn ordinary_head_excludes_structure(source: &str, forms: Seq<Fo
     }
 }
 
-proof fn structure_shapes_agree(
+/// 同じ構文位置から得た構造体式の形状が一致することを示す。
+pub proof fn structure_expression_shapes_agree(
     source: &str, forms: Seq<Form>, root: int, left: StructureExpressionShape, right: StructureExpressionShape,
 )
     requires structure_expression_matches(source, forms, root, left), structure_expression_matches(source, forms, root, right),
@@ -193,7 +205,7 @@ pub fn structure_expression_shape(source: &str, forms: &[Form], root: usize) -> 
     assert forall|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms@, root as int, shape)
         <==> found == Some(shape) by {
         if structure_expression_matches(source, forms@, root as int, shape) {
-            structure_shapes_agree(source, forms@, root as int, shape, found->Some_0);
+            structure_expression_shapes_agree(source, forms@, root as int, shape, found->Some_0);
         }
     };
     found
@@ -206,6 +218,7 @@ pub proof fn structure_expression_positions(
     requires structure_expression_matches(source, forms, root, shape),
     ensures
         0 <= root < shape.input.start < shape.input.end <= forms.len(),
+        forms[root] is List,
         shape.input.end == match forms[shape.input.start as int] {
             Form::List { end, .. } => end as int,
             Form::Atom { .. } => shape.input.start + 1,

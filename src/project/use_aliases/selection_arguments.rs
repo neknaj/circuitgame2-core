@@ -180,8 +180,8 @@ pub(super) proof fn selection_arguments_agree(
 {
 }
 
-/// 成功したビット選択の個数は、入力幅や診断位置にかかわらず元の引数で決まる。
-pub(super) proof fn selection_counts_agree(
+/// 成功したビット選択の値は入力幅や診断位置にかかわらず元の引数で決まる。
+pub(super) proof fn successful_selections_agree(
     source: &ProjectSource, forms: Seq<Form>, shape: &BitSelectionShape,
     left_width: u64, left_origin: &LocatedName, left: CheckedBitSelection,
     right_width: u64, right_origin: &LocatedName, right: CheckedBitSelection,
@@ -189,7 +189,7 @@ pub(super) proof fn selection_counts_agree(
     requires
         selection_arguments_match(source, forms, shape, left_width, left_origin, Ok(left)),
         selection_arguments_match(source, forms, shape, right_width, right_origin, Ok(right)),
-    ensures left.count == right.count,
+    ensures left == right,
 {
 }
 

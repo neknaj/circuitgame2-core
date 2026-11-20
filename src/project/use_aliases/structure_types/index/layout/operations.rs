@@ -174,6 +174,65 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
             }
     }
 
+    pub(in crate::project::use_aliases) proof fn checked_field_requires_structure(
+        &self, name: &str, input: StructureFieldType, checked: TypedStructureOperation,
+    )
+        requires self.structure_operation_matches(StructureOperation::Field(name), input, Ok(checked)),
+        ensures input is Struct,
+    {
+    }
+
+    /// 同じ構造体と名前に対する成功したフィールド選択は、同じビット区間を指す。
+    pub(in crate::project::use_aliases) proof fn structure_field_ranges_agree(
+        &self, position: StructurePosition, first_name: &str, second_name: &str,
+        first: TypedStructureOperation, second: TypedStructureOperation,
+    )
+        requires
+            first_name.spec_bytes() == second_name.spec_bytes(),
+            self.structure_operation_matches(StructureOperation::Field(first_name),
+                StructureFieldType::Struct(position), Ok(first)),
+            self.structure_operation_matches(StructureOperation::Field(second_name),
+                StructureFieldType::Struct(position), Ok(second)),
+        ensures first.range == second.range,
+    {
+        let (a, field_a) = self.selected_field(position, first_name, first);
+        let (b, field_b) = self.selected_field(position, second_name, second);
+        let i = choose|i: int| 0 <= i < self.entries@.len() && (#[trigger] self.entries@[i]) == *a;
+        let j = choose|j: int| 0 <= j < self.entries@.len() && (#[trigger] self.entries@[j]) == *b;
+        if i < j {
+            assert(structure_before(self.entries@[i].position, self.entries@[j].position));
+        } else if j < i {
+            assert(structure_before(self.entries@[j].position, self.entries@[i].position));
+        }
+        assert(*a == *b);
+        let left = choose|i: int| 0 <= i < a.fields@.len() && (#[trigger] a.fields@[i]) == *field_a
+            && forall|j: int| 0 <= j < i ==> (#[trigger] a.fields@[j]).name.spec_bytes() != first_name.spec_bytes();
+        let right = choose|i: int| 0 <= i < a.fields@.len() && (#[trigger] a.fields@[i]) == *field_b
+            && forall|j: int| 0 <= j < i ==> (#[trigger] a.fields@[j]).name.spec_bytes() != second_name.spec_bytes();
+        if left < right {
+            assert(a.fields@[left].name.spec_bytes() != second_name.spec_bytes());
+        } else if right < left {
+            assert(a.fields@[right].name.spec_bytes() != first_name.spec_bytes());
+        }
+    }
+
+    proof fn selected_field(
+        &self, position: StructurePosition, name: &str, operation: TypedStructureOperation,
+    ) -> (selected: (&StructureLayout<'p, 'a>, &StructureLayoutField<'p, 'a>))
+        requires self.structure_operation_matches(StructureOperation::Field(name),
+            StructureFieldType::Struct(position), Ok(operation)),
+        ensures
+            self.layout_matches(position, Some(selected.0)),
+            selected.0.field_matches(name, Some(selected.1)),
+            operation.range == selected.1.range,
+    {
+        let (layout, field) = choose|layout: &StructureLayout, field: &StructureLayoutField|
+            #[trigger] self.layout_matches(position, Some(layout))
+            && #[trigger] layout.field_matches(name, Some(field))
+            && operation == TypedStructureOperation { ty: field.ty, range: field.range };
+        (layout, field)
+    }
+
     /// 操作ごとの入力型と、指定した配置から決まる結果型・区間または診断を表す。
     pub closed spec fn structure_operation_matches(
         &self, op: StructureOperation, input: StructureFieldType, result: Result<TypedStructureOperation, StructureOperationError>,

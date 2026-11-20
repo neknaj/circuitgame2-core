@@ -5,7 +5,7 @@ use super::function_types::FuncSignalTypeError;
 use super::selection_arguments::check_selection_arguments;
 use super::structure_types::{StructureExpressionContext, StructureLayouts, TypedStructureOperation};
 #[cfg(verus_only)]
-use super::selection_arguments::{CheckedBitSelection, selection_arguments_match, selection_counts_agree};
+use super::selection_arguments::{CheckedBitSelection, selection_arguments_match, successful_selections_agree};
 #[cfg(verus_only)]
 use super::function_literals::output_indices;
 #[cfg(verus_only)]
@@ -567,7 +567,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] selection_arguments_match(source, forms, &inferred_shape, input_width, &input.origin, Ok(inferred))
             && #[trigger] is_form_location(source, forms[root as int], expression)
             && types@[index] == Some(SignalType { ty: ResolvedPortType::Bits(inferred.count), origin: expression });
-        selection_counts_agree(source, forms, &shape, input_width, &input.origin, inferred,
+        successful_selections_agree(source, forms, &shape, input_width, &input.origin, inferred,
             width, &origin, selection);
     }
 
@@ -603,22 +603,33 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn structure_projection_widths(
         &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
         layouts: StructureLayouts, types: Seq<Option<SignalType>>, projection: StructureProjection,
-    )
+    ) -> (shape: StructureExpressionShape)
         requires structure_projection_matches(self, file, entry, limit, wiring, layouts, types, projection),
         ensures ({
             let target = projection.target as int;
             let range = projection.operation.range;
             let input = signal_type_at(wiring, types.take(target), projection.input);
             let project = self.targets.project_model();
-            let parsed = project.circuits_model()[file as int];
-            let root = parsed.definitions@[wiring.drivers.definitions@[target].definition as int].expression.start;
+            let source = &project.sources_model()[file as int];
+            let parsed = &project.circuits_model()[file as int];
+            let definition = wiring.drivers.definitions@[target].definition;
+            let row = parsed.definitions@[definition as int];
+            let frame = parsed.entry_ranges@[entry as int];
+            let first = row.signals.start - frame.signals.start;
+            let forms = parsed.syntax.forms@;
+            let context = StructureExpressionContext { file, entry, limit, source, parsed,
+                definition: (definition - frame.definitions.start) as usize };
             &&& input.is_some() && types[target].is_some()
+            &&& 0 <= first < wiring.signals@.len()
+            &&& wiring.signals@[first].definition == definition && wiring.signals@[first].driver == projection.input
+            &&& named_structure_expression_matches(source.text, forms, row.expression.start as int, shape)
+            &&& is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
+            &&& self.structure_expression_type_matches(&context, shape, &layouts, input->Some_0,
+                Ok((types[target]->Some_0, projection.operation, projection.input_width)))
             &&& range.start < range.end <= projection.input_width
             &&& self.layout_port_width_matches(&layouts, types[target]->Some_0.ty, range.end - range.start)
             &&& self.layout_port_width_matches(&layouts, input->Some_0.ty, projection.input_width as int)
-            &&& (exists|shape: StructureExpressionShape|
-                #[trigger] named_structure_expression_matches(project.sources_model()[file as int].text, parsed.syntax.forms@, root as int, shape)
-                && (!(shape.kind is Field) ==> range.start == 0 && range.end == projection.input_width))
+            &&& (!(shape.kind is Field) ==> range.start == 0 && range.end == projection.input_width)
         }),
     {
         reveal(structure_projection_matches);
@@ -635,8 +646,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let checked = (types[target]->Some_0, projection.operation, projection.input_width);
         let shape = choose|shape: StructureExpressionShape|
             #[trigger] named_structure_expression_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+            && is_form_location(source, parsed.syntax.forms@[shape.input.start as int],
+                wiring.signals@[row.signals.start - frame.signals.start].site)
             && self.structure_expression_type_matches(&context, shape, &layouts, input, Ok(checked));
         self.structure_expression_width_evidence(&context, shape, &layouts, input, checked);
+        shape
     }
 
     pub(super) proof fn atom_types_keep_wiring(
