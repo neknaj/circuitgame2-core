@@ -26,6 +26,7 @@ mod names;
 mod ports;
 mod selection_shapes;
 mod structure;
+mod structure_expressions;
 #[cfg(verus_only)]
 mod test_diagnostics;
 mod test_items;
@@ -109,6 +110,11 @@ pub use selection_shapes::{
     bit_selection_shape_matches, bit_selection_shape_positions, strict_bit_selection_has_shape, strict_bit_selection_input,
 };
 use structure::validate_structure_arguments;
+pub use structure_expressions::{StructureExpressionKind, StructureExpressionShape, structure_expression_shape};
+#[cfg(verus_only)]
+pub use structure_expressions::{
+    strict_structure_expression_has_shape, structure_expression_matches, structure_expression_positions,
+};
 pub use structure::sites::{FieldSite, FieldTypeSite, StructureSites, structure_sites};
 #[cfg(verus_only)]
 pub use structure::sites::{
