@@ -14,6 +14,7 @@ mod body;
 mod call_shapes;
 mod build;
 mod clauses;
+mod concat_arguments;
 #[cfg(verus_only)]
 mod clause_diagnostics;
 mod definitions;
@@ -35,6 +36,12 @@ mod test_values;
 pub use body::routine_expansion_evidence;
 use body::validate_routine_arguments;
 pub use body::{DefinitionReferences, first_routine_expansion};
+pub use concat_arguments::concat_argument_range;
+#[cfg(verus_only)]
+pub use concat_arguments::{
+    concat_arguments_evidence, concat_arguments_match, following_concat_argument, indexed_concat_argument_signal,
+    strict_concat_has_argument_range,
+};
 use build::BuildRows;
 pub use call_shapes::{
     CallShape, RoutineArity, call_argument_range, definition_root_is_call, indexed_call_shape,

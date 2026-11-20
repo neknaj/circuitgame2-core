@@ -329,7 +329,7 @@ pub(super) proof fn list_child_signals(
     };
 }
 
-proof fn direct_name_in_signal_index(
+pub(super) proof fn direct_name_in_signal_index(
     source: &str, forms: Seq<Form>, first: int, end: int, name: usize,
 )
     requires

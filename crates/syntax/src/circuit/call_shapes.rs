@@ -257,6 +257,7 @@ pub fn call_argument_range(forms: &[Form], call: &CallShape) -> (range: Range<us
 
 /// 残りの引数列から、先頭の引数式が占める半開範囲を返す。
 ///
+/// 通常呼び出しや [`concat`](super::concat_argument_range) の引数範囲を渡せる。
 /// 次の呼び出しでは、この範囲の末尾を残りの引数列の先頭に使う。
 /// 入れ子のリストは、その末尾の添字まで一度に進む。
 ///
@@ -329,7 +330,7 @@ fn count_arguments(forms: &[Form], first: usize, end: usize) -> (count: usize)
     count
 }
 
-proof fn list_children_region(forms: Seq<Form>, parent: int, first: int, end: int)
+pub(super) proof fn list_children_region(forms: Seq<Form>, parent: int, first: int, end: int)
     requires
         0 <= parent < first <= end <= forms.len(),
         forms[parent] is List && forms[parent]->List_end == end,
