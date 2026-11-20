@@ -6,7 +6,7 @@ use super::selection_arguments::{check_selection_arguments, check_selection_chai
 use super::structure_types::{StructureExpressionContext, StructureLayouts, TypedStructureOperation};
 #[cfg(verus_only)]
 use super::selection_arguments::{
-    CheckedBitSelection, nested_named_selection_matches, nested_named_selection_root,
+    CheckedBitSelection, nested_named_selection_matches, nested_named_selection_root, nested_named_selections_agree,
     selection_arguments_match, selection_chain_arguments_match,
     successful_selection_chain_counts_agree, successful_selections_agree,
 };
@@ -28,7 +28,7 @@ use crate::syntax::{AtomKind, Form};
 use crate::syntax::circuit::{BitSelectionShape, StructureExpressionShape, bit_selection_shape, structure_expression_shape};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    NamedBuildCircuit, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
+    NamedBuildCircuit, bit_selection_excludes_structure, bit_selection_shape_matches, bit_selection_shape_positions, bit_selection_shapes_agree,
     build_bare_signal_position,
     build_definition_scope_evidence, build_selection_chain_signal, build_selection_input_position, build_structure_input_position,
     ordinary_call_at, ordinary_call_excludes_special_forms, structure_expression_matches, structure_expression_positions,
@@ -884,6 +884,65 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && types@[index] == Some(SignalType { ty: ResolvedPortType::Bits(inferred.count), origin: expression });
         successful_selections_agree(source, forms, &shape, input_width, &input.origin, inferred,
             width, &origin, selection);
+    }
+
+    /// 型検査に成功した選択列から、入力型と各段の検査の根拠を取り出す。
+    pub(super) proof fn successful_nested_selection_type(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>,
+        types: Vec<Option<SignalType>>, index: int, steps: Seq<BitSelectionShape>, leaf: usize,
+    ) -> (evidence: (u64, LocatedName<'p, 'a>, CheckedBitSelection))
+        requires
+            atoms_match(self, file, limit, source, parsed, entry as int, wiring, widths, roots, Ok(types)),
+            0 <= index < types@.len(),
+            widths[index].is_none(),
+            roots.len() > 0,
+            ({
+                let driver = wiring.drivers.definitions@[index];
+                let row = parsed.definitions@[driver.definition as int];
+                let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+                &&& driver.result_index == 0
+                &&& nested_named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, leaf)
+                &&& signal_type_at(wiring, types@.take(index), wiring.signals@[first].driver).is_some()
+            }),
+        ensures ({
+            let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+            let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+            let (width, origin, selection) = evidence;
+            &&& signal_type_at(wiring, types@.take(index), wiring.signals@[first].driver)
+                == Some(SignalType { ty: ResolvedPortType::Bits(width), origin })
+            &&& selection_chain_arguments_match(source, parsed.syntax.forms@, steps, width, origin, Ok(selection))
+            &&& types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(selection.count)
+        }),
+    {
+        let outputs = self.successful_atom_step(file, entry, limit, source, parsed, wiring, widths, roots, types, index);
+        assert(atom_type_step(self, file, limit, source, parsed, entry as int,
+            wiring, widths, outputs, roots, types@.take(index), index, Ok(types@[index])));
+        reveal(atom_type_step);
+        let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+        let root = row.expression.start;
+        let forms = parsed.syntax.forms@;
+        nested_named_selection_root(source.text, forms, root, steps, leaf);
+        bit_selection_excludes_structure(source.text, forms, root as int, steps[0]);
+        if exists|shape: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, root as int, shape) {
+            let shape = choose|shape: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, root as int, shape);
+            bit_selection_shapes_agree(source.text, forms, root as int, steps[0], shape);
+            assert(false);
+        }
+        let (actual, at) = choose|actual: Seq<BitSelectionShape>, at: usize|
+            #[trigger] nested_named_selection_matches(source.text, forms, root, actual, at);
+        nested_named_selections_agree(source.text, forms, root, steps, leaf, actual, at);
+        reveal(nested_selection_type_matches);
+        let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+        let input = signal_type_at(wiring, types@.take(index), wiring.signals@[first].driver)->Some_0;
+        assert(types@[index].is_some());
+        assert(input.ty is Bits);
+        let input_width = input.ty->Bits_0;
+        let (inferred, _expression) = choose|inferred: CheckedBitSelection, expression: LocatedName|
+            #[trigger] selection_chain_arguments_match(source, forms, steps, input_width, input.origin, Ok(inferred))
+            && #[trigger] is_form_location(source, forms[root as int], expression)
+            && types@[index] == Some(SignalType { ty: ResolvedPortType::Bits(inferred.count), origin: expression });
+        (input_width, input.origin, inferred)
     }
 
     /// 裸の信号名の結果型がその駆動元の型を引き継ぐことを示す。

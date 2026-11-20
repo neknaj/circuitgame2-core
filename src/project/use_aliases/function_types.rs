@@ -13,7 +13,10 @@ use super::{FuncWiring, ResolvedPortType, TypedFuncCall, function_atoms::{
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, circuit::BitSelectionShape};
 #[cfg(verus_only)]
-use super::selection_arguments::{CheckedBitSelection, selection_arguments_match};
+use super::selection_arguments::{
+    CheckedBitSelection, nested_named_selection_matches, nested_named_selection_root, selection_arguments_match,
+    selection_chain_arguments_match,
+};
 #[cfg(verus_only)]
 use super::function_atoms::named_selection_matches;
 #[cfg(verus_only)]
@@ -245,6 +248,51 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.nonliteral_definition_has_no_literal_width(file, entry, limit, &typed.literals, &wiring, index);
         self.successful_selection_type(file, entry, limit, source, parsed, &wiring, typed.literals.widths@,
             roots.types@, typed.types, index, shape, input, width, origin, selection);
+    }
+
+    /// 関数の型検査から、ネストした選択の入力幅と選択範囲の根拠を取り出す。
+    pub(super) proof fn checked_nested_selection_type(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes, wiring: FuncWiring,
+        index: int, steps: Seq<BitSelectionShape>, leaf: usize,
+    ) -> (evidence: (u64, LocatedName<'p, 'a>, CheckedBitSelection))
+        requires
+            self.func_signal_types_evidence(file, entry, limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+            0 <= index < typed.types@.len() && index < wiring.drivers.definitions@.len(),
+            ({
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let source = &project.sources_model()[file as int];
+                let driver = wiring.drivers.definitions@[index];
+                let row = parsed.definitions@[driver.definition as int];
+                let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+                &&& driver.result_index == 0
+                &&& nested_named_selection_matches(source.text, parsed.syntax.forms@, row.expression.start, steps, leaf)
+                &&& signal_type_at(&wiring, typed.types@.take(index), wiring.signals@[first].driver).is_some()
+            }),
+        ensures ({
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[file as int];
+            let source = &project.sources_model()[file as int];
+            let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+            let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+            let (width, origin, selection) = evidence;
+            &&& signal_type_at(&wiring, typed.types@.take(index), wiring.signals@[first].driver)
+                == Some(SignalType { ty: ResolvedPortType::Bits(width), origin })
+            &&& selection_chain_arguments_match(source, parsed.syntax.forms@, steps, width, origin, Ok(selection))
+            &&& typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(selection.count)
+        }),
+    {
+        let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
+        self.call_outputs_fit_wiring(file, entry, limit, &roots, &wiring);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let row = parsed.definitions@[wiring.drivers.definitions@[index].definition as int];
+        nested_named_selection_root(source.text, parsed.syntax.forms@, row.expression.start, steps, leaf);
+        self.nonliteral_definition_has_no_literal_width(file, entry, limit, &typed.literals, &wiring, index);
+        self.successful_nested_selection_type(file, entry, limit, source, parsed, &wiring, typed.literals.widths@,
+            roots.types@, typed.types, index, steps, leaf)
     }
 
     pub(super) closed spec fn signal_type_sources(

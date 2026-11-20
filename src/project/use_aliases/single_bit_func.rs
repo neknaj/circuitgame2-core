@@ -28,11 +28,14 @@ use super::{FuncSignalTypes, TypedFuncCall, TypedPort};
 use super::super::location_in_source;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    BitSelectionShape, build_bare_signal_position, build_definition_scope_evidence, build_selection_input_position,
+    BitSelectionShape, build_bare_signal_position, build_definition_scope_evidence, build_selection_chain_signal,
+    build_selection_input_position,
     definition_signal_positions_agree, definition_target_range, indexed_entry_evidence,
 };
 #[cfg(verus_only)]
 use super::function_atoms::named_selection_matches;
+#[cfg(verus_only)]
+use super::selection_arguments::nested_named_selection_matches;
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 #[cfg(verus_only)]
@@ -372,6 +375,90 @@ pub(super) proof fn selection_rhs_driver_matches(
     let signal = choose|signal: int| #[trigger] prior_name_binding(parsed, entry, definition, root, wiring, prior, signal)
         && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver;
     assert(signal == row.signals.start);
+}
+
+/// 選択列の末端にある信号の駆動元は、定義行の信号索引が指す駆動元と一致する。
+pub(super) proof fn nested_selection_rhs_driver_matches(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, definition: usize,
+    wiring: &FuncWiring, prior: int, steps: Seq<BitSelectionShape>, leaf: usize, driver: OutputDriver,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(),
+        entry < parsed.entry_ranges@.len(),
+        parsed.entry_ranges@[entry as int].definitions.start <= definition
+            < parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len(),
+        nested_named_selection_matches(source.text, parsed.syntax.forms@,
+            parsed.definitions@[definition as int].expression.start, steps, leaf),
+        operand_matches(source, parsed, entry, definition, leaf as int, wiring, prior, SingleBitOperand::Driver(driver)),
+    ensures ({
+        let row = parsed.definitions@[definition as int];
+        let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+        &&& 0 <= first < wiring.signals@.len()
+        &&& wiring.signals@[first].driver == driver
+    }),
+{
+    reveal(nested_named_selection_matches);
+    parsed_index_evidence(*source, *parsed);
+    build_selection_chain_signal(source.text, &parsed.build_model(), entry as int, definition as int, steps, leaf);
+    let row = parsed.definitions@[definition as int];
+    let signal = choose|signal: int| #[trigger] prior_name_binding(parsed, entry, definition, leaf as int, wiring, prior, signal)
+        && wiring.signals@[signal - parsed.entry_ranges@[entry as int].signals.start].driver == driver;
+    assert(signal == row.signals.start);
+}
+
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 検査済みの結線から、選択列の入力を駆動する信号を確定する。
+    pub(super) proof fn checked_nested_selection_driver(
+        &self, file: usize, entry: usize, limit: u64, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        wiring: &FuncWiring, index: usize, steps: Seq<BitSelectionShape>, leaf: usize,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
+            ({
+                let project = self.targets.project_model();
+                &&& file < project.sources_model().len() && file < project.circuits_model().len()
+                &&& *source == project.sources_model()[file as int] && *parsed == project.circuits_model()[file as int]
+            }),
+            parsed_circuit_matches(*source, *parsed),
+            entry < parsed.syntax.entries@.len(), entry < parsed.entry_ranges@.len(),
+            index < wiring.drivers.definitions@.len(),
+            ({
+                let definition = wiring.drivers.definitions@[index as int].definition;
+                let frame = parsed.entry_ranges@[entry as int].definitions;
+                &&& frame.start <= definition < frame.end <= parsed.definitions@.len()
+                &&& nested_named_selection_matches(source.text, parsed.syntax.forms@,
+                    parsed.definitions@[definition as int].expression.start, steps, leaf)
+            }),
+        ensures ({
+            let definition = wiring.drivers.definitions@[index as int].definition;
+            let row = parsed.definitions@[definition as int];
+            let first = parsed.entry_ranges@[entry as int].signals.start;
+            let at = row.signals.start - first;
+            &&& first <= row.signals.start && at < wiring.signals@.len()
+            &&& operand_matches(source, parsed, entry, definition, leaf as int, wiring, index as int,
+                SingleBitOperand::Driver(wiring.signals@[at].driver))
+            &&& single_bit_driver_available(wiring.signals@[at].driver, wiring.drivers.signature.inputs@.len(), index as nat)
+        }),
+    {
+        reveal(nested_named_selection_matches);
+        parsed_index_evidence(*source, *parsed);
+        self.checked_wiring_is_func(file, entry, limit, *wiring);
+        let definition = wiring.drivers.definitions@[index as int].definition;
+        let row = parsed.definitions@[definition as int];
+        let at = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+        build_selection_chain_signal(source.text, &parsed.build_model(), entry as int, definition as int, steps, leaf);
+        self.checked_signal_driver(file, entry, limit, *wiring, definition, row.signals.start);
+        if let OutputDriver::Definition(prior) = wiring.signals@[at].driver {
+            assert(prior < index) by {
+                if index < prior {
+                    assert(wiring.drivers.definitions@[index as int].definition <= wiring.drivers.definitions@[prior as int].definition);
+                }
+            };
+        }
+        assert(prior_name_binding(parsed, entry, definition, leaf as int, wiring, index as int, row.signals.start as int));
+    }
 }
 
 pub(super) closed spec fn no_operand(

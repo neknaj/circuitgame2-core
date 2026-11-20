@@ -11,7 +11,7 @@ use super::super::super::function_atoms::named_structure_expression_matches;
 use super::super::super::function_drivers::same_definition_driver;
 use super::super::super::selection_arguments::{
     nested_named_selection_matches, nested_named_selection_root, nested_named_selections_agree, selection_chain_values_agree,
-    selection_chain_values_match, successful_selections_agree,
+    selection_chain_projection_preserves_values, selection_chain_values_match, successful_selections_agree,
 };
 use super::super::super::single_bit_func::{source_operand_is_atom, source_operands_agree};
 use super::super::super::structure_types::{CheckedStructureExpression, StructureExpressionContext};
@@ -606,21 +606,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let forms = scope.parsed.syntax.forms@;
                 let width = bit_driver_width(scope.inputs@, definitions, input)->Some_0;
                 let origin = driver_width_origin(signature, definitions, input);
-                let shape = choose|shape: BitSelectionShape|
-                    #[trigger] named_selection_matches(scope.source.text, forms, root, shape)
-                    && operand_matches(scope.source, scope.parsed, scope.entry, definition, shape.input.start as int,
-                        scope.wiring, index, SingleBitOperand::Driver(input))
-                    && selection_arguments_match(scope.source, forms, &shape, width, &origin, Ok(selection));
                 driver_value_length(scope, definitions, inputs, values, input, width);
-                assert(selection_arguments_match(scope.source, forms, &shape, driver_values(inputs, values, input).len() as u64,
-                    &origin, Ok(selection)));
                 let input_bits = driver_values(inputs, values, input);
                 assert(result =~= Seq::new(selection.count as nat,
                     |i: int| input_bits[selection.start + i * selection.stride]));
-                bit_selection_shape_positions(scope.source.text, forms, root, shape);
-                assert(self.source_selection_case(&context, inputs, values, result, shape, input, selection, origin)) by {
-                    reveal(UseAliases::source_selection_case);
-                };
+                if Self::nested_selection_projection(scope, definitions, index, input, selection) {
+                    reveal(UseAliases::nested_selection_projection);
+                    let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
+                        #[trigger] nested_named_selection_matches(scope.source.text, forms, root as usize, steps, leaf)
+                        && operand_matches(scope.source, scope.parsed, scope.entry, definition, leaf as int,
+                            scope.wiring, index, SingleBitOperand::Driver(input))
+                        && selection_chain_arguments_match(scope.source, forms, steps, width, origin, Ok(selection));
+                    selection_chain_projection_preserves_values(scope.source, forms, steps, origin, input_bits, selection);
+                    assert(self.source_nested_selection_case(&context, inputs, values, result, steps, leaf, input, origin)) by {
+                        reveal(UseAliases::source_nested_selection_case);
+                    };
+                } else {
+                    let shape = choose|shape: BitSelectionShape|
+                        #[trigger] named_selection_matches(scope.source.text, forms, root, shape)
+                        && operand_matches(scope.source, scope.parsed, scope.entry, definition, shape.input.start as int,
+                            scope.wiring, index, SingleBitOperand::Driver(input))
+                        && selection_arguments_match(scope.source, forms, &shape, width, &origin, Ok(selection));
+                    bit_selection_shape_positions(scope.source.text, forms, root, shape);
+                    assert(self.source_selection_case(&context, inputs, values, result, shape, input, selection, origin)) by {
+                        reveal(UseAliases::source_selection_case);
+                    };
+                }
                 assert(self.ordinary_source_rhs_value(&context, inputs, values, result));
             },
         }

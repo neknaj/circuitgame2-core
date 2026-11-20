@@ -8,14 +8,16 @@ use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc};
 use super::super::{
-    FuncCallSignatureError, FuncCallTarget, FuncSignalTypeError, FuncWiring, FuncWiringResult, OutputDriver,
+    FuncCallSignatureError, FuncCallTarget, FuncSignalTypeError, FuncSignalTypes, FuncWiring, FuncWiringResult, OutputDriver,
     ResolvedPortType, SelectionArgumentError, SingleBitOperand, StructureLayouts, StructureTypeError,
     TypedPort, TypedRoutineSignature, UseAliases,
 };
 use super::super::function_atoms::{StructureProjection, copy_location, named_selection};
 #[cfg(verus_only)]
 use super::super::function_atoms::SignalType;
-use super::super::selection_arguments::{CheckedBitSelection, check_selection_arguments};
+use super::super::selection_arguments::{
+    CheckedBitSelection, check_selection_arguments, check_selection_chain, nested_named_selection,
+};
 use crate::project::{LocatedName, ProjectSource};
 use crate::project::circuits::form_location;
 use crate::syntax::{Form, circuit::{NamedBuildCircuit, definition_target_atoms}};
@@ -24,11 +26,18 @@ use crate::syntax::{Form, circuit::{NamedBuildCircuit, definition_target_atoms}}
 use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available, nor_operand_matches};
 #[cfg(verus_only)]
 use super::super::{
-    FuncSignalTypes, TypedFuncCall, function_atoms::named_selection_matches, function_drivers::{checked_ports_and_output_bounds, expected_output_context, indexed_driver_site},
+    TypedFuncCall, function_atoms::named_selection_matches, function_drivers::{checked_ports_and_output_bounds, expected_output_context, indexed_driver_site},
     port_types::typed_name_sites, selection_arguments::selection_arguments_match, single_bit_func::{bare_rhs_driver_matches, constant_operand_literal, no_operand, operand_matches, selection_rhs_driver_matches},
 };
 #[cfg(verus_only)]
 use super::super::function_atoms::{signal_type_at, structure_projection_matches, structure_projections_in_order};
+#[cfg(verus_only)]
+use super::super::selection_arguments::{
+    nested_named_selection_matches, selection_chain_arguments_match, selection_chain_success_excludes_error,
+    successful_selection_chain_counts_agree,
+};
+#[cfg(verus_only)]
+use super::super::single_bit_func::nested_selection_rhs_driver_matches;
 #[cfg(verus_only)]
 use crate::project::location_in_source;
 #[cfg(verus_only)]
@@ -450,14 +459,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     scope.file, entry, local, 0, scope.limit, Ok(Some(call)),
                 ) && call.call.call.form == root && call.call.call.arguments == 2 && call.call.target is Nor
             },
-            BitFuncRhs::Selection { input, selection } => exists|shape: BitSelectionShape|
+            BitFuncRhs::Selection { input, selection } => (exists|shape: BitSelectionShape|
                 #[trigger] named_selection_matches(scope.source.text, forms, root, shape)
                 && (bit_driver_width(scope.inputs@, prior, input) matches Some(width)
                 && operand_matches(scope.source, parsed, entry, definition, shape.input.start as int, scope.wiring, i,
                     SingleBitOperand::Driver(input))
                 && selection_arguments_match(scope.source, forms, &shape, width, &driver_width_origin(signature, prior, input),
-                    Ok(selection))),
+                    Ok(selection)))) || Self::nested_selection_projection(scope, prior, i, input, selection),
         } }
+    }
+
+    #[verifier::opaque]
+    spec fn nested_selection_projection(
+        scope: &FuncProjection, prior: Seq<CheckedBitDefinition>, i: int,
+        input: OutputDriver, selection: CheckedBitSelection,
+    ) -> bool {
+        let parsed = scope.parsed;
+        let definition = scope.wiring.drivers.definitions@[i].definition;
+        let root = parsed.definitions@[definition as int].expression.start;
+        let forms = parsed.syntax.forms@;
+        exists|steps: Seq<BitSelectionShape>, leaf: usize|
+            #[trigger] nested_named_selection_matches(scope.source.text, forms, root, steps, leaf)
+            && operand_matches(scope.source, parsed, scope.entry, definition, leaf as int, scope.wiring, i,
+                SingleBitOperand::Driver(input))
+            && (bit_driver_width(scope.inputs@, prior, input) matches Some(width)
+                && selection_chain_arguments_match(scope.source, forms, steps, width,
+                    driver_width_origin(&scope.wiring.drivers.signature, prior, input), Ok(selection)))
     }
 
     spec fn bit_definition_from_source(
@@ -527,7 +554,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let local = (definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
 
         let call_candidate = row.expression.end == root + 4 && forms[root] is List
-            && (forall|shape: BitSelectionShape| !#[trigger] named_selection_matches(source.text, forms, root, shape));
+            && (forall|shape: BitSelectionShape| !#[trigger] named_selection_matches(source.text, forms, root, shape))
+            && (forall|steps: Seq<BitSelectionShape>, leaf: usize|
+                !#[trigger] nested_named_selection_matches(source.text, forms, root as usize, steps, leaf));
         &&& i < wiring.drivers.definitions@.len()
         &&& (!(error matches BitFuncError::Unsupported(UnsupportedBitFunc::DefinitionOutputCount, _))
             ==> forall|j: int| 0 <= j < scope.structures@.len() ==> (#[trigger] scope.structures@[j]).target != i)
@@ -542,7 +571,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && no_operand(source, parsed, entry, definition, shape.input.start as int, wiring, i)
                         && is_form_location(source, forms[root], site)
                 } else {
-                    self.unsupported_expression(scope.file, entry, scope.limit, wiring, i, site)
+                    (forall|steps: Seq<BitSelectionShape>, leaf: usize|
+                        !#[trigger] nested_named_selection_matches(source.text, forms, root as usize, steps, leaf))
+                    && self.unsupported_expression(scope.file, entry, scope.limit, wiring, i, site)
                 }
             },
             BitFuncError::Call(position, error) => call_candidate && position == local
@@ -718,15 +749,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let origin = driver_width_origin(&wiring.drivers.signature, prior, driver);
         self.checked_wiring_is_func(scope.file, scope.entry, scope.limit, *wiring);
         assert(indexed_driver_site(source, parsed, scope.entry as int, site));
-        let shape = choose|shape: BitSelectionShape|
-            #[trigger] named_selection_matches(source.text, forms, row.expression.start as int, shape)
-            && operand_matches(source, parsed, scope.entry, site.definition, shape.input.start as int, wiring,
-                index, SingleBitOperand::Driver(driver))
-            && selection_arguments_match(source, forms, &shape, width, &origin, Ok(selection));
-        selection_rhs_driver_matches(source, parsed, scope.entry, site.definition, wiring, index, shape, driver);
         let input = signal_type_at(wiring, typed.types@.take(index), driver)->Some_0;
-        self.checked_selection_type(scope.file, scope.entry, scope.limit, typed, *wiring,
-            index, shape, input, width, origin, selection);
+        if Self::nested_selection_projection(scope, prior, index, driver, selection) {
+            reveal(UseAliases::nested_selection_projection);
+            let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
+                #[trigger] nested_named_selection_matches(source.text, forms, row.expression.start, steps, leaf)
+                && operand_matches(source, parsed, scope.entry, site.definition, leaf as int, wiring,
+                    index, SingleBitOperand::Driver(driver))
+                && selection_chain_arguments_match(source, forms, steps, width, origin, Ok(selection));
+            nested_selection_rhs_driver_matches(source, parsed, scope.entry, site.definition, wiring, index, steps, leaf, driver);
+            let (inferred_width, inferred_origin, inferred) = self.checked_nested_selection_type(
+                scope.file, scope.entry, scope.limit, typed, *wiring, index, steps, leaf,
+            );
+            successful_selection_chain_counts_agree(source, forms, steps, inferred_width, inferred_origin, inferred,
+                width, origin, selection);
+        } else {
+            let shape = choose|shape: BitSelectionShape|
+                #[trigger] named_selection_matches(source.text, forms, row.expression.start as int, shape)
+                && operand_matches(source, parsed, scope.entry, site.definition, shape.input.start as int, wiring,
+                    index, SingleBitOperand::Driver(driver))
+                && selection_arguments_match(source, forms, &shape, width, &origin, Ok(selection));
+            selection_rhs_driver_matches(source, parsed, scope.entry, site.definition, wiring, index, shape, driver);
+            self.checked_selection_type(scope.file, scope.entry, scope.limit, typed, *wiring,
+                index, shape, input, width, origin, selection);
+        }
     }
 
     proof fn nor_definition_type(
@@ -912,12 +958,93 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         CheckedBitDefinition { expression, width: range.end - range.start, rhs }
     }
 
+    /// 選択列の入力を結線から取り出し、合成した選択を一つの右辺にする。
+    fn project_nested_definition(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, prior: &[CheckedBitDefinition<'p, 'a>], index: usize,
+        steps: &[crate::syntax::circuit::BitSelectionShape], leaf: usize, expression: LocatedName<'p, 'a>,
+        Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
+    ) -> (checked: CheckedBitDefinition<'p, 'a>)
+        requires
+            self.projection_context(scope),
+            self.projection_port_widths_match(scope),
+            self.definition_widths_match(scope, prior@),
+            self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            typed.types@ == scope.types@,
+            typed.types@.len() == scope.wiring.drivers.definitions@.len(),
+            index == prior@.len() < scope.wiring.drivers.definitions@.len(),
+            forall|i: int| 0 <= i < prior@.len() ==>
+                location_in_source((#[trigger] prior@[i]).expression) && prior@[i].width > 0,
+            forall|j: int| 0 <= j < scope.structures@.len() ==> (#[trigger] scope.structures@[j]).target != index,
+            ({
+                let definition = scope.wiring.drivers.definitions@[index as int].definition;
+                let row = scope.parsed.definitions@[definition as int];
+                let root = row.expression.start;
+                let forms = scope.parsed.syntax.forms@;
+                let (first, end) = definition_target_range(forms, row);
+                &&& end - first == 1
+                &&& root < forms.len()
+                &&& is_form_location(scope.source, forms[root as int], expression)
+                &&& nested_named_selection_matches(scope.source.text, forms, root, steps@, leaf)
+            }),
+        ensures self.bit_definition_from_source(scope, prior@, index as int, checked),
+    {
+        let source = scope.source;
+        let parsed = scope.parsed;
+        let wiring = scope.wiring;
+        let definition = wiring.drivers.definitions[index].definition;
+        let row = &parsed.definitions[definition];
+        let root = row.expression.start;
+        let forms = parsed.syntax.forms.as_slice();
+        proof {
+            reveal(nested_named_selection_matches);
+            self.checked_wiring_is_func(scope.file, scope.entry, scope.limit, *wiring);
+            parsed_index_evidence(*source, *parsed);
+            build_definition_scope_evidence(source.text, &parsed.build_model(), scope.entry as int, definition as int);
+            self.checked_nested_selection_driver(scope.file, scope.entry, scope.limit, source, parsed, wiring, index, steps@, leaf);
+            let site = wiring.drivers.definitions@[index as int];
+            assert(indexed_driver_site(source, parsed, scope.entry as int, site));
+            assert(site.result_index == 0);
+        }
+        let at = row.signals.start - parsed.entry_ranges[scope.entry].signals.start;
+        let input = wiring.signals[at].driver;
+        let (width, origin) = driver_type(&wiring.drivers.signature, scope.inputs.as_slice(), prior, input);
+        let ghost (inferred_width, inferred_origin, inferred) = {
+            self.driver_type_matches_width(scope, prior@, input, width);
+            assert(signal_type_at(wiring, typed.types@.take(index as int), input).is_some());
+            let evidence = self.checked_nested_selection_type(
+                scope.file, scope.entry, scope.limit, typed, *wiring, index as int, steps@, leaf,
+            );
+            assert(evidence.0 == width);
+            evidence
+        };
+        let selection = match check_selection_chain(source, forms, root, steps, leaf, width, origin) {
+            Ok(checked) => checked,
+            Err(_error) => {
+                proof { selection_chain_success_excludes_error(
+                    source, forms@, steps@, inferred_width, inferred_origin, inferred, *origin, _error,
+                ); }
+                unreachable!()
+            }
+        };
+        assert(Self::nested_selection_projection(scope, prior@, index as int, input, selection)) by {
+            reveal(UseAliases::nested_selection_projection);
+            assert(nested_named_selection_matches(source.text, forms@, root, steps@, leaf));
+        };
+        let rhs = BitFuncRhs::Selection { input, selection };
+        CheckedBitDefinition { expression, width: selection.count, rhs }
+    }
+
     fn project_definition(
         &self, scope: &FuncProjection<'_, 'p, 'a>, prior: &[CheckedBitDefinition<'p, 'a>], index: usize,
-        projection: Option<usize>,
+        projection: Option<usize>, Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
     ) -> (result: Result<CheckedBitDefinition<'p, 'a>, BitFuncError<'p, 'a>>)
         requires
             self.projection_context(scope),
+            self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            typed.types@ == scope.types@,
+            typed.types@.len() == scope.wiring.drivers.definitions@.len(),
             index == prior@.len() < scope.wiring.drivers.definitions@.len(),
             self.projection_port_widths_match(scope),
             self.projection_structures_match(scope),
@@ -972,6 +1099,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Err(error) => return Err(BitFuncError::Selection(error)),
             };
             (selection.count, BitFuncRhs::Selection { input, selection })
+        } else if let Some((steps, leaf)) = nested_named_selection(source.text, forms, root) {
+            return Ok(self.project_nested_definition(scope, prior, index, steps.as_slice(), leaf, expression, Ghost(typed)));
         } else if end - root == 4 && matches!(forms[root], Form::List { .. }) {
             let local = definition - parsed.entry_ranges[entry].definitions.start;
             let call = match self.resolve_func_call_signature(file, entry, local, 0, limit) {
@@ -1007,7 +1136,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 組み合わせ関数から、ポートの幅と定義順の右辺を取り出す。
     ///
     /// 信号の転送、定数 `0`・`1`、基底 NOR を扱う。
-    /// `bit`・`slice`・`field`・`as`・`raw` は、裸の信号名を入力に取る式を扱う。
+    /// 最内段の入力が裸の信号名である `bit`・`slice` を扱う。入れ子の選択は配線上で一段にまとめる。
+    /// `field`・`as`・`raw` は、裸の信号名を入力に取る式を扱う。
     /// 構造体型のポート間で同じ型の信号を転送するときは、宣言の総幅を使う。
     ///
     /// # Examples
@@ -1161,6 +1291,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.projection_port_widths_match(&scope),
                 self.projection_structures_match(&scope),
                 typed_model.types@ == scope.types@,
+                typed_model.types@.len() == wiring.drivers.definitions@.len(),
                 self.func_structure_projections_complete(file, entry, limit, typed_model, &wiring, scope.structures@),
                 scope.wiring == &wiring && *signature == wiring.drivers.signature,
                 scope.file == file && scope.entry == entry && scope.limit == limit,
@@ -1181,7 +1312,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         {
             let (cursor, structure) = next_structure_projection(scope.structures.as_slice(), next_structure, i);
             next_structure = cursor;
-            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure) {
+            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure, Ghost(typed_model)) {
                 Ok(checked) => checked,
                 Err(error) => {
                     assert(self.projection_failure(&scope, error));

@@ -736,6 +736,44 @@ pub(super) proof fn selection_chain_values_agree<T>(
     assert(a =~= b);
 }
 
+/// 同じ構文と入力幅について、選択列の検査は成功と失敗を同時には満たさない。
+pub(super) proof fn selection_chain_success_excludes_error(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>, base: u64,
+    success_origin: LocatedName, selection: CheckedBitSelection, error_origin: LocatedName, error: SelectionArgumentError,
+)
+    requires
+        selection_chain_arguments_match(source, forms, steps, base, success_origin, Ok(selection)),
+        selection_chain_arguments_match(source, forms, steps, base, error_origin, Err(error)),
+    ensures false,
+{
+    let good = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, base, success_origin, 0, checked)
+        && projects_selection_chain(checked, base, Some(selection));
+    let (i, prefix, site) = choose|i: int, checked: Seq<CheckedBitSelection>, site: LocatedName|
+        0 <= i < steps.len()
+        && #[trigger] checked_selection_suffix(source, forms, steps, base, error_origin, i + 1, checked)
+        && selection_width_origin(source, forms, steps, i, error_origin, site)
+        && #[trigger] selection_arguments_match(source, forms, &steps[i],
+            selection_input_width(checked, -1, base), &site, Err(error));
+    if prefix.len() > 0 {
+        assert(selection_suffix_stage(source, forms, steps, base, success_origin, 0, good, i + 1));
+        assert(selection_suffix_stage(source, forms, steps, base, error_origin, i + 1, prefix, 0));
+        let lw = selection_input_width(good, i + 1, base);
+        let rw = selection_input_width(prefix, 0, base);
+        let l = selection_stage_witness(source, forms, steps, i + 1, success_origin, lw, good[i + 1]);
+        let r = selection_stage_witness(source, forms, steps, i + 1, error_origin, rw, prefix[0]);
+        successful_selections_agree(source, forms, &steps[i + 1], lw, &l, good[i + 1], rw, &r, prefix[0]);
+    }
+    let width = selection_input_width(good, i, base);
+    assert(width == selection_input_width(prefix, -1, base));
+    assert(selection_suffix_stage(source, forms, steps, base, success_origin, 0, good, i));
+    let other = selection_stage_witness(source, forms, steps, i, success_origin, width, good[i]);
+    assert(selection_arguments_match(source, forms, &steps[i], width, &site, Ok(good[i]))) by {
+        assert(selection_arguments_match(source, forms, &steps[i], width, &other, Ok(good[i])));
+    };
+    selection_arguments_agree(source, forms, &steps[i], width, &site, Ok(good[i]), Err(error));
+}
+
 /// 同じ選択式の列を検査できたとき、最外段の選択数は入力幅や診断位置にかかわらず一致する。
 pub(super) proof fn successful_selection_chain_counts_agree(
     source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
