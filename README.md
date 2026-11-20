@@ -2,7 +2,7 @@
 
 NCG2 の CLI と Web で共用する Rust ライブラリ。回路ソースの厳格解析とエラー回復、プロジェクト内の名前解決、回路の型・幅・結線の検査を提供する。構造体はフィールドの配置と型参照の循環も検査できる。
 
-ビット列を扱う `func` のうち、信号の転送、定数 `0`・`1`、基底 NOR、信号を直接指定する `bit`・`slice` からなるものをネットリストに変換して評価できる。
+信号の転送、定数 `0`・`1`、基底 NOR、`bit`・`slice`・`field`・`as`・`raw` を使う `func` をネットリストに変換して評価できる。選択や変換は、信号名を入力に取り、`def` の右辺全体を占める式に対応する。構造体ポートの直結と `as`・`raw` の変換では、フィールドに割り当てていないビットも保持する。
 
 ## 使い方
 
@@ -10,7 +10,7 @@ Rust 1.99.1 を使う。利用側の `Cargo.toml` に次の依存関係を追加
 
 ```toml
 [dependencies]
-circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "d4673b69a92b7b96d194c39e4322c896a4d663fb" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "4d586ea5a0a46db457f883881585e448fd69d85e" }
 ```
 
 次のコードを `src/main.rs` に置き、`cargo run` を実行する。2入力の NOR を定義し、入力が両方 `false` のときだけ出力が `true` になることを確かめる。
