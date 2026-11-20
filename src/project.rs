@@ -103,7 +103,7 @@ pub use use_aliases::{
 pub use use_aliases::{
     ResolvedStructure, ResolvedStructureEntry, ResolvedStructureField, ResolvedStructures,
     StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
-    StructurePlacementError, StructurePosition, StructureResolutionError,
+    StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference,
 };
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};

@@ -1,7 +1,7 @@
 //! 解決済みの構造体を宣言位置で検索できるように集める。
 
 mod layout;
-pub use layout::{StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts, StructurePlacementError};
+pub use layout::{StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts, StructurePlacementError, StructureTypeError, StructureTypeReference};
 
 use super::{ResolvedStructure, StructurePosition, StructureResolutionError, UseAliases};
 use alloc::vec::Vec;
@@ -61,6 +61,20 @@ impl ResolvedStructures {
     pub fn get(&self, position: StructurePosition) -> (found: Option<&ResolvedStructure>)
         ensures self.lookup_matches(position, found),
     {
+        let entry = self.find_entry(position)?;
+        Some(&self.entries[entry].declaration)
+    }
+
+    spec fn entry_search_matches(&self, position: StructurePosition, found: Option<usize>) -> bool {
+        match found {
+            Some(i) => i < self.entries@.len() && self.entries@[i as int].position == position,
+            None => forall|i: int| 0 <= i < self.entries@.len() ==> (#[trigger] self.entries@[i]).position != position,
+        }
+    }
+
+    fn find_entry(&self, position: StructurePosition) -> (found: Option<usize>)
+        ensures self.entry_search_matches(position, found),
+    {
         proof { use_type_invariant(self); }
         let entries = self.entries.as_slice();
         let mut first = 0;
@@ -90,7 +104,7 @@ impl ResolvedStructures {
                 };
                 last = middle;
             } else {
-                return Some(&item.declaration);
+                return Some(middle);
             }
         }
         None

@@ -1,6 +1,8 @@
 //! 解決済みの構造体フィールドを、宣言に従ってビット区間へ配置する。
 
+mod dependencies;
 mod fields;
+pub use dependencies::{StructureTypeError, StructureTypeReference};
 
 use super::{ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructurePosition, UseAliases};
 use super::super::StructureFieldType;
@@ -18,13 +20,15 @@ use crate::project::declarations::located_name_evidence;
 #[cfg(verus_only)]
 use crate::project::structure_declarations::checked_structure_fields;
 #[cfg(verus_only)]
-use crate::project::{StructureDeclaration, structure_declaration_result};
+use crate::project::{DeclaredFieldType, StructureDeclaration, structure_declaration_result};
 #[cfg(verus_only)]
 use fields::{field_range_matches, overlaps, placement_matches};
 #[cfg(verus_only)]
 use super::structure_before;
 #[cfg(verus_only)]
 use crate::syntax::form_span;
+#[cfg(verus_only)]
+use crate::syntax::circuit::reference_atom;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
@@ -149,7 +153,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& match f.ty {
                     StructureFieldType::Bits(width) => 0 < width <= limit,
                     StructureFieldType::Struct(target) =>
-                        self.is_structure_position(target)
+                        f.declared.ty matches DeclaredFieldType::Named { form } && form < forms.len()
+                        && forms[form as int] is Atom && reference_atom(forms[form as int]->Atom_kind)
+                        && self.is_structure_position(target)
                         && exists|j: int| 0 <= j < index.entries_model().len()
                             && (#[trigger] index.entries_model()[j]).position == target,
                 }
@@ -180,7 +186,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& match f.ty {
                 StructureFieldType::Bits(width) => 0 < width <= limit,
                 StructureFieldType::Struct(target) =>
-                    self.is_structure_position(target) && exists|j: int| 0 <= j < entries.len()
+                    f.declared.ty matches DeclaredFieldType::Named { form } && form < forms.len()
+                    && forms[form as int] is Atom && reference_atom(forms[form as int]->Atom_kind)
+                    && self.is_structure_position(target) && exists|j: int| 0 <= j < entries.len()
                         && (#[trigger] entries[j]).position == target,
             }
         } by {
@@ -437,16 +445,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         match result {
             Err(StructureLayoutError::Resolution(error)) => self.structure_index_matches(limit, Err(error)),
             _ => exists|index: ResolvedStructures| #[trigger] self.structure_index_matches(limit, Ok(index))
-                && match result {
-                    Ok(layouts) => layouts.entries@.len() == index.entries_model().len()
-                        && self.layouts_before(&index, layouts.entries@),
-                    Err(StructureLayoutError::Placement { position, error }) => exists|prior: Seq<StructureLayout>|
-                        #[trigger] self.layouts_before(&index, prior)
-                            && prior.len() < index.entries_model().len()
-                            && index.entries_model()[prior.len() as int].position == position
-                            && self.layout_row_result(&index, index.entries_model()[prior.len() as int], Err(error)),
-                    _ => false,
-                },
+                && self.layouts_for_index(&index, result),
+        }
+    }
+
+    spec fn layouts_for_index(
+        &self, index: &ResolvedStructures, result: Result<StructureLayouts, StructureLayoutError>,
+    ) -> bool {
+        match result {
+            Ok(layouts) => layouts.entries@.len() == index.entries_model().len()
+                && self.layouts_before(index, layouts.entries@),
+            Err(StructureLayoutError::Placement { position, error }) => exists|prior: Seq<StructureLayout>|
+                #[trigger] self.layouts_before(index, prior)
+                    && prior.len() < index.entries_model().len()
+                    && index.entries_model()[prior.len() as int].position == position
+                    && self.layout_row_result(index, index.entries_model()[prior.len() as int], Err(error)),
+            _ => false,
         }
     }
 
@@ -491,21 +505,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(index) => index,
             Err(error) => return Err(StructureLayoutError::Resolution(error)),
         };
+        self.place_resolved_structures(&index, limit)
+    }
+
+    fn place_resolved_structures(&self, index: &ResolvedStructures, limit: u64)
+        -> (result: Result<StructureLayouts<'p, 'a>, StructureLayoutError<'p, 'a>>)
+        requires self.can_resolve(), self.structure_index_matches(limit, Ok(*index)),
+        ensures self.layouts_for_index(index, result),
+    {
         let rows = index.entries();
         let mut layouts = Vec::new();
         let mut i = 0;
         while i < rows.len()
             invariant
                 self.can_resolve(),
-                self.structure_index_matches(limit, Ok(index)),
+                self.structure_index_matches(limit, Ok(*index)),
                 rows@ == index.entries_model(),
                 i == layouts@.len() <= rows@.len(),
-                self.layouts_before(&index, layouts@),
+                self.layouts_before(index, layouts@),
             decreases rows@.len() - i,
         {
             let row = &rows[i];
             assert(rows@.contains(*row));
-            let layout = match self.place_structure(&index, limit, row) {
+            let layout = match self.place_structure(index, limit, row) {
                 Ok(layout) => layout,
                 Err(error) => return Err(StructureLayoutError::Placement { position: row.position, error }),
             };
