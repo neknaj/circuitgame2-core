@@ -109,6 +109,12 @@ pub use selection_shapes::{
     bit_selection_shape_matches, bit_selection_shape_positions, strict_bit_selection_has_shape, strict_bit_selection_input,
 };
 use structure::validate_structure_arguments;
+pub use structure::sites::{FieldSite, FieldTypeSite, StructureSites, structure_sites};
+#[cfg(verus_only)]
+pub use structure::sites::{
+    field_site_matches, structure_field_site_evidence, structure_field_sites_order,
+    structure_sites_match, structure_width_site_evidence,
+};
 #[cfg(verus_only)]
 pub use structure::{
     field_error_evidence, field_matches, structure_arguments_match, structure_error_evidence,
