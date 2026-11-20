@@ -98,6 +98,8 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
     pub fn get(&self, position: StructurePosition) -> (result: Option<&StructureLayout<'p, 'a>>)
         ensures
             self.layout_matches(position, result),
+            result.is_some() <==> (exists|i: int| 0 <= i < self.entries_model().len()
+                && (#[trigger] self.entries_model()[i]).position == position),
             result matches Some(layout) ==> {
                 &&& layout.width > 0
                 &&& self.representation_width_matches(StructureFieldType::Struct(position), layout.width as int)
@@ -116,6 +118,7 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
             invariant
                 first <= last <= entries@.len(),
                 entries@ == self.entries@,
+                entries@ == self.entries_model(),
                 self.layout_entries_valid(),
                 forall|i: int| 0 <= i < first ==> structure_before((#[trigger] entries@[i]).position, position),
                 forall|i: int| last <= i < entries@.len() ==> structure_before(position, (#[trigger] entries@[i]).position),
@@ -138,6 +141,10 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
                 last = middle;
             } else {
                 assert(self.representation_width_matches(StructureFieldType::Struct(position), entry.width as int));
+                assert(exists|i: int| 0 <= i < self.entries_model().len()
+                    && (#[trigger] self.entries_model()[i]).position == position) by {
+                    assert(self.entries_model()[middle as int].position == position);
+                };
                 return Some(entry);
             }
         }

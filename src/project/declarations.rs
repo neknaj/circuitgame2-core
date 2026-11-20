@@ -332,6 +332,27 @@ pub(super) proof fn declaration_key_evidence(
 {
 }
 
+pub(super) proof fn indexed_structure_is_declared(
+    project: &CircuitProject, table: &DeclarationTable, file: int, index: int, source: &ProjectSource, form: &NamedForm,
+)
+    requires
+        declaration_table_matches(project, *table),
+        0 <= file < project.sources_model().len(),
+        file < project.circuits_model().len(),
+        0 <= index < project.circuits_model()[file].names@.len(),
+        project.sources_model()[file] == *source,
+        project.circuits_model()[file].names@[index] == *form,
+        form.head is Struct,
+    ensures table.declaration_at(form_key(*form), source, form),
+{
+    reveal(occurrences_before);
+    assert(binding_at(project, file, index));
+    let items = table.occurrences@;
+    let at = choose|at: int| 0 <= at < items.len()
+        && (#[trigger] items[at])._file == file && items[at]._index == index;
+    assert(occurrence_matches(project, items[at]));
+}
+
 /// 内容が同じキーは、同じ独立宣言の位置に対応する。
 pub(super) proof fn same_declaration_key(
     table: &DeclarationTable, left: NameKey, right: NameKey, source: &ProjectSource, form: &NamedForm,

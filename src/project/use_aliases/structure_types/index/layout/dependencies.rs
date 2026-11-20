@@ -256,6 +256,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 型検査を通過した配置表には、このプロジェクトの各構造体の配置がある。
+    pub(in crate::project::use_aliases) proof fn checked_layout_contains(
+        &self, limit: u64, layouts: StructureLayouts, position: StructurePosition,
+    )
+        requires
+            self.structure_types_match(limit, Ok(layouts)),
+            self.is_structure_position(position),
+        ensures exists|i: int| 0 <= i < layouts.entries_model().len()
+            && (#[trigger] layouts.entries_model()[i]).position == position,
+    {
+        reveal(UseAliases::structure_index_matches);
+        let (index, graph) = choose|index: ResolvedStructures, graph: Seq<Vec<Option<usize>>>|
+            #[trigger] self.structure_index_matches(limit, Ok(index))
+                && #[trigger] self.dependency_rows_match(&index, graph)
+                && graph.len() == index.entries_model().len()
+                && self.layouts_for_index(&index, Ok(layouts))
+                && exists|rank: Seq<nat>| #[trigger] dependencies_in_order(graph, rank);
+        let rows = index.entries_model();
+        self.targets.project_model().circuit_count_fits();
+        let stop = StructurePosition {
+            file: self.targets.project_model().circuits_model().len() as usize, entry: 0,
+        };
+        assert(self.structure_index_matches(limit, Ok(index)));
+        assert(self.structure_prefix(limit, stop, rows));
+        assert(super::structure_before(position, stop));
+        assert(self.is_structure_position(position));
+        assert(self.layouts_for_index(&index, Ok(layouts)));
+        assert(self.layouts_before(&index, layouts.entries_model()));
+        let i = choose|i: int| 0 <= i < rows.len() && (#[trigger] rows[i]).position == position;
+        assert(self.layout_row_result(&index, rows[i], Ok(layouts.entries_model()[i])));
+    }
+
     /// 構造体の型参照を解決し、配置と循環を検査する。
     ///
     /// `limit` は各構造体とビット列フィールドの宣言幅の上限。

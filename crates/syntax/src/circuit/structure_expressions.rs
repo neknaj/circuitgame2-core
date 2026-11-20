@@ -6,7 +6,9 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
-use super::expression_forest::{expression_references, first_cast_reference, first_expression_children};
+use super::expression_forest::{
+    expression_references, expression_signals, first_cast_reference, first_expression_children, first_named_child_signal,
+};
 #[cfg(verus_only)]
 use super::expressions::{
     after_form, argument_matches, arguments_match, expression_child_range, list_head_matches, same_expression_head,
@@ -14,7 +16,7 @@ use super::expressions::{
 #[cfg(verus_only)]
 use super::{HeaderError, expression_forest, expression_head_spelling, form_span, form_spans_valid, is_char_boundary};
 #[cfg(verus_only)]
-use super::{ExpressionReference, ExpressionReferenceKind};
+use super::{BuildCircuitIndex, ExpressionReference, ExpressionReferenceKind, build_definition_scope_evidence, build_index_matches};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
@@ -230,6 +232,41 @@ pub proof fn structure_cast_reference(
     let end = forms[root]->List_end as int;
     assert(expression_child_range(source, forms, root, end, shape.input.start as int, shape.input.end as int));
     first_cast_reference(source, forms, root, stop, shape.input.start as int, shape.input.end as int);
+}
+
+/// 入力が裸の信号名なら、定義の信号索引の先頭がその名前を指すことを示す。
+pub proof fn build_structure_input_position(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int, shape: StructureExpressionShape,
+)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition
+            < index.entry_ranges@[entry].definitions.end <= index.definitions@.len(),
+        structure_expression_matches(source, index.syntax.forms@, index.definitions@[definition].expression.start as int, shape),
+        shape.input.end == shape.input.start + 1,
+        index.syntax.forms@[shape.input.start as int] is Atom,
+        index.syntax.forms@[shape.input.start as int]->Atom_kind is Name,
+    ensures ({
+        let frame = index.entry_ranges@[entry].signals;
+        let row = index.definitions@[definition];
+        &&& frame.start <= row.signals.start < row.signals.end <= frame.end <= index.signals@.len()
+        &&& index.signals@[row.signals.start as int] == shape.input.start
+    }),
+{
+    build_definition_scope_evidence(source, index, entry, definition);
+    vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
+    let forms = index.syntax.forms@;
+    let row = index.definitions@[definition];
+    let root = row.expression.start as int;
+    let stop = row.expression.end as int;
+    first_expression_children(source, forms, root, stop);
+    assert(expression_child_range(
+        source, forms, root, forms[root]->List_end as int,
+        shape.input.start as int, shape.input.end as int,
+    ));
+    first_named_child_signal(source, forms, root, stop, shape.input.start);
+    assert(index.signals@[row.signals.start as int..row.signals.end as int] == expression_signals(source, forms, root, stop));
 }
 
 /// 文法に適合する構造体操作から位置を取り出せることと、その入力式が文法に適合することを示す。

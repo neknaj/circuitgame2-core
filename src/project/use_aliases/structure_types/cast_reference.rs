@@ -155,6 +155,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.structure_cast_resolution_matches(file, entry, definition, Ok(Some(position))));
         Ok(Some(position))
     }
+
+    /// 成功した `as` の参照先がこのプロジェクトにある構造体宣言であることを示す。
+    pub(in crate::project::use_aliases) proof fn cast_targets_structure(
+        &self, file: usize, entry: usize, definition: usize, position: StructurePosition,
+    )
+        requires self.structure_cast_resolution_matches(file, entry, definition, Ok(Some(position))),
+        ensures self.is_structure_position(position),
+    {
+        reveal(UseAliases::structure_position_matches);
+    }
 }
 
 } // verus!

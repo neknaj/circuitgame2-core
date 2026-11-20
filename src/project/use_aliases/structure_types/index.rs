@@ -124,13 +124,6 @@ impl ResolvedStructures {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn is_structure_position(&self, position: StructurePosition) -> bool {
-        let circuits = self.targets.project_model().circuits_model();
-        &&& position.file < circuits.len()
-        &&& position.entry < circuits[position.file as int].syntax.entries@.len()
-        &&& circuits[position.file as int].syntax.entries@[position.entry as int].head is Struct
-    }
-
     spec fn structure_prefix(
         &self, limit: u64, stop: StructurePosition, entries: Seq<ResolvedStructureEntry>,
     ) -> bool {

@@ -2,6 +2,7 @@
 
 mod index;
 mod cast_reference;
+mod port_type;
 pub use index::{
     ResolvedStructureEntry, ResolvedStructures, StructureIndexError, StructureLayout, StructureLayoutError,
     StructureLayoutField, StructureLayouts, StructurePlacementError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
@@ -9,6 +10,8 @@ pub use index::{
 
 use super::definitions::{ReferenceRequest, ReferenceUse};
 use super::{DefinitionBinding, DefinitionReferenceReason, UseAliases};
+#[cfg(verus_only)]
+use super::ResolvedPortType;
 use crate::project::circuits::read_indexed_atom;
 use crate::project::declarations::key_of;
 use crate::project::{
@@ -29,7 +32,7 @@ use crate::project::structure_declarations::checked_structure_fields;
 #[cfg(verus_only)]
 use crate::project::{StructureDeclaration, location_in_source, structure_declaration_result};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{indexed_entry_evidence, namespace_name_evidence, reference_atom};
+use crate::syntax::circuit::{indexed_entry_evidence, named_forms_match, namespace_name_evidence, reference_atom};
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 #[cfg(verus_only)]
@@ -120,17 +123,61 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 scope.forms@[at as int]->Atom_kind, binding)
     }
 
+    pub(super) open spec fn is_structure_position(&self, position: StructurePosition) -> bool {
+        let circuits = self.targets.project_model().circuits_model();
+        &&& position.file < circuits.len()
+        &&& position.entry < circuits[position.file as int].syntax.entries@.len()
+        &&& circuits[position.file as int].syntax.entries@[position.entry as int].head is Struct
+    }
+
     pub(super) closed spec fn structure_position_matches(&self, position: StructurePosition, binding: DefinitionBinding) -> bool {
         let project = self.targets.project_model();
         &&& binding matches DefinitionBinding::Declaration { source, form }
+        &&& self.is_structure_position(position)
         &&& position.file < project.sources_model().len()
-        &&& position.file < project.circuits_model().len()
         &&& *source == project.sources_model()[position.file as int]
-        &&& {
-            let entries = project.circuits_model()[position.file as int].syntax.entries@;
-            &&& position.entry < entries.len()
-            &&& entries[position.entry as int].head is Struct
-            &&& entries[position.entry as int].form == form.form
+        &&& project.circuits_model()[position.file as int].syntax.entries@[position.entry as int].form == form.form
+    }
+
+    /// 構造体の宣言位置と、ポート型が保持する宣言の対応を表す。
+    pub closed spec fn structure_port_type_matches(
+        &self, position: StructurePosition, result: Option<ResolvedPortType>,
+    ) -> bool {
+        match result {
+            Some(ResolvedPortType::Struct { source, form }) => {
+                let parsed = self.targets.project_model().circuits_model()[position.file as int];
+                &&& self.structure_position_matches(position, DefinitionBinding::Declaration { source, form })
+                &&& (exists|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]) == *form)
+                &&& self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form)
+            },
+            None => !self.is_structure_position(position),
+            _ => false,
+        }
+    }
+
+    /// 同じ宣言位置で得られるポート型は、元の宣言とそのソースを一意に指す。
+    pub proof fn structure_port_types_agree(
+        &self, position: StructurePosition, left: Option<ResolvedPortType>, right: Option<ResolvedPortType>,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_port_type_matches(position, left),
+            self.structure_port_type_matches(position, right),
+        ensures left == right,
+    {
+        if let (Some(ResolvedPortType::Struct { source: x, form: a }),
+            Some(ResolvedPortType::Struct { source: y, form: b })) = (left, right)
+        {
+            let project = self.targets.project_model();
+            let parsed = project.circuits_model()[position.file as int];
+            self.targets.parsed_project_model();
+            parsed_index_evidence(*x, parsed);
+            reveal(named_forms_match);
+            let i = choose|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]) == *a;
+            let j = choose|j: int| 0 <= j < parsed.names@.len() && (#[trigger] parsed.names@[j]) == *b;
+            if i < j { assert(parsed.names@[i].form < parsed.names@[j].form); }
+            if j < i { assert(parsed.names@[j].form < parsed.names@[i].form); }
+            assert(i == j && *x == *y);
         }
     }
 
@@ -142,7 +189,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.can_resolve(),
             declaration.head is Struct,
             self.targets.exports_model().declarations_model().declaration_at(form_key(*declaration), source, declaration),
-        ensures self.structure_position_matches(position, DefinitionBinding::Declaration { source, form: declaration }),
+        ensures
+            self.is_structure_position(position),
+            self.structure_position_matches(position, DefinitionBinding::Declaration { source, form: declaration }),
+            self.structure_port_type_matches(position, Some(ResolvedPortType::Struct { source, form: declaration })),
     {
         proof { self.targets.declarations_cover_project(); }
         let project = self.targets.project();
@@ -155,7 +205,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             parsed_index_evidence(*source, *parsed);
         }
         let entry = named_build_entry(source.text, parsed, name);
-        StructurePosition { file, entry }
+        let position = StructurePosition { file, entry };
+        proof {
+            assert(exists|i: int| 0 <= i < parsed.names@.len()
+                && (#[trigger] parsed.names@[i]) == *declaration) by {
+                assert(parsed.names@[name as int] == *declaration);
+            };
+        }
+        position
     }
 
     spec fn structure_field_matches(&self, scope: &StructureScope, declared: DeclaredField, field: ResolvedStructureField) -> bool {
