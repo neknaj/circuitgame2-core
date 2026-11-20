@@ -35,6 +35,8 @@ use crate::project::declarations::{declaration_location_evidence, form_key, loca
 #[cfg(verus_only)]
 use crate::project::structure_declarations::checked_structure_fields;
 #[cfg(verus_only)]
+use crate::project::sources::source_ordinals_agree;
+#[cfg(verus_only)]
 use crate::project::{StructureDeclaration, location_in_source, structure_declaration_result};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{indexed_entry_evidence, named_forms_match, namespace_name_evidence, reference_atom};
@@ -199,6 +201,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if i < j { assert(parsed.names@[i].form < parsed.names@[j].form); }
             if j < i { assert(parsed.names@[j].form < parsed.names@[i].form); }
             assert(i == j && *x == *y);
+        }
+    }
+
+    pub(super) proof fn structure_port_positions_agree(
+        &self, ty: ResolvedPortType, left: StructurePosition, right: StructurePosition,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_port_type_matches(left, Some(ty)),
+            self.structure_port_type_matches(right, Some(ty)),
+        ensures left == right,
+    {
+        let project = self.targets.project_model();
+        self.targets.parsed_project_model();
+        source_ordinals_agree(project.sources_model(), left.file as int, right.file as int);
+        let parsed = project.circuits_model()[left.file as int];
+        let source = project.sources_model()[left.file as int];
+        parsed_index_evidence(source, parsed);
+        let entries = parsed.syntax.entries@;
+        let forms = parsed.syntax.forms@;
+        if left.entry < right.entry {
+            indexed_entry_evidence(source.text, forms, entries, right.entry as int);
+            assert(entries[left.entry as int].form < entries[right.entry as int].form);
+        } else if right.entry < left.entry {
+            indexed_entry_evidence(source.text, forms, entries, left.entry as int);
+            assert(entries[right.entry as int].form < entries[left.entry as int].form);
         }
     }
 

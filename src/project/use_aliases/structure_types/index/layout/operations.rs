@@ -210,6 +210,12 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
         self.layout_entries_valid() && representation_width(self.entries@, ty, width)
     }
 
+    pub(in crate::project::use_aliases) proof fn bits_representation_width(&self, bits: u64, width: int)
+        requires self.representation_width_matches(StructureFieldType::Bits(bits), width),
+        ensures width == bits,
+    {
+    }
+
     pub(in crate::project::use_aliases) proof fn representation_has_layout(&self, position: StructurePosition, width: int)
         requires self.representation_width_matches(StructureFieldType::Struct(position), width),
         ensures exists|i: int| 0 <= i < self.entries_model().len()
@@ -332,6 +338,30 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
                 &&& self.representation_width_matches(typed.ty, typed.range.end - typed.range.start)
                 &&& exists|width: int| #[trigger] self.representation_width_matches(input, width)
                     && typed.range.end <= width
+                    && (!(op is Field) ==> typed.range.start == 0 && typed.range.end == width)
+            },
+    {
+        match self.check_operation_with_width(op, input) {
+            Ok((typed, _)) => Ok(typed),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(in crate::project::use_aliases) fn check_operation_with_width(&self, op: StructureOperation, input: StructureFieldType)
+        -> (result: Result<(TypedStructureOperation, u64), StructureOperationError>)
+        ensures
+            self.structure_operation_matches(op, input, match result {
+                Ok((typed, _)) => Ok(typed),
+                Err(error) => Err(error),
+            }),
+            result matches Err(StructureOperationError::WidthMismatch { input: width, .. })
+                ==> op is As && input == StructureFieldType::Bits(width),
+            result matches Err(StructureOperationError::UnknownField(_)) ==> op is Field,
+            result matches Ok((typed, width)) ==> {
+                &&& typed.range.start < typed.range.end <= width
+                &&& self.representation_width_matches(input, width as int)
+                &&& self.representation_width_matches(typed.ty, typed.range.end - typed.range.start)
+                &&& !(op is Field) ==> typed.range.start == 0 && typed.range.end == width
             },
     {
         proof { use_type_invariant(self); }
@@ -344,13 +374,13 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
                 assert(self.structure_field_result(position, name, Ok(TypedStructureOperation {
                     ty: field.ty, range: field.range,
                 })));
-                Ok(TypedStructureOperation { ty: field.ty, range: field.range.start..field.range.end })
+                Ok((TypedStructureOperation { ty: field.ty, range: field.range.start..field.range.end }, layout.width))
             },
             (StructureOperation::Raw, StructureFieldType::Struct(position)) => {
                 let Some(layout) = self.get(position) else { return Err(StructureOperationError::UnknownStructure(position)); };
                 assert(self.representation_width_matches(input, layout.width as int));
                 assert(self.representation_width_matches(StructureFieldType::Bits(layout.width), layout.width as int));
-                Ok(TypedStructureOperation { ty: StructureFieldType::Bits(layout.width), range: 0..layout.width })
+                Ok((TypedStructureOperation { ty: StructureFieldType::Bits(layout.width), range: 0..layout.width }, layout.width))
             },
             (StructureOperation::As(position), StructureFieldType::Bits(width)) => {
                 let Some(layout) = self.get(position) else { return Err(StructureOperationError::UnknownStructure(position)); };
@@ -359,7 +389,7 @@ impl<'p, 'a> StructureLayouts<'p, 'a> {
                 }
                 assert(self.representation_width_matches(input, width as int));
                 assert(self.representation_width_matches(StructureFieldType::Struct(position), width as int));
-                Ok(TypedStructureOperation { ty: StructureFieldType::Struct(position), range: 0..width })
+                Ok((TypedStructureOperation { ty: StructureFieldType::Struct(position), range: 0..width }, width))
             },
             (StructureOperation::As(_), StructureFieldType::Struct(_)) => Err(StructureOperationError::ExpectedBits),
             (_, StructureFieldType::Bits(_)) => Err(StructureOperationError::ExpectedStructure),

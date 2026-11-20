@@ -6,9 +6,14 @@ use super::{
     StructureTypeError, UseAliases,
 };
 #[cfg(verus_only)]
-use super::{FuncWiring, function_atoms::atoms_match};
+use super::{FuncWiring, function_atoms::{
+    atoms_match, structure_projection_matches, structure_projection_required, structure_projections_in_order,
+}};
 use alloc::vec::Vec;
 use super::signature_cache::SignatureCache;
+use super::function_atoms::StructureProjections;
+#[cfg(verus_only)]
+use super::function_atoms::StructureProjection;
 use super::selection_arguments::SelectionArgumentError;
 use crate::project::LocatedName;
 use vstd::prelude::*;
@@ -64,7 +69,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.arity_preserves_wiring(file, entry, limit, typed.literals.wiring);
     }
 
-    spec fn signal_type_sources(
+    pub(super) closed spec fn signal_type_sources(
         &self, file: usize, entry: usize, limit: u64, literals: FuncLiteralWidths, wiring: &FuncWiring,
         roots: FuncCallOutputTypes,
     ) -> bool {
@@ -160,12 +165,46 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.func_signal_types_evidence(file, entry, max_width, result),
     {
+        match self.check_func_signal_projections(file, entry, max_width) {
+            Ok((types, _)) => Ok(types),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn check_func_signal_projections(
+        &self, file: usize, entry: usize, max_width: u64,
+    ) -> (result: Result<(FuncSignalTypes<'p, 'a>, StructureProjections<'p, 'a>), FuncSignalTypeError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures
+            self.func_signal_types_evidence(file, entry, max_width, match result {
+                Ok((types, _)) => Ok(types),
+                Err(error) => Err(error),
+            }),
+            result matches Ok((typed, projections)) ==> {
+                &&& projections.layouts matches Some(layouts) ==> self.structure_types_match(max_width, Ok(layouts))
+                &&& projections.layouts.is_none() ==> projections.entries@.len() == 0
+                &&& if let FuncWiringResult::Checked(wiring) = typed.literals.wiring {
+                    &&& typed.types@.len() == wiring.drivers.definitions@.len()
+                    &&& structure_projections_in_order(projections.entries@, typed.types@.len() as int,
+                        wiring.drivers.signature.inputs@.len() as int)
+                    &&& projections.layouts matches Some(table) ==> forall|j: int| 0 <= j < projections.entries@.len()
+                        ==> structure_projection_matches(self, file, entry, max_width, &wiring, table, typed.types@,
+                            #[trigger] projections.entries@[j])
+                    &&& self.func_structure_projections_complete(file, entry, max_width, typed, &wiring, projections.entries@)
+                } else {
+                    projections.entries@.len() == 0
+                }
+            },
+    {
         let literals = match self.check_func_literal_widths(file, entry, max_width) {
             Ok(literals) => literals,
             Err(error) => return Err(FuncSignalTypeError::Literal(error)),
         };
         if !matches!(literals.wiring, FuncWiringResult::Checked(_)) {
-            return Ok(FuncSignalTypes { literals, types: Vec::new() });
+            return Ok((
+                FuncSignalTypes { literals, types: Vec::new() },
+                StructureProjections { entries: Vec::new(), layouts: None },
+            ));
         }
         proof { self.literals_preserve_arity(file, entry, max_width, literals); }
         let ghost prepared = literals;
@@ -195,8 +234,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.call_outputs_fit_wiring(file, entry, max_width, &roots, scope);
             assert(self.signal_type_sources(file, entry, max_width, literals, scope, roots));
         }
-        let types = match self.check_atoms(file, entry, max_width, &literals, scope, call_types.as_slice()) {
-            Ok(types) => types,
+        let (types, projections) = match self.check_atoms(file, entry, max_width, &literals, scope, call_types.as_slice()) {
+            Ok(propagated) => propagated,
             Err(error) => {
                 assert(self.func_signal_types_evidence(file, entry, max_width, Err(error))) by {
                     assert(self.propagated_types_match(file, entry, max_width, scope, literals, roots, Err(error)));
@@ -219,13 +258,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && self.prepared_call_inputs_match(file, entry, max_width, types@, scope, Ok(()))) by {
                     assert(self.signal_type_sources(file, entry, max_width, literals, scope, roots));
                 };
-                Ok(FuncSignalTypes { literals, types })
+                Ok((FuncSignalTypes { literals, types }, projections))
             },
             Err(error) => {
                 assert(self.func_signal_types_evidence(file, entry, max_width, Err(FuncSignalTypeError::CallInput(error))));
                 Err(FuncSignalTypeError::CallInput(error))
             },
         }
+    }
+
+    pub(super) open spec fn func_structure_projections_complete(
+        &self, file: usize, entry: usize, limit: u64, typed: FuncSignalTypes,
+        wiring: &FuncWiring, rows: Seq<StructureProjection>,
+    ) -> bool {
+        let project = self.targets.project_model();
+        exists|roots: FuncCallOutputTypes|
+            #[trigger] self.signal_type_sources(file, entry, limit, typed.literals, wiring, roots)
+            && roots.types@.len() == wiring.drivers.definitions@.len()
+            && (forall|target: int| 0 <= target < typed.types@.len() &&
+                #[trigger] structure_projection_required(
+                    &project.sources_model()[file as int], &project.circuits_model()[file as int],
+                    entry, wiring, typed.literals.widths@, roots.types@, typed.types@, target,
+                ) ==> exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).target == target)
     }
 }
 

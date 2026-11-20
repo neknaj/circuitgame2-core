@@ -3,7 +3,7 @@
 use super::function_literals::index_outputs;
 use super::function_types::FuncSignalTypeError;
 use super::selection_arguments::check_selection_arguments;
-use super::structure_types::StructureExpressionContext;
+use super::structure_types::{StructureExpressionContext, StructureLayouts, TypedStructureOperation};
 #[cfg(verus_only)]
 use super::selection_arguments::selection_arguments_match;
 #[cfg(verus_only)]
@@ -42,6 +42,82 @@ pub struct SignalType<'p, 'a> {
     pub ty: ResolvedPortType<'p, 'a>,
     /// 型を与えたポートの注釈、定数、または組み込み呼び出しの範囲。信号名を介しても元の範囲を保つ。
     pub origin: LocatedName<'p, 'a>,
+}
+
+/// 構造体式の駆動元と、型検査で決めたビット区間。
+#[derive(Debug)]
+pub(super) struct StructureProjection {
+    pub(super) target: usize,
+    pub(super) input: OutputDriver,
+    pub(super) operation: TypedStructureOperation,
+    pub(super) input_width: u64,
+}
+
+/// 定義順に集めた構造体式と、共通の配置表。
+#[derive(Debug)]
+pub(super) struct StructureProjections<'p, 'a> {
+    pub(super) entries: Vec<StructureProjection>,
+    pub(super) layouts: Option<StructureLayouts<'p, 'a>>,
+}
+
+pub(super) open spec fn structure_projections_in_order(rows: Seq<StructureProjection>, count: int, inputs: int) -> bool {
+    &&& forall|j: int| 0 <= j < rows.len() ==> {
+        let row = #[trigger] rows[j];
+        &&& row.target < count
+        &&& row.operation.range.start < row.operation.range.end <= row.input_width
+        &&& match row.input {
+            OutputDriver::Input(port) => port < inputs,
+            OutputDriver::Definition(prior) => prior < row.target,
+        }
+    }
+    &&& forall|a: int, b: int| 0 <= a < b < rows.len() ==> (#[trigger] rows[a]).target < (#[trigger] rows[b]).target
+}
+
+#[verifier::opaque]
+pub(super) closed spec fn structure_projection_matches(
+    aliases: &UseAliases, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
+    layouts: StructureLayouts, types: Seq<Option<SignalType>>, projection: StructureProjection,
+) -> bool {
+    let project = aliases.targets.project_model();
+    let source = &project.sources_model()[file as int];
+    let parsed = &project.circuits_model()[file as int];
+    let target = projection.target as int;
+    let definition = wiring.drivers.definitions@[target].definition;
+    let row = parsed.definitions@[definition as int];
+    let frame = parsed.entry_ranges@[entry as int];
+    let context = StructureExpressionContext { file, entry, limit, source, parsed,
+        definition: (definition - frame.definitions.start) as usize };
+    let forms = parsed.syntax.forms@;
+    let first = row.signals.start - frame.signals.start;
+    &&& target < types.len() && target < wiring.drivers.definitions@.len()
+    &&& frame.definitions.start <= definition < frame.definitions.end
+    &&& 0 <= first < wiring.signals@.len()
+    &&& wiring.signals@[first].definition == definition
+    &&& wiring.signals@[first].driver == projection.input
+    &&& signal_type_at(wiring, types.take(target), projection.input) matches Some(input)
+    &&& types[target] matches Some(signal)
+    &&& exists|shape: StructureExpressionShape|
+        #[trigger] named_structure_expression_matches(source.text, forms, row.expression.start as int, shape)
+        && is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
+        && aliases.structure_expression_type_matches(&context, shape, &layouts, input,
+            Ok((signal, projection.operation, projection.input_width)))
+}
+
+#[verifier::opaque]
+pub(super) open spec fn structure_projection_required(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, wiring: &FuncWiring,
+    widths: Seq<Option<u64>>, roots: Seq<Option<SignalType>>, types: Seq<Option<SignalType>>, target: int,
+) -> bool {
+    let driver = wiring.drivers.definitions@[target];
+    let row = parsed.definitions@[driver.definition as int];
+    let root = row.expression.start as int;
+    let forms = parsed.syntax.forms@;
+    let first = row.signals.start - parsed.entry_ranges@[entry as int].signals.start;
+    &&& roots.len() > 0 && widths[target].is_none() && driver.result_index == 0 && forms[root] is List
+    &&& !(exists|shape: BitSelectionShape| #[trigger] named_selection_matches(source.text, forms, root, shape))
+    &&& (exists|shape: StructureExpressionShape| #[trigger] named_structure_expression_matches(source.text, forms, root, shape))
+    &&& 0 <= first < wiring.signals@.len()
+    &&& signal_type_at(wiring, types.take(target), wiring.signals@[first].driver).is_some()
 }
 
 /// 配線、定数の幅、および定数や裸の信号参照から確定した型。
@@ -392,6 +468,46 @@ pub(super) closed spec fn atoms_match(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 保存した区間の長さが結果幅に一致し、選択範囲が入力幅に収まることを示す。
+    pub(super) proof fn structure_projection_widths(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
+        layouts: StructureLayouts, types: Seq<Option<SignalType>>, projection: StructureProjection,
+    )
+        requires structure_projection_matches(self, file, entry, limit, wiring, layouts, types, projection),
+        ensures ({
+            let target = projection.target as int;
+            let range = projection.operation.range;
+            let input = signal_type_at(wiring, types.take(target), projection.input);
+            let project = self.targets.project_model();
+            let parsed = project.circuits_model()[file as int];
+            let root = parsed.definitions@[wiring.drivers.definitions@[target].definition as int].expression.start;
+            &&& input.is_some() && types[target].is_some()
+            &&& range.start < range.end <= projection.input_width
+            &&& self.layout_port_width_matches(&layouts, types[target]->Some_0.ty, range.end - range.start)
+            &&& self.layout_port_width_matches(&layouts, input->Some_0.ty, projection.input_width as int)
+            &&& (exists|shape: StructureExpressionShape|
+                #[trigger] named_structure_expression_matches(project.sources_model()[file as int].text, parsed.syntax.forms@, root as int, shape)
+                && (!(shape.kind is Field) ==> range.start == 0 && range.end == projection.input_width))
+        }),
+    {
+        reveal(structure_projection_matches);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let target = projection.target as int;
+        let definition = wiring.drivers.definitions@[target].definition;
+        let row = parsed.definitions@[definition as int];
+        let frame = parsed.entry_ranges@[entry as int];
+        let context = StructureExpressionContext { file, entry, limit, source, parsed,
+            definition: (definition - frame.definitions.start) as usize };
+        let input = signal_type_at(wiring, types.take(target), projection.input)->Some_0;
+        let checked = (types[target]->Some_0, projection.operation, projection.input_width);
+        let shape = choose|shape: StructureExpressionShape|
+            #[trigger] named_structure_expression_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+            && self.structure_expression_type_matches(&context, shape, &layouts, input, Ok(checked));
+        self.structure_expression_width_evidence(&context, shape, &layouts, input, checked);
+    }
+
     pub(super) proof fn atom_types_keep_wiring(
         &self, file: usize, entry: usize, limit: u64, typed: FuncAtomTypes, wiring: FuncWiring,
     )
@@ -408,7 +524,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) fn check_atoms(
         &self, file: usize, entry: usize, _limit: u64, literals: &FuncLiteralWidths<'p, 'a>, wiring: &FuncWiring<'p, 'a>,
         roots: &[Option<SignalType<'p, 'a>>],
-    ) -> (result: Result<Vec<Option<SignalType<'p, 'a>>>, FuncSignalTypeError<'p, 'a>>)
+    ) -> (result: Result<(Vec<Option<SignalType<'p, 'a>>>, StructureProjections<'p, 'a>), FuncSignalTypeError<'p, 'a>>)
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*wiring))),
@@ -427,9 +543,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ({
                 let project = self.targets.project_model();
                 atoms_match(self, file, _limit, &project.sources_model()[file as int], &project.circuits_model()[file as int],
-                    entry as int, wiring, literals.widths@, roots@, result)
+                    entry as int, wiring, literals.widths@, roots@, match result {
+                        Ok((types, _)) => Ok(types),
+                        Err(error) => Err(error),
+                    })
             }),
-            result matches Ok(types) ==> types@.len() == wiring.drivers.definitions@.len(),
+            result matches Ok((types, projections)) ==> {
+                &&& types@.len() == wiring.drivers.definitions@.len()
+                &&& projections.layouts matches Some(layouts) ==> self.structure_types_match(_limit, Ok(layouts))
+                &&& projections.layouts.is_none() ==> projections.entries@.len() == 0
+                &&& structure_projections_in_order(projections.entries@, types@.len() as int,
+                    wiring.drivers.signature.inputs@.len() as int)
+                &&& projections.layouts matches Some(table) ==> forall|j: int| 0 <= j < projections.entries@.len()
+                    ==> structure_projection_matches(self, file, entry, _limit, wiring, table, types@,
+                        #[trigger] projections.entries@[j])
+                &&& forall|target: int| 0 <= target < types@.len() &&
+                    #[trigger] structure_projection_required(
+                        &self.targets.project_model().sources_model()[file as int],
+                        &self.targets.project_model().circuits_model()[file as int],
+                        entry, wiring, literals.widths@, roots@, types@, target,
+                    ) ==> exists|j: int| 0 <= j < projections.entries@.len()
+                        && (#[trigger] projections.entries@[j]).target == target
+            },
             result matches Err(error) ==> error is Signal
                 || (roots@.len() > 0 && (error is SelectionInputType || error is SelectionArgument
                     || error is StructureLayout || error is StructureExpression)),
@@ -440,6 +575,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let parsed = &project.circuits()[file];
         let outputs = index_outputs(&wiring.drivers);
         let mut layouts = None;
+        let mut projections = Vec::new();
         let mut types: Vec<Option<SignalType>> = Vec::new();
         let mut i = 0;
         proof {
@@ -465,6 +601,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
                     ==> location_in_source(types@[j]->Some_0.origin) && self.declared_port_type(types@[j]->Some_0.ty),
                 layouts matches Some(table) ==> self.structure_types_match(_limit, Ok(table)),
+                layouts.is_none() ==> projections@.len() == 0,
+                structure_projections_in_order(projections@, i as int, wiring.drivers.signature.inputs@.len() as int),
+                layouts matches Some(table) ==> forall|j: int| 0 <= j < projections@.len()
+                    ==> structure_projection_matches(self, file, entry, _limit, wiring, table, types@, #[trigger] projections@[j]),
+                forall|target: int| 0 <= target < i &&
+                    #[trigger] structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, target)
+                    ==> exists|j: int| 0 <= j < projections@.len() && (#[trigger] projections@[j]).target == target,
                 i == types@.len() <= wiring.drivers.definitions@.len(),
                 typed_prefix(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@, outputs@, roots@, types@),
             decreases wiring.drivers.definitions@.len() - i,
@@ -473,6 +616,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let row = &parsed.definitions[driver.definition];
             let root = row.expression.start;
             let forms = parsed.syntax.forms.as_slice();
+            let mut projection = None;
+            let ghost prior_layouts = layouts;
             proof {
                 reveal(atom_type_step);
                 reveal(output_indices);
@@ -622,6 +767,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         assert(structure_atom_step(self, &context, shape, Some(input), expected_type, Ok(Some(actual)))) by {
                             assert(self.structure_expression_type_matches(&context, shape, table, input, Ok(checked)));
                         };
+                        let stored = StructureProjection {
+                            target: i, input: bound.driver, operation: checked.1, input_width: checked.2,
+                        };
+                        assert(structure_projection_matches(
+                            self, file, entry, _limit, wiring, *table, types@.push(Some(actual)), stored,
+                        )) by {
+                            reveal(structure_projection_matches);
+                            assert(types@.push(Some(actual)).take(i as int) =~= types@);
+                        };
+                        projection = Some(stored);
                         Some(actual)
                     } else {
                         None
@@ -635,9 +790,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(atom_type_step(self, file, _limit, source, parsed, entry as int, wiring, literals.widths@,
                 outputs@, roots@, types@, i as int, Ok(next)));
             assert(next matches Some(ty) ==> location_in_source(ty.origin) && self.declared_port_type(ty.ty));
+            assert(structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, i as int)
+                ==> projection.is_some()) by {
+                reveal(structure_projection_required);
+            };
             let ghost before = types@;
+            let ghost prior = projections@;
             types.push(next);
+            if let Some(row) = projection {
+                projections.push(row);
+                assert(structure_projections_in_order(projections@, i + 1, wiring.drivers.signature.inputs@.len() as int)) by {
+                    assert(projections@ =~= prior.push(row));
+                };
+            }
             proof {
+                assert forall|target: int| 0 <= target <= i &&
+                    #[trigger] structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, types@, target)
+                    implies exists|j: int| 0 <= j < projections@.len() && (#[trigger] projections@[j]).target == target by {
+                    assert(types@.take(target) =~= before.take(target));
+                    assert(structure_projection_required(source, parsed, entry, wiring, literals.widths@, roots@, before, target)) by {
+                        reveal(structure_projection_required);
+                    };
+                    if target < i {
+                        let j = choose|j: int| 0 <= j < prior.len() && (#[trigger] prior[j]).target == target;
+                        assert(projections@[j] == prior[j]);
+                    } else {
+                        assert(projection.is_some());
+                        assert(projections@[prior.len() as int].target == i);
+                    }
+                };
+                assert forall|j: int| 0 <= j < projections@.len() && layouts.is_some()
+                    implies structure_projection_matches(self, file, entry, _limit, wiring,
+                        layouts->Some_0, types@, #[trigger] projections@[j]) by {
+                    if j < prior.len() {
+                        assert(prior_layouts == layouts);
+                        let old_row = prior[j];
+                        assert(structure_projection_matches(self, file, entry, _limit, wiring, layouts->Some_0, before, old_row));
+                        assert(structure_projection_matches(self, file, entry, _limit, wiring, layouts->Some_0, types@, old_row)) by {
+                            reveal(structure_projection_matches);
+                            assert(types@.take(old_row.target as int) =~= before.take(old_row.target as int));
+                        };
+                    } else {
+                        assert(types@ =~= before.push(next));
+                    }
+                };
                 reveal(typed_prefix);
                 assert forall|j: int| 0 <= j < types@.len() && (#[trigger] types@[j]).is_some()
                     implies location_in_source(types@[j]->Some_0.origin) && self.declared_port_type(types@[j]->Some_0.ty) by {
@@ -657,7 +853,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             i += 1;
         }
-        Ok(types)
+        Ok((types, StructureProjections { entries: projections, layouts }))
     }
 
     /// 検査結果が定数の型と信号の束縛に対応することを表す。
@@ -711,7 +907,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let roots: &[Option<SignalType>] = &[];
         assert(roots@ =~= Seq::empty());
         match self.check_atoms(file, entry, max_width, &literals, wiring, roots) {
-            Ok(types) => Ok(FuncAtomTypes { literals, types }),
+            Ok((types, _)) => Ok(FuncAtomTypes { literals, types }),
             Err(FuncSignalTypeError::Signal(error)) => {
                 assert(self.func_atom_type_evidence(file, entry, max_width, Err(error))) by {
                     assert(self.func_literal_evidence(file, entry, max_width, Ok(literals)));

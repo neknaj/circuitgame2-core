@@ -787,6 +787,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& expected_output_context(source, &circuits[file as int], entry as int, checked)
             &&& forall|i: int| 0 <= i < checked.signature.inputs@.len()
                 ==> self.declared_port_type((#[trigger] checked.signature.inputs@[i]).ty)
+            &&& forall|i: int| 0 <= i < checked.signature.outputs@.len()
+                ==> self.declared_port_type((#[trigger] checked.signature.outputs@[i]).ty)
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
                 ==> indexed_driver_site(source, &circuits[file as int], entry as int, #[trigger] checked.definitions@[i])
         }),

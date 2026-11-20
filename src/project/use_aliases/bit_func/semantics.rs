@@ -3,6 +3,8 @@
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::{BitFuncRhs, CheckedBitFunc, OutputDriver, SingleBitOperand, checked_bit_func_available};
+#[cfg(verus_only)]
+use crate::project::bit_selection_matches;
 
 verus! {
 
@@ -33,10 +35,43 @@ pub(super) open spec fn definition_values(rhs: BitFuncRhs, inputs: Seq<Seq<bool>
     }
 }
 
+/// 入力上の半開区間が、直結または刻み1の選択に対応することを表す。
+pub(super) open spec fn contiguous_rhs_matches(
+    rhs: BitFuncRhs, input: OutputDriver, start: u64, end: u64, width: u64,
+) -> bool {
+    &&& start < end <= width
+    &&& if start == 0 && end == width {
+        rhs == BitFuncRhs::Driver(input)
+    } else {
+        rhs matches BitFuncRhs::Selection { input: driver, selection }
+            && driver == input
+            && selection.start == start && selection.count == end - start && selection.stride == 1
+            && selection.last == end - 1
+            && bit_selection_matches(width, selection.start, selection.count, selection.stride, Ok(selection.last))
+    }
+}
+
+/// 直結と刻み1の選択が、半開区間のビットを元の順序で返すことを示す。
+pub(super) proof fn contiguous_rhs_preserves_range(
+    rhs: BitFuncRhs, inputs: Seq<Seq<bool>>, definitions: Seq<Seq<bool>>,
+    input: OutputDriver, start: u64, end: u64, width: u64,
+)
+    requires
+        contiguous_rhs_matches(rhs, input, start, end, width),
+        driver_values(inputs, definitions, input).len() == width,
+    ensures
+        definition_values(rhs, inputs, definitions)
+            == driver_values(inputs, definitions, input).subrange(start as int, end as int),
+{
+    reveal(definition_values);
+    let value = driver_values(inputs, definitions, input);
+    assert(definition_values(rhs, inputs, definitions) =~= value.subrange(start as int, end as int));
+}
+
 pub(super) open spec fn bit_func_inputs_match(source: &CheckedBitFunc, inputs: Seq<Seq<bool>>) -> bool {
-    &&& inputs.len() == source.signature.inputs@.len()
+    &&& inputs.len() == source.input_widths@.len()
     &&& forall|i: int| 0 <= i < inputs.len()
-        ==> (#[trigger] inputs[i]).len() == source.signature.inputs@[i].ty->Bits_0
+        ==> (#[trigger] inputs[i]).len() == source.input_widths@[i]
 }
 
 #[verifier::opaque]

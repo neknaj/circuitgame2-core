@@ -37,7 +37,7 @@ proof fn driver_bit_value(
         input.len() == lowered.layouts.inputs.total_bits_model(),
         lowered.definition_wires@.len() == lowered.layouts.definitions.total_bits_model(),
         0 <= scope <= source.definitions@.len(),
-        bit_driver_width(&source.signature, source.definitions@.take(scope), driver) == Some(width),
+        bit_driver_width(source.input_widths@, source.definitions@.take(scope), driver) == Some(width),
         0 <= bit < width,
     ensures
         driver_values(port_values(&lowered.layouts.inputs, input),
@@ -52,7 +52,7 @@ proof fn driver_bit_value(
         OutputDriver::Input(port) => {
             reveal(port_values);
             let range = lowered.layouts.inputs.ranges_model()[port as int];
-            assert(port_widths(source.signature.inputs@)[port as int] == width);
+            assert(source.input_widths@[port as int] == width);
             assert(port_values(&lowered.layouts.inputs, input)[port as int]
                 == input.subrange(range.start as int, range.end as int));
         },
@@ -77,7 +77,7 @@ proof fn operand_matches_wire(
         input.len() == lowered.layouts.inputs.total_bits_model(),
         lowered.definition_wires@.len() == lowered.layouts.definitions.total_bits_model(),
         scope < source.definitions@.len(),
-        nor_operand_matches(&source.signature, source.definitions@.take(scope as int), operand),
+        nor_operand_matches(source.input_widths@, source.definitions@.take(scope as int), operand),
          scope < lowered.layouts.definitions.ranges_model().len(),
          lowered.layouts.definitions.ranges_model()[scope as int].start
             == preceding_port_bits(definition_widths(source.definitions@), scope as nat),
@@ -164,7 +164,7 @@ proof fn definition_values_match_wiring(
                 BitFuncRhs::Selection { input, selection } => (input, selection.start as int, selection.stride as int),
                 _ => arbitrary(),
             };
-            let driver_width = bit_driver_width(&source.signature, source.definitions@.take(i as int), driver)->Some_0;
+            let driver_width = bit_driver_width(source.input_widths@, source.definitions@.take(i as int), driver)->Some_0;
             assert(expected.len() == definition.width) by {
                 if definition.rhs is Driver {
                     driver_bit_value(source, lowered, capacity, i as int, input, gates, driver, driver_width, 0);
@@ -211,14 +211,13 @@ pub(super) proof fn lowered_bit_func_refines_evaluation(
     reveal(layouts_result);
     reveal(port_values);
 
-    assert(inputs.len() == source.signature.inputs@.len()) by { reveal(port_values); };
+    assert(inputs.len() == source.input_widths@.len()) by { reveal(port_values); };
     assert(bit_func_inputs_match(source, inputs)) by {
         reveal(checked_bit_func_available);
         assert forall|i: int| 0 <= i < inputs.len() implies
-            (#[trigger] inputs[i]).len() == source.signature.inputs@[i].ty->Bits_0 by {
+            (#[trigger] inputs[i]).len() == source.input_widths@[i] by {
             let range = lowered.layouts.inputs.ranges_model()[i];
             assert(inputs[i] == input.subrange(range.start as int, range.end as int));
-            assert(port_widths(source.signature.inputs@)[i] == source.signature.inputs@[i].ty->Bits_0);
         };
     };
     assert(bit_func_definitions_match(source, inputs, values)) by {
@@ -245,9 +244,8 @@ pub(super) proof fn lowered_bit_func_refines_evaluation(
             let scope = source.definitions@.len() as int;
             assert(values.take(scope) =~= values) by { reveal(definition_wire_values); };
             let expected = driver_values(inputs, values, driver);
-            let width = source.signature.outputs@[i].ty->Bits_0;
+            let width = source.output_widths@[i];
             assert(port == output.subrange(range.start as int, range.end as int));
-            assert(port_widths(source.signature.outputs@)[i] == width);
             driver_bit_value(source, lowered, capacity, scope, input, gates, driver, width, 0);
             assert forall|bit: int| 0 <= bit < width implies
                 (#[trigger] port[bit]) == (#[trigger] expected[bit]) by {

@@ -376,6 +376,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& super::function_drivers::checked_ports_and_output_bounds(circuits[file as int].syntax.forms@, wiring.drivers)
             &&& forall|i: int| 0 <= i < wiring.drivers.signature.inputs@.len()
                 ==> self.declared_port_type((#[trigger] wiring.drivers.signature.inputs@[i]).ty)
+            &&& forall|i: int| 0 <= i < wiring.drivers.signature.outputs@.len()
+                ==> self.declared_port_type((#[trigger] wiring.drivers.signature.outputs@[i]).ty)
             &&& forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
                 ==> indexed_driver_site(&project.sources_model()[file as int], &circuits[file as int],
                     entry as int, #[trigger] wiring.drivers.definitions@[i])

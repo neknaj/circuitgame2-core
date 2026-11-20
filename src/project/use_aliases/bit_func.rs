@@ -14,7 +14,7 @@ pub use semantics::{bit_func_evaluation, bit_func_evaluations_agree};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-use super::{OutputDriver, ResolvedPortType, SingleBitOperand, TypedRoutineSignature};
+use super::{OutputDriver, SingleBitOperand, TypedRoutineSignature};
 use super::selection_arguments::CheckedBitSelection;
 use crate::project::LocatedName;
 #[cfg(verus_only)]
@@ -47,11 +47,25 @@ pub(super) struct CheckedBitDefinition<'p, 'a> {
 #[derive(Debug)]
 pub struct CheckedBitFunc<'p, 'a> {
     pub(super) signature: TypedRoutineSignature<'p, 'a>,
+    pub(super) input_widths: Vec<u64>,
+    pub(super) output_widths: Vec<u64>,
     pub(super) definitions: Vec<CheckedBitDefinition<'p, 'a>>,
     pub(super) output_drivers: Vec<OutputDriver>,
 }
 
 impl<'p, 'a> CheckedBitFunc<'p, 'a> {
+    /// 元の宣言型とソース位置を保持する入出力の署名を返す。
+    pub fn signature(&self) -> (signature: &TypedRoutineSignature<'p, 'a>)
+        ensures *signature == self.signature_model(),
+    {
+        &self.signature
+    }
+
+    /// 配線変換の対象になった関数の署名を表す。
+    pub closed spec fn signature_model(&self) -> TypedRoutineSignature<'p, 'a> {
+        self.signature
+    }
+
     #[verifier::type_invariant]
     spec fn drivers_and_widths_match(&self) -> bool {
         checked_bit_func_available(self)
@@ -59,18 +73,11 @@ impl<'p, 'a> CheckedBitFunc<'p, 'a> {
 }
 
 pub(super) open spec fn bit_driver_width(
-    signature: &TypedRoutineSignature, prior: Seq<CheckedBitDefinition>, driver: OutputDriver,
+    inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>, driver: OutputDriver,
 ) -> Option<u64> {
     match driver {
         OutputDriver::Input(port) => {
-            if port < signature.inputs@.len() {
-                match signature.inputs@[port as int].ty {
-                    ResolvedPortType::Bits(width) => Some(width),
-                    _ => None,
-                }
-            } else {
-                None
-            }
+            if port < inputs.len() { Some(inputs[port as int]) } else { None }
         },
         OutputDriver::Definition(index) => {
             if index < prior.len() { Some(prior[index as int].width) } else { None }
@@ -79,27 +86,27 @@ pub(super) open spec fn bit_driver_width(
 }
 
 pub(super) open spec fn nor_operand_matches(
-    signature: &TypedRoutineSignature, prior: Seq<CheckedBitDefinition>, operand: SingleBitOperand,
+    inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>, operand: SingleBitOperand,
 ) -> bool {
     match operand {
-        SingleBitOperand::Driver(driver) => bit_driver_width(signature, prior, driver) == Some(1),
+        SingleBitOperand::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(1),
         SingleBitOperand::Constant(_) => true,
     }
 }
 
 /// 参照する幅が定義済みで、各右辺の結果幅と定義幅が一致することを表す。
 pub(super) open spec fn bit_definition_matches(
-    signature: &TypedRoutineSignature, prior: Seq<CheckedBitDefinition>, definition: CheckedBitDefinition,
+    inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>, definition: CheckedBitDefinition,
 ) -> bool {
     &&& definition.width > 0
     &&& location_in_source(definition.expression)
     &&& match definition.rhs {
-        BitFuncRhs::Driver(driver) => bit_driver_width(signature, prior, driver) == Some(definition.width),
+        BitFuncRhs::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(definition.width),
         BitFuncRhs::Constant(_) => definition.width == 1,
         BitFuncRhs::Nor { left, right } => definition.width == 1
-            && nor_operand_matches(signature, prior, left) && nor_operand_matches(signature, prior, right),
+            && nor_operand_matches(inputs, prior, left) && nor_operand_matches(inputs, prior, right),
         BitFuncRhs::Selection { input, selection } =>
-            bit_driver_width(signature, prior, input) matches Some(width)
+            bit_driver_width(inputs, prior, input) matches Some(width)
             && definition.width == selection.count
             && bit_selection_matches(width, selection.start, selection.count, selection.stride, Ok(selection.last)),
     }
@@ -111,17 +118,17 @@ pub closed spec fn checked_bit_func_available(function: &CheckedBitFunc) -> bool
     let signature = &function.signature;
     let definitions = function.definitions@;
     let drivers = function.output_drivers@;
-    &&& forall|i: int| 0 <= i < signature.inputs@.len() ==>
-        ((#[trigger] signature.inputs@[i]).ty matches ResolvedPortType::Bits(width) && width > 0)
-    &&& 0 < signature.outputs@.len() == drivers.len()
+    &&& function.input_widths@.len() == signature.inputs@.len()
+    &&& function.output_widths@.len() == signature.outputs@.len()
+    &&& forall|i: int| 0 <= i < function.input_widths@.len() ==> (#[trigger] function.input_widths@[i]) > 0
+    &&& 0 < function.output_widths@.len() == drivers.len()
     &&& forall|i: int| 0 <= i < drivers.len() ==> {
-        let port = #[trigger] signature.outputs@[i];
-        &&& port.ty matches ResolvedPortType::Bits(width)
+        let width = #[trigger] function.output_widths@[i];
         &&& width > 0
-        &&& bit_driver_width(signature, definitions, drivers[i]) == Some(width)
+        &&& bit_driver_width(function.input_widths@, definitions, drivers[i]) == Some(width)
     }
     &&& forall|i: int| 0 <= i < definitions.len() ==>
-        bit_definition_matches(signature, definitions.take(i), #[trigger] definitions[i])
+        bit_definition_matches(function.input_widths@, definitions.take(i), #[trigger] definitions[i])
 }
 
 } // verus!
