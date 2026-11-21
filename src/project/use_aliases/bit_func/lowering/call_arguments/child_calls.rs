@@ -630,6 +630,28 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_range
         exists|i: int| 0 <= i < end && (#[trigger] calls[i]).reference == r
 }
 
+/// 展開済みの子の範囲は、一時配線表の内部にあり、その子の出力本数と同じ幅を持つ。
+proof fn produced_child_argument_ready(
+    calls: Seq<ChildCall>, stop: nat, ranges: Seq<Option<Range<usize>>>, wires: nat,
+    earlier: int, reference: usize, width: usize,
+)
+    requires
+        child_ranges_match(calls, stop, ranges),
+        wires == child_sizes(calls, stop).1 <= usize::MAX,
+        0 <= earlier < stop,
+        calls[earlier].reference == reference,
+        calls[earlier].circuit.outputs@.len() == width,
+    ensures
+        projected_source_available(ranges, CallArgumentSource::NestedCall(reference)),
+        child_argument_width_ready(ranges, wires, CallArgumentSource::NestedCall(reference), width),
+{
+    reveal(child_ranges_match);
+    child_sizes_grow(calls, (earlier + 1) as nat, stop);
+    child_sizes_step(calls, earlier);
+    assert(ranges[reference as int] == Some((child_sizes(calls, earlier as nat).1 as usize)
+        ..(child_sizes(calls, (earlier + 1) as nat).1 as usize)));
+}
+
 pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_arguments_determined(calls: Seq<ChildCall>, stop: nat) -> bool {
     &&& stop <= calls.len()
     &&& forall|i: int, j: int| 0 <= i < stop && 0 <= j < calls[i].arguments@.len() ==>
@@ -699,10 +721,8 @@ proof fn next_child_readiness(
             let span = call.inputs.ranges_model()[port];
             let earlier = choose|i: int| 0 <= i < index && (#[trigger] calls[i]).reference == reference
                 && calls[i].circuit.outputs@.len() == (span.end - span.start) as usize;
-            child_sizes_grow(calls, (earlier + 1) as nat, index as nat);
-            child_sizes_step(calls, earlier);
-            assert(ranges[reference as int] == Some((child_sizes(calls, earlier as nat).1 as usize)
-                ..(child_sizes(calls, (earlier + 1) as nat).1 as usize)));
+            produced_child_argument_ready(calls, index as nat, ranges, wires, earlier, reference,
+                (span.end - span.start) as usize);
         }
     };
 }
@@ -733,6 +753,37 @@ proof fn extend_child_ranges(
         implies exists|i: int| 0 <= i < index + 1 && (#[trigger] calls[i]).reference == r by {
         if r != calls[index as int].reference { assert(after[r] == before[r]); }
     };
+}
+
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_wiring_failure(
+    caller: &CallerArguments, calls: Seq<ChildCall>, index: usize, error: ChildCallWiringError,
+    initial_gates: int, capacity: usize, output_capacity: usize,
+) -> bool {
+    &&& index < calls.len()
+    &&& child_arguments_determined(calls, index as nat)
+    &&& initial_gates + child_sizes(calls, index as nat).0 <= capacity
+    &&& child_sizes(calls, index as nat).1 <= output_capacity
+    &&& match error {
+        ChildCallWiringError::DeferredArgument(site) => {
+            let projected = calls[index as int].arguments@;
+            exists|port: int| 0 <= port < projected.len() && (#[trigger] projected[port]).source is Deferred
+                && is_form_location(caller.source, caller.forms@[projected[port].form as int], site)
+                && forall|j: int| 0 <= j < port ==> !((#[trigger] projected[j]).source is Deferred)
+        },
+        ChildCallWiringError::GateCapacity(site) =>
+            site == *calls[index as int].expression
+            && initial_gates + child_sizes(calls, (index + 1) as nat).0 > capacity
+            && child_arguments_determined(calls, (index + 1) as nat),
+        ChildCallWiringError::OutputCapacity { site, used, width, capacity: available } => {
+            &&& site == *calls[index as int].expression
+            &&& available == output_capacity
+            &&& used == child_sizes(calls, index as nat).1
+            &&& width == calls[index as int].circuit.outputs@.len()
+            &&& child_sizes(calls, (index + 1) as nat).1 == used + width > output_capacity
+            &&& initial_gates + child_sizes(calls, (index + 1) as nat).0 <= capacity
+            &&& child_arguments_determined(calls, (index + 1) as nat)
+        },
+    }
 }
 
 /// 後順の子を展開し、全件に成功したときだけ一時配線表を返す。
@@ -773,32 +824,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
                 caller, calls@, calls@.len(), reference_count, old(gates)@, trace,
                 ChildWiringSnapshot { table, gates: final(gates)@ }, input_bits)
         },
-        result matches Err((i, _)) ==> i < calls@.len(),
-        result.is_err() ==> final(gates)@ == old(gates)@,
-        result matches Err((i, _)) ==> old(gates)@.len() + child_sizes(calls@, i as nat).0 <= capacity,
-        result matches Err((i, _)) ==> child_sizes(calls@, i as nat).1 <= output_capacity,
-        result matches Err((i, _)) ==> child_arguments_determined(calls@, i as nat),
-        result matches Err((i, error)) ==> i < calls@.len() && match error {
-                ChildCallWiringError::DeferredArgument(site) => {
-                    let projected = calls@[i as int].arguments@;
-                    exists|port: int| 0 <= port < projected.len() && (#[trigger] projected[port]).source is Deferred
-                        && is_form_location(caller.source, caller.forms@[projected[port].form as int], site)
-                        && forall|j: int| 0 <= j < port ==> !((#[trigger] projected[j]).source is Deferred)
-                },
-                ChildCallWiringError::GateCapacity(site) =>
-                    site == *calls@[i as int].expression
-                    && old(gates)@.len() + child_sizes(calls@, (i + 1) as nat).0 > capacity
-                    && child_arguments_determined(calls@, (i + 1) as nat),
-                ChildCallWiringError::OutputCapacity { site, used, width, capacity: available } => {
-                    &&& site == *calls@[i as int].expression
-                    &&& available == output_capacity
-                    &&& used == child_sizes(calls@, i as nat).1
-                    &&& width == calls@[i as int].circuit.outputs@.len()
-                    &&& child_sizes(calls@, (i + 1) as nat).1 == used + width > output_capacity
-                    &&& old(gates)@.len() + child_sizes(calls@, (i + 1) as nat).0 <= capacity
-                    &&& child_arguments_determined(calls@, (i + 1) as nat)
-                },
-        },
+        result matches Err((i, error)) ==> final(gates)@ == old(gates)@
+            && child_wiring_failure(caller, calls@, i, error, old(gates)@.len() as int, capacity, output_capacity),
 {
     let mut table = ChildOutputWires::new(reference_count);
     let checkpoint = gates.len();
@@ -895,6 +922,170 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
         index += 1;
     }
     Ok(table)
+}
+
+/// 後順の子と根を配線するとき、どちらの段階で失敗したかを保持する。
+#[derive(Debug)]
+pub(in crate::project::use_aliases::bit_func::lowering) enum NestedCallWiringError<'p, 'a> {
+    /// 最初に失敗した子の後順添字と診断。
+    Child(usize, ChildCallWiringError<'p, 'a>),
+    /// 子の展開後に、根の引数または容量を検査して得た診断。
+    Root(CallWiringError<'p, 'a>),
+}
+
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn root_arguments_fit_children(
+    caller: &CallerArguments, calls: Seq<ChildCall>, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
+) -> bool {
+    &&& arguments.len() == layout.ranges_model().len()
+    &&& forall|port: int| 0 <= port < arguments.len() ==> {
+        let argument = #[trigger] arguments[port];
+        let span = layout.ranges_model()[port];
+        let width = (span.end - span.start) as usize;
+        &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
+            caller.wires@.len() as int, argument, width)
+        &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
+            exists|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).reference == reference
+                && calls[i].circuit.outputs@.len() == width
+        } else { true }
+    }
+}
+
+/// 子の開始状態から、子の出力を読む根の実引数と展開後の出力までをつなぐ。
+#[verifier::opaque]
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nested_root_wiring_matches(
+    caller: &CallerArguments, calls: Seq<ChildCall>, count: usize, arguments: Seq<ProjectedCallArgument>,
+    layout: &PortBitLayout, callee: &NorNetlist, initial: Seq<NorGate>, final_gates: Seq<NorGate>,
+    input_bits: usize, outputs: Seq<Wire>,
+) -> bool {
+    exists|trace: Seq<ChildWiringSnapshot>, invocation: CallerArguments, mapped: Seq<Wire>| #![trigger
+        child_wiring_trace_matches(caller, calls, calls.len(), count, initial, trace, trace[calls.len() as int], input_bits),
+        argument_prefix_wires(&invocation, arguments, layout.ranges_model(), arguments.len() as int, mapped)] {
+        let end = trace[calls.len() as int];
+        &&& child_wiring_trace_matches(caller, calls, calls.len(), count, initial, trace, end, input_bits)
+        &&& child_ranges_match(calls, calls.len(), end.table.ranges@)
+        &&& end.table.wires@.len() == child_sizes(calls, calls.len()).1
+        &&& invocation.source == caller.source && invocation.forms@ == caller.forms@
+        &&& invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
+        &&& invocation.wires@ == caller.wires@
+        &&& invocation.child_ranges@ == end.table.ranges@ && invocation.child_wires@ == end.table.wires@
+        &&& argument_prefix_wires(&invocation, arguments, layout.ranges_model(), arguments.len() as int, mapped)
+        &&& mapped.len() == layout.total_bits_model()
+        &&& wires_available(mapped, input_bits, end.gates.len())
+        &&& instance_gates_match(end.gates, callee.gates@, mapped, final_gates)
+        &&& instance_outputs_match(callee.outputs@, mapped, end.gates.len() as usize, outputs)
+    }
+}
+
+/// 子を後順に展開し、その出力を根の入力へ渡す。
+///
+/// # Errors
+///
+/// 子の最初の失敗を返す。すべての子が成功した場合は、根の最初の未確定引数またはゲート上限を返す。
+/// 子と根のどちらで失敗しても、呼び出し前のゲート列に戻す。
+pub(in crate::project::use_aliases::bit_func::lowering) fn lower_root_with_children<'s, 'p, 'a>(
+    caller: &CallerArguments<'s, 'p, 'a>, calls: &[ChildCall<'s, 'p, 'a>], reference_count: usize,
+    arguments: &[ProjectedCallArgument], layout: &PortBitLayout, callee: &NorNetlist,
+    gates: &mut Vec<NorGate>, capacity: usize, output_capacity: usize,
+    Ghost(root_layout): Ghost<(Seq<u64>, usize)>, Ghost(input_bits): Ghost<usize>,
+) -> (result: Result<Vec<Wire>, NestedCallWiringError<'p, 'a>>)
+    requires
+        form_spans_valid(caller.source.text, caller.forms@, caller.source.text.spec_bytes().len() as int),
+        old(gates)@.len() <= capacity,
+        gates_available(old(gates)@, input_bits as nat, old(gates)@.len() as int),
+        wires_available(caller.wires@, input_bits, old(gates)@.len()),
+        forall|i: int| 0 <= i < caller.inputs@.len() ==> (#[trigger] caller.inputs@[i]).end <= input_bits,
+        forall|i: int| 0 <= i < calls@.len() ==>
+            (#[trigger] calls@[i]).reference < reference_count && child_call_ready(caller, calls@, i)
+            && location_in_source(*calls@[i].expression) && *calls@[i].expression.source == *caller.source,
+        forall|i: int, j: int| 0 <= i < j < calls@.len() ==>
+            (#[trigger] calls@[i]).reference != (#[trigger] calls@[j]).reference,
+        port_bit_layout_result(root_layout.0, root_layout.1, Ok(*layout)),
+        arguments@.len() == root_layout.0.len(),
+        nor_evaluation_ready(callee, layout.total_bits_model() as nat),
+        root_arguments_fit_children(caller, calls@, arguments@, layout),
+    ensures
+        result matches Ok(outputs) ==> {
+            &&& final(gates)@.len() == old(gates)@.len() + child_sizes(calls@, calls@.len()).0 + callee.gates@.len() <= capacity
+            &&& final(gates)@.take(old(gates)@.len() as int) == old(gates)@
+            &&& gates_available(final(gates)@, input_bits as nat, final(gates)@.len() as int)
+            &&& output_ports_available(outputs@, input_bits as nat, final(gates)@.len(), outputs@.len() as int)
+            &&& nested_root_wiring_matches(caller, calls@, reference_count, arguments@, layout, callee,
+                old(gates)@, final(gates)@, input_bits, outputs@)
+        },
+        result matches Err(error) ==> {
+            &&& final(gates)@ == old(gates)@
+            &&& match error {
+                NestedCallWiringError::Child(index, failure) => child_wiring_failure(caller, calls@, index, failure,
+                    old(gates)@.len() as int, capacity, output_capacity),
+                NestedCallWiringError::Root(failure) => {
+                    let size = old(gates)@.len() + child_sizes(calls@, calls@.len()).0;
+                    &&& child_arguments_determined(calls@, calls@.len())
+                    &&& size <= capacity && child_sizes(calls@, calls@.len()).1 <= output_capacity
+                    &&& match failure {
+                        CallWiringError::DeferredArgument(site) =>
+                            exists|i: int| 0 <= i < arguments@.len() && (#[trigger] arguments@[i]).source is Deferred
+                                && is_form_location(caller.source, caller.forms@[arguments@[i].form as int], site)
+                                && forall|j: int| 0 <= j < i ==> !((#[trigger] arguments@[j]).source is Deferred),
+                        CallWiringError::GateCapacity => size + callee.gates@.len() > capacity
+                            && forall|j: int| 0 <= j < arguments@.len() ==> !((#[trigger] arguments@[j]).source is Deferred),
+                    }
+                },
+            }
+        },
+{
+    let checkpoint = gates.len();
+    let ghost initial = gates@;
+    let table = match lower_child_calls(caller, calls, reference_count, gates, capacity, output_capacity, Ghost(input_bits)) {
+        Ok(table) => table,
+        Err((index, error)) => return Err(NestedCallWiringError::Child(index, error)),
+    };
+    let invocation = CallerArguments { child_ranges: table.ranges.as_slice(), child_wires: table.wires.as_slice(), ..*caller };
+    let ghost end = ChildWiringSnapshot { table, gates: gates@ };
+    proof {
+        reveal(argument_wires_ready);
+        existing_wires_keep_availability(caller.wires@, input_bits, initial.len(), end.gates.len());
+        assert forall|port: int| 0 <= port < arguments@.len() implies {
+            let argument = #[trigger] arguments@[port];
+            let range = layout.ranges_model()[port];
+            &&& argument_wires_ready(&invocation, argument, (range.end - range.start) as usize)
+            &&& argument_source_available(&invocation, argument.source) == !(argument.source is Deferred)
+        } by {
+            let argument = arguments@[port];
+            if let CallArgumentSource::NestedCall(reference) = argument.source {
+                let range = layout.ranges_model()[port];
+                let width = (range.end - range.start) as usize;
+                let i = choose|i: int| 0 <= i < calls@.len() && (#[trigger] calls@[i]).reference == reference
+                    && calls@[i].circuit.outputs@.len() == width;
+                produced_child_argument_ready(calls@, calls@.len(), table.ranges@, table.wires@.len(), i, reference, width);
+            }
+        };
+    }
+    let result = lower_projected_call(&invocation, arguments, layout, callee, gates, capacity,
+        Ghost(root_layout.0), Ghost(root_layout.1), Ghost(input_bits));
+    match result {
+        Ok(outputs) => {
+            proof {
+                let mapped = choose|mapped: Seq<Wire>| #[trigger] argument_prefix_wires(&invocation, arguments@,
+                    layout.ranges_model(), arguments@.len() as int, mapped)
+                    && mapped.len() == layout.total_bits_model()
+                    && wires_available(mapped, input_bits, end.gates.len())
+                    && instance_gates_match(end.gates, callee.gates@, mapped, gates@)
+                    && instance_outputs_match(callee.outputs@, mapped, end.gates.len() as usize, outputs@);
+                let trace = choose|trace: Seq<ChildWiringSnapshot>| #[trigger] child_wiring_trace_matches(
+                    caller, calls@, calls@.len(), reference_count, initial, trace, end, input_bits);
+                assert(trace[calls@.len() as int] == end) by { reveal(child_wiring_trace_matches); };
+                assert(gates@.take(checkpoint as int) =~= initial);
+                assert(nested_root_wiring_matches(caller, calls@, reference_count, arguments@, layout, callee,
+                    initial, gates@, input_bits, outputs@)) by { reveal(nested_root_wiring_matches); };
+            }
+            Ok(outputs)
+        },
+        Err(error) => {
+            gates.truncate(checkpoint);
+            assert(gates@ =~= initial);
+            Err(NestedCallWiringError::Root(error))
+        },
+    }
 }
 
 } // verus!

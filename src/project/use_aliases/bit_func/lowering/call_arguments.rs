@@ -1005,7 +1005,7 @@ fn nested_argument_uses_the_saved_child_output_range() {
 #[test]
 fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
-    use child_calls::{bind_child_calls, lower_child_calls};
+    use child_calls::{NestedCallWiringError, bind_child_calls, lower_root_with_children};
 
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "calls.ncg2",
@@ -1043,20 +1043,28 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     assert_eq!(calls.iter().map(|call| call.reference).collect::<Vec<_>>(), [3, 2, 1]);
     let prefix = NorGate { left: Wire::Constant(false), right: Wire::Constant(false) };
     let mut gates = alloc::vec![prefix];
-    let at_limit = lower_child_calls(&base, &calls, count, &mut gates, 2, 1, Ghost(1usize));
-    let Err((1, ChildCallWiringError::GateCapacity(site))) = at_limit else { panic!("expected a child gate limit error"); };
+    let parent_circuit = parent.template.circuit();
+    let at_limit = lower_root_with_children(&base, &calls, count, parent.arguments, parent_circuit.inputs(),
+        parent_circuit.netlist(), &mut gates, 2, 1, Ghost((seq![1u64], 1usize)), Ghost(1usize));
+    let Err(NestedCallWiringError::Child(1, ChildCallWiringError::GateCapacity(site))) = at_limit
+        else { panic!("expected a child gate limit error"); };
     assert_eq!(&site.source.text[site.span], "(nor (nor a a) 0)");
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
-    let output_limit = lower_child_calls(&base, &calls, count, &mut gates, 3, 1, Ghost(1usize));
-    let Err((1, ChildCallWiringError::OutputCapacity { site, used: 1, width: 1, capacity: 1 })) = output_limit
+    let output_limit = lower_root_with_children(&base, &calls, count, parent.arguments, parent_circuit.inputs(),
+        parent_circuit.netlist(), &mut gates, 3, 1, Ghost((seq![1u64], 1usize)), Ghost(1usize));
+    let Err(NestedCallWiringError::Child(1, ChildCallWiringError::OutputCapacity { site, used: 1, width: 1, capacity: 1 })) = output_limit
         else { panic!("expected a child wiring limit error"); };
     assert_eq!(&site.source.text[site.span], "(nor (nor a a) 0)");
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
-    let children = lower_child_calls(&base, &calls, count, &mut gates, 3, 3, Ghost(1usize)).unwrap();
-    let invocation = CallerArguments { child_ranges: &children.ranges, child_wires: &children.wires, ..base };
-    let parent_circuit = parent.template.circuit();
-    let outputs = lower_projected_call(&invocation, parent.arguments, parent_circuit.inputs(), parent_circuit.netlist(),
-        &mut gates, 3, Ghost(seq![1u64]), Ghost(1usize), Ghost(1usize)).unwrap();
+    let deferred = [ProjectedCallArgument { form: parent.arguments[0].form, source: CallArgumentSource::Deferred }];
+    let root_failure = lower_root_with_children(&base, &calls, count, &deferred, parent_circuit.inputs(),
+        parent_circuit.netlist(), &mut gates, 3, 3, Ghost((seq![1u64], 1usize)), Ghost(1usize));
+    let Err(NestedCallWiringError::Root(CallWiringError::DeferredArgument(site))) = root_failure
+        else { panic!("expected a root argument error"); };
+    assert_eq!(&site.source.text[site.span], "(id (nor (nor a a) 0))");
+    assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
+    let outputs = lower_root_with_children(&base, &calls, count, parent.arguments, parent_circuit.inputs(),
+        parent_circuit.netlist(), &mut gates, 3, 3, Ghost((seq![1u64], 1usize)), Ghost(1usize)).unwrap();
     let result = NorNetlist { input_count: 1, gates, outputs };
     assert_eq!(result.evaluate(&[false]).unwrap(), [false]);
     assert_eq!(result.evaluate(&[true]).unwrap(), [true]);
