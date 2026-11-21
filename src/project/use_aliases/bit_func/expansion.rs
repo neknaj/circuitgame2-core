@@ -883,6 +883,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& forall|i: int, j: int| 0 <= i < j < body.calls@.len() ==>
             (#[trigger] body.calls@[i]).outputs.end <= (#[trigger] body.calls@[j]).outputs.start
         &&& body.projections.call_arguments.ranges@.len() == body.calls@.len()
+        &&& self.projected_references_match((file, entry, limit), body.typed.types@, &wiring,
+            &body.projections.call_arguments, body.projections.calls@)
         &&& forall|i: int| 0 <= i < body.calls@.len() ==> self.checked_expansion_call_matches(plan, (file, entry, limit),
             body.typed, &wiring, body.projections.calls@[i], body.projections.call_arguments.ranges@[i],
             &body.projections.call_arguments, #[trigger] body.calls@[i])

@@ -536,6 +536,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         projections.calls@, typed.types@.len())
                     &&& self.projected_roots_match((file, entry, max_width), typed.types@, &wiring, projections.calls@,
                         projections.call_arguments.ranges@, projections.call_arguments.arguments@)
+                    &&& (retain_calls ==> self.projected_references_match((file, entry, max_width), typed.types@, &wiring,
+                        &projections.call_arguments, projections.calls@))
                     &&& concat_projections_match(file, entry, max_width,
                         &self.targets.project_model().sources_model()[file as int],
                         &self.targets.project_model().circuits_model()[file as int], &wiring, typed.types@, projections.concats@)
@@ -613,7 +615,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let mut call_arguments = CallArgumentProjections::new();
         let checked = self.check_all_inputs_with_types(file, entry, max_width, type_slice, scope, &mut signatures,
-            calls.as_slice(), &mut call_arguments);
+            calls.as_slice(), &mut call_arguments, retain_calls);
         match checked {
             Ok(()) => {
                 proof {

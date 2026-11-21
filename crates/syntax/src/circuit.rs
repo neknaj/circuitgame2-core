@@ -60,7 +60,8 @@ pub use build::{
 };
 #[cfg(verus_only)]
 pub use build::{
-    build_bare_signal_position, build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
+    build_bare_signal_position, build_definition_reference_boundaries, build_definition_scope_evidence,
+    build_entry_ranges_evidence, build_index_matches,
     build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
     definition_expression_region, definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
     definition_targets_match,

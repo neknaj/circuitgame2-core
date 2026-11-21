@@ -753,6 +753,19 @@ pub(super) open spec fn flat_body_matches(
 }
 
 /// 平坦な本体の一行から、参照範囲と元ソースの根拠を取り出す。
+pub(super) proof fn flat_body_reference_boundaries(
+    source: &str, forms: Seq<Form>, body: int, end: int, rows: Seq<BuildDefinition>,
+    refs: Seq<ExpressionReference>, signals: Seq<usize>, first: int, stop: int, first_signal: int, stop_signal: int,
+)
+    requires flat_body_matches(source, forms, body, end, end, rows, refs, signals, first, stop, first_signal, stop_signal),
+    ensures
+        stop == if rows.len() == 0 { first } else { rows.last().references.end as int },
+        forall|i: int| 0 <= i < rows.len() ==> (#[trigger] rows[i]).references.start
+            == if i == 0 { first } else { rows[i - 1].references.end as int },
+{
+    reveal(flat_body_matches);
+}
+
 pub(super) proof fn flat_body_row_evidence(
     source: &str, forms: Seq<Form>, start: int, end: int,
     definitions: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
