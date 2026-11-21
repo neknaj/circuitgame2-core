@@ -972,12 +972,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     pub(super) open spec fn expansion_child_scope(&self, group: &CheckedExpansionCall) -> bool {
-        &&& group.references.start <= group.references.end
-        &&& group.postorder matches Some(children) ==> {
+        self.expression_children_in_reference_range(group.references, group.expression.source, group.postorder)
+    }
+
+    /// 子の参照が同じ定義の区間に収まり、重複しないことを表す。
+    pub(super) open spec fn expression_children_in_reference_range(
+        &self, references: Range<usize>, source: &crate::project::ProjectSource,
+        postorder: Option<Vec<PreparedExpressionCall>>,
+    ) -> bool {
+        &&& references.start <= references.end
+        &&& postorder matches Some(children) ==> {
             &&& forall|i: int| 0 <= i < children@.len() ==> {
                 let child = #[trigger] children@[i];
-                &&& group.references.start <= child.reference < group.references.end
-                &&& *child.expression.source == *group.expression.source
+                &&& references.start <= child.reference < references.end
+                &&& *child.expression.source == *source
                 &&& location_in_source(child.expression)
             }
             &&& forall|i: int, j: int| 0 <= i < j < children@.len() ==>

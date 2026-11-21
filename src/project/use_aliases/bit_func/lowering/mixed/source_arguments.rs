@@ -376,12 +376,28 @@ proof fn nested_child_values<'s, 'p, 'a>(
     let wiring = prepared.typed.literals.wiring->Checked_0;
     let definition = prepared.projections.calls@[index].definition;
     let range = selected_child.child.arguments;
+    let projected = prepared.projections.call_arguments.arguments@.subrange(range.start as int, range.end as int);
+    assert(call.arguments@ == projected);
     let positions = Seq::new(call.arguments@.len(), |port: int| call.arguments@[port].form);
+    assert(call_argument_positions(forms, selected_child.child._signature@.call.call, positions));
     let ports = port_values(call.inputs, result.0);
     let incoming = port_values(&layouts.inputs, inputs);
     let prior = prior_definition_values(layouts, step, inputs, gates);
     port_bit_layout_size(call._input_widths@, call._layout_limit@, call.inputs);
     reveal(port_values);
+    assert(ports.len() == call.arguments@.len());
+    assert(nor_evaluation(call.circuit, result.0, result.1));
+    assert(selected_child.template.is_none() ==> {
+        &&& result.0.len() == 2
+        &&& ports == seq![seq![result.0[0]], seq![result.0[1]]]
+        &&& result.1 == seq![!(result.0[0] || result.0[1])]
+    });
+    let reference = call.reference as int;
+    assert(0 <= reference < root.end.table.ranges@.len());
+    assert(root.end.table.ranges@[reference] matches Some(output_range)
+            && output_range.start <= output_range.end <= root.end.table.wires@.len()
+            && result.1 == instance_wire_values(
+                root.end.table.wires@.subrange(output_range.start as int, output_range.end as int), inputs, gates));
     assert forall|port: int| 0 <= port < call.arguments@.len() implies
         !((#[trigger] call.arguments@[port]).source is Deferred) by {
         reveal(argument_prefix_wires);
@@ -428,7 +444,10 @@ proof fn nested_child_values<'s, 'p, 'a>(
         }
         assert(earlier == producer);
     };
-    EvaluatedCallBits { input: result.0, ports, output: result.1 }
+    let evaluation = EvaluatedCallBits { input: result.0, ports, output: result.1 };
+    assert(evaluated_nested_child(aliases, caller, prepared, index, selected, layouts, step, forms,
+        calls, root, inputs, gates, child_index, evaluation));
+    evaluation
 }
 
 proof fn trace_call_frame(

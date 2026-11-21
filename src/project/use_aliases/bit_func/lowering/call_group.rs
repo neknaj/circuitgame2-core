@@ -16,7 +16,7 @@ use vstd::prelude::*;
 use super::call_arguments::{argument_prefix_wires, argument_wires_ready, layout_argument_ready};
 #[cfg(verus_only)]
 use super::call_arguments::child_calls::{
-    ChildCall, NestedRootEvaluation, child_call_abi, child_call_binding, child_call_ready, child_value_flows_to_root,
+    ChildCall, NestedRootEvaluation, bound_template_arguments_ready, child_call_abi, child_call_binding, child_call_ready, child_value_flows_to_root,
     nested_root_values, nested_root_wiring_result, root_arguments_fit_children, root_port_reads_child,
 };
 #[cfg(verus_only)]
@@ -570,8 +570,12 @@ pub(super) fn lower_nested_call_group<'s, 'p, 'a>(
         child_ranges: &[], child_wires: &[] };
     let ghost invoked = invocation;
     proof { super::body_inputs_end_within_layout(body, caller_limit, caller); }
-    let (count, children) = bind_child_calls(selected, builtin, Ghost(aliases), Ghost(context),
-        Ghost(&invocation), Ghost((body, caller, caller_limit)));
+    let (count, children) = bind_child_calls(&group.references, selected.children.as_slice(), builtin,
+        Ghost(aliases), Ghost(context), Ghost(group.expression.source), Ghost(group.postorder));
+    proof {
+        bound_template_arguments_ready(selected, builtin, &invocation, body, caller, caller_limit,
+            context.2, children@);
+    }
     assert(nested_group_invocation_matches(selected, forms@, caller, builtin, before, invoked, children@)) by {
         reveal(nested_group_invocation_matches);
     };

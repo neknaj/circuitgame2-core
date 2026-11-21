@@ -1079,9 +1079,10 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
         wires: &[Wire::Constant(false)], child_ranges: &[], child_wires: &[],
     };
     let builtin = builtin_nor_call();
-    let (count, calls) = bind_child_calls(parent, &builtin, Ghost(&aliases),
+    let (count, calls) = bind_child_calls(&parent.group.references, parent.children.as_slice(),
+        &builtin, Ghost(&aliases),
         Ghost((&plan, &templates, 1u64, prepared.projections.call_arguments.arguments@)),
-        Ghost(&base), Ghost((&_body, &layouts, 2usize)));
+        Ghost(parent.group.expression.source), Ghost(parent.group.postorder));
     assert!(parent.group.references.start > 0);
     assert_eq!(count, 4);
     assert_eq!(calls.iter().map(|call| call.reference).collect::<Vec<_>>(), [3, 2, 1]);

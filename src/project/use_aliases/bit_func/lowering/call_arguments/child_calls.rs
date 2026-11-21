@@ -1,8 +1,11 @@
 //! 子呼び出しを内側から展開し、失敗したときは追加したゲートを取り除く。
 
 use super::*;
+use super::super::super::templates::{FunctionTemplates, ResolvedExpressionCall};
+#[cfg(verus_only)]
 use super::super::{Layouts, LoweringBody};
-use super::super::super::templates::{FunctionTemplates, ResolvedExpressionCall, ResolvedTemplateCall};
+#[cfg(verus_only)]
+use super::super::super::templates::ResolvedTemplateCall;
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
 use super::super::{existing_wires_keep_availability, port_values};
@@ -59,78 +62,63 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_
     }
 }
 
-/// 同じ定義の子を後順に並べたまま参照添字を相対化し、実引数、入力配置、回路を借りる。
-///
-/// 根と子の確定済みの実引数について、現在の配線と先行する子が供給する幅を照合する。
+/// 子を後順に保ち、定義の参照区間を起点とする添字で実引数、入力配置、回路を結び付ける。
 pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 'p, 'a>(
-    selected: &'s ResolvedTemplateCall<'s, 'p, 'a>, builtin: &'s (NorNetlist, PortBitLayout),
+    references: &Range<usize>, selected: &'s [ResolvedExpressionCall<'s, 'p, 'a>],
+    builtin: &'s (NorNetlist, PortBitLayout),
     Ghost(aliases): Ghost<&UseAliases<'_, 'p, 'a>>,
-    context: Ghost<(&FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, u64, Seq<ProjectedCallArgument>)>,
-    Ghost(caller): Ghost<&CallerArguments<'_, 'p, 'a>>,
-    Ghost(body_layout): Ghost<(&LoweringBody<'_, 'p, 'a>, &Layouts, usize)>,
+    _context: Ghost<(&FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, u64, Seq<ProjectedCallArgument>)>,
+    Ghost(source): Ghost<&ProjectSource<'a>>,
+    Ghost(postorder): Ghost<Option<Vec<super::super::super::expansion::PreparedExpressionCall<'p, 'a>>>>,
 ) -> (bound: (usize, Vec<ChildCall<'s, 'p, 'a>>))
     requires
-        aliases.expansion_child_scope(selected.group),
-        aliases.resolved_expression_calls_match(context@.0, context@.1, context@.2, selected.group.postorder,
-            context@.3, selected.children@),
+        aliases.expression_children_in_reference_range(*references, source, postorder),
+        aliases.resolved_expression_calls_match(_context@.0, _context@.1, _context@.2, postorder, _context@.3, selected@),
         builtin_nor_call_matches(builtin),
-        body_definition_layouts(body_layout.0.input_widths@, body_layout.0.definitions@, body_layout.2, body_layout.1),
-        caller.source == selected.group.expression.source,
-        caller.inputs@ == body_layout.1.inputs.ranges_model(),
-        caller.definitions@ == body_layout.1.definitions.ranges_model(),
-        caller.wires@.len() == preceding_port_bits(definition_widths(body_layout.0.definitions@), selected.group.outputs.start as nat),
-        resolved_call_fits_body(*selected, body_layout.0.input_widths@, body_layout.0.definitions@, caller.forms@, context@.2),
-        port_bit_layout_result(selected.template.input_widths_model(), selected.template.bit_limit_model(),
-            Ok(*selected.template.circuit_model().input_layout_model())),
-        selected.arguments@.len() == selected.template.input_widths_model().len(),
     ensures
-        bound.0 == selected.group.references.end - selected.group.references.start,
-        bound.1@.len() == selected.children@.len(),
+        bound.0 == references.end - references.start,
+        bound.1@.len() == selected@.len(),
         forall|i: int| 0 <= i < bound.1@.len() ==>
             (#[trigger] bound.1@[i]).reference < bound.0
             && location_in_source(*bound.1@[i].expression)
-            && *bound.1@[i].expression.source == *selected.group.expression.source
-            && child_call_binding(selected.children@[i], selected.group.references, builtin, bound.1@[i])
-            && child_call_ready(caller, bound.1@, i),
+            && *bound.1@[i].expression.source == *source
+            && child_call_binding(selected@[i], *references, builtin, bound.1@[i]),
         forall|i: int, j: int| 0 <= i < j < bound.1@.len() ==>
             (#[trigger] bound.1@[i]).reference != (#[trigger] bound.1@[j]).reference,
-        root_arguments_fit_children(caller, bound.1@, selected.arguments@, selected.template.circuit_model().input_layout_model()),
 {
-    let references = &selected.group.references;
     let count = references.end - references.start;
     let mut calls: Vec<ChildCall<'s, 'p, 'a>> = Vec::new();
     let mut index = 0;
-    while index < selected.children.len()
+    while index < selected.len()
         invariant
-            references == &selected.group.references,
             count == references.end - references.start,
-            aliases.expansion_child_scope(selected.group),
-            aliases.resolved_expression_calls_match(context@.0, context@.1, context@.2, selected.group.postorder,
-                context@.3, selected.children@),
+            aliases.expression_children_in_reference_range(*references, source, postorder),
+            aliases.resolved_expression_calls_match(_context@.0, _context@.1, _context@.2, postorder,
+                _context@.3, selected@),
             builtin_nor_call_matches(builtin),
-            index == calls@.len() <= selected.children@.len(),
+            index == calls@.len() <= selected@.len(),
             forall|i: int| 0 <= i < calls@.len() ==>
                 (#[trigger] calls@[i]).reference < count
                 && location_in_source(*calls@[i].expression)
-                && *calls@[i].expression.source == *selected.group.expression.source
-                && child_call_binding(selected.children@[i], *references, builtin, calls@[i]),
-        decreases selected.children@.len() - index,
+                && *calls@[i].expression.source == *source
+                && child_call_binding(selected@[i], *references, builtin, calls@[i]),
+        decreases selected@.len() - index,
     {
-        let child = &selected.children[index];
+        let child = &selected[index];
         proof {
             reveal(UseAliases::resolved_expression_call_matches);
-            assert(selected.group.postorder is Some);
-            let row = selected.group.postorder->Some_0@[index as int];
-            assert(aliases.resolved_expression_call_matches(context@.0, context@.1, context@.2, context@.3, row, *child));
+            assert(postorder is Some);
+            let row = postorder->Some_0@[index as int];
+            assert(aliases.resolved_expression_call_matches(_context@.0, _context@.1, _context@.2, _context@.3, row, *child));
             assert(references.start <= child.child.reference < references.end);
         }
         let reference = child.child.reference - references.start;
         let call = if let Some(template) = child.template {
             proof {
-                let target = context@.0.position_model(child.child._rank@->Some_0)->Some_0;
-                aliases.template_circuit_evidence(target, context@.2, template);
-                aliases.template_port_evidence(target, context@.2, template);
-                aliases.template_port_counts(template.signature_model(), context@.2, template.input_widths_model(),
+                let target = _context@.0.position_model(child.child._rank@->Some_0)->Some_0;
+                aliases.template_circuit_evidence(target, _context@.2, template);
+                aliases.template_port_evidence(target, _context@.2, template);
+                aliases.template_port_counts(template.signature_model(), _context@.2, template.input_widths_model(),
                     template.output_widths_model(), template.structure_layouts_model());
                 port_bit_layout_size(template.input_widths_model(), template.bit_limit_model(),
                     template.circuit_model().input_layout_model());
@@ -152,8 +140,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
         assert forall|i: int| 0 <= i < calls@.len() implies
             (#[trigger] calls@[i]).reference < count
                 && location_in_source(*calls@[i].expression)
-                && *calls@[i].expression.source == *selected.group.expression.source
-                && child_call_binding(selected.children@[i], *references, builtin, calls@[i]) by {
+                && *calls@[i].expression.source == *source
+                && child_call_binding(selected@[i], *references, builtin, calls@[i]) by {
             if i < index { assert(calls@[i] == before[i]); }
         };
         index += 1;
@@ -162,25 +150,48 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
         assert forall|i: int, j: int| 0 <= i < j < calls@.len() implies
             (#[trigger] calls@[i]).reference != (#[trigger] calls@[j]).reference by {
             reveal(UseAliases::resolved_expression_call_matches);
-            let source = selected.group.postorder->Some_0;
-            assert(*selected.children@[i].child == source@[i] && *selected.children@[j].child == source@[j]);
-            assert(source@[i].reference != source@[j].reference);
+            let rows = postorder->Some_0;
+            assert(*selected@[i].child == rows@[i] && *selected@[j].child == rows@[j]);
+            assert(rows@[i].reference != rows@[j].reference);
         };
-        let (body, layouts, capacity) = body_layout;
-        assert forall|i: int| 0 <= i < calls@.len() implies
-            #[trigger] child_call_ready(caller, calls@, i) by {
-            assert(child_call_binding(selected.children@[i], *references, builtin, calls@[i]));
-            assert forall|port: int| 0 <= port < selected.children@[i].arguments@.len() implies
-                #[trigger] expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
-                    body.definitions@, *selected, i, port, context@.2) by {
-                assert(expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
-                    body.definitions@, *selected, i, port, context@.2));
-            };
-            bound_child_call_ready(body, layouts, capacity, context@.2, caller, *selected, builtin, calls@, i);
-        };
-        bound_root_arguments_ready(body, layouts, capacity, context@.2, caller, *selected, builtin, calls@);
     }
     (count, calls)
+}
+
+/// 通常関数を根とする呼び出しで、根と子の全実引数が幅に合う配線を読めることを示す。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn bound_template_arguments_ready(
+    selected: &ResolvedTemplateCall, builtin: &(NorNetlist, PortBitLayout),
+    caller: &CallerArguments, body: &LoweringBody, layouts: &Layouts, capacity: usize,
+    width_limit: u64, calls: Seq<ChildCall>,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        caller.source == selected.group.expression.source,
+        caller.inputs@ == layouts.inputs.ranges_model(),
+        caller.definitions@ == layouts.definitions.ranges_model(),
+        caller.wires@.len() == preceding_port_bits(definition_widths(body.definitions@), selected.group.outputs.start as nat),
+        resolved_call_fits_body(*selected, body.input_widths@, body.definitions@, caller.forms@, width_limit),
+        port_bit_layout_result(selected.template.input_widths_model(), selected.template.bit_limit_model(),
+            Ok(*selected.template.circuit_model().input_layout_model())),
+        selected.arguments@.len() == selected.template.input_widths_model().len(),
+        calls.len() == selected.children@.len(),
+        forall|i: int| 0 <= i < calls.len() ==>
+            child_call_binding(selected.children@[i], selected.group.references, builtin, #[trigger] calls[i]),
+    ensures
+        forall|i: int| 0 <= i < calls.len() ==> #[trigger] child_call_ready(caller, calls, i),
+        root_arguments_fit_children(caller, calls, selected.arguments@, selected.template.circuit_model().input_layout_model()),
+{
+    assert forall|i: int| 0 <= i < calls.len() implies #[trigger] child_call_ready(caller, calls, i) by {
+        assert(child_call_binding(selected.children@[i], selected.group.references, builtin, calls[i]));
+        assert forall|port: int| 0 <= port < selected.children@[i].arguments@.len() implies
+            #[trigger] expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+                body.definitions@, *selected, i, port, width_limit) by {
+            assert(expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+                body.definitions@, *selected, i, port, width_limit));
+        };
+        bound_child_call_ready(body, layouts, capacity, width_limit, caller, *selected, builtin, calls, i);
+    };
+    bound_root_arguments_ready(body, layouts, capacity, width_limit, caller, *selected, builtin, calls);
 }
 
 /// 子を一件ずつ処理した境界の、検証に使う配線表とゲート列。
@@ -534,8 +545,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_nested_po
     ensures child_port_reads_producer(calls, end, producer, consumer, port,
         instance_wire_values(mapped, inputs, values), inputs, values),
 {
-    reveal(child_call_ready);
     let call = calls[consumer as int];
+    assert(child_call_abi(call)) by { reveal(child_call_ready); };
     assert(trace.len() == stop + 1 && trace[stop as int] == end) by {
         reveal(child_wiring_trace_matches);
     };
@@ -544,7 +555,9 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_nested_po
     let dest = call.inputs.ranges_model()[port as int];
     port_bit_layout_port(call._input_widths@, call._layout_limit@, *call.inputs, port);
     assert(exists|i: int| 0 <= i < consumer && (#[trigger] calls[i]).reference == reference
-        && calls[i].circuit.outputs@.len() == (dest.end - dest.start) as usize);
+        && calls[i].circuit.outputs@.len() == (dest.end - dest.start) as usize) by {
+        reveal(child_call_ready);
+    };
     let child = choose|i: int| 0 <= i < consumer && (#[trigger] calls[i]).reference == reference
         && calls[i].circuit.outputs@.len() == (dest.end - dest.start) as usize;
     child_output_range_preserved(caller, calls, stop, reference_count, initial, trace, end,
