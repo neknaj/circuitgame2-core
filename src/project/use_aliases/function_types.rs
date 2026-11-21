@@ -310,7 +310,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& builtin.call.call.form == parsed.definitions@[driver.definition as int].expression.start
                 &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(builtin)))
             }),
-        ensures typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+        ensures
+            typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+            wiring.drivers.definitions@[index].result_index == 0,
     {
         let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
         self.call_outputs_fit_wiring(file, entry, limit, &roots, &wiring);

@@ -1056,6 +1056,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }),
         ensures
             outputs.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+            wiring.drivers.definitions@[index].result_index == 0,
             ({
                 let project = self.targets.project_model();
                 let parsed = &project.circuits_model()[file as int];

@@ -19,7 +19,7 @@ use crate::project::circuits::form_location;
 use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
-use crate::syntax::circuit::{definition_root_is_call, postorder_call_references};
+use crate::syntax::circuit::{definition_root_is_call, definition_target_atoms, postorder_call_references};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     call_postorder_positions, call_postorder_reference, call_postorder_references_distinct, call_references_in_postorder,
@@ -125,6 +125,8 @@ pub(super) struct CheckedExpansionCall<'p, 'a> {
 pub(super) struct PreparedNorRoot<'p, 'a> {
     /// ファイルの定義配列を参照する添字。
     pub(super) definition: usize,
+    /// 駆動元配列で、この根の一ビット出力を指す添字。
+    pub(super) output_slot: usize,
     pub(super) root: PreparedExpressionCall<'p, 'a>,
     pub(super) postorder: Vec<PreparedExpressionCall<'p, 'a>>,
     pub(super) _caller_rank: Ghost<int>,
@@ -2165,6 +2167,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let rank = prepared._caller_rank@;
         &&& frame.definitions.start <= absolute < frame.definitions.end <= parsed.definitions@.len()
         &&& prepared.definition == absolute
+        &&& prepared.output_slot < wiring.drivers.definitions@.len() && prepared.output_slot < types.len()
+        &&& wiring.drivers.definitions@[prepared.output_slot as int].definition == absolute
+        &&& wiring.drivers.definitions@[prepared.output_slot as int].result_index == 0
+        &&& types[prepared.output_slot as int] matches Some(ty) && ty.ty == crate::project::ResolvedPortType::Bits(1)
+        &&& forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
+            && (#[trigger] wiring.drivers.definitions@[i]).definition == absolute ==> i == prepared.output_slot
         &&& 0 <= rank < plan.order_model().len() && plan.position_model(rank) == Some((file, entry))
         &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text, parsed.syntax.forms@,
             row.expression.start as int, row.expression.end as int)
@@ -2318,17 +2326,87 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    /// ソース順のカーソルを進め、次の根 NOR に対応する出力スロットを得る。
+    fn next_nor_output(
+        drivers: &[super::super::function_drivers::DefinitionDriver], start: usize, definition: usize,
+        Ghost(expected): Ghost<int>,
+    ) -> (output: usize)
+        requires
+            start <= expected < drivers@.len(),
+            drivers@[expected].definition == definition,
+            forall|i: int| 0 <= i < expected ==> (#[trigger] drivers@[i]).definition < definition,
+        ensures output == expected,
+    {
+        let mut cursor = start;
+        while drivers[cursor].definition < definition
+            invariant
+                start <= cursor <= expected < drivers@.len(),
+                drivers@[expected].definition == definition,
+                forall|i: int| 0 <= i < expected ==> (#[trigger] drivers@[i]).definition < definition,
+            decreases expected - cursor,
+        {
+            assert(cursor < expected);
+            cursor += 1;
+        }
+        cursor
+    }
+
+    proof fn nor_output_type_and_uniqueness(
+        &self, caller: (usize, usize, u64), typed: FuncSignalTypes, wiring: FuncWiring,
+        definition: usize, output: usize, builtin: TypedFuncCall,
+    )
+        requires
+            self.can_resolve(),
+            self.func_signal_types_evidence(caller.0, caller.1, caller.2, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(wiring),
+            typed.types@.len() == wiring.drivers.definitions@.len(),
+            output < wiring.drivers.definitions@.len(),
+            wiring.drivers.definitions@[output as int].definition == definition,
+            builtin.call.target is Nor,
+            ({
+                let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+                let local = (definition - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize;
+                &&& builtin.call.call.form == parsed.definitions@[definition as int].expression.start
+                &&& self.func_call_signature_evidence(caller.0, caller.1, local, 0, caller.2, Ok(Some(builtin)))
+            }),
+        ensures
+            typed.types@[output as int] matches Some(ty) && ty.ty == crate::project::ResolvedPortType::Bits(1),
+            wiring.drivers.definitions@[output as int].result_index == 0,
+            forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
+                && (#[trigger] wiring.drivers.definitions@[i]).definition == definition ==> i == output,
+    {
+        self.checked_types_keep_wiring(caller.0, caller.1, caller.2, typed, wiring);
+        self.checked_wiring_is_func(caller.0, caller.1, caller.2, wiring);
+        self.checked_nor_type(caller.0, caller.1, caller.2, typed, wiring, output as int, builtin);
+        assert forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
+            && (#[trigger] wiring.drivers.definitions@[i]).definition == definition implies i == output by {
+            if i != output {
+                self.checked_nor_type(caller.0, caller.1, caller.2, typed, wiring, i, builtin);
+                if i < output {
+                    assert(wiring.drivers.definitions@[i].result_index < wiring.drivers.definitions@[output as int].result_index);
+                } else {
+                    assert(wiring.drivers.definitions@[output as int].result_index < wiring.drivers.definitions@[i].result_index);
+                }
+            }
+        };
+    }
+
     fn prepare_nested_nor_roots(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, _limit: u64,
         _typed: &FuncSignalTypes<'p, 'a>, _wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
     ) -> (roots: Vec<PreparedNorRoot<'p, 'a>>)
         requires
             self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.func_signal_types_evidence(file, entry, _limit, Ok(*_typed)),
+            _typed.literals.wiring == FuncWiringResult::Checked(*_wiring),
+            _typed.types@.len() == _wiring.drivers.definitions@.len(),
             self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*_wiring))),
             self.projected_references_match((file, entry, _limit), _typed.types@, _wiring,
                 &projections.call_arguments, projections.calls@),
         ensures
             roots@.len() == projections.call_arguments.nested_nor_roots@.len(),
+            forall|i: int, j: int| 0 <= i < j < roots@.len() ==>
+                (#[trigger] roots@[i]).output_slot < (#[trigger] roots@[j]).output_slot,
             forall|i: int| 0 <= i < roots@.len() ==> self.prepared_nor_root_matches(*plan, (file, entry, _limit),
                 _typed.types@, _wiring, &projections.call_arguments, projections.call_arguments.nested_nor_roots@[i],
                 #[trigger] roots@[i]),
@@ -2345,11 +2423,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let first = parsed.entry_ranges[entry].definitions.start;
         let indices = &projections.call_arguments.nested_nor_roots;
-        let mut roots = Vec::new();
+        let mut roots: Vec<PreparedNorRoot<'p, 'a>> = Vec::new();
         let mut index = 0;
+        let mut cursor = 0;
+        let drivers = _wiring.drivers.definitions.as_slice();
         while index < indices.len()
             invariant
                 self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.func_signal_types_evidence(file, entry, _limit, Ok(*_typed)),
+                _typed.literals.wiring == FuncWiringResult::Checked(*_wiring),
+                _typed.types@.len() == _wiring.drivers.definitions@.len() == drivers@.len(),
+                drivers@ == _wiring.drivers.definitions@,
+                index == 0 ==> cursor == 0,
+                index > 0 ==> cursor == roots@[index - 1].output_slot + 1,
                 self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*_wiring))),
                 caller == (file, entry, _limit),
                 0 <= rank < plan.order_model().len(), plan.position_model(rank) == Some((file, entry)),
@@ -2363,6 +2449,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 indices@ == projections.call_arguments.nested_nor_roots@,
                 self.projected_references_match(caller, _typed.types@, _wiring, &projections.call_arguments, projections.calls@),
                 roots@.len() == index <= indices@.len(),
+                forall|i: int| 0 <= i < roots@.len() ==> (#[trigger] roots@[i]).output_slot < cursor,
+                forall|i: int, j: int| 0 <= i < j < roots@.len() ==>
+                    (#[trigger] roots@[i]).output_slot < (#[trigger] roots@[j]).output_slot,
                 forall|i: int| 0 <= i < roots@.len() ==> self.prepared_nor_root_matches(*plan, caller, _typed.types@,
                     _wiring, &projections.call_arguments, indices@[i], #[trigger] roots@[i]),
             decreases indices@.len() - index,
@@ -2378,6 +2467,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 proof { assert(false); }
                 unreachable!();
             }
+            let _targets = definition_target_atoms(parsed.syntax.forms.as_slice(), row);
+            let ghost output_slot = self.checked_wiring_first_definition_driver(file, entry, _limit, *_wiring, absolute);
+            proof {
+                self.checked_wiring_is_func(file, entry, _limit, *_wiring);
+                assert forall|i: int| 0 <= i < output_slot implies (#[trigger] drivers@[i]).definition < absolute by {
+                    assert(drivers@[i] == _wiring.drivers.definitions@[i]);
+                };
+                if index > 0 {
+                    reveal(UseAliases::prepared_nor_root_matches);
+                    let prior = roots@[index - 1];
+                    assert(prior.definition < absolute);
+                    assert(drivers@[prior.output_slot as int].definition == prior.definition);
+                    if output_slot < prior.output_slot {
+                        assert(drivers@[output_slot].definition <= drivers@[prior.output_slot as int].definition);
+                    }
+                    assert(cursor <= output_slot);
+                }
+            }
+            let output = Self::next_nor_output(drivers, cursor, absolute, Ghost(output_slot));
             let definition = absolute - first;
             let (root, postorder) = self.prepare_root_expression(plan, file, entry, definition, projections,
                 Ghost((_limit, _typed.types@, _wiring, rank)));
@@ -2409,7 +2517,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     _wiring, rank, postorder@, postorder@.len() as int, 0, root._signature@, projected, port);
                 assert(postorder@.len() > 0);
             }
-            let prepared = PreparedNorRoot { definition: absolute, root, postorder, _caller_rank: Ghost(rank) };
+            proof { self.nor_output_type_and_uniqueness(caller, *_typed, *_wiring, absolute, output, root._signature@); }
+            let prepared = PreparedNorRoot { definition: absolute, output_slot: output, root, postorder, _caller_rank: Ghost(rank) };
             assert(self.prepared_nor_root_matches(*plan, caller, _typed.types@, _wiring, &projections.call_arguments,
                 absolute, prepared)) by { reveal(UseAliases::prepared_nor_root_matches); };
             let ghost before = roots@;
@@ -2418,9 +2527,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 _wiring, &projections.call_arguments, indices@[i], #[trigger] roots@[i]) by {
                 if i < index { assert(roots@[i] == before[i]); }
             };
+            proof {
+                assert forall|i: int| 0 <= i < roots@.len() implies (#[trigger] roots@[i]).output_slot <= output by {
+                    if i < index { assert(roots@[i] == before[i]); }
+                };
+                assert forall|i: int, j: int| 0 <= i < j < roots@.len() implies
+                    (#[trigger] roots@[i]).output_slot < (#[trigger] roots@[j]).output_slot by {
+                    assert(roots@[i] == before[i]);
+                    if j < index { assert(roots@[j] == before[j]); }
+                };
+            }
+            proof {
+                vstd::std_specs::vec::axiom_spec_len(&_wiring.drivers.definitions);
+                assert(output < drivers@.len() <= usize::MAX);
+            }
+            cursor = output + 1;
             index += 1;
         }
         roots
+    }
+
+    /// 通常関数の出力区間と、根 NOR の一ビット出力が重ならないことを表す。
+    #[verifier::opaque]
+    pub(super) open spec fn nor_call_slots_disjoint(calls: Seq<CheckedExpansionCall>, roots: Seq<PreparedNorRoot>) -> bool {
+        forall|i: int, j: int| 0 <= i < calls.len() && 0 <= j < roots.len() ==>
+            !((#[trigger] calls[i]).outputs.start <= (#[trigger] roots[j]).output_slot < calls[i].outputs.end)
     }
 
     pub(super) open spec fn prepared_expansion_body_matches(
@@ -2450,7 +2581,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& body.projections.call_arguments.ranges@.len() == body.calls@.len()
         &&& self.projected_references_match((file, entry, limit), body.typed.types@, &wiring,
             &body.projections.call_arguments, body.projections.calls@)
+        &&& Self::nor_call_slots_disjoint(body.calls@, body.nor_roots@)
         &&& body.nor_roots@.len() == body.projections.call_arguments.nested_nor_roots@.len()
+        &&& forall|i: int, j: int| 0 <= i < j < body.nor_roots@.len() ==>
+            (#[trigger] body.nor_roots@[i]).output_slot < (#[trigger] body.nor_roots@[j]).output_slot
         &&& forall|i: int| 0 <= i < body.nor_roots@.len() ==> self.prepared_nor_root_matches(plan, (file, entry, limit),
             body.typed.types@, &wiring, &body.projections.call_arguments,
             body.projections.call_arguments.nested_nor_roots@[i], #[trigger] body.nor_roots@[i])
@@ -2497,6 +2631,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let calls = self.check_expansion_call_groups(plan, file, entry, limit, &typed, wiring, &projections);
         proof { self.checked_types_keep_wiring(file, entry, limit, typed, *wiring); }
         let nor_roots = self.prepare_nested_nor_roots(plan, file, entry, limit, &typed, wiring, &projections);
+        assert(Self::nor_call_slots_disjoint(calls@, nor_roots@)) by {
+            reveal(UseAliases::nor_call_slots_disjoint);
+            assert forall|i: int, j: int| 0 <= i < calls@.len() && 0 <= j < nor_roots@.len() implies
+                !((#[trigger] calls@[i]).outputs.start <= (#[trigger] nor_roots@[j]).output_slot < calls@[i].outputs.end) by {
+                let call = calls@[i];
+                let nor = nor_roots@[j];
+                let root = projections.calls@[i];
+                if call.outputs.start <= nor.output_slot < call.outputs.end {
+                    self.expansion_call_output_types(*plan, (file, entry, limit), typed, wiring, root,
+                        projections.call_arguments.ranges@[i], &projections.call_arguments, call);
+                    reveal(UseAliases::prepared_nor_root_matches);
+                    reveal(UseAliases::prepared_expression_call_matches);
+                    reveal(UseAliases::checked_expansion_call_matches);
+                    assert(nor.definition == root.definition);
+                    let parsed = &self.targets.project_model().circuits_model()[file as int];
+                    let definition = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+                    self.successful_call_signatures_agree(file, entry, definition, 0, limit,
+                        call._signature@, nor.root._signature@);
+                }
+            };
+        };
         Ok(PreparedExpansionBody { typed, projections, calls, nor_roots })
     }
 }
@@ -2508,7 +2663,12 @@ fn prepares_a_nor_root_without_a_function_vertex() {
 
     let text = "(using nor) (func id (in a) (out a))
                 (func caller (in a) (out y) (def y (nor (id a) a)))
-                (func only-nor (in a) (out y) (def y (nor (nor a a) a)))";
+                (func only-nor (in a) (out y) (def y (nor (nor a a) a)))
+                (func both (in a b) (out a b))
+                (func multiple (in a b) (out y)
+                    (def (p q) (both a b))
+                    (def x (nor (nor p q) a))
+                    (def y (nor (id x) q)))";
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "root-nor.ncg2", revision: 1, text,
     }]).unwrap();
@@ -2541,6 +2701,14 @@ fn prepares_a_nor_root_without_a_function_vertex() {
     };
     assert_eq!(&text[child.expression.span.clone()], "(nor a a)");
     assert!(child.vertex.is_none());
+
+    let multiple = aliases.prepare_expansion_body(&plan, 0, 5, 1).unwrap();
+    let [first, second] = multiple.nor_roots.as_slice() else {
+        panic!("expected two NOR roots");
+    };
+    let base = project.circuits()[0].entry_ranges[5].definitions.start;
+    assert_eq!((first.definition, first.output_slot), (base + 1, 2));
+    assert_eq!((second.definition, second.output_slot), (base + 2, 3));
 }
 
 } // verus!

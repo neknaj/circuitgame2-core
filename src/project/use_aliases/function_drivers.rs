@@ -949,6 +949,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.typed_signature_types_declared(file, entry, max_width, checked.signature);
     }
 
+    /// 厳格構文木の左辺が、検査済みの駆動元一覧に含まれることを示す。
+    pub(super) proof fn checked_first_definition_driver(
+        &self, file: usize, entry: usize, limit: u64, checked: FuncDrivers, definition: usize,
+    ) -> (first: int)
+        requires
+            self.can_resolve(), self.func_driver_evidence(file, entry, limit, Ok(FuncDriverResult::Checked(checked))),
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let frame = parsed.entry_ranges@[entry as int].definitions;
+                let (start, end) = definition_target_range(parsed.syntax.forms@, parsed.definitions@[definition as int]);
+                &&& frame.start <= definition < frame.end <= parsed.definitions@.len()
+                &&& start < end
+            }),
+        ensures
+            0 <= first < checked.definitions@.len(),
+            checked.definitions@[first].definition == definition,
+            checked.definitions@[first].result_index == 0,
+    {
+        self.reveal_checked_driver_result(file, entry, limit, checked);
+        let parsed = self.targets.project_model().circuits_model()[file as int];
+        let frame = parsed.entry_ranges@[entry as int].definitions;
+        assert(target_position(parsed.syntax.forms@, parsed.definitions@, frame.start as int, frame.end as int,
+            definition as int, 0));
+        assert(ordered(definition as int, 0, frame.end as int, 0));
+        choose|i: int| 0 <= i < checked.definitions@.len()
+            && (#[trigger] checked.definitions@[i]).definition == definition && checked.definitions@[i].result_index == 0
+    }
+
     /// 一つの定義の左辺が、駆動元一覧で出力ポート順の連続区間を占めることを示す。
     pub(super) proof fn checked_driver_output_group(
         &self, file: usize, entry: usize, limit: u64, checked: FuncDrivers, first: int,

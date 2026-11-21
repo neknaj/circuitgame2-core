@@ -484,6 +484,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let definition = (absolute - frame.definitions.start) as usize;
             let key = row.references.start - frame.references.start;
             &&& frame.definitions.start <= absolute < frame.definitions.end <= parsed.definitions@.len()
+            &&& forall|j: int| 0 <= j < index ==> (#[trigger] projections.nested_nor_roots@[j]) < absolute
             &&& row.references.start < row.references.end <= parsed.references@.len()
             &&& parsed.references@[row.references.start as int].kind is Callee
             &&& parsed.references@[row.references.start as int].form == row.expression.start + 1
