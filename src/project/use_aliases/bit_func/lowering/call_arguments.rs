@@ -343,11 +343,11 @@ pub(super) proof fn lowered_argument_port_value(
     widths: Seq<u64>, limit: usize, mapped: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>, port: usize,
 )
     requires
-        caller.child_ranges@.len() == 0,
         port_bit_layout_result(widths, limit, Ok(*layout)),
         argument_prefix_wires(caller, arguments, layout.ranges_model(), arguments.len() as int, mapped),
         mapped.len() == layout.total_bits_model(),
-        port < widths.len(),
+        port < widths.len(), port < arguments.len(),
+        arguments[port as int].source.has_direct_wires(),
         ({
             let argument = arguments[port as int];
             match argument.source {

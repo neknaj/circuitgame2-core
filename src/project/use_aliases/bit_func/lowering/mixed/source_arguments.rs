@@ -1,7 +1,10 @@
 //! 展開した呼び出しの入力値を、元の引数フォームの値に対応付ける。
 
 use super::*;
-use super::super::call_arguments::{argument_driver_value, literal_word, lowered_argument_port_value};
+use super::super::call_arguments::child_calls::NestedRootEvaluation;
+use super::super::call_arguments::{
+    argument_driver_value, argument_prefix_wires, argument_source_available, literal_word, lowered_argument_port_value,
+};
 use super::super::evaluation::definition_values_from_wires;
 use super::super::super::expansion::{
     call_literal_bit, source_argument_bytes, source_call_argument_value, source_call_arguments_match,
@@ -16,7 +19,7 @@ use vstd::string::StringSliceAdditionalSpecFns;
 verus! {
 
 /// 呼び出し直前の配線から、先行する定義の値を定義順に読む。
-spec fn prior_definition_values(
+pub(super) open spec fn prior_definition_values(
     layouts: &Layouts, step: WiringStep, inputs: Seq<bool>, gates: Seq<bool>,
 ) -> Seq<Seq<bool>> {
     Seq::new(step.from as nat, |index: int| {
@@ -90,50 +93,56 @@ proof fn call_driver_range(
 
 /// 一つの入力ポートを読み、駆動元の値またはリテラルの値と一致することを示す。
 proof fn expanded_port_value(
-    body: &LoweringBody, layouts: &Layouts, layout_limit: usize, binding: CallBinding, step: WiringStep,
-    forms: Seq<Form>, invocation: CallerArguments, mapped: Seq<Wire>, outputs: Seq<Wire>,
+    body: &LoweringBody, layouts: &Layouts, layout_limit: usize, step: WiringStep,
+    arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout, widths: Seq<u64>, argument_limit: usize,
+    invocation: CallerArguments, mapped: Seq<Wire>,
     inputs: Seq<bool>, gates: Seq<bool>, width_limit: u64, port: usize,
 )
     requires
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
-        binding_ready(binding, layouts, forms, definition_widths(body.definitions@)),
-        step.from == binding.group.outputs.start <= body.definitions@.len(),
+        step.from <= body.definitions@.len(),
         step.before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), step.from as nat),
         inputs.len() == layouts.inputs.total_bits_model(),
+        step.before.definitions.len() <= step.after.definitions.len(),
+        step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions,
         wires_available(step.after.definitions, layouts.inputs.total_bits_model(), gates.len()),
-        call_group_wires_match(binding.group, forms, binding.arguments@, layouts, binding.callee,
-            step.before, step.after, binding._output_widths@, invocation, mapped, outputs),
-        port < binding._input_widths@.len() == binding.arguments@.len(),
-        argument_matches_width(binding.group.expression.source, forms, body.input_widths@,
-            body.definitions@.take(step.from as int), binding.arguments@[port as int], binding._input_widths@[port as int], width_limit),
+        invocation.inputs@ == layouts.inputs.ranges_model(),
+        invocation.definitions@ == layouts.definitions.ranges_model(),
+        invocation.wires@ == step.before.definitions,
+        form_spans_valid(invocation.source.text, invocation.forms@, invocation.source.text.spec_bytes().len() as int),
+        port_bit_layout_result(widths, argument_limit, Ok(*layout)),
+        argument_prefix_wires(&invocation, arguments, layout.ranges_model(), arguments.len() as int, mapped),
+        mapped.len() == layout.total_bits_model(),
+        port < widths.len(), port < arguments.len(),
+        arguments[port as int].source.has_direct_wires(),
+        argument_matches_width(invocation.source, invocation.forms@, body.input_widths@,
+            body.definitions@.take(step.from as int), arguments[port as int], widths[port as int], width_limit),
     ensures ({
-        let width = binding._input_widths@[port as int];
-        let value = port_values(binding.callee.input_layout_model(), instance_wire_values(mapped, inputs, gates))[port as int];
-        let argument = binding.arguments@[port as int];
+        let width = widths[port as int];
+        let value = port_values(layout, instance_wire_values(mapped, inputs, gates))[port as int];
+        let argument = arguments[port as int];
         &&& value.len() == width
         &&& match argument.source {
             CallArgumentSource::Driver(driver) =>
                 value == driver_values(port_values(&layouts.inputs, inputs),
                     prior_definition_values(layouts, step, inputs, gates), driver),
             CallArgumentSource::Literal(bits) => {
-                let bytes = source_argument_bytes(binding.group.expression.source, forms, argument.form);
+                let bytes = source_argument_bytes(invocation.source, invocation.forms@, argument.form);
                 width == bits && value == Seq::new(width as nat, |bit: int| call_literal_bit(bytes, bit as nat))
             },
             CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => false,
         }
     }),
 {
-    reveal(binding_ready);
     reveal(port_values);
     reveal(wires_available);
-    let argument = binding.arguments@[port as int];
-    let widths = binding._input_widths@;
-    port_bit_layout_size(widths, binding._layout_limit@, binding.callee.input_layout_model());
+    let argument = arguments[port as int];
+    port_bit_layout_size(widths, argument_limit, layout);
     if let CallArgumentSource::Driver(driver) = argument.source {
         call_driver_range(body, layouts, layout_limit, step, driver, widths[port as int]);
     }
     if argument.source is Literal {
-        let span = form_span(forms[argument.form as int]);
+        let span = form_span(invocation.forms@[argument.form as int]);
         reveal(form_spans_valid);
         assert(span.start < span.end <= invocation.source.text.spec_bytes().len());
     }
@@ -145,9 +154,8 @@ proof fn expanded_port_value(
             assert(wire_available(step.after.definitions[bit], inputs.len(), gates.len()));
         };
     }
-    lowered_argument_port_value(&invocation, binding.arguments@, binding.callee.input_layout_model(), widths,
-        binding._layout_limit@, mapped, inputs, gates, port);
-    let value = port_values(binding.callee.input_layout_model(), instance_wire_values(mapped, inputs, gates))[port as int];
+    lowered_argument_port_value(&invocation, arguments, layout, widths, argument_limit, mapped, inputs, gates, port);
+    let value = port_values(layout, instance_wire_values(mapped, inputs, gates))[port as int];
     match argument.source {
         CallArgumentSource::Driver(driver) => {
             assert(value == argument_driver_value(&invocation, inputs, gates, driver));
@@ -156,12 +164,89 @@ proof fn expanded_port_value(
         },
         CallArgumentSource::Literal(bits) => {
             let raw = literal_word(&invocation, argument.form);
-            let source = source_argument_bytes(binding.group.expression.source, forms, argument.form);
+            let source = source_argument_bytes(invocation.source, invocation.forms@, argument.form);
             assert(raw == source);
             assert(value == Seq::new(bits as nat, |bit: int| call_literal_bit(source, bit as nat)));
         },
         CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => {},
     };
+}
+
+/// 根の信号またはリテラルの値を、厳格構文木の同じ引数位置に結び付ける。
+pub(super) proof fn nested_root_atom_value(
+    aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+    index: int, selected: ResolvedTemplateCall, body: &LoweringBody, layouts: &Layouts, layout_limit: usize,
+    step: WiringStep, forms: Seq<Form>, root: &NestedRootEvaluation, inputs: Seq<bool>, gates: Seq<bool>, port: usize,
+)
+    requires
+        aliases.can_resolve(),
+        aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+        aliases.resolved_template_call_matches(plan, caller, prepared, index, selected),
+        prepared.typed.literals.wiring matches FuncWiringResult::Checked(wiring)
+            && body.input_widths@.len() == wiring.drivers.signature.inputs@.len(),
+        ({
+            let project = aliases.targets.project_model();
+            &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
+            &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
+        }),
+        resolved_call_fits_body(selected, body.input_widths@, body.definitions@, forms, caller.2),
+        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
+        step.from == selected.group.outputs.start,
+        step.before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), step.from as nat),
+        step.before.definitions.len() <= step.after.definitions.len(),
+        step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions,
+        wires_available(step.after.definitions, layouts.inputs.total_bits_model(), gates.len()),
+        inputs.len() == layouts.inputs.total_bits_model(),
+        port < selected.arguments@.len(),
+        selected.arguments@[port as int].source.has_direct_wires(),
+        ({
+            let layout = selected.template.circuit_model().input_layout_model();
+            &&& port_bit_layout_result(selected.template.input_widths_model(), selected.template.bit_limit_model(), Ok(*layout))
+            &&& root.invocation.source == selected.group.expression.source && root.invocation.forms@ == forms
+            &&& root.invocation.inputs@ == layouts.inputs.ranges_model()
+            &&& root.invocation.definitions@ == layouts.definitions.ranges_model()
+            &&& root.invocation.wires@ == step.before.definitions
+            &&& argument_prefix_wires(&root.invocation, selected.arguments@, layout.ranges_model(),
+                selected.arguments@.len() as int, root.mapped)
+            &&& root.mapped.len() == layout.total_bits_model()
+            &&& root.arguments == instance_wire_values(root.mapped, inputs, gates)
+        }),
+    ensures ({
+        let project = aliases.targets.project_model();
+        let layout = selected.template.circuit_model().input_layout_model();
+        let positions = Seq::new(selected.arguments@.len(), |i: int| selected.arguments@[i].form);
+        &&& call_argument_positions(forms, selected.group._signature@.call.call, positions)
+        &&& source_call_argument_value(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
+            &prepared.typed.literals.wiring->Checked_0, caller.1, prepared.projections.calls@[index].definition,
+            selected.arguments@[port as int].form, caller.2, port_values(&layouts.inputs, inputs),
+            prior_definition_values(layouts, step, inputs, gates), selected.template.input_widths_model()[port as int],
+            port_values(layout, root.arguments)[port as int])
+    }),
+{
+    let template = selected.template;
+    let layout = template.circuit_model().input_layout_model();
+    let widths = template.input_widths_model();
+    let argument = selected.arguments@[port as int];
+    let wiring = prepared.typed.literals.wiring->Checked_0;
+    let source_call = prepared.projections.calls@[index];
+    let projections = &prepared.projections.call_arguments;
+    let range = projections.ranges@[index];
+    let incoming = port_values(&layouts.inputs, inputs);
+    let prior = prior_definition_values(layouts, step, inputs, gates);
+    let value = port_values(layout, root.arguments)[port as int];
+
+    aliases.checked_types_keep_wiring(caller.0, caller.1, caller.2, prepared.typed, wiring);
+    aliases.expansion_callee_template_evidence(*plan, caller, prepared, index);
+    aliases.expansion_arguments_in_source_order(*plan, caller, prepared.typed, &wiring, source_call, range, projections,
+        *selected.group);
+    assert(argument == projections.arguments@[range.start + port]);
+    assert(root_argument_matches_width(selected.group.expression.source, forms, body.input_widths@,
+        body.definitions@, selected, port as int, caller.2));
+    expanded_port_value(body, layouts, layout_limit, step, selected.arguments@, layout, widths, template.bit_limit_model(),
+        root.invocation, root.mapped, inputs, gates, caller.2, port);
+    reveal(port_values);
+    aliases.expansion_argument_value_from_source(*plan, caller, prepared.typed, &wiring, source_call, range, projections,
+        *selected.group, port as int, incoming, prior, widths[port as int], value);
 }
 
 proof fn trace_call_frame(
@@ -183,6 +268,7 @@ proof fn trace_call_frame(
         &&& binding_ready(binding, layouts, forms, definition_widths(body.definitions@))
         &&& binding.arguments@.len() == binding._input_widths@.len()
         &&& port_bit_layout_result(binding._input_widths@, binding._layout_limit@, Ok(*binding.callee.input_layout_model()))
+        &&& wiring_view_is_prefix(step.before, step.after)
         &&& wiring_view_is_prefix(step.before, final_wiring)
         &&& wires_available(step.after.definitions, layouts.inputs.total_bits_model(), final_wiring.gates.len())
     }),
@@ -192,6 +278,7 @@ proof fn trace_call_frame(
     reveal(wiring_step_valid);
     reveal(binding_ready);
     let step = steps[at];
+    wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, step);
     existing_wires_keep_availability(step.after.definitions, layouts.inputs.total_bits_model(),
         step.after.gates.len(), final_wiring.gates.len());
 }
@@ -336,8 +423,13 @@ proof fn mixed_trace_source_call_values(
             body.definitions@, selected, port, caller.2));
         assert(argument_matches_width(source, forms, body.input_widths@, body.definitions@.take(step.from as int),
             argument, widths[port], caller.2));
-        expanded_port_value(body, layouts, layout_limit, binding, step, forms, invocation, mapped, wires,
-            inputs, values, caller.2, port as usize);
+        reveal(binding_ready);
+        reveal(argument_prefix_wires);
+        port_bit_layout_port(widths, binding._layout_limit@, *layout, port as usize);
+        assert(argument_source_available(&invocation, argument.source));
+        assert(argument.source.has_direct_wires());
+        expanded_port_value(body, layouts, layout_limit, step, binding.arguments@, layout, widths,
+            binding._layout_limit@, invocation, mapped, inputs, values, caller.2, port as usize);
         aliases.expansion_argument_value_from_source(*plan, caller, prepared.typed, &wiring, root, range, projections,
             *binding.group, port, incoming, prior, widths[port], ports[port]);
     };
