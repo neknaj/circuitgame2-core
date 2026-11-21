@@ -45,7 +45,7 @@ pub use concat_arguments::{
 };
 use build::BuildRows;
 pub use call_shapes::{
-    CallShape, RoutineArity, call_argument_range, definition_root_is_call, indexed_call_shape,
+    CallShape, RoutineArity, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,
     indexed_call_signal, next_call_argument, routine_arity,
 };
 #[cfg(verus_only)]

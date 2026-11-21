@@ -3,8 +3,8 @@
 #[cfg(verus_only)]
 use super::expression_forest::{
     call_argument_signal_index, expression_callee_location, expression_forest, expression_references,
-    expression_region, expression_root_callee, expression_signals, expression_signals_in_order,
-    ordinary_call_at, signal_indices_in_order,
+    expression_references_in_order, expression_region, expression_root_callee, expression_signals,
+    expression_signals_in_order, ordinary_call_at, ordinary_call_in_reference_index, signal_indices_in_order,
 };
 #[cfg(verus_only)]
 use super::expressions::after_form;
@@ -461,6 +461,122 @@ pub fn definition_root_is_call(
     let first = &references[row.references.start];
     matches!(first.kind, ExpressionReferenceKind::Callee)
         && first.form == row.expression.start + 1
+}
+
+/// 定義の参照索引から、指定した通常呼び出しの参照を探す。
+///
+/// ソース、構文木、定義、参照配列は、同じ厳格解析の入力と結果から渡す。
+/// `form` は式の先頭を指す構文木添字。見つかった参照の添字はファイル全体の参照配列を基準とする。
+/// 専用フォームやアトムを指定した場合、または添字が定義の右辺の外にある場合は `None` を返す。
+/// 定義の参照範囲が配列に収まらない場合も `None` を返す。
+pub fn callee_reference_at_form(
+    _source: &str, _forms: &[Form], row: &BuildDefinition, references: &[ExpressionReference], form: usize,
+) -> (reference: Option<usize>)
+    requires definition_call_index(_source, _forms@, *row, references@),
+    ensures
+        reference.is_some() <==>
+            row.expression.start <= form < row.expression.end
+                && ordinary_call_at(_source, _forms@, form as int, row.expression.end as int),
+        reference matches Some(at) ==>
+            row.references.start <= at < row.references.end
+                && references@[at as int].form == form + 1
+                && references@[at as int].kind is Callee,
+{
+    if form < row.expression.start || form >= row.expression.end {
+        return None;
+    }
+    let first = row.references.start;
+    let end = row.references.end;
+    if first > end || end > references.len() {
+        proof { assert(false); }
+        return None;
+    }
+    let key = form + 1;
+    let _length = _forms.len();
+    proof {
+        callee_reference_search_evidence(_source, _forms@, *row, references@, form);
+    }
+    let mut lo = first;
+    let mut hi = end;
+    while lo < hi
+        invariant
+            row.expression.start <= form < row.expression.end,
+            key == form + 1,
+            first == row.references.start, end == row.references.end,
+            first <= lo <= hi <= end <= references@.len(),
+            forall|i: int, j: int| first <= i < j < end ==>
+                (#[trigger] references@[i]).form < (#[trigger] references@[j]).form,
+            forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key ==> lo <= i < hi,
+            ordinary_call_at(_source, _forms@, form as int, row.expression.end as int)
+                <==> exists|i: int| first <= i < end
+                    && (#[trigger] references@[i]).form == key && references@[i].kind is Callee,
+        decreases hi - lo,
+    {
+        let mid = lo + (hi - lo) / 2;
+        let item = &references[mid];
+        if item.form < key {
+            assert forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key
+                implies mid < i by { assert(references@[mid as int] == *item); };
+            lo = mid + 1;
+        } else if item.form > key {
+            assert forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key
+                implies i < mid by { assert(references@[mid as int] == *item); };
+            hi = mid;
+        } else {
+            assert(references@[mid as int] == *item);
+            if matches!(item.kind, ExpressionReferenceKind::Callee) {
+                assert(exists|i: int| first <= i < end
+                    && (#[trigger] references@[i]).form == key && references@[i].kind is Callee);
+                return Some(mid);
+            }
+            proof {
+                assert forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key
+                    implies i == mid by {};
+            }
+            return None;
+        }
+    }
+    None
+}
+
+proof fn callee_reference_search_evidence(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, references: Seq<ExpressionReference>, form: usize,
+)
+    requires
+        forms.len() <= usize::MAX,
+        definition_call_index(source, forms, row, references),
+        row.expression.start <= form < row.expression.end,
+    ensures ({
+        let first = row.references.start as int;
+        let end = row.references.end as int;
+        &&& forall|i: int, j: int| first <= i < j < end ==>
+            (#[trigger] references[i]).form < (#[trigger] references[j]).form
+        &&& (ordinary_call_at(source, forms, form as int, row.expression.end as int)
+            <==> exists|i: int| first <= i < end
+                && (#[trigger] references[i]).form == form + 1 && references[i].kind is Callee)
+    }),
+{
+    let start = row.expression.start as int;
+    let stop = row.expression.end as int;
+    let first = row.references.start as int;
+    let end = row.references.end as int;
+    let refs = expression_references(source, forms, start, stop);
+    expression_references_in_order(source, forms, start, stop);
+    assert forall|i: int, j: int| first <= i < j < end implies
+        (#[trigger] references[i]).form < (#[trigger] references[j]).form by {
+        assert(references[i] == refs[i - first]);
+        assert(references[j] == refs[j - first]);
+    };
+    if ordinary_call_at(source, forms, form as int, stop) {
+        ordinary_call_in_reference_index(source, forms, start, stop, form as int, stop);
+        let i = choose|i: int| 0 <= i < refs.len() && (#[trigger] refs[i]).form == form + 1 && refs[i].kind is Callee;
+        assert(references[first + i] == refs[i]);
+    }
+    if exists|i: int| first <= i < end && (#[trigger] references[i]).form == form + 1 && references[i].kind is Callee {
+        let i = choose|i: int| first <= i < end && (#[trigger] references[i]).form == form + 1 && references[i].kind is Callee;
+        assert(references[i] == refs[i - first]);
+        expression_callee_location(source, forms, start, stop, i - first);
+    }
 }
 
 /// 検査済みの定義に属する参照から、通常呼び出しの形を取り出す。

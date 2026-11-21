@@ -215,6 +215,148 @@ pub(super) proof fn expression_root_callee(
     }
 }
 
+/// 各参照の構文木添字は式列の範囲内にあり、重複せず昇順に並ぶ。
+pub(super) proof fn expression_references_in_order(source: &str, forms: Seq<Form>, start: int, stop: int)
+    requires forms.len() <= usize::MAX,
+    ensures ({
+        let refs = expression_references(source, forms, start, stop);
+        &&& forall|i: int| 0 <= i < refs.len() ==> start <= (#[trigger] refs[i]).form < stop
+        &&& forall|i: int, j: int| 0 <= i < j < refs.len() ==>
+            (#[trigger] refs[i]).form < (#[trigger] refs[j]).form
+    }),
+    decreases stop - start,
+{
+    reveal_with_fuel(expression_references, 1);
+    if 0 <= start < stop <= forms.len() {
+        match forms[start] {
+            Form::Atom { .. } => expression_references_in_order(source, forms, start + 1, stop),
+            Form::List { end, .. } => {
+                let end = end as int;
+                if start < end <= stop && exists|a: int, b: int| start < a <= b <= end
+                    && #[trigger] expression_child_range(source, forms, start, end, a, b)
+                {
+                    let (a, b) = choose|a: int, b: int| start < a <= b <= end
+                        && #[trigger] expression_child_range(source, forms, start, end, a, b);
+                    let head = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, start + 1, head);
+                    let witness = choose|builtin: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, start + 1, builtin)
+                        && arguments_match(forms, start + 2, end, builtin, a, b);
+                    same_expression_head(source, forms, start + 1, head, witness);
+                    let local = local_reference(forms, start, end, head);
+                    let children = expression_references(source, forms, a, b);
+                    let siblings = expression_references(source, forms, end, stop);
+                    let refs = expression_references(source, forms, start, stop);
+                    expression_references_in_order(source, forms, a, b);
+                    expression_references_in_order(source, forms, end, stop);
+                    assert(refs == local + children + siblings);
+                    assert(local.len() <= 1);
+                    assert forall|i: int| 0 <= i < local.len() implies start <= (#[trigger] local[i]).form < a by {
+                        assert(i == 0);
+                    };
+                    assert forall|i: int| 0 <= i < refs.len() implies start <= (#[trigger] refs[i]).form < stop by {
+                        if i < local.len() {
+                            assert(refs[i] == local[i]);
+                        } else if i < local.len() + children.len() {
+                            assert(refs[i] == children[i - local.len()]);
+                        } else {
+                            assert(refs[i] == siblings[i - local.len() - children.len()]);
+                        }
+                    };
+                    assert forall|i: int, j: int| 0 <= i < j < refs.len() implies
+                        (#[trigger] refs[i]).form < (#[trigger] refs[j]).form by {
+                        if i < local.len() {
+                            assert(refs[i] == local[i]);
+                            if j < local.len() + children.len() {
+                                assert(refs[j] == children[j - local.len()]);
+                            } else {
+                                assert(refs[j] == siblings[j - local.len() - children.len()]);
+                            }
+                        } else if i < local.len() + children.len() {
+                            assert(refs[i] == children[i - local.len()]);
+                            if j < local.len() + children.len() {
+                                assert(refs[j] == children[j - local.len()]);
+                            } else {
+                                assert(refs[j] == siblings[j - local.len() - children.len()]);
+                            }
+                        } else {
+                            assert(refs[i] == siblings[i - local.len() - children.len()]);
+                            assert(refs[j] == siblings[j - local.len() - children.len()]);
+                        }
+                    };
+                }
+            },
+        }
+    }
+}
+
+/// 文法上の通常呼び出しが、右辺の参照列に含まれることを示す。
+pub(super) proof fn ordinary_call_in_reference_index(
+    source: &str, forms: Seq<Form>, start: int, stop: int, call: int, call_limit: int,
+)
+    requires
+        0 <= start <= call < stop <= forms.len() <= usize::MAX,
+        expression_forest(source, forms, start, stop),
+        ordinary_call_at(source, forms, call, call_limit),
+    ensures exists|i: int| 0 <= i < expression_references(source, forms, start, stop).len()
+        && (#[trigger] expression_references(source, forms, start, stop)[i]).form == call + 1
+        && expression_references(source, forms, start, stop)[i].kind is Callee,
+    decreases stop - start,
+{
+    reveal_with_fuel(expression_references, 1);
+    reveal_with_fuel(expression_forest, 1);
+    reveal(ordinary_call_at);
+    let refs = expression_references(source, forms, start, stop);
+    match forms[start] {
+        Form::Atom { .. } => ordinary_call_in_reference_index(source, forms, start + 1, stop, call, call_limit),
+        Form::List { end, .. } => {
+            let end = end as int;
+            let (a, b) = choose|a: int, b: int| start < a <= b <= end
+                && #[trigger] expression_child_range(source, forms, start, end, a, b);
+            let (u, v) = choose|u: int, v: int| start < u <= v <= end
+                && #[trigger] expression_child_range(source, forms, start, end, u, v)
+                && expression_forest(source, forms, u, v);
+            same_child_interval(source, forms, start, end, a, b, u, v);
+            let head = choose|head: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, start + 1, head);
+            let local = local_reference(forms, start, end, head);
+            let children = expression_references(source, forms, a, b);
+            let siblings = expression_references(source, forms, end, stop);
+            assert(refs == local + children + siblings);
+            if call == start {
+                same_expression_head(source, forms, start + 1, head, None);
+                assert(refs[0] == local[0]);
+            } else if end <= call {
+                ordinary_call_in_reference_index(source, forms, end, stop, call, call_limit);
+                let i = choose|i: int| 0 <= i < siblings.len() && (#[trigger] siblings[i]).form == call + 1
+                    && siblings[i].kind is Callee;
+                assert(refs[local.len() + children.len() + i] == siblings[i]);
+            } else {
+                let witness = choose|builtin: Option<ExpressionHead>| #[trigger] list_head_matches(source, forms, start + 1, builtin)
+                    && arguments_match(forms, start + 2, end, builtin, a, b);
+                assert(forms[call] is List);
+                assert(a <= call < b) by {
+                    if call == start + 1 {
+                        assert(argument_matches(forms, call, end, HeaderError::ExpectedReference));
+                    }
+                    if call < a {
+                        assert(witness == Some(ExpressionHead::As) && call == start + 2);
+                        assert(argument_matches(forms, call, end, HeaderError::ExpectedReference));
+                    }
+                    if b <= call {
+                        assert(match witness {
+                            Some(ExpressionHead::Field) => argument_matches(forms, call, end, HeaderError::ExpectedName),
+                            _ => natural_argument_at(forms, call, end),
+                        });
+                        reveal(natural_argument_at);
+                    }
+                };
+                ordinary_call_in_reference_index(source, forms, a, b, call, call_limit);
+                let i = choose|i: int| 0 <= i < children.len() && (#[trigger] children[i]).form == call + 1
+                    && children[i].kind is Callee;
+                assert(refs[local.len() + i] == children[i]);
+            }
+        },
+    }
+}
+
 #[verifier::opaque]
 spec fn pending_references(source: &str, forms: Seq<Form>, pending: Seq<Range<usize>>) -> Seq<ExpressionReference>
     decreases pending.len(),
