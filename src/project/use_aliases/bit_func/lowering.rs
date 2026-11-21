@@ -198,6 +198,36 @@ pub(super) open spec fn projected_lowering_view(
         && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, layout_limit, gate_limit, result)
 }
 
+/// 展開した回路の入力・出力の配置と、評価に必要な配線の条件を取り出す。
+pub(super) proof fn projected_lowering_ports(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize, value: &LoweredBitFunc,
+)
+    requires projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+    ensures
+        port_bit_layout_result(inputs, layout_limit, Ok(*value.input_layout_model())),
+        port_bit_layout_result(outputs, layout_limit, Ok(*value.output_layout_model())),
+        nor_evaluation_ready(value.netlist_model(), value.input_layout_model().total_bits_model() as nat),
+        value.netlist_model().outputs@.len() == value.output_layout_model().total_bits_model(),
+{
+    let (a, b, c, d) = choose|a: &[u64], b: &[CheckedBitDefinition], c: &[u64], d: &[OutputDriver]|
+        a@ == inputs && b@ == definitions && c@ == outputs && d@ == drivers
+        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, layout_limit, gate_limit, Ok(*value));
+    let body = LoweringBody { input_widths: a, definitions: b };
+    let (layouts, bindings) = choose|layouts: Layouts, bindings: Seq<CallBinding>| {
+        &&& #[trigger] body_layouts_result(inputs, definitions, outputs, layout_limit, Ok(layouts))
+        &&& #[trigger] bindings_match_calls(bindings, selected)
+        &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs, drivers, gate_limit, Ok(*value))
+    };
+    let lowered = choose|lowered: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError>|
+        #[trigger] mixed_function_result(&body, &layouts, forms, bindings, outputs, drivers, gate_limit, lowered)
+        && Ok(*value) == match lowered {
+            Ok((value, _)) => Ok(value),
+            Err(error) => Err(ProjectedLoweringError::Wiring(error)),
+        };
+    assert(lowered matches Ok((circuit, _)) && circuit == *value);
+}
+
 /// 検査済みの本体にビット範囲を割り当て、呼び出しと通常の定義を配線へ変換する。
 ///
 /// # Errors

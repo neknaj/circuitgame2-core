@@ -377,13 +377,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &body.projections.call_arguments, #[trigger] body.calls@[i])
     }
 
-    /// 構文と型を検査し、通常呼び出しを一回ずつ展開できる形で保持する。
-    pub(super) fn prepare_expansion_body(
-        &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
-    ) -> (result: Result<PreparedExpansionBody<'p, 'a>, BitFuncError<'p, 'a>>)
-        requires self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
-        ensures match result {
-            Ok(body) => self.prepared_expansion_body_matches(*plan, file, entry, limit, &body),
+    pub(super) closed spec fn expansion_body_preparation_result(
+        &self, plan: FunctionExpansionOrder, file: usize, entry: usize, limit: u64,
+        result: Result<PreparedExpansionBody, BitFuncError>,
+    ) -> bool {
+        match result {
+            Ok(body) => self.prepared_expansion_body_matches(plan, file, entry, limit, &body),
             Err(BitFuncError::Check(error)) => self.func_signal_types_evidence(file, entry, limit, Err(error)),
             Err(BitFuncError::NotFunc) => exists|typed: FuncSignalTypes|
                 #[trigger] self.func_signal_types_evidence(file, entry, limit, Ok(typed)) && typed.literals.wiring is NotFunc,
@@ -391,7 +390,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] self.func_signal_types_evidence(file, entry, limit, Ok(typed))
                     && typed.literals.wiring == FuncWiringResult::NeedsExpansion(site),
             _ => false,
-        },
+        }
+    }
+
+    /// 構文と型を検査し、通常呼び出しを一回ずつ展開できる形で保持する。
+    pub(super) fn prepare_expansion_body(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
+    ) -> (result: Result<PreparedExpansionBody<'p, 'a>, BitFuncError<'p, 'a>>)
+        requires self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+        ensures
+            self.expansion_body_preparation_result(*plan, file, entry, limit, result),
+            result matches Ok(body) ==> self.prepared_expansion_body_matches(*plan, file, entry, limit, &body),
     {
         let (typed, projections) = match self.check_func_signal_projections(file, entry, limit, true, true) {
             Ok(result) => result,

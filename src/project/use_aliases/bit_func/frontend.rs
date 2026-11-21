@@ -3,6 +3,7 @@
 #[cfg(verus_only)]
 mod source_evaluation;
 mod body;
+pub(super) use body::{ExpandedBody, ExpandedBodyError};
 #[cfg(verus_only)]
 pub(super) use body::{argument_matches_width, call_covers};
 
@@ -2002,7 +2003,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
 #[cfg(all(test, not(verus_only)))]
 #[test]
-fn expands_structure_output_from_strict_source() {
+fn expands_successive_functions_in_dependency_order() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
 
     let project = parse_circuit_project(&[SourceSnapshot {
@@ -2015,22 +2016,18 @@ fn expands_structure_output_from_strict_source() {
                (func caller (in (a (bits 4)) b) (out y)
                    (def (word passthrough unused) (pair a b))
                    (def joined (concat word passthrough))
-                   (def y (bit joined 3)))",
+                   (def y (bit joined 3)))
+               (func top (in (a (bits 4)) b) (out y)
+                   (def y (caller a b)))",
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
     let plan = aliases.prepare_function_expansion().unwrap();
-    let prepared = aliases.prepare_expansion_body(&plan, 0, 3, 8).unwrap();
-
-    let mut templates = aliases.new_function_templates(&plan, Ghost(8u64));
-    let position = plan.get(templates.next_index()).unwrap();
-    let checked = aliases.check_bit_func(position.0, position.1, 8).unwrap();
-    let lowered = checked.lower_bit_func(16).unwrap();
-    let callee = aliases.standalone_function_template(position, 8, checked, lowered, 16);
-    aliases.insert_function_template(&plan, &mut templates, callee, Ghost(8u64));
-    assert!(prepared.projections.layouts.is_none());
-    let result = aliases.lower_expanded_body(&plan, &templates, (0, 3, 8), prepared, 16, 0).unwrap();
-    assert_eq!(result.definition_wires().len(), 15);
+    let templates = aliases.expand_templates_in_order(&plan, 8, 16, 0).unwrap();
+    assert_eq!(templates.next_index(), plan.len());
+    let caller_vertex = plan.template_vertex((0, 3)).unwrap();
+    assert_eq!(templates.circuit_at_vertex(caller_vertex).unwrap().definition_wires().len(), 15);
+    let result = templates.circuit_at_vertex(plan.template_vertex((0, 4)).unwrap()).unwrap();
     assert!(result.gate_definitions().is_empty());
     assert_eq!(result.netlist().evaluate(&[false, true, false, true, false]).unwrap(), [true]);
     assert_eq!(result.netlist().evaluate(&[false, true, false, false, true]).unwrap(), [false]);

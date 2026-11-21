@@ -3,7 +3,7 @@
 use super::super::{FunctionExpansionOrder, StructureLayouts, TypedRoutineSignature, UseAliases};
 use super::{CheckedBitFunc, LoweredBitFunc};
 use super::super::StructureTypeError;
-use super::frontend::contains_structure_port;
+use super::frontend::{BitFuncError, contains_structure_port, ExpandedBody, ExpandedBodyError};
 #[cfg(verus_only)]
 use super::frontend::has_structure_port;
 use super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
@@ -20,6 +20,13 @@ verus! {
 
 enum TemplateOrigin<'p, 'a> {
     Standalone(CheckedBitFunc<'p, 'a>),
+    Expanded {
+        plan: FunctionExpansionOrder<'p, 'a>,
+        prior: FunctionTemplates<'p, 'a>,
+        prepared: PreparedExpansionBody<'p, 'a>,
+        body: ExpandedBody<'p, 'a>,
+        gate_limit: usize,
+    },
 }
 
 /// 呼び出し側から再利用できるネットリストと、宣言順の入出力幅。
@@ -45,6 +52,15 @@ pub(super) struct ResolvedTemplateCall<'s, 'p, 'a> {
 pub(super) struct FunctionTemplates<'p, 'a> {
     slots: Vec<Option<FunctionTemplate<'p, 'a>>>,
     next: usize,
+}
+
+/// 展開順で最初にネットリストを作れなかった関数と、その診断。
+#[derive(Debug)]
+pub(super) enum FunctionTemplateBuildError<'p, 'a> {
+    /// 型と結線を検査して展開に必要な情報を集める段階の失敗。
+    Prepare((usize, usize), BitFuncError<'p, 'a>),
+    /// 検査した本体を配線へ変換する段階の失敗。
+    Lower((usize, usize), ExpandedBodyError<'p, 'a>),
 }
 
 impl<'p, 'a> FunctionTemplate<'p, 'a> {
@@ -90,6 +106,24 @@ impl<'p, 'a> FunctionTemplates<'p, 'a> {
         ensures rank == self.next_rank(),
     {
         self.next
+    }
+
+    /// 頂点に対応する格納済みネットリストを借りる。未登録の頂点では `None` を返す。
+    pub(super) fn circuit_at_vertex(&self, vertex: usize) -> (circuit: Option<&LoweredBitFunc>)
+        ensures circuit == if vertex < self.slots_model().len() {
+            match &self.slots_model()[vertex as int] {
+                Some(template) => Some(template.circuit_model()),
+                None => None,
+            }
+        } else { None },
+    {
+        if vertex >= self.slots.len() {
+            return None;
+        }
+        match &self.slots[vertex] {
+            Some(template) => Some(template.circuit()),
+            None => None,
+        }
     }
 
     pub(super) closed spec fn next_rank(&self) -> usize { self.next }
@@ -158,7 +192,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    pub(super) closed spec fn function_template_matches(
+    pub(super) closed spec fn template_abi_matches(
         &self, position: (usize, usize), width_limit: u64, template: &FunctionTemplate,
     ) -> bool {
         &&& self.typed_signature_evidence(position.0, position.1, width_limit, Ok(Some(template._signature@)))
@@ -170,19 +204,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& port_bit_layout_result(template.outputs@, template._bit_limit@, Ok(*template.circuit.output_layout_model()))
         &&& nor_evaluation_ready(template.circuit.netlist_model(), template.circuit.input_layout_model().total_bits_model() as nat)
         &&& template.circuit.netlist_model().outputs@.len() == template.circuit.output_layout_model().total_bits_model()
+    }
+
+    pub(super) closed spec fn function_template_matches(
+        &self, position: (usize, usize), width_limit: u64, template: &FunctionTemplate,
+    ) -> bool {
+        &&& self.template_abi_matches(position, width_limit, template)
         &&& match template._origin@ {
             TemplateOrigin::Standalone(checked) =>
                 checked.signature == template._signature@
                     && checked.input_widths@ == template.inputs@ && checked.output_widths@ == template.outputs@
                     && self.checked_bit_func_matches(position.0, position.1, width_limit, &checked)
                     && lowered_bit_func_result(&checked, template._bit_limit@, Ok(template.circuit)),
+            TemplateOrigin::Expanded { plan, prior, prepared, body, gate_limit } => {
+                &&& body.circuit == template.circuit
+                &&& body.ports.inputs@ == template.inputs@
+                &&& body.ports.outputs@ == template.outputs@
+                &&& body.ports.layouts == template._structure_layouts@
+                &&& prepared.typed.literals.wiring matches crate::project::FuncWiringResult::Checked(wiring)
+                &&& wiring.drivers.signature == template._signature@
+                &&& self.prepared_expansion_body_matches(plan, position.0, position.1, width_limit, &prepared)
+                &&& self.expanded_body_lowering_result(&plan, &prior, (position.0, position.1, width_limit),
+                    &prepared, template._bit_limit@, gate_limit, Ok(body))
+            },
         }
     }
 
     pub(super) proof fn template_port_evidence(
         &self, position: (usize, usize), limit: u64, template: &FunctionTemplate,
     )
-        requires self.function_template_matches(position, limit, template),
+        requires self.template_abi_matches(position, limit, template),
         ensures self.template_port_widths_match(template.signature_model(), limit, template.input_widths_model(),
             template.output_widths_model(), template.structure_layouts_model()),
     {
@@ -193,7 +244,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn template_circuit_evidence(
         &self, position: (usize, usize), limit: u64, template: &FunctionTemplate,
     )
-        requires self.function_template_matches(position, limit, template),
+        requires self.template_abi_matches(position, limit, template),
         ensures
             port_bit_layout_result(template.input_widths_model(), template.bit_limit_model(), Ok(*template.circuit_model().input_layout_model())),
             port_bit_layout_result(template.output_widths_model(), template.bit_limit_model(), Ok(*template.circuit_model().output_layout_model())),
@@ -225,6 +276,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.function_template_matches(position, width_limit, &template)) by {
             reveal(UseAliases::function_template_matches);
         };
+        template
+    }
+
+    /// 検査した呼び出し付き本体を、後続の呼び出しで使えるテンプレートにする。
+    fn expanded_function_template(
+        &self, body: ExpandedBody<'p, 'a>, _bit_limit: usize, _gate_limit: usize,
+        Ghost(context): Ghost<(
+            &FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>,
+        )>,
+    ) -> (template: FunctionTemplate<'p, 'a>)
+        requires
+            self.prepared_expansion_body_matches(*context.0, context.2.0, context.2.1, context.2.2, context.3),
+            self.expanded_body_lowering_result(context.0, context.1, context.2, context.3, _bit_limit, _gate_limit, Ok(body)),
+        ensures
+            self.function_template_matches((context.2.0, context.2.1), context.2.2, &template),
+            template.bit_limit_model() == _bit_limit,
+            template._origin@ matches TemplateOrigin::Expanded { plan, prior, gate_limit, .. }
+                && plan == *context.0 && prior == *context.1 && gate_limit == _gate_limit,
+    {
+        proof { self.expanded_body_ports_evidence(context.0, context.1, context.2, context.3, _bit_limit, _gate_limit, &body); }
+        let ghost signature = context.3.typed.literals.wiring->Checked_0.drivers.signature;
+        let ghost origin = TemplateOrigin::Expanded {
+            plan: *context.0, prior: *context.1, prepared: *context.3, body, gate_limit: _gate_limit,
+        };
+        let ghost layouts = body.ports.layouts;
+        let ExpandedBody { circuit, ports, has_structure_ports } = body;
+        let template = FunctionTemplate {
+            circuit, inputs: ports.inputs, outputs: ports.outputs, has_structure_ports,
+            _signature: Ghost(signature), _structure_layouts: Ghost(layouts), _bit_limit: Ghost(_bit_limit), _origin: Ghost(origin),
+        };
+        assert(self.function_template_matches((context.2.0, context.2.1), context.2.2, &template));
         template
     }
 
@@ -324,6 +406,177 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    #[verifier::opaque]
+    spec fn ordered_template_prefix(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, bit_limit: usize, gate_limit: usize,
+    ) -> bool {
+        let order = plan.order_model();
+        &&& table.slots_model().len() == order.len()
+        &&& table.next_rank() <= order.len()
+        &&& forall|rank: int| 0 <= rank < table.next_rank() ==> {
+            let vertex = #[trigger] order[rank];
+            &&& table.slots_model()[vertex as int] matches Some(template)
+            &&& template.bit_limit_model() == bit_limit
+            &&& template._origin@ matches TemplateOrigin::Expanded { plan: original, prior, gate_limit: limit, .. }
+            &&& original == *plan && limit == gate_limit
+            &&& prior.next_rank() == rank && prior.slots_model().len() == order.len()
+            &&& forall|i: int| 0 <= i < rank ==> {
+                let previous = #[trigger] order[i];
+                prior.slots_model()[previous as int] == table.slots_model()[previous as int]
+            }
+        }
+    }
+
+    /// 追加した回路が同じ上限で生成され、以前に参照した回路が同じ頂点に残ることを示す。
+    proof fn extend_ordered_template_prefix(
+        &self, plan: &FunctionExpansionOrder, before: &FunctionTemplates, after: &FunctionTemplates,
+        bit_limit: usize, gate_limit: usize, template: FunctionTemplate,
+    )
+        requires
+            self.function_expansion_evidence(Ok(*plan)),
+            self.ordered_template_prefix(plan, before, bit_limit, gate_limit),
+            before.next_rank() < plan.order_model().len(),
+            after.next_rank() == before.next_rank() + 1,
+            before.slots_model().len() == plan.order_model().len(),
+            plan.order_model()[before.next_rank() as int] < before.slots_model().len(),
+            after.slots_model() == before.slots_model().update(plan.order_model()[before.next_rank() as int] as int, Some(template)),
+            template.bit_limit_model() == bit_limit,
+            template._origin@ matches TemplateOrigin::Expanded { plan: original, prior, gate_limit: limit, .. }
+                && original == *plan && prior == *before && limit == gate_limit,
+        ensures self.ordered_template_prefix(plan, after, bit_limit, gate_limit),
+    {
+        reveal(UseAliases::ordered_template_prefix);
+        self.template_index_evidence(*plan);
+        let order = plan.order_model();
+        let at = before.next_rank() as int;
+        assert forall|rank: int| 0 <= rank < after.next_rank() implies {
+            let vertex = #[trigger] order[rank];
+            &&& after.slots_model()[vertex as int] matches Some(template)
+            &&& template.bit_limit_model() == bit_limit
+            &&& template._origin@ matches TemplateOrigin::Expanded { plan: original, prior, gate_limit: limit, .. }
+            &&& original == *plan && limit == gate_limit
+            &&& prior.next_rank() == rank && prior.slots_model().len() == order.len()
+            &&& forall|i: int| 0 <= i < rank ==> {
+                let previous = #[trigger] order[i];
+                prior.slots_model()[previous as int] == after.slots_model()[previous as int]
+            }
+        } by {
+            let vertex = order[rank];
+            assert(vertex < order.len());
+            if rank < at {
+                assert(vertex != order[at]);
+                assert(after.slots_model()[vertex as int] == before.slots_model()[vertex as int]);
+            } else {
+                assert(after.slots_model()[vertex as int] == Some(template));
+            }
+            let earlier_table = after.slots_model()[vertex as int]->Some_0._origin@->Expanded_prior;
+            assert forall|i: int| 0 <= i < rank implies
+                earlier_table.slots_model()[#[trigger] order[i] as int] == after.slots_model()[order[i] as int] by {
+                assert(order[i] < order.len());
+                assert(order[i] != order[at]);
+                assert(after.slots_model()[order[i] as int] == before.slots_model()[order[i] as int]);
+                if rank == at {
+                    assert(earlier_table == *before);
+                } else {
+                    assert(earlier_table.slots_model()[order[i] as int] == before.slots_model()[order[i] as int]);
+                }
+            };
+        };
+    }
+
+    pub(super) closed spec fn ordered_template_build_result(
+        &self, plan: &FunctionExpansionOrder, width_limit: u64, bit_limit: usize, gate_limit: usize,
+        result: Result<FunctionTemplates, FunctionTemplateBuildError>,
+    ) -> bool {
+        match result {
+            Ok(table) => self.function_templates_match(plan, width_limit, &table)
+                && self.ordered_template_prefix(plan, &table, bit_limit, gate_limit)
+                && table.next_rank() == plan.order_model().len(),
+            Err(error) => exists|prior: FunctionTemplates| {
+                &&& #[trigger] self.function_templates_match(plan, width_limit, &prior)
+                &&& self.ordered_template_prefix(plan, &prior, bit_limit, gate_limit)
+                &&& prior.next_rank() < plan.order_model().len()
+                &&& plan.position_model(prior.next_rank() as int) matches Some(position)
+                &&& match error {
+                    FunctionTemplateBuildError::Prepare(site, error) => site == position
+                        && self.expansion_body_preparation_result(*plan, position.0, position.1, width_limit, Err(error)),
+                    FunctionTemplateBuildError::Lower(site, error) => site == position
+                        && exists|body: PreparedExpansionBody|
+                            #[trigger] self.prepared_expansion_body_matches(*plan, position.0, position.1, width_limit, &body)
+                            && self.expanded_body_lowering_result(plan, &prior, (position.0, position.1, width_limit),
+                                &body, bit_limit, gate_limit, Err(error)),
+                }
+            },
+        }
+    }
+
+    /// 展開計画の順に関数を変換し、変換したネットリストを後続の呼び出しで使う。
+    ///
+    /// # Errors
+    ///
+    /// 最初に変換できなかった関数の宣言位置と診断を返す。
+    pub(super) fn expand_templates_in_order(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, width_limit: u64, bit_limit: usize, gate_limit: usize,
+    ) -> (result: Result<FunctionTemplates<'p, 'a>, FunctionTemplateBuildError<'p, 'a>>)
+        requires self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+        ensures self.ordered_template_build_result(plan, width_limit, bit_limit, gate_limit, result),
+    {
+        reveal(UseAliases::ordered_template_build_result);
+        proof {
+            self.template_index_evidence(*plan);
+            assert forall|rank: int| 0 <= rank < plan.order_model().len()
+                implies (#[trigger] plan.position_model(rank)).is_some() by {
+                assert(plan.order_model()[rank] < plan.order_model().len());
+            };
+        }
+        let mut templates = self.new_function_templates(plan, Ghost(width_limit));
+        proof {
+            reveal(UseAliases::function_templates_match);
+            assert(templates.slots_model().len() == plan.order_model().len());
+            assert(self.ordered_template_prefix(plan, &templates, bit_limit, gate_limit)) by {
+                reveal(UseAliases::ordered_template_prefix);
+            };
+        }
+        while templates.next_index() < plan.len()
+            invariant
+                self.can_resolve(),
+                self.function_expansion_evidence(Ok(*plan)),
+                self.function_templates_match(plan, width_limit, &templates),
+                self.ordered_template_prefix(plan, &templates, bit_limit, gate_limit),
+                templates.next_rank() <= plan.order_model().len(),
+                templates.slots_model().len() == plan.order_model().len(),
+                forall|rank: int| 0 <= rank < plan.order_model().len() ==> (#[trigger] plan.order_model()[rank]) < plan.order_model().len(),
+                forall|rank: int| 0 <= rank < plan.order_model().len() ==> (#[trigger] plan.position_model(rank)).is_some(),
+            decreases plan.order_model().len() - templates.next_rank(),
+        {
+            let next = templates.next_index();
+            let Some(position) = plan.get(next) else {
+                proof { assert(false); }
+                unreachable!()
+            };
+            let caller = (position.0, position.1, width_limit);
+            let prepared = match self.prepare_expansion_body(plan, position.0, position.1, width_limit) {
+                Ok(body) => body,
+                Err(error) => return Err(FunctionTemplateBuildError::Prepare(position, error)),
+            };
+            let ghost original = prepared;
+            let body = match self.lower_expanded_body(plan, &templates, caller, prepared, bit_limit, gate_limit) {
+                Ok(body) => body,
+                Err(error) => {
+                    assert(exists|prepared: PreparedExpansionBody|
+                        #[trigger] self.prepared_expansion_body_matches(*plan, position.0, position.1, width_limit, &prepared)
+                        && self.expanded_body_lowering_result(plan, &templates, caller, &prepared, bit_limit, gate_limit, Err(error)));
+                    return Err(FunctionTemplateBuildError::Lower(position, error));
+                },
+            };
+            let template = self.expanded_function_template(body, bit_limit, gate_limit, Ghost((plan, &templates, caller, &original)));
+            let ghost before = templates;
+            self.insert_function_template(plan, &mut templates, template, Ghost(width_limit));
+            proof { self.extend_ordered_template_prefix(plan, &before, &templates, bit_limit, gate_limit, template); }
+        }
+        Ok(templates)
+    }
+
     /// 処理済みの順位を持つ呼び出し先を、頂点番号から取り出す。
     pub(super) fn get_function_template<'s>(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, table: &'s FunctionTemplates<'p, 'a>,
@@ -362,7 +615,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
         &&& group.vertex == plan.order_model()[group._order@.0]
         &&& plan.position_model(group._order@.0) matches Some(target)
-        &&& self.function_template_matches(target, caller.2, selected.template)
+        &&& self.template_abi_matches(target, caller.2, selected.template)
         &&& group._signature@.signature matches crate::project::FuncCallSignature::Function(signature)
         &&& signature.inputs@ == selected.template.signature_model().inputs@
         &&& signature.outputs@ == selected.template.signature_model().outputs@
@@ -462,7 +715,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             template.has_structure_ports_model() <==> has_structure_port(template.signature_model().inputs@)
                 || has_structure_port(template.signature_model().outputs@),
             plan.position_model(group._order@.0) matches Some(target)
-                && self.function_template_matches(target, caller.2, template),
+                && self.template_abi_matches(target, caller.2, template),
             group._signature@.signature matches crate::project::FuncCallSignature::Function(signature)
                 && signature.inputs@ == template.signature_model().inputs@
                 && signature.outputs@ == template.signature_model().outputs@

@@ -4,7 +4,9 @@ use super::*;
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
 #[cfg(verus_only)]
-use super::super::lowering::{projected_lowering_view, projected_lowering_result, resolved_call_fits_body};
+use super::super::lowering::{projected_lowering_view, resolved_call_fits_body, projected_lowering_ports};
+#[cfg(verus_only)]
+use crate::netlist::{nor_evaluation_ready, port_bit_layout_result};
 use super::super::expansion::PreparedExpansionBody;
 use super::super::super::FunctionExpansionOrder;
 #[cfg(verus_only)]
@@ -723,6 +725,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 }
 
+/// 展開したネットリストと、宣言順の入出力幅および構造体配置。
+pub(in crate::project::use_aliases::bit_func) struct ExpandedBody<'p, 'a> {
+    pub(in crate::project::use_aliases::bit_func) circuit: LoweredBitFunc,
+    pub(in crate::project::use_aliases::bit_func) ports: PreparedBitFuncPorts<'p, 'a>,
+    pub(in crate::project::use_aliases::bit_func) has_structure_ports: bool,
+}
+
 /// 呼び出しを含む関数の本体をネットリストに変換するときの診断。
 #[derive(Debug)]
 pub(in crate::project::use_aliases::bit_func) enum ExpandedBodyError<'p, 'a> {
@@ -739,7 +748,7 @@ pub(in crate::project::use_aliases::bit_func) enum ExpandedBodyError<'p, 'a> {
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(in crate::project::use_aliases::bit_func) closed spec fn expanded_body_lowering_result(
         &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
-        layout_limit: usize, gate_limit: usize, result: Result<LoweredBitFunc, ExpandedBodyError>,
+        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
     ) -> bool {
         let (file, entry, limit) = caller;
         let project = self.targets.project_model();
@@ -755,6 +764,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 _ => exists|ports: PreparedBitFuncPorts|
                     #[trigger] self.expanded_routine_ports_result(
                         file, entry, limit, wiring, prepared.projections.layouts, selected, Ok(ports))
+                    && (result matches Ok(expanded) ==> expanded.ports == ports
+                        && (expanded.has_structure_ports <==> has_structure_port(wiring.drivers.signature.inputs@)
+                            || has_structure_port(wiring.drivers.signature.outputs@)))
                     && {
                         let scope = FuncProjection {
                             file, entry, limit, source, parsed, wiring,
@@ -770,7 +782,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     spec fn expanded_definition_lowering_result(
         &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
-        layout_limit: usize, gate_limit: usize, result: Result<LoweredBitFunc, ExpandedBodyError>,
+        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
     ) -> bool {
         let drivers = scope.wiring.drivers.outputs@;
         &&& self.projection_context(scope)
@@ -783,7 +795,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         &scope.wiring.drivers.signature, scope.inputs@, scope.outputs@, slots@, drivers, error),
                     Ok(value) => output_widths_before(scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
                         && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(value)),
+                            drivers, scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(value.circuit)),
                     Err(ExpandedBodyError::Lowering(error)) => output_widths_before(
                         scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
                         && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
@@ -791,6 +803,53 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     _ => false,
                 },
         }
+    }
+
+    /// 展開した本体のポート幅とビット配置を、元の宣言の署名に結び付ける。
+    pub(in crate::project::use_aliases::bit_func) proof fn expanded_body_ports_evidence(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, bit_limit: usize, gate_limit: usize, value: &ExpandedBody,
+    )
+        requires self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
+        ensures ({
+            let (file, entry, limit) = caller;
+            let signature = prepared.typed.literals.wiring->Checked_0.drivers.signature;
+            &&& self.typed_signature_evidence(file, entry, limit, Ok(Some(signature)))
+            &&& self.template_port_widths_match(signature, limit, value.ports.inputs@, value.ports.outputs@, value.ports.layouts)
+            &&& value.has_structure_ports <==> has_structure_port(signature.inputs@) || has_structure_port(signature.outputs@)
+            &&& port_bit_layout_result(value.ports.inputs@, bit_limit, Ok(*value.circuit.input_layout_model()))
+            &&& port_bit_layout_result(value.ports.outputs@, bit_limit, Ok(*value.circuit.output_layout_model()))
+            &&& nor_evaluation_ready(value.circuit.netlist_model(), value.circuit.input_layout_model().total_bits_model() as nat)
+            &&& value.circuit.netlist_model().outputs@.len() == value.circuit.output_layout_model().total_bits_model()
+        }),
+    {
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let wiring = &prepared.typed.literals.wiring->Checked_0;
+        let ports = &value.ports;
+        let scope = FuncProjection {
+            file, entry, limit, source, parsed, wiring,
+            inputs: &ports.inputs, outputs: &ports.outputs,
+            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
+            types: &prepared.typed.types, structures: &prepared.projections.entries,
+        };
+        let selected = choose|rows: Seq<ResolvedTemplateCall>|
+            #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, rows)
+            && self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, rows, Ok(*ports))
+            && self.expanded_definition_lowering_result(&scope, prepared.calls@, rows, bit_limit, gate_limit, Ok(*value));
+        let drivers = wiring.drivers.outputs@;
+        let slots = choose|slots: Vec<CheckedBitDefinition>|
+            #[trigger] self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
+            && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
+            && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
+                parsed.syntax.forms@, selected, bit_limit, gate_limit, Ok(value.circuit));
+        self.checked_wiring_is_func(file, entry, limit, *wiring);
+        reveal(UseAliases::routine_ports_result);
+        reveal(UseAliases::template_port_widths_match);
+        projected_lowering_ports(ports.inputs@, slots@, ports.outputs@, drivers, parsed.syntax.forms@,
+            selected, bit_limit, gate_limit, &value.circuit);
     }
 
     /// 厳格解析と型検査を終えた本体を、先行する関数のネットリストを使って配線へ変換する。
@@ -801,7 +860,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(in crate::project::use_aliases::bit_func) fn lower_expanded_body(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, templates: &FunctionTemplates<'p, 'a>,
         caller: (usize, usize, u64), prepared: PreparedExpansionBody<'p, 'a>, layout_limit: usize, gate_limit: usize,
-    ) -> (result: Result<LoweredBitFunc, ExpandedBodyError<'p, 'a>>)
+    ) -> (result: Result<ExpandedBody<'p, 'a>, ExpandedBodyError<'p, 'a>>)
         requires
             self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
             self.function_templates_match(plan, caller.2, templates),
@@ -889,8 +948,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let lowered = lower_projected_expansion(self, ports.inputs.as_slice(), definitions.as_slice(),
             ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected.as_slice(),
             layout_limit, gate_limit, Ghost((plan, caller, &original)));
+        let has_structure_ports = contains_structure_port(wiring.drivers.signature.inputs.as_slice())
+            || contains_structure_port(wiring.drivers.signature.outputs.as_slice());
         let result = match lowered {
-            Ok(value) => Ok(value),
+            Ok(circuit) => Ok(ExpandedBody { circuit, ports, has_structure_ports }),
             Err(error) => Err(ExpandedBodyError::Lowering(error)),
         };
         assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
