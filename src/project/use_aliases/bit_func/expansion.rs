@@ -2298,8 +2298,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let root = prepared.nor_roots@[index];
             let children = root.postorder@;
             let parent = if parent_index == children.len() { root.root } else { children[parent_index] };
-            let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+            let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+            let row = parsed.definitions@[root.definition as int];
+            let local = (root.definition - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize;
+            let reference = (parent.reference - row.references.start) as usize;
+            let call = parent._signature@;
+            let forms = parsed.syntax.forms@;
             let projected = prepared.projections.call_arguments.arguments@.subrange(parent.arguments.start as int, parent.arguments.end as int);
+            &&& row.references.start <= parent.reference < row.references.end
+            &&& if parent_index == children.len() {
+                parent.reference == row.references.start && call.call.call.form == row.expression.start
+                    && call.call.target is Nor && call.signature is Nor
+                    && projected.len() == 2
+                    && (projected[0].source is NestedCall || projected[1].source is NestedCall)
+            } else {
+                row.expression.start < call.call.call.form < row.expression.end
+            }
+            &&& self.func_call_form_reference(caller.0, caller.1, local, call.call.call.form, reference)
+            &&& self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(call)))
             &&& parent.arguments.start <= parent.arguments.end <= prepared.projections.call_arguments.arguments@.len()
             &&& crate::syntax::circuit::call_argument_positions(forms, parent._signature@.call.call,
                 Seq::new(projected.len(), |port: int| projected[port].form))
@@ -2316,7 +2332,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.checked_types_keep_wiring(file, entry, limit, prepared.typed, wiring);
         let parsed = &self.targets.project_model().circuits_model()[file as int];
         let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
-        let reference = (parent.reference - parsed.definitions@[root.definition as int].references.start) as usize;
+        let row = parsed.definitions@[root.definition as int];
+        let reference = (parent.reference - row.references.start) as usize;
+        let forms = parsed.syntax.forms@;
+        let signature = parent._signature@;
+        self.typed_call_arguments_ready(file, entry, local, reference, limit, signature);
+        self.resolved_call_reference_form(file, entry, local, reference, signature.call);
+        crate::syntax::circuit::indexed_call_arguments(signature.call.source.text, forms, row,
+            parsed.references@[parent.reference as int], signature.call.call);
+        if parent_index < children.len() && signature.call.call.form == row.expression.start {
+            self.targets.parsed_project_model();
+            let source = &self.targets.project_model().sources_model()[file as int];
+            parsed_index_evidence(*source, *parsed);
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
+            vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+            self.typed_call_arguments_ready(file, entry, local, 0, limit, root.root._signature@);
+            self.resolved_call_reference_form(file, entry, local, 0, root.root._signature@.call);
+            let order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
+            call_postorder_references_distinct(forms, parsed.references@, row.references, order, parent_index, children.len() as int);
+            definition_reference_form_unique(source.text, forms, parsed.references@, row, row.references.start, parent.reference);
+        }
         let projected = prepared.projections.call_arguments.arguments@.subrange(parent.arguments.start as int, parent.arguments.end as int);
         self.projected_arguments_in_source_order((file, entry, local, reference), limit, prepared.typed.types@,
             &wiring, parent._signature@, projected);

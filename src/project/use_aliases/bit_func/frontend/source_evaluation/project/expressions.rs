@@ -10,8 +10,8 @@ use crate::project::use_aliases::bit_func::expansion::{
 use crate::project::use_aliases::call_arity::{CallArgumentSource, ProjectedCallArgument};
 use crate::project::use_aliases::bit_func::frontend::expression_input_width;
 use crate::project::use_aliases::bit_func::lowering::{
-    EvaluatedCallBits, EvaluatedNestedCall, evaluated_nested_call_matches, evaluated_nor_call_matches,
-    nor_children_have_single_output,
+    EvaluatedCallBits, EvaluatedNestedCall, evaluated_expression_child_matches, evaluated_nested_call_matches,
+    evaluated_nor_call_matches, evaluated_nor_root_port_matches, nor_children_have_single_output,
 };
 use crate::project::use_aliases::bit_func::templates::{NorBinding, ResolvedExpressionCall, ResolvedTemplateCall};
 use crate::syntax::circuit::{
@@ -594,7 +594,130 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         children
     }
 
-    /// 根 NOR の子を、元のフォーム添字で引けるソース上の呼び出し値へ写す。
+    /// 根 NOR の引数を、厳格構文木とフォーム添字で引ける子の評価から説明する。
+    #[verifier::spinoff_prover]
+    proof fn source_nor_expression_arguments(
+        &self, scope: &SourceExpressionScope, prior: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, binding: &NorBinding, assigned: Seq<Seq<bool>>,
+        evaluation: EvaluatedNestedCall, indexed: Map<usize, SourceExpressionCall>, parent_index: int,
+    )
+        requires
+            self.source_expression_scope_matches(scope),
+            self.prepared_expansion_body_matches(*scope.plan, scope.context.file, scope.context.entry, scope.context.limit, prepared),
+            prepared.typed == scope.typed,
+            binding.candidate < prepared.nor_roots@.len(),
+            *binding.selected.prepared == prepared.nor_roots@[binding.candidate as int],
+            binding.selected.prepared.definition == scope.definition,
+            self.nor_binding_context(scope.plan, prior, scope.context.limit, prepared.projections.call_arguments.arguments@, *binding),
+            assigned.take(binding.selected.prepared.output_slot as int) == scope.prior,
+            evaluated_nor_call_matches(self, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, binding, scope.inputs, assigned, evaluation),
+            0 <= parent_index <= evaluation.children.len(),
+            forall|i: int| 0 <= i < evaluation.children.len() ==> {
+                let selected = #[trigger] binding.selected.children@[i];
+                let form = selected.child._signature@.call.call.form;
+                &&& indexed.contains_key(form)
+                &&& self.source_child_projection_matches(scope, binding.references.start, selected,
+                    evaluation.children[i], indexed[form])
+            },
+        ensures ({
+            let root = binding.selected.prepared;
+            let context = scope.context;
+            let row = context.parsed.definitions@[scope.definition as int];
+            let local = (scope.definition - context.parsed.entry_ranges@[context.entry as int].definitions.start) as usize;
+            if parent_index == evaluation.children.len() {
+                let signature = root.root._signature@;
+                &&& signature.call.call.form == row.expression.start
+                &&& signature.call.target is Nor && signature.signature is Nor
+                &&& self.func_call_signature_evidence(context.file, context.entry, local, 0, context.limit, Ok(Some(signature)))
+                &&& self.source_expression_arguments_match(scope, signature, seq![1u64, 1u64], evaluation.root.ports, indexed)
+                &&& self.source_nor_has_list_argument(scope, signature)
+            } else {
+                let form = binding.selected.children@[parent_index].child._signature@.call.call.form;
+                &&& row.expression.start < form < row.expression.end
+                &&& self.source_expression_call_evaluates(scope, form, indexed[form], indexed)
+            }
+        }),
+    {
+        reveal(UseAliases::source_expression_scope_matches);
+        reveal(UseAliases::resolved_expression_calls_match);
+        reveal(UseAliases::resolved_expression_call_matches);
+        let context = scope.context;
+        let caller = (context.file, context.entry, context.limit);
+        let root = binding.selected.prepared;
+        let children = root.postorder@;
+        let at_root = parent_index == children.len();
+        let selected = binding.selected.children@;
+        let parent = if at_root { root.root } else { children[parent_index] };
+        let call = parent._signature@;
+        let form = call.call.call.form;
+        let ports = if at_root { evaluation.root.ports } else { indexed[form].arguments };
+        let widths = if at_root { seq![1u64, 1u64] } else { indexed[form].widths };
+        let arguments = prepared.projections.call_arguments.arguments@;
+        let range = parent.arguments;
+        let projected = arguments.subrange(range.start as int, range.end as int);
+        let forms = context.parsed.syntax.forms@;
+        let positions = Seq::new(projected.len(), |p: int| projected[p].form);
+        self.prepared_nor_reference_evidence(*scope.plan, caller, prepared, binding.candidate as int);
+        self.prepared_nor_output_evidence(*scope.plan, caller, prepared, binding.candidate as int);
+        self.prepared_nor_arguments_in_source_order(*scope.plan, caller, prepared, binding.candidate as int, parent_index);
+        assert(positions.len() == ports.len() == widths.len());
+        assert forall|p: int| 0 <= p < positions.len() implies
+            self.source_expression_argument_matches(scope, call, p, #[trigger] positions[p], widths[p], ports[p], indexed) by {
+            let argument = projected[p];
+            let width = widths[p];
+            let value = ports[p];
+            let expected = match call.signature {
+                FuncCallSignature::Nor => ResolvedPortType::Bits(1),
+                FuncCallSignature::Function(signature) => signature.inputs@[p].ty,
+            };
+            assert(argument == arguments[range.start + p]);
+            self.prepared_nor_argument_evidence(*scope.plan, caller, prepared, binding.candidate as int,
+                root.output_slot, parent_index, p);
+            call_argument_position_bounds(forms, call.call.call, positions, p);
+            if at_root {
+                assert(argument == binding.selected.arguments@[p]);
+                assert(evaluated_nor_root_port_matches(self, caller, prepared, binding, scope.inputs, scope.prior,
+                    ports, evaluation.children, p));
+            } else {
+                assert(argument == selected[parent_index].arguments@[p]);
+                assert(width == expression_input_width(selected[parent_index], p));
+                assert(evaluated_expression_child_matches(self, caller, prepared, root.definition,
+                    binding.references.start, selected, scope.inputs, scope.prior, evaluation.children, parent_index));
+            }
+            if argument.source.has_direct_wires() {
+                assert(self.source_expression_atom_type(scope, argument.form, expected));
+            } else {
+                assert(argument.source is NestedCall);
+                assert(prepared_nested_output_matches(children, binding.references.start, parent_index, argument, expected));
+                let typed = choose|i: int| 0 <= i < parent_index
+                    && (#[trigger] children[i]).reference == binding.references.start + argument.source->NestedCall_0
+                    && children[i]._signature@.call.call.form == argument.form
+                    && match source_expression_output_type(children[i]._signature@) {
+                        Some(output) => port_types_equal(output, expected),
+                        None => false,
+                    };
+                let producer = choose|i: int| 0 <= i < parent_index
+                    && (#[trigger] selected[i]).child.reference == binding.references.start + argument.source->NestedCall_0
+                    && selected[i].child._signature@.call.call.form == argument.form
+                    && value == evaluation.children[i].output;
+                assert(*selected[typed].child == children[typed]);
+                assert(indexed[argument.form].signature == children[typed]._signature@);
+                assert(indexed[argument.form].result == evaluation.children[producer].output);
+            }
+        };
+        assert(self.source_expression_arguments_match(scope, call, widths, ports, indexed));
+        if at_root {
+            let p = if projected[0].source is NestedCall { 0int } else { 1int };
+            self.prepared_nor_argument_evidence(*scope.plan, caller, prepared, binding.candidate as int,
+                root.output_slot, parent_index, p);
+            assert(projected[p] == arguments[range.start + p]);
+            assert(forms[positions[p] as int] is List);
+            assert(self.source_nor_has_list_argument(scope, call));
+        }
+    }
+
+    /// 根 NOR の子を元のフォーム添字で引ける評価表にし、各項目と根の引数をソースの規則に結び付ける。
     #[verifier::spinoff_prover]
     proof fn source_nor_child_values_by_form(
         &self, scope: &SourceExpressionScope, prior: &FunctionTemplates, table: &FunctionTemplates,
@@ -631,6 +754,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& self.source_child_projection_matches(scope, binding.references.start, selected,
                     evaluation.children[i], indexed[form])
             },
+            self.source_nested_arguments_match(scope, binding.selected.prepared.root._signature@,
+                seq![1u64, 1u64], evaluation.root.ports, indexed),
+            self.source_nested_nor_evaluates(scope, binding.selected.prepared.root._signature@,
+                evaluation.root.ports, indexed, assigned[binding.selected.prepared.output_slot as int]),
     {
         reveal(UseAliases::source_expression_scope_matches);
         reveal(UseAliases::resolved_expression_calls_match);
@@ -680,7 +807,72 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(forms.contains(forms[i]));
             assert(indexed[forms[i]] == projected[i]);
         };
+        assert forall|form: usize| #[trigger] indexed.contains_key(form) implies {
+            let row = context.parsed.definitions@[scope.definition as int];
+            &&& row.expression.start < form < row.expression.end
+            &&& self.source_expression_call_evaluates(scope, form, indexed[form], indexed)
+        } by {
+            assert(forms.contains(form));
+            let i = forms.lemma_contains_to_index(form);
+            assert(selected[i].child._signature@.call.call.form == form);
+            self.source_nor_expression_arguments(scope, prior, prepared, binding, assigned, evaluation, indexed, i);
+        };
+        self.source_nor_expression_arguments(scope, prior, prepared, binding, assigned, evaluation, indexed, count as int);
+        assert(self.source_nested_arguments_match(scope, binding.selected.prepared.root._signature@,
+            seq![1u64, 1u64], evaluation.root.ports, indexed));
+        assert(self.source_nested_nor_evaluates(scope, binding.selected.prepared.root._signature@,
+            evaluation.root.ports, indexed, assigned[binding.selected.prepared.output_slot as int])) by {
+            reveal(UseAliases::source_nested_nor_evaluates);
+        };
         indexed
+    }
+
+    spec fn source_nor_has_list_argument(&self, scope: &SourceExpressionScope, call: TypedFuncCall) -> bool {
+        let forms = scope.context.parsed.syntax.forms@;
+        exists|positions: Seq<usize>| #[trigger] call_argument_positions(forms, call.call.call, positions)
+            && positions.len() == 2
+            && ((positions[0] < forms.len() && forms[positions[0] as int] is List)
+                || (positions[1] < forms.len() && forms[positions[1] as int] is List))
+    }
+
+    /// 入れ子を持つ根 NOR の値は、厳格構文木の二つの入力の論理和を否定した一ビットである。
+    pub(super) closed spec fn source_nested_nor_evaluates(
+        &self, scope: &SourceExpressionScope, call: TypedFuncCall, operands: Seq<Seq<bool>>,
+        children: Map<usize, SourceExpressionCall>, output: Seq<bool>,
+    ) -> bool {
+        &&& call.call.target is Nor && call.signature is Nor
+        &&& self.source_nor_has_list_argument(scope, call)
+        &&& self.source_nested_arguments_match(scope, call, seq![1u64, 1u64], operands, children)
+        &&& operands.len() == 2 && operands[0].len() == 1 && operands[1].len() == 1
+        &&& output == seq![!(operands[0][0] || operands[1][0])]
+    }
+
+    /// 同じ先行定義の値と関数評価を使う根 NOR では、子の評価表の選び方によらず出力が一致する。
+    #[verifier::spinoff_prover]
+    proof fn source_nested_nor_evaluations_agree(
+        &self, left: &SourceExpressionScope, right: &SourceExpressionScope,
+        a: (TypedFuncCall, Seq<Seq<bool>>, Map<usize, SourceExpressionCall>, Seq<bool>),
+        b: (TypedFuncCall, Seq<Seq<bool>>, Map<usize, SourceExpressionCall>, Seq<bool>),
+    )
+        requires
+            same_source_bindings(left.context, right.context),
+            left.plan == right.plan && left.rank == right.rank && left.definition == right.definition,
+            left.inputs == right.inputs && left.prior == right.prior,
+            self.source_nested_nor_evaluates(left, a.0, a.1, a.2, a.3),
+            self.source_nested_nor_evaluates(right, b.0, b.1, b.2, b.3),
+            forall|x: SourceInvocation, y: SourceInvocation|
+                #[trigger] left.derivation.contains(x) && #[trigger] right.derivation.contains(y)
+                && 0 <= x.rank == y.rank < left.rank && x.inputs == y.inputs ==> x.outputs == y.outputs,
+        ensures a.3 == b.3,
+    {
+        reveal(UseAliases::source_nested_nor_evaluates);
+        reveal(UseAliases::source_nested_arguments_match);
+        reveal(UseAliases::source_expression_scope_matches);
+        let context = left.context;
+        let frame = context.parsed.entry_ranges@[context.entry as int].definitions;
+        let local = (left.definition - frame.start) as usize;
+        self.successful_call_signatures_agree(context.file, context.entry, local, 0, context.limit, a.0, b.0);
+        self.source_expression_arguments_agree(left, right, (a.0, a.1, a.2), (b.0, b.1, b.2), seq![1u64, 1u64]);
     }
 
     /// 根の実引数を元の順序で読み、入れ子の引数は同じフォームの評価表から得る。
