@@ -22,7 +22,8 @@ use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges
 use crate::syntax::circuit::postorder_call_references;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    call_postorder_reference, call_postorder_references_distinct, call_references_in_postorder, definition_reference_form_unique,
+    call_postorder_positions, call_postorder_reference, call_postorder_references_distinct, call_references_in_postorder,
+    definition_reference_form_unique,
     nested_call_postorder_position, root_call_postorder_last,
 };
 use alloc::vec::Vec;
@@ -125,6 +126,53 @@ pub(super) struct PreparedExpansionBody<'p, 'a> {
     pub(super) typed: FuncSignalTypes<'p, 'a>,
     pub(super) projections: FuncProjections<'p, 'a>,
     pub(super) calls: Vec<CheckedExpansionCall<'p, 'a>>,
+}
+
+pub(super) open spec fn expansion_parent_range(group: &CheckedExpansionCall, children: Seq<PreparedExpressionCall>, parent: int)
+    -> Range<usize> {
+    if parent == children.len() { group.arguments } else { children[parent].arguments }
+}
+
+pub(super) open spec fn expansion_arguments_determined(group: &CheckedExpansionCall, arguments: Seq<ProjectedCallArgument>)
+    -> bool {
+    &&& group.postorder matches Some(children)
+    &&& forall|parent: int| 0 <= parent <= children@.len() ==> {
+        let range = #[trigger] expansion_parent_range(group, children@, parent);
+        &&& range.start <= range.end <= arguments.len()
+        &&& forall|i: int| range.start <= i < range.end ==> !((#[trigger] arguments[i]).source is Deferred)
+    }
+}
+
+/// 親の実引数が同じフォームと相対参照で子を指すとき、その子を一段でたどれる。
+pub(super) closed spec fn expansion_child_edge(group: &CheckedExpansionCall, arguments: Seq<ProjectedCallArgument>,
+    parent: int, child: int,
+) -> bool {
+    &&& group.postorder matches Some(children)
+    &&& 0 <= child < parent <= children@.len()
+    &&& {
+        let range = expansion_parent_range(group, children@, parent);
+        exists|i: int| {
+            let argument = #[trigger] arguments[i];
+            &&& range.start <= i < range.end <= arguments.len()
+            &&& argument.source matches CallArgumentSource::NestedCall(reference)
+            &&& children@[child].reference == group.references.start + reference
+            &&& children@[child]._signature@.call.call.form == argument.form
+        }
+    }
+}
+
+/// 根または親を起点とし、実引数が指す子だけを後順添字の小さい方へたどる。
+pub(super) closed spec fn expansion_child_reachable(group: &CheckedExpansionCall, arguments: Seq<ProjectedCallArgument>,
+    parent: int, child: int,
+) -> bool
+    decreases parent,
+{
+    &&& group.postorder matches Some(children)
+    &&& 0 <= child < children@.len()
+    &&& child <= parent <= children@.len()
+    &&& (parent == child || exists|next: int| 0 <= next < parent
+        && #[trigger] expansion_child_edge(group, arguments, parent, next)
+        && expansion_child_reachable(group, arguments, next, child))
 }
 
 /// 元の字句を低位ビットから読む。自然定数の 0 と 1 は一ビットで表す。
@@ -996,12 +1044,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
             let argument = prepared.projections.call_arguments.arguments@[range.start + port];
             &&& 0 <= port < range.end - range.start
+            &&& range.end <= prepared.projections.call_arguments.arguments@.len()
             &&& 0 <= child < parent
             &&& argument.source is NestedCall
             &&& children[child].reference == group.references.start + argument.source->NestedCall_0
             &&& children[child]._signature@.call.call.form == argument.form
             &&& forms[argument.form as int] is List
-            &&& argument.form <= descendant < forms[argument.form as int]->List_end
+            &&& argument.form <= descendant < forms[argument.form as int]->List_end <= forms.len()
         }),
     {
         reveal(UseAliases::checked_expansion_call_matches);
@@ -1044,6 +1093,175 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let child = self.prepared_nested_argument(plan, caller, local, arguments, prepared.typed.types@,
             &wiring, group._order@.1, children, parent, reference, typed, projected, port);
         (port, child)
+    }
+
+    /// 一つの定義で、対象の子と同じフォームを指す後順項目を同定する。
+    proof fn expansion_children_at_same_form(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        group_index: int, left: int, right: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            ({
+                let group = prepared.calls@[group_index];
+                &&& group.postorder matches Some(children)
+                &&& 0 <= left < children@.len() && 0 <= right < children@.len()
+                &&& children@[left]._signature@.call.call.form == children@[right]._signature@.call.call.form
+            }),
+        ensures left == right,
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        self.targets.parsed_project_model();
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let absolute = prepared.projections.calls@[group_index].definition;
+        let local = (absolute - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let row = parsed.definitions@[absolute as int];
+        let children = prepared.calls@[group_index].postorder->Some_0@;
+        let a = children[left];
+        let b = children[right];
+        let a_ref = (a.reference - row.references.start) as usize;
+        let b_ref = (b.reference - row.references.start) as usize;
+        self.typed_call_arguments_ready(file, entry, local, a_ref, limit, a._signature@);
+        self.typed_call_arguments_ready(file, entry, local, b_ref, limit, b._signature@);
+        self.resolved_call_reference_form(file, entry, local, a_ref, a._signature@.call);
+        self.resolved_call_reference_form(file, entry, local, b_ref, b._signature@.call);
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        definition_reference_form_unique(source.text, parsed.syntax.forms@, parsed.references@, row, a.reference, b.reference);
+        if left < right {
+            assert(children[left].reference != children[right].reference);
+        } else if right < left {
+            assert(children[right].reference != children[left].reference);
+        }
+    }
+
+    /// 対象のフォームを含む引数を選び、後順添字が小さくなる方向へたどる。
+    proof fn expansion_reaches_child_in_list(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        group_index: int, parent: int, target: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            caller.0 < self.targets.project_model().circuits_model().len(),
+            ({
+                let group = &prepared.calls@[group_index];
+                let args = prepared.projections.call_arguments.arguments@;
+                let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+                &&& expansion_arguments_determined(group, args)
+                &&& group.postorder matches Some(children)
+                &&& 0 <= parent <= children@.len() && 0 <= target < children@.len()
+                &&& {
+                    let first = if parent == children@.len() {
+                        group._signature@.call.call.form
+                    } else { children@[parent]._signature@.call.call.form };
+                    let descendant = children@[target]._signature@.call.call.form;
+                    &&& first < descendant < forms.len()
+                    &&& forms[first as int] is List
+                    &&& descendant < forms[first as int]->List_end <= forms.len()
+                    &&& forms[descendant as int] is List
+                }
+            }),
+        ensures expansion_child_reachable(&prepared.calls@[group_index], prepared.projections.call_arguments.arguments@,
+            parent, target),
+        decreases parent,
+    {
+        reveal(expansion_child_edge);
+        reveal_with_fuel(expansion_child_reachable, 1);
+        let group = &prepared.calls@[group_index];
+        let args = prepared.projections.call_arguments.arguments@;
+        let children = group.postorder->Some_0@;
+        let descendant = children[target]._signature@.call.call.form as int;
+        let range = expansion_parent_range(group, children, parent);
+        let (port, next) = self.expansion_child_containing_form(plan, caller, prepared, group_index, parent, descendant);
+        let argument = args[range.start + port];
+        assert(expansion_child_edge(group, args, parent, next));
+        if argument.form == descendant {
+            self.expansion_children_at_same_form(plan, caller, prepared, group_index, next, target);
+            assert(expansion_child_reachable(group, args, next, target));
+        } else {
+            self.expansion_reaches_child_in_list(plan, caller, prepared, group_index, next, target);
+        }
+        assert(expansion_child_reachable(group, args, parent, target));
+    }
+
+    /// 引数が確定していれば、後順に並べたすべての子を根からたどれる。
+    pub(super) proof fn expansion_reaches_every_child(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        group_index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            expansion_arguments_determined(&prepared.calls@[group_index], prepared.projections.call_arguments.arguments@),
+        ensures ({
+            let group = &prepared.calls@[group_index];
+            let arguments = prepared.projections.call_arguments.arguments@;
+            let children = group.postorder->Some_0@;
+            forall|i: int| 0 <= i < children.len() ==>
+                #[trigger] expansion_child_reachable(group, arguments, children.len() as int, i)
+        }),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let (file, entry, limit) = caller;
+        let group = &prepared.calls@[group_index];
+        let root = prepared.projections.calls@[group_index];
+        let children = group.postorder->Some_0@;
+        let arguments = &prepared.projections.call_arguments;
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let row = parsed.definitions@[root.definition as int];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        self.targets.parsed_project_model();
+        self.checked_types_keep_wiring(file, entry, limit, prepared.typed, wiring);
+        self.expansion_arguments_in_source_order(plan, caller, prepared.typed, &wiring, root, group.arguments, arguments, *group);
+        self.typed_call_arguments_ready(file, entry, local, 0, limit, group._signature@);
+        self.resolved_call_reference_form(file, entry, local, 0, group._signature@.call);
+        crate::syntax::circuit::call_form_bounds(forms, group._signature@.call.call);
+        reveal(crate::syntax::complete_list_indices);
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        let order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
+        assert forall|i: int| 0 <= i < children.len() implies
+            #[trigger] expansion_child_reachable(group, arguments.arguments@, children.len() as int, i) by {
+            let child = children[i];
+            let reference = (child.reference - row.references.start) as usize;
+            self.typed_call_arguments_ready(file, entry, local, reference, limit, child._signature@);
+            self.resolved_call_reference_form(file, entry, local, reference, child._signature@.call);
+            let last = children.len() as int;
+            call_postorder_reference(forms, parsed.references@, row.references, order, i);
+            call_postorder_reference(forms, parsed.references@, row.references, order, last);
+            call_postorder_references_distinct(forms, parsed.references@, row.references, order, i, last);
+            let (root_position, child_position) = call_postorder_positions(source.text, forms, parsed.references@,
+                row, order, row.references.start, child.reference);
+            if root_position < last {
+                call_postorder_references_distinct(forms, parsed.references@, row.references, order, root_position, last);
+            }
+            assert(root_position == last);
+            if child_position < i {
+                call_postorder_references_distinct(forms, parsed.references@, row.references, order, child_position, i);
+            } else if i < child_position {
+                call_postorder_references_distinct(forms, parsed.references@, row.references, order, i, child_position);
+            }
+            assert(child_position == i);
+            self.expansion_reaches_child_in_list(plan, caller, prepared, group_index, children.len() as int, i);
+        };
     }
 
     /// 子の実引数を呼び出し直下のフォームに対応付ける。

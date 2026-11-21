@@ -310,6 +310,7 @@ pub proof fn call_postorder_positions(
     ensures
         0 <= positions.0 < order.len(), order[positions.0] == first,
         0 <= positions.1 < order.len(), order[positions.1] == second,
+        references[first as int].form < references[second as int].form,
         ({
             let parent_start = references[first as int].form - 1;
             let second_start = references[second as int].form - 1;
