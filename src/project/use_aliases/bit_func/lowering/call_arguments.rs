@@ -1005,6 +1005,8 @@ fn nested_argument_uses_the_saved_child_output_range() {
 #[test]
 fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+    use super::super::{BitFuncRhs, CheckedBitDefinition};
+    use super::{LoweringBody, prepare_body_layouts};
     use child_calls::{NestedCallWiringError, bind_child_calls, lower_root_with_children};
 
     let project = parse_circuit_project(&[SourceSnapshot {
@@ -1012,8 +1014,8 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
         revision: 1,
         text: "(using nor) (func id (in a) (out a))
                (func caller (in a) (out y)
-                   (def earlier (id a))
-                   (def y (id (id (nor (nor a a) 0)))))",
+                   (def earlier (id 0))
+                   (def y (id (id (nor (nor earlier a) 0)))))",
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
@@ -1031,13 +1033,21 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
         &prepared.projections.call_arguments.arguments, Ghost(prepared), Ghost((position.0, position.1, 1u64)));
     let parent = &selected[1];
     let parsed = &project.circuits()[position.0];
+    let definitions: Vec<_> = selected.iter().enumerate().map(|(group, call)| CheckedBitDefinition {
+        expression: copy_location(&call.group.expression), width: 1,
+        rhs: BitFuncRhs::CallOutput { group, port: 0 }, operands: Vec::new(),
+    }).collect();
+    let layouts = prepare_body_layouts(&[1], &definitions, &[1], 2).unwrap();
+    let _body = LoweringBody { input_widths: &[1], definitions: definitions.as_slice() };
     let base = CallerArguments {
         source: &project.sources()[position.0], forms: &parsed.syntax.forms,
-        inputs: &[0..1], definitions: &[], wires: &[], child_ranges: &[], child_wires: &[],
+        inputs: layouts.inputs.ranges(), definitions: layouts.definitions.ranges(),
+        wires: &[Wire::Constant(false)], child_ranges: &[], child_wires: &[],
     };
     let builtin = builtin_nor_call();
     let (count, calls) = bind_child_calls(parent, &builtin, Ghost(&aliases),
-        Ghost((&plan, &templates, 1u64, prepared.projections.call_arguments.arguments@)));
+        Ghost((&plan, &templates, 1u64, prepared.projections.call_arguments.arguments@)),
+        Ghost(&base), Ghost((&_body, &layouts, 2usize)));
     assert!(parent.group.references.start > 0);
     assert_eq!(count, 4);
     assert_eq!(calls.iter().map(|call| call.reference).collect::<Vec<_>>(), [3, 2, 1]);
@@ -1048,20 +1058,20 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
         parent_circuit.netlist(), &mut gates, 2, 1, Ghost((seq![1u64], 1usize)), Ghost(1usize));
     let Err(NestedCallWiringError::Child(1, ChildCallWiringError::GateCapacity(site))) = at_limit
         else { panic!("expected a child gate limit error"); };
-    assert_eq!(&site.source.text[site.span], "(nor (nor a a) 0)");
+    assert_eq!(&site.source.text[site.span], "(nor (nor earlier a) 0)");
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
     let output_limit = lower_root_with_children(&base, &calls, count, parent.arguments, parent_circuit.inputs(),
         parent_circuit.netlist(), &mut gates, 3, 1, Ghost((seq![1u64], 1usize)), Ghost(1usize));
     let Err(NestedCallWiringError::Child(1, ChildCallWiringError::OutputCapacity { site, used: 1, width: 1, capacity: 1 })) = output_limit
         else { panic!("expected a child wiring limit error"); };
-    assert_eq!(&site.source.text[site.span], "(nor (nor a a) 0)");
+    assert_eq!(&site.source.text[site.span], "(nor (nor earlier a) 0)");
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
     let deferred = [ProjectedCallArgument { form: parent.arguments[0].form, source: CallArgumentSource::Deferred }];
     let root_failure = lower_root_with_children(&base, &calls, count, &deferred, parent_circuit.inputs(),
         parent_circuit.netlist(), &mut gates, 3, 3, Ghost((seq![1u64], 1usize)), Ghost(1usize));
     let Err(NestedCallWiringError::Root(CallWiringError::DeferredArgument(site))) = root_failure
         else { panic!("expected a root argument error"); };
-    assert_eq!(&site.source.text[site.span], "(id (nor (nor a a) 0))");
+    assert_eq!(&site.source.text[site.span], "(id (nor (nor earlier a) 0))");
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
     let outputs = lower_root_with_children(&base, &calls, count, parent.arguments, parent_circuit.inputs(),
         parent_circuit.netlist(), &mut gates, 3, 3, Ghost((seq![1u64], 1usize)), Ghost(1usize)).unwrap();
