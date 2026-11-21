@@ -4,6 +4,10 @@
 mod source_arguments;
 
 use super::*;
+#[cfg(verus_only)]
+use super::evaluation::{definition_values_from_wires, slot_values_match_wiring};
+#[cfg(verus_only)]
+use super::super::semantics::checked_definition_values;
 use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 use super::super::templates::ResolvedTemplateCall;
 use crate::project::{FunctionExpansionOrder, UseAliases};
@@ -355,6 +359,8 @@ pub(super) closed spec fn mixed_trace(
 spec fn wiring_view_is_prefix(before: WiringView, after: WiringView) -> bool {
     &&& before.gates.len() <= after.gates.len()
     &&& before.definitions.len() <= after.definitions.len()
+    &&& before.origins.len() <= after.origins.len()
+    &&& after.origins.take(before.origins.len() as int) == before.origins
     &&& after.gates.take(before.gates.len() as int) == before.gates
     &&& after.definitions.take(before.definitions.len() as int) == before.definitions
 }
@@ -379,6 +385,7 @@ proof fn wiring_step_keeps_prefix(
             assert(step.after.gates.take(step.before.gates.len() as int) =~= step.before.gates);
         }
         assert(step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions);
+        assert(step.after.origins.take(step.before.origins.len() as int) =~= step.before.origins);
     } else {
         let binding = bindings[step.group_before as int];
         let (invocation, mapped, outputs) = choose|invocation: CallerArguments, mapped: Seq<Wire>, outputs: Seq<Wire>|
@@ -413,9 +420,11 @@ proof fn mixed_trace_preserves_prefix(
         assert(last.before == steps[end - 1].after);
         wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, last);
         assert(last.after.gates.take(early.gates.len() as int) =~= early.gates);
+        assert(last.after.origins.take(early.origins.len() as int) =~= early.origins);
         assert(last.after.definitions.take(early.definitions.len() as int) =~= early.definitions);
     } else {
         assert(steps[end].after.gates.take(steps[end].after.gates.len() as int) =~= steps[end].after.gates);
+        assert(steps[end].after.origins.take(steps[end].after.origins.len() as int) =~= steps[end].after.origins);
         assert(steps[end].after.definitions.take(steps[end].after.definitions.len() as int) =~= steps[end].after.definitions);
     }
 }
@@ -441,7 +450,45 @@ proof fn mixed_trace_step_prefix(
     let step = steps[at];
     wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, step);
     assert(final_wiring.gates.take(step.before.gates.len() as int) =~= step.before.gates);
+    assert(final_wiring.origins.take(step.before.origins.len() as int) =~= step.before.origins);
     assert(final_wiring.definitions.take(step.before.definitions.len() as int) =~= step.before.definitions);
+}
+
+/// 通常の定義を変換した箇所では、最終配線から読んだ値が型検査済みの右辺の値に一致する。
+proof fn mixed_trace_local_value(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize,
+    final_wiring: WiringView, at: int, inputs: Seq<bool>, gates: Seq<bool>,
+)
+    requires
+        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        0 <= at < steps.len(),
+        steps[at].group_before == steps[at].group_after,
+        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
+        forall|i: int| 0 <= i < body.definitions@.len() && !binding_covers(bindings, i) ==>
+            bit_definition_matches(body.input_widths@, body.definitions@.take(i), #[trigger] body.definitions@[i]),
+        inputs.len() == layouts.inputs.total_bits_model(),
+        gate_values_match(inputs, final_wiring.gates, gates),
+        gates.len() == final_wiring.gates.len(),
+        wires_available(final_wiring.definitions, layouts.inputs.total_bits_model(), gates.len()),
+    ensures ({
+        let i = steps[at].from as int;
+        let definitions = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates);
+        &&& 0 <= i < body.definitions@.len()
+        &&& definitions[i].len() == body.definitions@[i].width
+        &&& definitions[i] == checked_definition_values(body.definitions@[i], port_values(&layouts.inputs, inputs),
+            definitions.take(i))
+    }),
+{
+    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
+    reveal(mixed_trace);
+    reveal(wiring_step_valid);
+    let step = steps[at];
+    let i = step.from as int;
+    slot_wiring_is_preserved(body.definitions@[i], layouts, i, step.after.definitions, final_wiring.definitions,
+        step.after.gates, final_wiring.gates, step.after.origins, final_wiring.origins);
+    slot_values_match_wiring(body.input_widths@, body.definitions@, layouts, final_wiring, layout_limit,
+        step.from, inputs, gates);
 }
 
 /// 評価済みの最終配線から、指定した呼び出しの入力と出力を得る。
@@ -473,11 +520,11 @@ proof fn mixed_trace_call_values(
                 inputs, values, result.1)
     }),
 {
-    reveal(mixed_trace);
-    reveal(wiring_step_valid);
-    reveal(binding_ready);
     mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
     let step = steps[at];
+    assert(wiring_step_valid(body, layouts, forms, bindings, limit, step)) by { reveal(mixed_trace); };
+    reveal(wiring_step_valid);
+    reveal(binding_ready);
     let binding = bindings[step.group_before as int];
     let result = call_group_values(binding.group, forms, binding.arguments@, layouts, binding.callee,
         step.before, step.after, limit, definition_widths(body.definitions@), binding._output_widths@,
@@ -665,6 +712,7 @@ pub(super) open spec fn mixed_function_result(
             &&& value.netlist.input_count == layouts.inputs.total_bits_model()
             &&& value.netlist.outputs@.len() == layouts.outputs.total_bits_model()
             &&& value.definition_wires@.len() == layouts.definitions.total_bits_model()
+            &&& wires_available(value.definition_wires@, layouts.inputs.total_bits_model(), value.netlist.gates@.len())
             &&& value.netlist.gates@.len() == value.gate_definitions@.len() <= gate_limit
             &&& nor_evaluation_ready(&value.netlist, layouts.inputs.total_bits_model() as nat)
             &&& body_output_wiring_matches(output_drivers, layouts, value.definition_wires@, value.netlist.outputs@,

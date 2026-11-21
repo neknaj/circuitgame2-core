@@ -1042,12 +1042,12 @@ spec fn slot_wiring_matches(
     }
 }
 
-proof fn prior_definition_wiring_is_preserved(
-    source: &CheckedBitFunc, layouts: &Layouts, i: int, before_wires: Seq<Wire>, after_wires: Seq<Wire>,
+proof fn slot_wiring_is_preserved(
+    slot: CheckedBitDefinition, layouts: &Layouts, i: int, before_wires: Seq<Wire>, after_wires: Seq<Wire>,
     before_gates: Seq<NorGate>, after_gates: Seq<NorGate>, before_origins: Seq<usize>, after_origins: Seq<usize>,
 )
     requires
-        definition_wiring_matches(source, layouts, before_wires, before_gates, before_origins, i),
+        slot_wiring_matches(slot, layouts, before_wires, before_gates, before_origins, i),
         before_wires.len() <= after_wires.len(),
         before_gates.len() <= after_gates.len(),
         before_origins.len() <= after_origins.len(),
@@ -1055,13 +1055,12 @@ proof fn prior_definition_wiring_is_preserved(
         after_gates.take(before_gates.len() as int) == before_gates,
         after_origins.take(before_origins.len() as int) == before_origins,
         after_gates.len() == after_origins.len(),
-    ensures definition_wiring_matches(source, layouts, after_wires, after_gates, after_origins, i),
+    ensures slot_wiring_matches(slot, layouts, after_wires, after_gates, after_origins, i),
 {
-    reveal(definition_wiring_matches);
     let range = layouts.definitions.ranges_model()[i];
     assert(after_wires.take(range.start as int) =~= before_wires.take(range.start as int));
     assert(after_wires[range.start as int] == before_wires[range.start as int]);
-    let rhs = source.definitions@[i].rhs;
+    let rhs = slot.rhs;
     if rhs is Concat {
         assert(after_wires.subrange(range.start as int, range.end as int)
             =~= before_wires.subrange(range.start as int, range.end as int));
@@ -1074,7 +1073,7 @@ proof fn prior_definition_wiring_is_preserved(
     if rhs is BitVector {
         assert forall|bit: int| 0 <= bit < range.end - range.start implies
             (#[trigger] after_wires[range.start + bit]) == Wire::Constant(
-                bit_literal_value_at(literal_bytes(source.definitions@[i].expression), bit as nat)) by {
+                bit_literal_value_at(literal_bytes(slot.expression), bit as nat)) by {
             assert(after_wires[range.start + bit] == before_wires[range.start + bit]);
         };
     } else if !(rhs is Concat) {
@@ -1715,7 +1714,9 @@ impl<'p, 'a> CheckedBitFunc<'p, 'a> {
             assert forall|j: int| 0 <= j <= i implies
                 #[trigger] definition_wiring_matches(self, &layouts, wires@, gates@, gate_definitions@, j) by {
                 if j < i {
-                    prior_definition_wiring_is_preserved(self, &layouts, j, prior, wires@,
+                    assert(definition_wiring_matches(self, &layouts, prior, prior_gates, prior_origins, j));
+                    reveal(definition_wiring_matches);
+                    slot_wiring_is_preserved(self.definitions@[j], &layouts, j, prior, wires@,
                         prior_gates, gates@, prior_origins, gate_definitions@);
                 }
             };
