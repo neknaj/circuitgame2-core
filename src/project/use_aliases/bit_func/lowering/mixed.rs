@@ -420,6 +420,30 @@ proof fn mixed_trace_preserves_prefix(
     }
 }
 
+/// 指定した変換の前後にある配線が、最終配線の接頭辞であることを示す。
+proof fn mixed_trace_step_prefix(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
+    steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int,
+)
+    requires
+        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        0 <= at < steps.len(),
+    ensures
+        wiring_view_is_prefix(steps[at].before, final_wiring),
+        wiring_view_is_prefix(steps[at].after, final_wiring),
+        steps[at].from <= body.definitions@.len(),
+        steps[at].before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), steps[at].from as nat),
+{
+    mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring,
+        at, steps.len() as int - 1);
+    reveal(mixed_trace);
+    reveal(wiring_step_valid);
+    let step = steps[at];
+    wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, step);
+    assert(final_wiring.gates.take(step.before.gates.len() as int) =~= step.before.gates);
+    assert(final_wiring.definitions.take(step.before.definitions.len() as int) =~= step.before.definitions);
+}
+
 /// 評価済みの最終配線から、指定した呼び出しの入力と出力を得る。
 proof fn mixed_trace_call_values(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
@@ -452,8 +476,7 @@ proof fn mixed_trace_call_values(
     reveal(mixed_trace);
     reveal(wiring_step_valid);
     reveal(binding_ready);
-    mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group,
-        final_wiring, at, steps.len() as int - 1);
+    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
     let step = steps[at];
     let binding = bindings[step.group_before as int];
     let result = call_group_values(binding.group, forms, binding.arguments@, layouts, binding.callee,

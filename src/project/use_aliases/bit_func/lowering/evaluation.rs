@@ -18,14 +18,21 @@ pub open spec fn port_values(layout: &PortBitLayout, flat: Seq<bool>) -> Seq<Seq
     })
 }
 
-#[verifier::opaque]
-spec fn definition_wire_values(lowered: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>) -> Seq<Seq<bool>> {
-    let ranges = lowered.layouts.definitions.ranges_model();
+/// 各定義のビット範囲を使って、配線から定義順の値を得る。
+pub(super) open spec fn definition_values_from_wires(
+    layout: &PortBitLayout, wires: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>,
+) -> Seq<Seq<bool>> {
+    let ranges = layout.ranges_model();
     Seq::new(ranges.len(), |i: int| {
         let range = ranges[i];
         Seq::new((range.end - range.start) as nat, |bit: int|
-            wire_value(lowered.definition_wires@[range.start + bit], input, gates))
+            wire_value(wires[range.start + bit], inputs, gates))
     })
+}
+
+#[verifier::opaque]
+spec fn definition_wire_values(lowered: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>) -> Seq<Seq<bool>> {
+    definition_values_from_wires(&lowered.layouts.definitions, lowered.definition_wires@, input, gates)
 }
 
 proof fn driver_bit_value(

@@ -2,6 +2,7 @@
 
 use super::*;
 use super::super::call_arguments::{argument_driver_value, literal_word, lowered_argument_port_value};
+use super::super::evaluation::definition_values_from_wires;
 use super::super::super::expansion::{call_literal_bit, source_argument_bytes, source_call_argument_value};
 use super::super::super::semantics::driver_values;
 use crate::netlist::wire_value;
@@ -20,6 +21,37 @@ spec fn prior_definition_values(
         Seq::new((range.end - range.start) as nat,
             |bit: int| wire_value(step.before.definitions[range.start + bit], inputs, gates))
     })
+}
+
+/// 先行定義の値は、呼び出し直前の配線から読んでも最終配線から読んでも等しい。
+proof fn prior_definition_values_from_final(
+    body: &LoweringBody, layouts: &Layouts, capacity: usize, step: WiringStep, final_wiring: WiringView,
+    inputs: Seq<bool>, gates: Seq<bool>,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        step.from <= body.definitions@.len(),
+        step.before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), step.from as nat),
+        wiring_view_is_prefix(step.before, final_wiring),
+    ensures
+        prior_definition_values(layouts, step, inputs, gates)
+            == definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates).take(step.from as int),
+{
+    let prior = prior_definition_values(layouts, step, inputs, gates);
+    let final_values = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates);
+    let prefix = final_values.take(step.from as int);
+    let widths = definition_widths(body.definitions@);
+    assert forall|i: int| 0 <= i < step.from implies #[trigger] prior[i] == prefix[i] by {
+        port_bit_layout_port(widths, capacity, layouts.definitions, i as usize);
+        preceding_port_bits_grow(widths, (i + 1) as nat, step.from as nat);
+        let range = layouts.definitions.ranges_model()[i];
+        assert forall|bit: int| 0 <= bit < prior[i].len() implies #[trigger] prior[i][bit] == prefix[i][bit] by {
+            assert(range.start + bit < step.before.definitions.len());
+            assert(step.before.definitions[range.start + bit] == final_wiring.definitions[range.start + bit]);
+        };
+        assert(prior[i] =~= prefix[i]);
+    };
+    assert(prior =~= prefix);
 }
 
 /// 型検査で決まった幅から、駆動元の全ビットが呼び出し前に読めることを示す。
@@ -146,11 +178,11 @@ proof fn trace_call_frame(
         &&& binding_ready(binding, layouts, forms, definition_widths(body.definitions@))
         &&& binding.arguments@.len() == binding._input_widths@.len()
         &&& port_bit_layout_result(binding._input_widths@, binding._layout_limit@, Ok(*binding.callee.input_layout_model()))
+        &&& wiring_view_is_prefix(step.before, final_wiring)
         &&& wires_available(step.after.definitions, layouts.inputs.total_bits_model(), final_wiring.gates.len())
     }),
 {
-    mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring,
-        at, steps.len() as int - 1);
+    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
     reveal(mixed_trace);
     reveal(wiring_step_valid);
     reveal(binding_ready);
@@ -200,7 +232,7 @@ proof fn mixed_trace_source_call_values(
         let root = prepared.projections.calls@[step.group_before as int];
         let ports = port_values(binding.callee.input_layout_model(), result.0);
         let incoming = port_values(&layouts.inputs, inputs);
-        let prior = prior_definition_values(layouts, step, inputs, values);
+        let prior = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values).take(step.from as int);
 
         &&& nor_evaluation(binding.callee.netlist_model(), result.0, result.1)
         &&& exists|positions: Seq<usize>| #[trigger] call_argument_positions(forms, binding.group._signature@.call.call, positions)
@@ -260,6 +292,7 @@ proof fn mixed_trace_source_call_values(
             *binding.group, port, incoming, prior, widths[port], ports[port]);
     };
     assert(call_argument_positions(forms, binding.group._signature@.call.call, positions));
+    prior_definition_values_from_final(body, layouts, layout_limit, step, final_wiring, inputs, values);
     result
 }
 
