@@ -17,7 +17,7 @@ pub use bit_literal::{BitLiteral, BitLiteralSize, bit_literal_size, read_bit_lit
 #[cfg(verus_only)]
 pub use bit_literal::{
     bit_literal_high_bits_are_zero, bit_literal_kind_has_digits, bit_literal_required_width_fits_spelling,
-    bit_literal_size_matches, bit_literal_top_bit_is_one,
+    bit_literal_size_has_kind, bit_literal_size_matches, bit_literal_top_bit_is_one,
     bit_literal_value_at, bit_literal_written_widths_agree,
 };
 #[cfg(verus_only)]

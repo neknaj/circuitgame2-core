@@ -2,11 +2,19 @@
 
 #[cfg(verus_only)]
 mod source_evaluation;
+mod body;
+pub(super) use body::{ExpandedBody, ExpandedBodyError};
+#[cfg(verus_only)]
+pub(super) use body::{argument_matches_width, call_covers};
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc};
+use super::expansion::CheckedExpansionCall;
+use super::templates::ResolvedTemplateCall;
+#[cfg(verus_only)]
+use super::templates::call_ports_need_structure_layout;
 use super::super::{
     FuncCallSignatureError, FuncCallTarget, FuncSignalTypeError, FuncSignalTypes, FuncWiring, FuncWiringResult, OutputDriver,
     ResolvedPortType, SelectionArgumentError, SingleBitOperand, StructureLayouts, StructureTypeError,
@@ -116,6 +124,14 @@ pub enum BitFuncError<'p, 'a> {
     Unsupported(UnsupportedBitFunc, LocatedName<'p, 'a>),
 }
 
+/// 入出力ポートの宣言順の幅と、構造体型を展開するときの配置表。
+#[derive(Debug)]
+pub(super) struct PreparedBitFuncPorts<'p, 'a> {
+    pub(super) inputs: Vec<u64>,
+    pub(super) outputs: Vec<u64>,
+    pub(super) layouts: Option<StructureLayouts<'p, 'a>>,
+}
+
 struct FuncProjection<'w, 'p, 'a> {
     file: usize,
     entry: usize,
@@ -132,11 +148,11 @@ struct FuncProjection<'w, 'p, 'a> {
     structures: &'w Vec<StructureProjection>,
 }
 
-spec fn has_structure_port(ports: Seq<TypedPort>) -> bool {
+pub(super) open spec fn has_structure_port(ports: Seq<TypedPort>) -> bool {
     exists|i: int| 0 <= i < ports.len() && (#[trigger] ports[i]).ty is Struct
 }
 
-fn contains_structure_port(ports: &[TypedPort]) -> (has_structure: bool)
+pub(super) fn contains_structure_port(ports: &[TypedPort]) -> (has_structure: bool)
     ensures has_structure == has_structure_port(ports@),
 {
     let mut i = 0;
@@ -408,6 +424,176 @@ fn check_output_widths<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    spec fn port_preparation_error(
+        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, limit: u64,
+        signature: &TypedRoutineSignature, error: BitFuncError,
+    ) -> bool {
+        let forms = parsed.syntax.forms@;
+        match error {
+            BitFuncError::Unsupported(UnsupportedBitFunc::OutputCount, location) =>
+                signature.outputs@.len() == 0
+                && is_form_location(source, forms[parsed.syntax.entries@[entry as int].form as int], location),
+            BitFuncError::Unsupported(UnsupportedBitFunc::PortType, location) => signature.outputs@.len() > 0
+                && (unsupported_port(source, forms, signature.outputs@, location)
+                    || (supported_ports(signature.outputs@) && unsupported_port(source, forms, signature.inputs@, location))),
+            BitFuncError::PortLayout(error) => signature.outputs@.len() > 0
+                && supported_ports(signature.outputs@) && supported_ports(signature.inputs@)
+                && (has_structure_port(signature.outputs@) || has_structure_port(signature.inputs@))
+                && self.structure_types_match(limit, Err(error)),
+            _ => false,
+        }
+    }
+
+    #[verifier::opaque]
+    pub(super) closed spec fn routine_ports_result(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring, original: Option<StructureLayouts>,
+        result: Result<PreparedBitFuncPorts, BitFuncError>,
+    ) -> bool {
+        let signature = &wiring.drivers.signature;
+        match result {
+            Ok(ports) => {
+                let layouts = match &ports.layouts { Some(table) => Some(table), None => None };
+                &&& 0 < signature.outputs@.len()
+                &&& supported_ports(signature.outputs@) && supported_ports(signature.inputs@)
+                &&& self.port_widths_match(signature.inputs@, ports.inputs@, layouts)
+                &&& self.port_widths_match(signature.outputs@, ports.outputs@, layouts)
+                &&& self.structure_layout_for_ports(limit, layouts)
+                &&& original.is_some() ==> original == ports.layouts
+            },
+            Err(error) => {
+                let project = self.targets.project_model();
+                self.port_preparation_error(&project.sources_model()[file as int], &project.circuits_model()[file as int],
+                    entry, limit, signature, error)
+            },
+        }
+    }
+
+    /// 宣言順の入出力ポートの幅を求め、既存の構造体配置があれば再利用する。
+    ///
+    /// # Errors
+    ///
+    /// 出力ポートがない場合、ポート幅が対応範囲外の場合、配置表の検査に失敗した場合の順に診断する。
+    pub(super) fn prepare_routine_ports(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring<'p, 'a>,
+        mut layouts: Option<StructureLayouts<'p, 'a>>,
+    ) -> (result: Result<PreparedBitFuncPorts<'p, 'a>, BitFuncError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
+            layouts matches Some(table) ==> self.structure_types_match(limit, Ok(table)),
+        ensures
+            self.routine_ports_result(file, entry, limit, wiring, layouts, result),
+            result matches Ok(ports) ==> (ports.layouts.is_some() <==> layouts.is_some()
+                || has_structure_port(wiring.drivers.signature.inputs@)
+                || has_structure_port(wiring.drivers.signature.outputs@)),
+    {
+        reveal(UseAliases::routine_ports_result);
+        let ghost original = layouts;
+        proof { self.checked_wiring_is_func(file, entry, limit, *wiring); }
+        let project = self.targets.project();
+        let source = &project.sources()[file];
+        let parsed = &project.circuits()[file];
+        let forms = parsed.syntax.forms.as_slice();
+        proof {
+            parsed_index_evidence(*source, *parsed);
+            indexed_entry_evidence(source.text, forms@, parsed.syntax.entries@, entry as int);
+        }
+        let signature = &wiring.drivers.signature;
+        if signature.outputs.is_empty() {
+            let site = form_location(source, forms, parsed.syntax.entries[entry].form);
+            return Err(BitFuncError::Unsupported(UnsupportedBitFunc::OutputCount, site));
+        }
+        if let Err(location) = check_ports(source, forms, signature.outputs.as_slice()) {
+            return Err(BitFuncError::Unsupported(UnsupportedBitFunc::PortType, location));
+        }
+        if let Err(location) = check_ports(source, forms, signature.inputs.as_slice()) {
+            return Err(BitFuncError::Unsupported(UnsupportedBitFunc::PortType, location));
+        }
+        if layouts.is_none() && (contains_structure_port(signature.outputs.as_slice())
+            || contains_structure_port(signature.inputs.as_slice()))
+        {
+            match self.check_structure_types(limit) {
+                Ok(table) => layouts = Some(table),
+                Err(error) => return Err(BitFuncError::PortLayout(error)),
+            }
+        }
+        let inputs = self.collect_port_widths(signature.inputs.as_slice(), layouts.as_ref(), limit);
+        let outputs = self.collect_port_widths(signature.outputs.as_slice(), layouts.as_ref(), limit);
+        Ok(PreparedBitFuncPorts { inputs, outputs, layouts })
+    }
+
+    pub(super) closed spec fn expanded_routine_ports_result(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring, layouts: Option<StructureLayouts>,
+        selected: Seq<ResolvedTemplateCall>, result: Result<PreparedBitFuncPorts, BitFuncError>,
+    ) -> bool {
+        match result {
+            Ok(ports) => self.routine_ports_result(file, entry, limit, wiring, layouts, Ok(ports))
+                && (ports.layouts.is_some() <==> layouts.is_some()
+                    || has_structure_port(wiring.drivers.signature.inputs@)
+                    || has_structure_port(wiring.drivers.signature.outputs@)
+                    || call_ports_need_structure_layout(selected)),
+            Err(error) => self.routine_ports_result(file, entry, limit, wiring, layouts, Err(error))
+                || (error matches BitFuncError::PortLayout(diagnostic) && exists|ports: PreparedBitFuncPorts|
+                    #[trigger] self.routine_ports_result(file, entry, limit, wiring, layouts, Ok(ports))
+                    && self.called_structure_layout_result(selected, limit, ports.layouts, Err(diagnostic))),
+        }
+    }
+
+    /// 呼び出し元のポートを検査し、呼び出し先の署名を扱うために必要な構造体配置も確保する。
+    ///
+    /// # Errors
+    ///
+    /// 呼び出し元のポート検査が失敗した場合はその診断を返す。
+    /// ポートが妥当で、呼び出し先に必要な構造体配置の検査が失敗した場合は、その診断を返す。
+    pub(super) fn prepare_expanded_routine_ports(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring<'p, 'a>,
+        layouts: Option<StructureLayouts<'p, 'a>>, selected: &[ResolvedTemplateCall<'_, 'p, 'a>],
+    ) -> (result: Result<PreparedBitFuncPorts<'p, 'a>, BitFuncError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
+            layouts matches Some(table) ==> self.structure_types_match(limit, Ok(table)),
+        ensures self.expanded_routine_ports_result(file, entry, limit, wiring, layouts, selected@, result),
+    {
+        reveal(UseAliases::routine_ports_result);
+        let mut ports = match self.prepare_routine_ports(file, entry, limit, wiring, layouts) {
+            Ok(ports) => ports,
+            Err(error) => return Err(error),
+        };
+        if ports.layouts.is_some() {
+            return Ok(ports);
+        }
+        let ghost original = ports;
+        let table = match self.prepare_called_structure_layout(selected, limit, ports.layouts) {
+            Ok(table) => table,
+            Err(error) => {
+                assert(exists|before: PreparedBitFuncPorts| #[trigger] self.routine_ports_result(file, entry, limit, wiring,
+                    layouts, Ok(before)) && self.called_structure_layout_result(selected@, limit, before.layouts, Err(error)));
+                return Err(BitFuncError::PortLayout(error));
+            },
+        };
+        ports.layouts = table;
+        proof {
+
+            let new_table = match &ports.layouts { Some(table) => Some(table), None => None };
+            self.widths_without_structure_layout(wiring.drivers.signature.inputs@, original.inputs@, new_table);
+            self.widths_without_structure_layout(wiring.drivers.signature.outputs@, original.outputs@, new_table);
+        }
+        Ok(ports)
+    }
+
+    proof fn widths_without_structure_layout(
+        &self, ports: Seq<TypedPort>, widths: Seq<u64>, layouts: Option<&StructureLayouts>,
+    )
+        requires self.port_widths_match(ports, widths, None),
+        ensures self.port_widths_match(ports, widths, layouts),
+    {
+        assert forall|i: int| 0 <= i < widths.len() implies
+            self.port_width_matches(ports[i].ty, #[trigger] widths[i], layouts) by {
+            assert(self.port_width_matches(ports[i].ty, widths[i], None));
+        };
+    }
+
     spec fn port_width_matches(
         &self, ty: ResolvedPortType, width: u64, layouts: Option<&StructureLayouts>,
     ) -> bool {
@@ -416,6 +602,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ResolvedPortType::Bits(bits) => width == bits,
             ResolvedPortType::Struct { .. } => layouts matches Some(table)
                 && self.layout_port_width_matches(table, ty, width as int),
+        }
+    }
+
+    /// 比較した二つのポート型が、同じ配置表で同じ表現幅を持つことを示す。
+    proof fn equivalent_port_widths(
+        &self, layouts: Option<&StructureLayouts>, left: ResolvedPortType, left_width: u64,
+        right: ResolvedPortType, right_width: u64,
+    )
+        requires
+            self.can_resolve(),
+            self.port_width_matches(left, left_width, layouts),
+            self.port_width_matches(right, right_width, layouts),
+            crate::project::port_types_equal(left, right),
+        ensures left_width == right_width,
+    {
+        if let ResolvedPortType::Struct { .. } = left {
+            let table = layouts->Some_0;
+            self.layout_port_is_declared(table, left, left_width as int);
+            self.layout_port_is_declared(table, right, right_width as int);
+            self.equivalent_declared_port_types(left, right);
+            self.layout_port_widths_agree(table, left, left_width as int, right_width as int);
         }
     }
 
@@ -543,6 +750,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     scope.types@, concat)
                 && concat.target == i && concat.operands@ == operands,
             BitFuncRhs::BitVector => bit_vector_form(forms[root]),
+            BitFuncRhs::CallOutput { .. } => false,
         } }
     }
 
@@ -612,6 +820,94 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         exists|typed: FuncSignalTypes, layouts: Option<&StructureLayouts>, structures: Vec<StructureProjection>|
             #![trigger self.func_signal_types_evidence(file, entry, limit, Ok(typed)), self.structure_layout_for_ports(limit, layouts), structures@]
             self.checked_bit_func_projection(file, entry, limit, checked, typed, layouts, structures)
+    }
+
+    pub(super) closed spec fn template_port_widths_match(
+        &self, signature: TypedRoutineSignature, limit: u64, inputs: Seq<u64>, outputs: Seq<u64>,
+        layouts: Option<StructureLayouts>,
+    ) -> bool {
+        let table = match &layouts { Some(table) => Some(table), None => None };
+        &&& self.structure_layout_for_ports(limit, table)
+        &&& self.port_widths_match(signature.inputs@, inputs, table)
+        &&& self.port_widths_match(signature.outputs@, outputs, table)
+    }
+
+    pub(super) proof fn template_port_counts(
+        &self, signature: TypedRoutineSignature, limit: u64, inputs: Seq<u64>, outputs: Seq<u64>,
+        layouts: Option<StructureLayouts>,
+    )
+        requires self.template_port_widths_match(signature, limit, inputs, outputs, layouts),
+        ensures inputs.len() == signature.inputs@.len(), outputs.len() == signature.outputs@.len(),
+    {
+        reveal(UseAliases::template_port_widths_match);
+    }
+
+    /// 呼び出し先のポート幅を、呼び出し元で使う検査済みの配置表へ引き継ぐ。
+    proof fn template_widths_in_caller_layout(
+        &self, signature: TypedRoutineSignature, limit: u64, inputs: Seq<u64>, outputs: Seq<u64>,
+        from: Option<StructureLayouts>, to: Option<&StructureLayouts>,
+    )
+        requires
+            self.can_resolve(),
+            self.template_port_widths_match(signature, limit, inputs, outputs, from),
+            to matches Some(table) ==> self.structure_types_match(limit, Ok(*table)),
+            to.is_none() ==> !has_structure_port(signature.inputs@) && !has_structure_port(signature.outputs@),
+        ensures
+            self.port_widths_match(signature.inputs@, inputs, to),
+            self.port_widths_match(signature.outputs@, outputs, to),
+    {
+        let source = match &from { Some(table) => Some(table), None => None };
+        self.port_widths_in_caller_layout(signature.inputs@, inputs, limit, source, to);
+        self.port_widths_in_caller_layout(signature.outputs@, outputs, limit, source, to);
+    }
+
+    proof fn port_widths_in_caller_layout(
+        &self, ports: Seq<TypedPort>, widths: Seq<u64>, limit: u64,
+        from: Option<&StructureLayouts>, to: Option<&StructureLayouts>,
+    )
+        requires
+            self.can_resolve(),
+            self.port_widths_match(ports, widths, from),
+            self.structure_layout_for_ports(limit, from),
+            self.structure_layout_for_ports(limit, to),
+            to.is_none() ==> !has_structure_port(ports),
+        ensures self.port_widths_match(ports, widths, to),
+    {
+        assert forall|i: int| 0 <= i < widths.len() implies
+            self.port_width_matches(ports[i].ty, #[trigger] widths[i], to) by {
+            let ty = ports[i].ty;
+            assert(self.port_width_matches(ty, widths[i], from));
+            if ty is Struct {
+                let origin = from->Some_0;
+                let table = to->Some_0;
+                self.layout_port_width_transfers(limit, origin, table, ty, widths[i] as int);
+            }
+        };
+    }
+
+    /// 単独関数で検査したポート幅を、同じ宣言と構造体配置に結び付ける。
+    pub(super) proof fn standalone_template_ports(
+        &self, file: usize, entry: usize, limit: u64, checked: &CheckedBitFunc,
+    ) -> (layouts: Option<StructureLayouts<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.checked_bit_func_matches(file, entry, limit, checked),
+        ensures
+            self.typed_signature_evidence(file, entry, limit, Ok(Some(checked.signature))),
+            self.template_port_widths_match(checked.signature, limit, checked.input_widths@, checked.output_widths@, layouts),
+    {
+        reveal(UseAliases::checked_bit_func_matches);
+        let (typed, table, structures) = choose|typed: FuncSignalTypes, table: Option<&StructureLayouts>, structures: Vec<StructureProjection>|
+            #![trigger self.func_signal_types_evidence(file, entry, limit, Ok(typed)), self.structure_layout_for_ports(limit, table), structures@]
+            self.checked_bit_func_projection(file, entry, limit, checked, typed, table, structures);
+        let wiring = typed.literals.wiring->Checked_0;
+        self.checked_types_keep_wiring(file, entry, limit, typed, wiring);
+        self.checked_wiring_is_func(file, entry, limit, wiring);
+        let model = match table { Some(table) => Some(*table), None => None };
+        assert(self.template_port_widths_match(checked.signature, limit, checked.input_widths@, checked.output_widths@, model)) by {
+            reveal(UseAliases::template_port_widths_match);
+        };
+        model
     }
 
     spec fn checked_bit_func_projection(
@@ -715,18 +1011,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     spec fn projection_failure(&self, scope: &FuncProjection, error: BitFuncError) -> bool {
         let signature = &scope.wiring.drivers.signature;
-        let forms = scope.parsed.syntax.forms@;
         match error {
-            BitFuncError::Unsupported(UnsupportedBitFunc::OutputCount, location) =>
-                signature.outputs@.len() == 0
-                && is_form_location(scope.source, forms[scope.parsed.syntax.entries@[scope.entry as int].form as int], location),
-            BitFuncError::Unsupported(UnsupportedBitFunc::PortType, location) => signature.outputs@.len() > 0
-                && (unsupported_port(scope.source, forms, signature.outputs@, location)
-                    || (supported_ports(signature.outputs@) && unsupported_port(scope.source, forms, signature.inputs@, location))),
-            BitFuncError::PortLayout(error) => signature.outputs@.len() > 0
-                && supported_ports(signature.outputs@) && supported_ports(signature.inputs@)
-                && (has_structure_port(signature.outputs@) || has_structure_port(signature.inputs@))
-                && self.structure_types_match(scope.limit, Err(error)),
+            BitFuncError::Unsupported(UnsupportedBitFunc::OutputCount | UnsupportedBitFunc::PortType, _)
+            | BitFuncError::PortLayout(_) =>
+                self.port_preparation_error(scope.source, scope.parsed, scope.entry, scope.limit, signature, error),
             _ => {
                 &&& signature.outputs@.len() > 0
                 &&& supported_ports(signature.outputs@) && supported_ports(signature.inputs@)
@@ -1009,15 +1297,137 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(bits == checked.width);
                 },
                 BitFuncRhs::BitVector => {},
+                BitFuncRhs::CallOutput { .. } => { assert(false); },
             }
         }
         assert(scope.types@[index] matches Some(ty) && self.port_width_matches(ty.ty, checked.width, scope.layouts));
+        self.push_definition_width(scope, prior, checked);
+    }
+
+    proof fn push_definition_width(
+        &self, scope: &FuncProjection, prior: Seq<CheckedBitDefinition>, checked: CheckedBitDefinition,
+    )
+        requires
+            self.definition_widths_match(scope, prior),
+            prior.len() < scope.types@.len(),
+            scope.types@[prior.len() as int] matches Some(ty) && self.port_width_matches(ty.ty, checked.width, scope.layouts),
+        ensures self.definition_widths_match(scope, prior.push(checked)),
+    {
         reveal(UseAliases::definition_widths_match);
         let next = prior.push(checked);
         assert forall|j: int| 0 <= j < next.len() implies scope.types@[j] matches Some(ty)
             && self.port_width_matches(ty.ty, (#[trigger] next[j]).width, scope.layouts) by {
-            if j < index { assert(next[j] == prior[j]); }
+            if j < prior.len() { assert(next[j] == prior[j]); }
         };
+    }
+
+    #[verifier::opaque]
+    spec fn call_definition_widths_match(
+        &self, scope: &FuncProjection, start: usize, widths: Seq<u64>,
+    ) -> bool {
+        &&& start + widths.len() <= scope.types@.len()
+        &&& forall|port: int| 0 <= port < widths.len() ==> (
+            scope.types@[start + port] matches Some(ty)
+                && self.port_width_matches(ty.ty, #[trigger] widths[port], scope.layouts)
+        )
+    }
+
+    /// 呼び出し先の宣言から求めた出力幅が、呼び出し元の各左辺の型にも合うことを示す。
+    proof fn call_definition_widths_from_signature(
+        &self, scope: &FuncProjection, call: &CheckedExpansionCall, widths: Seq<u64>,
+    )
+        requires
+            call._signature@.signature is Function,
+            call.outputs.start <= call.outputs.end <= scope.types@.len(),
+            call.outputs.end - call.outputs.start == widths.len(),
+            self.port_widths_match(call._signature@.signature->Function_0.outputs@, widths, scope.layouts),
+            forall|port: int| 0 <= port < widths.len() ==> {
+                let expected = call._signature@.signature->Function_0.outputs@[port];
+                (#[trigger] scope.types@[call.outputs.start + port]) == Some(SignalType {
+                    ty: expected.ty, origin: expected.annotation,
+                })
+            },
+        ensures self.call_definition_widths_match(scope, call.outputs.start, widths),
+    {
+        reveal(UseAliases::call_definition_widths_match);
+        assert forall|port: int| 0 <= port < widths.len() implies (
+            scope.types@[call.outputs.start + port] matches Some(ty)
+                && self.port_width_matches(ty.ty, #[trigger] widths[port], scope.layouts)
+        ) by {
+            let expected = call._signature@.signature->Function_0.outputs@[port];
+            assert(scope.types@[call.outputs.start + port] == Some(SignalType {
+                ty: expected.ty, origin: expected.annotation,
+            }));
+        };
+    }
+
+    /// 呼び出しの出力をポート順に登録し、後続の定義から参照できるようにする。
+    ///
+    /// 各出力には呼び出し式の元ソース範囲を保持する。
+    fn append_call_definitions(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, call: &CheckedExpansionCall<'p, 'a>, group: usize,
+        widths: &[u64], definitions: &mut Vec<CheckedBitDefinition<'p, 'a>>,
+    )
+        requires
+            self.definition_widths_match(scope, old(definitions)@),
+            old(definitions)@.len() == call.outputs.start <= call.outputs.end <= scope.types@.len(),
+            widths@.len() == call.outputs.end - call.outputs.start,
+            location_in_source(call.expression),
+            self.call_definition_widths_match(scope, call.outputs.start, widths@),
+        ensures
+            self.definition_widths_match(scope, final(definitions)@),
+            final(definitions)@.len() == call.outputs.end,
+            final(definitions)@.take(call.outputs.start as int) == old(definitions)@,
+            forall|port: int| 0 <= port < widths@.len() ==> {
+                let slot = #[trigger] final(definitions)@[call.outputs.start + port];
+                &&& slot.rhs == BitFuncRhs::CallOutput { group, port: port as usize }
+                &&& slot.expression == call.expression
+                &&& slot.width == widths@[port] > 0
+                &&& slot.operands@.len() == 0
+            },
+    {
+        let ghost before = definitions@;
+        let mut port = 0;
+        while port < widths.len()
+            invariant
+                call.outputs.start <= call.outputs.end <= scope.types@.len(),
+                widths@.len() == call.outputs.end - call.outputs.start,
+                port <= widths@.len(),
+                location_in_source(call.expression),
+                definitions@.len() == call.outputs.start + port,
+                definitions@.take(call.outputs.start as int) == before,
+                self.definition_widths_match(scope, definitions@),
+                self.call_definition_widths_match(scope, call.outputs.start, widths@),
+                forall|j: int| 0 <= j < port ==> {
+                    let slot = #[trigger] definitions@[call.outputs.start + j];
+                    &&& slot.rhs == BitFuncRhs::CallOutput { group, port: j as usize }
+                    &&& slot.expression == call.expression
+                    &&& slot.width == widths@[j] > 0
+                    &&& slot.operands@.len() == 0
+                },
+            decreases widths@.len() - port,
+        {
+            let width = widths[port];
+            let slot = CheckedBitDefinition { expression: copy_location(&call.expression), width,
+                rhs: BitFuncRhs::CallOutput { group, port }, operands: Vec::new() };
+            let ghost previous = definitions@;
+            proof {
+                reveal(UseAliases::call_definition_widths_match);
+                self.push_definition_width(scope, previous, slot);
+            }
+            definitions.push(slot);
+            assert(definitions@.take(call.outputs.start as int) =~= previous.take(call.outputs.start as int));
+            assert forall|j: int| 0 <= j <= port implies {
+                let slot = #[trigger] definitions@[call.outputs.start + j];
+                &&& slot.rhs == BitFuncRhs::CallOutput { group, port: j as usize }
+                &&& slot.expression == call.expression
+                &&& slot.width == widths@[j] > 0
+                &&& slot.operands@.len() == 0
+            } by {
+                if j < port { assert(definitions@[call.outputs.start + j] == previous[call.outputs.start + j]); }
+            };
+            port += 1;
+        }
     }
 
     proof fn structure_input_width_matches(
@@ -1263,7 +1673,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             index == prior@.len() < scope.wiring.drivers.definitions@.len(),
             self.projection_port_widths_match(scope),
             self.projection_structures_match(scope),
-            self.definition_prefix(scope, prior@),
             self.definition_widths_match(scope, prior@),
             projection matches Some(at) ==> at < scope.structures@.len() && scope.structures@[at as int].target == index,
             projection.is_none() ==> forall|j: int| 0 <= j < scope.structures@.len()
@@ -1513,7 +1922,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => self.checked_bit_func_error(file, entry, limit, error),
         },
     {
-        let (typed, projections) = match self.check_func_signal_projections(file, entry, limit, true) {
+        let (typed, projections) = match self.check_func_signal_projections(file, entry, limit, true, false) {
             Ok(checked) => checked,
             Err(error) => return Err(BitFuncError::Check(error)),
         };
@@ -1532,48 +1941,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let project = self.targets.project();
         let source = &project.sources()[file];
         let parsed = &project.circuits()[file];
-        let forms = parsed.syntax.forms.as_slice();
-        proof {
-            parsed_index_evidence(*source, *parsed);
-            indexed_entry_evidence(source.text, forms@, parsed.syntax.entries@, entry as int);
-        }
-        let _empty: Vec<u64> = Vec::new();
-        let ghost early_scope = FuncProjection { file, entry, limit, source, parsed, wiring: &wiring,
-            inputs: &_empty, outputs: &_empty, layouts: None, types: &typed.types, structures: &projections.entries };
-        let signature = &wiring.drivers.signature;
-        if signature.outputs.is_empty() {
-            let site = form_location(source, forms, parsed.syntax.entries[entry].form);
-            let error = BitFuncError::Unsupported(UnsupportedBitFunc::OutputCount, site);
-            proof { self.projected_error(&early_scope, typed_model, error); }
-            return Err(error);
-        }
-        if let Err(location) = check_ports(source, forms, signature.outputs.as_slice()) {
-            let error = BitFuncError::Unsupported(UnsupportedBitFunc::PortType, location);
-            proof { self.projected_error(&early_scope, typed_model, error); }
-            return Err(error);
-        }
-        if let Err(location) = check_ports(source, forms, signature.inputs.as_slice()) {
-            let error = BitFuncError::Unsupported(UnsupportedBitFunc::PortType, location);
-            proof { self.projected_error(&early_scope, typed_model, error); }
-            return Err(error);
-        }
         let ghost original_layouts = projections.layouts;
-        let mut layouts = projections.layouts;
-        if layouts.is_none() && (contains_structure_port(signature.outputs.as_slice())
-            || contains_structure_port(signature.inputs.as_slice()))
-        {
-            match self.check_structure_types(limit) {
-                Ok(table) => layouts = Some(table),
+        reveal(UseAliases::routine_ports_result);
+        let PreparedBitFuncPorts { inputs: input_widths, outputs: output_widths, layouts } =
+            match self.prepare_routine_ports(file, entry, limit, &wiring, projections.layouts) {
+                Ok(ports) => ports,
                 Err(error) => {
-                    let error = BitFuncError::PortLayout(error);
+                    let _empty: Vec<u64> = Vec::new();
+                    let ghost early_scope = FuncProjection { file, entry, limit, source, parsed, wiring: &wiring,
+                        inputs: &_empty, outputs: &_empty, layouts: None, types: &typed.types, structures: &projections.entries };
+                    assert(self.projection_failure(&early_scope, error));
                     proof { self.projected_error(&early_scope, typed_model, error); }
                     return Err(error);
                 },
-            }
-        }
+            };
         let layout_ref = layouts.as_ref();
-        let input_widths = self.collect_port_widths(signature.inputs.as_slice(), layout_ref, limit);
-        let output_widths = self.collect_port_widths(signature.outputs.as_slice(), layout_ref, limit);
         let scope = FuncProjection { file, entry, limit, source, parsed, wiring: &wiring,
             inputs: &input_widths, outputs: &output_widths,
             #[cfg(verus_only)]
@@ -1589,86 +1971,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(projections.entries@.len() == 0);
             }
         };
-        let mut definitions = Vec::new();
-        assert(self.definition_prefix(&scope, definitions@)) by { reveal(UseAliases::definition_prefix); };
-        assert(self.definition_widths_match(&scope, definitions@)) by {
-            reveal(UseAliases::definition_widths_match);
+        let definitions = match self.project_standalone_definitions(
+            &scope, typed.literals.widths.as_slice(), projections.concats, Ghost(typed_model),
+        ) {
+            Ok(definitions) => definitions,
+            Err(error) => {
+                proof { self.projected_error(&scope, typed_model, error); }
+                return Err(error);
+            },
         };
-        let mut i = 0usize;
-        let mut next_structure = 0usize;
-        let mut next_concat = 0usize;
-        let mut concats = projections.concats;
-        let ghost concat_model = concats@;
-        proof {
-            concat_projections_order(file, entry, limit, source, parsed, &wiring, scope.types@, concat_model);
-            assert(concat_cursor_ready(concats@, concat_model, next_concat, i as int)) by { reveal(concat_cursor_ready); };
-        }
-        while i < wiring.drivers.definitions.len()
-            invariant
-                self.projection_context(&scope),
-                self.projection_port_widths_match(&scope),
-                self.projection_structures_match(&scope),
-                typed_model.types@ == scope.types@,
-                typed_model.types@.len() == wiring.drivers.definitions@.len(),
-                typed.literals.widths@ == typed_model.literals.widths@,
-                typed.literals.widths@.len() == wiring.drivers.definitions@.len(),
-                self.func_structure_projections_complete(file, entry, limit, typed_model, &wiring, scope.structures@),
-                scope.wiring == &wiring && *signature == wiring.drivers.signature && scope.source == source && scope.parsed == parsed,
-                scope.file == file && scope.entry == entry && scope.limit == limit,
-                self.func_signal_types_evidence(file, entry, limit, Ok(typed_model)),
-                typed_model.literals.wiring == FuncWiringResult::Checked(wiring),
-                i == definitions@.len() <= wiring.drivers.definitions@.len(),
-                next_structure <= scope.structures@.len(),
-                concat_cursor_ready(concats@, concat_model, next_concat, i as int),
-                self.func_concat_projections_complete(file, entry, limit, typed_model, &wiring, concat_model),
-                forall|a: int, b: int| 0 <= a < b < concat_model.len()
-                    ==> (#[trigger] concat_model[a]).target < (#[trigger] concat_model[b]).target,
-                forall|j: int| 0 <= j < concat_model.len() ==> concat_projection_matches(
-                    file, entry, limit, source, parsed, &wiring, scope.types@, #[trigger] concat_model[j]),
-                forall|j: int| 0 <= j < next_structure ==> (#[trigger] scope.structures@[j]).target < i,
-                forall|j: int| next_structure <= j < scope.structures@.len() ==> i <= (#[trigger] scope.structures@[j]).target,
-                self.definition_prefix(&scope, definitions@),
-                self.definition_widths_match(&scope, definitions@),
-                0 < signature.outputs@.len(),
-                supported_ports(signature.outputs@), supported_ports(signature.inputs@),
-                forall|j: int| 0 <= j < definitions@.len() ==>
-                    location_in_source((#[trigger] definitions@[j]).expression)
-                    && definitions@[j].width > 0,
-            decreases wiring.drivers.definitions@.len() - i,
-        {
-            let (cursor, structure) = next_structure_projection(scope.structures.as_slice(), next_structure, i);
-            next_structure = cursor;
-            let (cursor, concat) = take_concat_projection(&mut concats, next_concat, i, Ghost(concat_model));
-            proof {
-                if let Some(row) = &concat {
-                    assert(*row == concat_model[next_concat as int]);
-                    assert(concat_projection_matches(file, entry, limit, source, parsed, &wiring, scope.types@, *row));
-                } else if concat_type_ready(&scope, i as int) {
-                    self.ready_concat_has_row(&scope, typed_model, concat_model, i as int);
-                    assert(false);
-                }
-            }
-            next_concat = cursor;
-            let checked = match self.project_definition(&scope, definitions.as_slice(), i, structure, concat,
-                typed.literals.widths[i], Ghost(typed_model))
-            {
-                Ok(checked) => checked,
-                Err(error) => {
-                    assert(self.projection_failure(&scope, error));
-                    proof { self.projected_error(&scope, typed_model, error); }
-                    return Err(error);
-                },
-            };
-            let ghost previous = definitions@;
-            proof {
-                self.extend_definition_widths(&scope, typed_model, previous, checked, structure);
-                self.extend_definition_prefix(&scope, previous, checked);
-            }
-            definitions.push(checked);
-            assert(concat_cursor_ready(concats@, concat_model, next_concat, i as int + 1));
-            i += 1;
-        }
-        assert(definitions@.len() == wiring.drivers.definitions@.len());
         if let Err(error) = check_output_widths(&wiring, scope.inputs.as_slice(), scope.outputs.as_slice(), definitions.as_slice()) {
             assert(self.definition_prefix(&scope, definitions@));
             assert(self.projection_failure(&scope, error));
@@ -1688,6 +1999,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.checked_bit_func_matches(file, entry, limit, &checked));
         Ok(checked)
     }
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn expands_successive_functions_in_dependency_order() {
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "calls.ncg2",
+        revision: 1,
+        text: "(using nor)
+               (struct Word (width 4))
+               (func pair (in (a (bits 4)) b) (out (a (bits 4)) b (boxed Word))
+                   (def boxed (as Word a)))
+               (func caller (in (a (bits 4)) b) (out y)
+                   (def (word passthrough unused) (pair a b))
+                   (def joined (concat word passthrough))
+                   (def y (bit joined 3)))
+               (func top (in (a (bits 4)) b) (out y)
+                   (def y (caller a b)))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    let templates = aliases.expand_templates_in_order(&plan, 8, 16, 0).unwrap();
+    assert_eq!(templates.next_index(), plan.len());
+    let caller_vertex = plan.template_vertex((0, 3)).unwrap();
+    assert_eq!(templates.circuit_at_vertex(caller_vertex).unwrap().definition_wires().len(), 15);
+    let result = templates.circuit_at_vertex(plan.template_vertex((0, 4)).unwrap()).unwrap();
+    assert!(result.gate_definitions().is_empty());
+    assert_eq!(result.netlist().evaluate(&[false, true, false, true, false]).unwrap(), [true]);
+    assert_eq!(result.netlist().evaluate(&[false, true, false, false, true]).unwrap(), [false]);
 }
 
 } // verus!

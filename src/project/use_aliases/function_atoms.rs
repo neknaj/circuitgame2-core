@@ -86,6 +86,8 @@ pub(super) struct FuncProjections<'p, 'a> {
     pub(super) entries: Vec<StructureProjection>,
     pub(super) layouts: Option<StructureLayouts<'p, 'a>>,
     pub(super) concats: Vec<ConcatProjection>,
+    pub(super) calls: Vec<super::call_arity::RootFunctionCall>,
+    pub(super) call_arguments: super::call_arity::CallArgumentProjections,
 }
 
 pub(super) closed spec fn concat_projection_matches(
@@ -374,6 +376,43 @@ pub(super) closed spec fn structure_projection_matches(
             && is_form_location(source, forms[shape.input.start as int], wiring.signals@[first].site)
             && aliases.structure_expression_type_matches(&context, shape, &layouts, input,
                 Ok((signal, projection.operation, projection.input_width)))
+    }
+}
+
+/// 通常呼び出しの右辺は、構造体式やフィールドを含む選択式として扱われない。
+pub(super) proof fn ordinary_call_excludes_structure_projection(
+    aliases: &UseAliases, file: usize, entry: usize, limit: u64, wiring: &FuncWiring,
+    layouts: StructureLayouts, types: Seq<Option<SignalType>>, row: StructureProjection,
+)
+    requires ({
+        let project = aliases.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let definition = wiring.drivers.definitions@[row.target as int].definition;
+        let expression = parsed.definitions@[definition as int].expression;
+        ordinary_call_at(source.text, parsed.syntax.forms@, expression.start as int, expression.end as int)
+    }),
+    ensures !structure_projection_matches(aliases, file, entry, limit, wiring, layouts, types, row),
+{
+    let project = aliases.targets.project_model();
+    let parsed = &project.circuits_model()[file as int];
+    let source = &project.sources_model()[file as int];
+    let definition = wiring.drivers.definitions@[row.target as int].definition;
+    let expression = parsed.definitions@[definition as int].expression;
+    let forms = parsed.syntax.forms@;
+    ordinary_call_excludes_special_forms(source.text, forms, expression.start as int, expression.end as int);
+    reveal(structure_projection_matches);
+    if structure_projection_matches(aliases, file, entry, limit, wiring, layouts, types, row) {
+        if row.selection.is_some() {
+            let (steps, at, shape) = choose|steps: Seq<BitSelectionShape>, at: usize, shape: StructureExpressionShape|
+                #[trigger] field_selection_shape_matches(source.text, forms, expression.start, steps, at, shape);
+            field_selection_root(source.text, forms, expression.start, steps, at, shape);
+        } else {
+            let shape = choose|shape: StructureExpressionShape|
+                #[trigger] named_structure_expression_matches(source.text, forms, expression.start as int, shape);
+            assert(structure_expression_matches(source.text, forms, expression.start as int, shape));
+        }
+        assert(false);
     }
 }
 
@@ -2020,7 +2059,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             i += 1;
         }
-        Ok((types, FuncProjections { entries: projections, layouts, concats }))
+        Ok((types, FuncProjections {
+            entries: projections, layouts, concats, calls: Vec::new(),
+            call_arguments: super::call_arity::CallArgumentProjections::new(),
+        }))
     }
 
     /// 検査結果が定数の型と信号の束縛に対応することを表す。

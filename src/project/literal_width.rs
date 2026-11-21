@@ -3,7 +3,8 @@
 use crate::syntax::bit_literal_size;
 #[cfg(verus_only)]
 use crate::syntax::{
-    BitLiteralSize, bit_literal_high_bits_are_zero, bit_literal_required_width_fits_spelling,
+    AtomKind, BitLiteralSize, bare_atom_kind, bit_literal_high_bits_are_zero, bit_literal_required_width_fits_spelling,
+    bit_literal_size_has_kind,
     bit_literal_size_matches, bit_literal_top_bit_is_one,
     bit_literal_value_at, bit_literal_written_widths_agree,
 };
@@ -147,6 +148,21 @@ pub(super) proof fn fixed_bit_literal_width(
     };
     vstd::string::is_ascii_spec_bytes(word);
     assert(fixed_bit(bytes));
+}
+
+/// 期待幅を指定した検査に成功した定数は、その幅に収まる既知のリテラルである。
+pub(super) proof fn checked_literal_for_port(bytes: Seq<u8>, expected: u64, limit: u64, width: u64)
+    requires circuit_literal_width_matches(bytes, Some(expected), limit, Ok(width)),
+    ensures
+        0 < width == expected <= limit,
+        width == 1 && bytes.len() == 1 && (bytes[0] == b'0' || bytes[0] == b'1')
+            || bare_atom_kind(bytes) == Some(AtomKind::Binary) || bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal),
+{
+    if !fixed_bit(bytes) {
+        let size = choose|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
+            && width_for(false, size.written_bits, size.required_bits, Some(expected), limit, Ok(width));
+        bit_literal_size_has_kind(bytes, size);
+    }
 }
 
 fn apply_width(

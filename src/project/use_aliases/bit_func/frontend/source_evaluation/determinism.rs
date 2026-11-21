@@ -61,7 +61,47 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    proof fn source_rhs_values_agree(
+    /// 通常の右辺の評価と、関数宣言を呼び出す評価の規則は同じ右辺には適用できない。
+    pub(super) proof fn source_rhs_excludes_function_call(
+        &self, context: &SourceFunc, other: &SourceFunc, layouts: Option<&StructureLayouts>,
+        types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int,
+        definition: usize, call: TypedFuncCall, outputs: core::ops::Range<usize>, target: (usize, usize),
+    )
+        requires
+            self.can_resolve(),
+            same_source_bindings(context, other),
+            *context.source == self.targets.project_model().sources_model()[context.file as int],
+            *context.parsed == self.targets.project_model().circuits_model()[context.file as int],
+            0 <= slot < values.len(),
+            self.source_definition_value(context, layouts, types, inputs, values, slot),
+            self.source_function_call_site((context.file, context.entry, context.limit), other.wiring,
+                definition, call, outputs, target),
+            outputs.start <= slot < outputs.end,
+        ensures false,
+    {
+        reveal(UseAliases::source_definition_value);
+        self.source_function_call_site_evidence((context.file, context.entry, context.limit), other.wiring,
+            slot, definition, call, outputs, target);
+        assert(same_definition_driver(context.wiring.drivers.definitions@[slot], other.wiring.drivers.definitions@[slot]));
+        let row = context.parsed.definitions@[definition as int];
+        let root = row.expression.start as int;
+        let forms = context.parsed.syntax.forms@;
+        ordinary_call_excludes_special_forms(context.source.text, forms, root, row.expression.end as int);
+        let prior = values.take(slot);
+        let kind = self.source_rhs_kind(context, layouts, types, inputs, prior, values[slot]);
+        if kind is Nor {
+            reveal(UseAliases::source_nor_value);
+            reveal(UseAliases::source_nor_operands);
+            let (builtin, left, right) = choose|builtin: TypedFuncCall, left: Seq<bool>, right: Seq<bool>|
+                #[trigger] self.source_nor_operands(context, inputs, prior, builtin, left, right)
+                    && values[slot] == seq![!(left[0] || right[0])];
+            let base = context.parsed.entry_ranges@[context.entry as int].definitions.start;
+            self.resolved_nor_call_agrees(context.file, context.entry, (definition - base) as usize,
+                0, context.limit, builtin, Some(call));
+        }
+    }
+
+    pub(super) proof fn source_rhs_values_agree(
         &self, context: &SourceFunc, other: &SourceFunc, layouts: Option<&StructureLayouts>,
         other_layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
         inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, left: Seq<bool>, right: Seq<bool>,

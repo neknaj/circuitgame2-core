@@ -115,7 +115,10 @@ pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use use_aliases::{SelectionArgument, SelectionArgumentError};
 pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
 pub use use_aliases::LoweredSingleBitFunc;
-pub use use_aliases::{BitFuncError, BitFuncLowerError, CheckedBitFunc, LoweredBitFunc, UnsupportedBitFunc};
+pub use use_aliases::{
+    BitFuncError, BitFuncLowerError, CheckedBitFunc, ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic,
+    LoweredBitFunc, UnsupportedBitFunc,
+};
 #[cfg(verus_only)]
 pub use use_aliases::{
     bit_func_evaluation, bit_func_lowering_preserves_evaluation, bit_func_evaluations_agree,

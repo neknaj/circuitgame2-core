@@ -1,6 +1,11 @@
 //! 型と結線が確定したビット列の組み合わせ回路を表す。
 
+mod compile;
 mod frontend;
+pub use compile::{ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic};
+mod expansion;
+mod templates;
+mod instances;
 mod lowering;
 mod semantics;
 
@@ -41,6 +46,8 @@ pub(super) enum BitFuncRhs {
     Concat,
     /// 元の二進または十六進リテラルを、確定した幅の定数配線にする。
     BitVector,
+    /// 展開する呼び出しの番号と、その宣言上の出力ポート番号。
+    CallOutput { group: usize, port: usize },
 }
 
 /// 元ソース位置と値の幅が確定した定義。
@@ -132,6 +139,7 @@ pub(super) open spec fn bit_definition_matches(
     &&& location_in_source(definition.expression)
     &&& !(definition.rhs is Concat) ==> definition.operands@.len() == 0
     &&& match definition.rhs {
+        BitFuncRhs::CallOutput { .. } => false,
         BitFuncRhs::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(definition.width),
         BitFuncRhs::Constant(_) => definition.width == 1,
         BitFuncRhs::Nor { left, right } => definition.width == 1

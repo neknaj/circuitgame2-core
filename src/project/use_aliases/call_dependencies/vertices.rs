@@ -164,7 +164,9 @@ impl FunctionVertices {
     /// 検索結果が頂点番号順の列に対応することを表す。
     pub(super) open spec fn vertex_at(&self, position: Position, result: Option<usize>) -> bool {
         match result {
-            Some(vertex) => vertex < self.positions_model().len() && self.positions_model()[vertex as int] == position,
+            Some(vertex) => vertex < self.positions_model().len() && self.positions_model()[vertex as int] == position
+                && (forall|i: int| 0 <= i < self.positions_model().len()
+                    && (#[trigger] self.positions_model()[i]) == position ==> i == vertex),
             None => forall|i: int| 0 <= i < self.positions_model().len() ==>
                 (#[trigger] self.positions_model()[i]) != position,
         }

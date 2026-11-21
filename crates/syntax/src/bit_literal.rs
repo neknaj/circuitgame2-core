@@ -178,6 +178,13 @@ pub closed spec fn bit_literal_size_matches(bytes: Seq<u8>, result: Option<BitLi
     }
 }
 
+/// 桁数を取得できる字句が、二進または十六進リテラルであることを示す。
+pub proof fn bit_literal_size_has_kind(bytes: Seq<u8>, size: BitLiteralSize)
+    requires bit_literal_size_matches(bytes, Some(size)),
+    ensures bare_atom_kind(bytes) == Some(AtomKind::Binary) || bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal),
+{
+}
+
 /// 表記の桁数で、そのリテラルの値をすべて表せることを示す。
 pub proof fn bit_literal_required_width_fits_spelling(bytes: Seq<u8>, size: BitLiteralSize)
     requires bit_literal_size_matches(bytes, Some(size)),

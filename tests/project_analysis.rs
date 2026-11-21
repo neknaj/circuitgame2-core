@@ -177,3 +177,71 @@ fn checks_project_prerequisites_before_definition_references() {
     assert_eq!(first.site.reference.word, "::lib");
     assert_eq!(later.site.reference.word, "::other");
 }
+
+#[test]
+fn expands_functions_and_reports_the_call_that_exceeds_the_gate_limit() {
+    use circuitgame2_core::project::{ExpandFunctionsError, FunctionBuildDiagnostic};
+
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "calls.ncg2",
+        revision: 7,
+        text: "(using nor)
+               (func twice (in a) (out y) (def t (inv a)) (def y (inv t)))
+               (func inv (in a) (out y) (def y (nor a a)))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+
+    let functions = aliases.expand_functions(8, 16, 2).unwrap();
+    assert!(core::ptr::eq(functions.project(), &project));
+    assert!(functions.get(0, 0).is_none());
+    assert!(functions.get(0, usize::MAX).is_none());
+    assert!(functions.get(usize::MAX, 1).is_none());
+    assert_eq!(functions.get(0, 1).unwrap().netlist().evaluate(&[true]).unwrap(), [true]);
+
+    let Err(ExpandFunctionsError::Function {
+        position: (0, 1),
+        diagnostic: FunctionBuildDiagnostic::CallGateCapacity(site),
+    }) = aliases.expand_functions(8, 16, 1) else {
+        panic!("expected the second invocation in twice to exceed the gate limit");
+    };
+    assert_eq!(site.source.revision, 7);
+    assert_eq!(&site.source.text[site.span], "(inv t)");
+}
+
+#[test]
+fn expands_a_cross_file_call_with_struct_ports_and_multiple_outputs() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot {
+            path: "main.ncg2",
+            revision: 1,
+            text: "(using nor)
+                   (func run (in (a (bits 8))) (out (copy (bits 8)) (picked (bits 2)))
+                     (def word (as ::lib::Word a))
+                     (def (keep picked) (::lib::split word))
+                     (def copy (raw keep)))",
+        },
+        SourceSnapshot {
+            path: "lib.ncg2",
+            revision: 2,
+            text: "(namespace lib
+                     (export Word split)
+                     (struct Word (width 8) (payload (bits 4) (at 2)))
+                     (func split (in (w Word)) (out (w Word) (picked (bits 2)))
+                       (def picked (slice (field w payload) 0 2 2))))",
+        },
+    ])
+    .unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let functions = aliases.expand_functions(8, 32, 0).unwrap();
+    let circuit = functions.get(0, 1).unwrap();
+    for bit in 0..8 {
+        let input: [bool; 8] = core::array::from_fn(|index| index == bit);
+        let output = circuit.netlist().evaluate(&input).unwrap();
+
+        assert_eq!(output.len(), 10);
+        assert_eq!(output[..8], input);
+        assert_eq!(output[8..], [input[2], input[4]]);
+    }
+}

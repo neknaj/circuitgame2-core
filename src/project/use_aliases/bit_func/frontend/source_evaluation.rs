@@ -2,6 +2,7 @@
 
 mod determinism;
 mod field_selection;
+mod project;
 
 use super::*;
 use super::super::semantics::{
@@ -23,7 +24,12 @@ use crate::syntax::circuit::{
     structure_expression_matches, structure_expression_positions, structure_expression_shapes_agree,
 };
 use super::super::{LoweredBitFunc, bit_func_lowering_preserves_evaluation, lowered_bit_func_result, port_values};
-use crate::netlist::{NorEvaluationError, nor_evaluation_result};
+use super::super::lowering::{
+    expanded_definition_values, projected_lowering_local_values, projected_lowering_view,
+};
+use super::super::expansion::CheckedExpansionCall;
+use super::super::templates::ResolvedTemplateCall;
+use crate::netlist::{NorEvaluationError, gate_values_match, nor_evaluation_result};
 use crate::syntax::{bit_literal_value_at, form_span};
 
 verus! {
@@ -279,6 +285,151 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 || self.source_field_selection_value(context, table, types, inputs, prior, value)))
     }
 
+    /// 型検査済みの通常の定義について、評価値が元の右辺の意味を満たすことを示す。
+    proof fn checked_slot_preserves_source_value(
+        &self, scope: &FuncProjection, definitions: Seq<CheckedBitDefinition>,
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, i: int,
+    )
+        requires
+            self.projection_context(scope),
+            self.projection_structures_match(scope),
+            0 <= i < definitions.len() == values.len() <= scope.wiring.drivers.definitions@.len(),
+            self.bit_definition_from_source(scope, definitions.take(i), i, definitions[i]),
+            self.definition_widths_match(scope, definitions),
+            inputs.len() == scope.inputs@.len(),
+            forall|j: int| 0 <= j < inputs.len() ==> (#[trigger] inputs[j]).len() == scope.inputs@[j],
+            forall|j: int| 0 <= j <= i ==> (#[trigger] values[j]).len() == definitions[j].width,
+            values[i] == checked_definition_values(definitions[i], inputs, values.take(i)),
+        ensures self.source_definition_value(
+            &SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
+                source: scope.source, parsed: scope.parsed, wiring: scope.wiring },
+            scope.layouts, scope.types@, inputs, values, i,
+        ),
+    {
+        reveal(UseAliases::source_definition_value);
+        reveal(UseAliases::definition_widths_match);
+        let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
+            source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
+        let definition = definitions[i];
+        let prior = definitions.take(i);
+        let prior_values = values.take(i);
+        assert forall|j: int| 0 <= j < prior_values.len() implies
+            (#[trigger] prior_values[j]).len() == prior[j].width by {
+            assert(prior_values[j] == values[j]);
+            assert(prior[j] == definitions[j]);
+        };
+        if definition.rhs is BitVector {
+            let row = scope.parsed.definitions@[scope.wiring.drivers.definitions@[i].definition as int];
+            let root = scope.parsed.syntax.forms@[row.expression.start as int];
+            assert(self.bit_rhs_from_source(scope, prior, i, definition.rhs, definition.operands@));
+            assert(definition.expression.span == form_span(root));
+            assert(source_bit_vector_value(&context, scope.types@, i, values[i]));
+        } else if exists|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i {
+            let at = choose|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i;
+            if scope.structures@[at].selection.is_some() {
+                self.field_projection_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
+            } else {
+                self.structure_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
+            }
+        } else {
+            self.ordinary_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition);
+        }
+    }
+
+    /// 展開準備で確認した通常の定義を、元の構文に従う参照評価に対応付ける。
+    proof fn prepared_slot_preserves_source_value(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>,
+        selected: Seq<ResolvedTemplateCall>,
+        definitions: Vec<CheckedBitDefinition>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, i: int,
+    )
+        requires
+            self.projection_context(scope),
+            self.projection_structures_match(scope),
+            self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+            0 <= i < definitions@.len() == values.len(),
+            !super::body::call_covers(calls, i),
+            inputs.len() == scope.inputs@.len(),
+            forall|j: int| 0 <= j < inputs.len() ==> (#[trigger] inputs[j]).len() == scope.inputs@[j],
+            forall|j: int| 0 <= j <= i ==> (#[trigger] values[j]).len() == definitions@[j].width,
+            values[i] == checked_definition_values(definitions@[i], inputs, values.take(i)),
+        ensures self.source_definition_value(
+            &SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
+                source: scope.source, parsed: scope.parsed, wiring: scope.wiring },
+            scope.layouts, scope.types@, inputs, values, i,
+        ),
+    {
+        self.prepared_ordinary_definition_evidence(scope, calls, selected, definitions, i);
+        self.checked_slot_preserves_source_value(scope, definitions@, inputs, values, i);
+    }
+
+
+    spec fn source_value_has_type(
+        &self, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>, values: Seq<Seq<bool>>, i: int,
+    ) -> bool {
+        &&& 0 <= i < types.len() && i < values.len()
+        &&& values[i].len() <= u64::MAX
+        &&& types[i] matches Some(ty)
+        &&& self.port_width_matches(ty.ty, values[i].len() as u64, layouts)
+    }
+
+    /// 展開した関数の通常の定義が、元の構文に従う値を持つことを示す。
+    proof fn projected_ordinary_definitions_preserve_source_values(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        definitions: Vec<CheckedBitDefinition>, layout_limit: usize, gate_limit: usize,
+        function: &LoweredBitFunc, inputs: Seq<bool>, gates: Seq<bool>,
+    )
+        requires
+            self.projection_context(scope),
+            self.projection_structures_match(scope),
+            self.projection_port_widths_match(scope),
+            self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+            projected_lowering_view(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
+                scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(*function)),
+            calls.len() == selected.len(),
+            forall|g: int| 0 <= g < selected.len() ==> *(#[trigger] selected[g]).group == calls[g],
+            forall|a: int, b: int| 0 <= a < b < calls.len()
+                ==> (#[trigger] calls[a]).outputs.end <= (#[trigger] calls[b]).outputs.start,
+            inputs.len() == function.input_layout_model().total_bits_model(),
+            gate_values_match(inputs, function.netlist_model().gates@, gates),
+            gates.len() == function.netlist_model().gates@.len(),
+        ensures ({
+            let incoming = port_values(function.input_layout_model(), inputs);
+            let values = expanded_definition_values(function, inputs, gates);
+            let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
+                source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
+            &&& self.source_inputs_match(scope.wiring, scope.layouts, incoming)
+            &&& values.len() == definitions@.len()
+            &&& forall|i: int| #![trigger values[i]] 0 <= i < values.len()
+                ==> self.source_value_has_type(scope.layouts, scope.types@, values, i)
+            &&& forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) ==>
+                #[trigger] self.source_definition_value(&context, scope.layouts, scope.types@, incoming, values, i)
+        }),
+    {
+        assert forall|i: int| 0 <= i < definitions@.len() && !super::body::call_covers(calls, i) implies
+            bit_definition_matches(scope.inputs@, definitions@.take(i), #[trigger] definitions@[i]) by {
+            self.prepared_ordinary_definition_evidence(scope, calls, selected, definitions, i);
+        };
+        projected_lowering_local_values(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
+            scope.parsed.syntax.forms@, selected, calls, layout_limit, gate_limit, function, inputs, gates);
+        let incoming = port_values(function.input_layout_model(), inputs);
+        let values = expanded_definition_values(function, inputs, gates);
+        assert(self.source_inputs_match(scope.wiring, scope.layouts, incoming));
+        self.prepared_definition_width_evidence(scope, calls, selected, definitions);
+        assert(values.len() <= scope.types@.len()) by { reveal(UseAliases::definition_widths_match); };
+        assert forall|i: int| #![trigger values[i]] 0 <= i < values.len() implies
+            self.source_value_has_type(scope.layouts, scope.types@, values, i) by {
+            reveal(UseAliases::definition_widths_match);
+            assert(values[i].len() == definitions@[i].width);
+        };
+        let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
+            source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
+        assert forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) implies
+            #[trigger] self.source_definition_value(&context, scope.layouts, scope.types@, incoming, values, i) by {
+            assert(values[i] == checked_definition_values(definitions@[i], incoming, values.take(i)));
+            self.prepared_slot_preserves_source_value(scope, calls, selected, definitions, incoming, values, i);
+        };
+    }
+
     proof fn checked_definitions_preserve_source_values(
         &self, scope: &FuncProjection, checked: &CheckedBitFunc,
         inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>,
@@ -306,33 +457,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
         assert forall|i: int| 0 <= i < values.len() implies
             #[trigger] self.source_definition_value(&context, scope.layouts, scope.types@, inputs, values, i) by {
-            reveal(UseAliases::source_definition_value);
-            let definition = checked.definitions@[i];
-            let prior = checked.definitions@.take(i);
-            let prior_values = values.take(i);
-            assert(self.bit_definition_from_source(scope, prior, i, definition));
-            assert(values[i] == checked_definition_values(definition, inputs, prior_values));
-            assert forall|j: int| 0 <= j < prior_values.len() implies
-                (#[trigger] prior_values[j]).len() == prior[j].width by {
-                assert(prior_values[j] == values[j]);
-                assert(prior[j] == checked.definitions@[j]);
-            };
-            if definition.rhs is BitVector {
-                let row = scope.parsed.definitions@[scope.wiring.drivers.definitions@[i].definition as int];
-                let root = scope.parsed.syntax.forms@[row.expression.start as int];
-                assert(self.bit_rhs_from_source(scope, prior, i, definition.rhs, definition.operands@));
-                assert(definition.expression.span == form_span(root));
-                assert(source_bit_vector_value(&context, scope.types@, i, values[i]));
-            } else if exists|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i {
-                let at = choose|at: int| 0 <= at < scope.structures@.len() && (#[trigger] scope.structures@[at]).target == i;
-                if scope.structures@[at].selection.is_some() {
-                    self.field_projection_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
-                } else {
-                    self.structure_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition, at);
-                }
-            } else {
-                self.ordinary_lowering_preserves_rhs_value(scope, prior, inputs, prior_values, definition);
-            }
+            assert(self.bit_definition_from_source(scope, checked.definitions@.take(i), i, checked.definitions@[i]));
+            self.checked_slot_preserves_source_value(scope, checked.definitions@, inputs, values, i);
         };
         assert(values.len() == scope.wiring.drivers.definitions@.len());
         assert(values.len() == scope.types@.len());
@@ -610,7 +736,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.bit_rhs_from_source(scope, definitions, index, checked.rhs, checked.operands@));
         assert(!(exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == index));
         match checked.rhs {
-            BitFuncRhs::BitVector => { assert(false); },
+            BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => { assert(false); },
             BitFuncRhs::Concat => {
                 let projection = choose|concat: ConcatProjection|
                     #[trigger] concat_projection_matches(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
@@ -715,7 +841,7 @@ spec fn source_bit_vector_value(
     &&& value == Seq::new(width as nat, |bit: int| bit_literal_value_at(bytes, bit as nat))
 }
 
-spec fn source_outputs_match(
+pub(super) closed spec fn source_outputs_match(
     wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
 ) -> bool {
     &&& outputs.len() == wiring.drivers.signature.outputs@.len()
@@ -735,6 +861,27 @@ spec fn source_output_at(
     &&& outputs[i] == driver_values(inputs, values, driver)
 }
 
+/// 宣言順に並べた出力値を、ソース上の出力の参照評価に対応付ける。
+pub(super) proof fn source_outputs_from_driver_values(
+    wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
+)
+    requires
+        outputs.len() == wiring.drivers.outputs@.len() == wiring.drivers.signature.outputs@.len(),
+        forall|i: int| 0 <= i < outputs.len() ==> {
+            let driver = #[trigger] wiring.drivers.outputs@[i];
+            match driver {
+                OutputDriver::Input(port) => port < inputs.len(),
+                OutputDriver::Definition(index) => index < values.len(),
+            }
+        },
+        forall|i: int| 0 <= i < outputs.len() ==>
+            (#[trigger] outputs[i]) == driver_values(inputs, values, wiring.drivers.outputs@[i]),
+    ensures source_outputs_match(wiring, inputs, values, outputs),
+{
+    assert forall|i: int| 0 <= i < outputs.len() implies
+        #[trigger] source_output_at(wiring, inputs, values, outputs, i) by {};
+}
+
 proof fn source_outputs_follow_wiring(
     checked: &CheckedBitFunc, wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
 )
@@ -749,13 +896,17 @@ proof fn source_outputs_follow_wiring(
 {
     reveal(checked_bit_func_available);
     reveal(bit_func_definitions_match);
-    assert forall|i: int| 0 <= i < outputs.len() implies
-        #[trigger] source_output_at(wiring, inputs, values, outputs, i) by {
-        let driver = wiring.drivers.outputs@[i];
-        assert(checked.output_drivers@[i] == driver);
+    assert forall|i: int| 0 <= i < outputs.len() implies {
+        let driver = #[trigger] wiring.drivers.outputs@[i];
+        match driver {
+            OutputDriver::Input(port) => port < inputs.len(),
+            OutputDriver::Definition(index) => index < values.len(),
+        }
+    } by {
+        let driver = checked.output_drivers@[i];
         assert(bit_driver_width(checked.input_widths@, checked.definitions@, driver) == Some(checked.output_widths@[i]));
-        assert(outputs[i] == driver_values(inputs, values, driver));
     };
+    source_outputs_from_driver_values(wiring, inputs, values, outputs);
 }
 
 proof fn atomic_value_intro(

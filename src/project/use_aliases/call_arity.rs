@@ -6,7 +6,10 @@ mod outputs;
 mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
+pub(super) use inputs::CallArgumentProjections;
+pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument};
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
+pub(super) use outputs::RootFunctionCall;
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
 
 use super::{DefinitionBinding, DefinitionReferenceError, ResolvedDefinitionReference, UseAliases};
@@ -192,6 +195,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(None) => false,
             }
         }
+    }
+
+    proof fn resolved_arity_excludes_no_call(
+        &self, at: (usize, usize, usize, usize), call: FuncCallArity,
+    )
+        requires self.func_call_arity_evidence(at.0, at.1, at.2, at.3, Ok(Some(call))),
+        ensures !self.func_call_arity_evidence(at.0, at.1, at.2, at.3, Ok(None)),
+    {
     }
 
     /// 解決済みの関数呼び出しから、展開順の定理に使う参照位置を得る。

@@ -473,6 +473,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(l[i].ty == r[i].ty && l[i].range == r[i].range);
     }
 
+    /// 同じプロジェクトと幅上限で検査した二つの配置表では、型の表現幅を引き継げる。
+    pub(in crate::project::use_aliases) proof fn representation_width_transfers(
+        &self, limit: u64, from: &StructureLayouts, to: &StructureLayouts, ty: StructureFieldType, width: int,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(limit, Ok(*from)),
+            self.structure_types_match(limit, Ok(*to)),
+            from.representation_width_matches(ty, width),
+        ensures to.representation_width_matches(ty, width),
+    {
+        self.checked_layout_entries_are_valid(limit, *to);
+        if let StructureFieldType::Struct(position) = ty {
+            let a = choose|i: int| 0 <= i < from.entries_model().len()
+                && (#[trigger] from.entries_model()[i]).position == position && from.entries_model()[i].width == width;
+            self.checked_layout_positions_are_declared(limit, *from);
+            assert(self.is_structure_position(position));
+            self.checked_layout_contains(limit, *to, position);
+            let b = choose|i: int| 0 <= i < to.entries_model().len()
+                && (#[trigger] to.entries_model()[i]).position == position;
+            self.structure_type_layouts_agree_at(limit, *from, *to, a, b);
+            assert(to.entries_model()[b].width == width);
+        }
+    }
+
     pub(in crate::project::use_aliases) proof fn representation_widths_agree_across_layouts(
         &self, limit: u64, left: &StructureLayouts, right: &StructureLayouts, ty: StructureFieldType, a: int, b: int,
     )
