@@ -1353,17 +1353,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let forms = parsed.syntax.forms.as_slice();
         proof {
-            assert forall|g: int| 0 <= g < selected@.len() implies {
-                let call = #[trigger] selected@[g];
-                &&& self.resolved_template_call_matches(plan, caller, &original, g, call)
-                &&& resolved_call_fits_body(call, ports.inputs@, definitions@, forms@, limit)
-            } by {
+            assert forall|g: int| 0 <= g < selected@.len() implies
+                resolved_call_fits_body(#[trigger] selected@[g], ports.inputs@, definitions@, forms@, limit) by {
                 assert(*selected@[g].group.expression.source == *source);
             };
         }
         let lowered = lower_projected_expansion(self, ports.inputs.as_slice(), definitions.as_slice(),
             ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected.as_slice(),
-            layout_limit, gate_limit, Ghost((plan, caller, &original)));
+            layout_limit, gate_limit, Ghost((plan, caller, &original)), Ghost(templates));
         let has_structure_ports = contains_structure_port(wiring.drivers.signature.inputs.as_slice())
             || contains_structure_port(wiring.drivers.signature.outputs.as_slice());
         let result = match lowered {

@@ -12,7 +12,7 @@ pub(super) use mixed::resolved_call_fits_body;
 pub(super) use call_group::CallGroupError;
 pub(super) use mixed::MixedWiringError;
 use mixed::lower_resolved_function;
-use super::templates::ResolvedTemplateCall;
+use super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use super::expansion::PreparedExpansionBody;
 use super::super::{FunctionExpansionOrder, UseAliases};
 use crate::syntax::Form;
@@ -409,18 +409,16 @@ pub(super) fn lower_projected_expansion<'s, 'p, 'a>(
     outputs: &[u64], drivers: &[OutputDriver], forms: &[Form], selected: &[ResolvedTemplateCall<'s, 'p, 'a>],
     layout_limit: usize, gate_limit: usize,
     Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>)>,
+    Ghost(templates): Ghost<&FunctionTemplates<'p, 'a>>,
 ) -> (result: Result<LoweredBitFunc, ProjectedLoweringError<'p, 'a>>)
     requires
         aliases.prepared_expansion_body_matches(*context.0, context.1.0, context.1.1, context.1.2, context.2),
         outputs@.len() == drivers@.len(),
         forall|p: int| 0 <= p < outputs@.len() ==>
             bit_driver_width(inputs@, definitions@, #[trigger] drivers@[p]) == Some(outputs@[p]),
-        selected@.len() == context.2.calls@.len(),
-        forall|g: int| 0 <= g < selected@.len() ==> {
-            let call = #[trigger] selected@[g];
-            &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, g, call)
-            &&& resolved_call_fits_body(call, inputs@, definitions@, forms@, context.1.2)
-        },
+        aliases.expansion_selection_matches(context.0, templates, context.1, context.2, selected@),
+        forall|g: int| 0 <= g < selected@.len() ==>
+            resolved_call_fits_body(#[trigger] selected@[g], inputs@, definitions@, forms@, context.1.2),
         forall|slot: int| 0 <= slot < definitions@.len() && !call_covers(context.2.calls@, slot) ==>
             bit_definition_matches(inputs@, definitions@.take(slot), #[trigger] definitions@[slot]),
     ensures projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@, layout_limit, gate_limit, result),
@@ -432,7 +430,7 @@ pub(super) fn lower_projected_expansion<'s, 'p, 'a>(
     };
     let body = LoweringBody { input_widths: inputs, definitions };
     let lowered = lower_resolved_function(aliases, &body, layouts, forms, selected, outputs, drivers,
-        layout_limit, gate_limit, Ghost(context));
+        layout_limit, gate_limit, Ghost(context), Ghost(templates));
     let result = match lowered {
         Ok((value, _)) => Ok(value),
         Err(error) => Err(ProjectedLoweringError::Wiring(error)),

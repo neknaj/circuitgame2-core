@@ -11,7 +11,7 @@ use super::evaluation::{definition_values_from_wires, slot_values_match_wiring};
 #[cfg(verus_only)]
 use super::super::semantics::checked_definition_values;
 use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
-use super::super::templates::ResolvedTemplateCall;
+use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
 use super::super::frontend::{argument_matches_width, call_covers, expression_argument_matches_width, root_argument_matches_width};
@@ -38,6 +38,8 @@ pub(super) struct CallBinding<'s, 'p, 'a> {
     pub(super) group: &'s CheckedExpansionCall<'p, 'a>,
     pub(super) arguments: &'s [ProjectedCallArgument],
     pub(super) callee: &'s LoweredBitFunc,
+    /// 配線履歴を元の選択に戻すため、子を含む呼び出し全体を証明で保持する。
+    pub(super) _selection: Ghost<ResolvedTemplateCall<'s, 'p, 'a>>,
     pub(super) _input_widths: Ghost<Seq<u64>>,
     pub(super) _output_widths: Ghost<Seq<u64>>,
     pub(super) _layout_limit: Ghost<usize>,
@@ -146,6 +148,7 @@ pub(in crate::project::use_aliases::bit_func) open spec fn resolved_call_fits_bo
 }
 
 pub(super) open spec fn binding_matches_selection(binding: CallBinding, call: ResolvedTemplateCall) -> bool {
+    &&& binding._selection@ == call
     &&& binding.group == call.group
     &&& binding.arguments == call.arguments
     &&& binding.callee == call.template.circuit_model()
@@ -173,6 +176,7 @@ pub(super) fn bind_resolved_call<'s, 'p, 'a>(
         group: selected.group,
         arguments: selected.arguments,
         callee: template.circuit(),
+        _selection: Ghost(*selected),
         _input_widths: Ghost(template.input_widths_model()),
         _output_widths: Ghost(template.output_widths_model()),
         _layout_limit: Ghost(template.bit_limit_model()),
@@ -872,6 +876,7 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
     selected: &[ResolvedTemplateCall<'s, 'p, 'a>], output_widths: &[u64], output_drivers: &[OutputDriver],
     layout_limit: usize, gate_limit: usize,
     Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>)>,
+    Ghost(templates): Ghost<&FunctionTemplates<'p, 'a>>,
 ) -> (result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError<'p, 'a>>)
     requires
         aliases.prepared_expansion_body_matches(*context.0, context.1.0, context.1.1, context.1.2, context.2),
@@ -880,12 +885,9 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
         output_widths@.len() == output_drivers@.len(),
         forall|p: int| 0 <= p < output_widths@.len() ==>
             bit_driver_width(body.input_widths@, body.definitions@, #[trigger] output_drivers@[p]) == Some(output_widths@[p]),
-        selected@.len() == context.2.calls@.len(),
-        forall|g: int| 0 <= g < selected@.len() ==> {
-            let call = #[trigger] selected@[g];
-            &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, g, call)
-            &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, forms@, context.1.2)
-        },
+        aliases.expansion_selection_matches(context.0, templates, context.1, context.2, selected@),
+        forall|g: int| 0 <= g < selected@.len() ==>
+            resolved_call_fits_body(#[trigger] selected@[g], body.input_widths@, body.definitions@, forms@, context.1.2),
         forall|slot: int| 0 <= slot < body.definitions@.len() && !call_covers(context.2.calls@, slot) ==>
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
     ensures exists|bindings: Seq<CallBinding>|
@@ -976,7 +978,7 @@ fn mixed_body_passes_outputs_through_successive_calls() {
     let limited = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 16).unwrap();
     let Err(MixedWiringError::LocalGateCapacity(site)) = lower_resolved_function(
         &aliases, &body, limited, forms, selected.as_slice(), output_widths, output_drivers, 16, 2,
-        Ghost((&plan, (0usize, 1usize, 8u64), &prepared)),
+        Ghost((&plan, (0usize, 1usize, 8u64), &prepared)), Ghost(&templates),
     ) else {
         panic!("expected the caller NOR to exceed the gate limit");
     };
@@ -985,7 +987,7 @@ fn mixed_body_passes_outputs_through_successive_calls() {
     let layout = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 16).unwrap();
     let (lowered, _) = lower_resolved_function(
         &aliases, &body, layout, forms, selected.as_slice(), output_widths, output_drivers, 16, 3,
-        Ghost((&plan, (0usize, 1usize, 8u64), &prepared)),
+        Ghost((&plan, (0usize, 1usize, 8u64), &prepared)), Ghost(&templates),
     ).unwrap();
     assert_eq!(lowered.gate_definitions(), [0, 2, 4]);
     assert_eq!(lowered.netlist().evaluate(&[true, false, true, false, true]).unwrap(), [false]);
