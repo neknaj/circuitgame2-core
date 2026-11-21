@@ -1,5 +1,8 @@
 //! 通常の定義と関数呼び出しを、同じ配線列へ定義順に変換する。
 
+#[cfg(verus_only)]
+mod source_arguments;
+
 use super::*;
 use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 use super::super::templates::ResolvedTemplateCall;

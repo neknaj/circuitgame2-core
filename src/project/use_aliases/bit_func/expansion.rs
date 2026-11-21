@@ -58,6 +58,7 @@ pub(super) open spec fn source_argument_bytes(source: &crate::project::ProjectSo
 }
 
 /// 引数フォームの値を、呼び出し直前の信号値または元の字句から定める。
+#[verifier::opaque]
 pub(super) open spec fn source_call_argument_value(
     source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
     wiring: &FuncWiring, entry: usize, definition: usize, form: usize, limit: u64,
@@ -313,6 +314,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 inputs, prior, width, value)
         }),
     {
+        reveal(source_call_argument_value);
         self.expansion_argument_evidence(plan, caller, typed, wiring, root, range, arguments, group, port);
         self.checked_wiring_is_func(caller.0, caller.1, caller.2, *wiring);
         reveal(UseAliases::checked_expansion_call_matches);
