@@ -15,7 +15,7 @@ use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
 use super::super::frontend::{argument_matches_width, call_covers, expression_argument_matches_width, root_argument_matches_width};
-use super::super::super::call_arity::ProjectedCallArgument;
+use super::super::super::call_arity::{CallArgumentSource, ProjectedCallArgument};
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group, lower_nested_call_group};
 use super::call_arguments::child_calls::NestedCallWiringError;
 use crate::syntax::Form;
@@ -688,6 +688,68 @@ pub(super) closed spec fn mixed_error_at(
     }
 }
 
+spec fn arguments_are_determined(arguments: Seq<ProjectedCallArgument>) -> bool {
+    forall|port: int| 0 <= port < arguments.len() ==> !((#[trigger] arguments[port]).source is Deferred)
+}
+
+/// 引数に未確定の式が残っていれば、その時点で走査を終える。
+fn arguments_are_determined_exec(arguments: &[ProjectedCallArgument]) -> (determined: bool)
+    ensures determined == arguments_are_determined(arguments@),
+{
+    let mut port = 0;
+    while port < arguments.len()
+        invariant
+            port <= arguments@.len(),
+            forall|i: int| 0 <= i < port ==> !((#[trigger] arguments@[i]).source is Deferred),
+        decreases arguments@.len() - port,
+    {
+        if matches!(arguments[port].source, CallArgumentSource::Deferred) {
+            return false;
+        }
+        port += 1;
+    }
+    true
+}
+
+#[verifier::opaque]
+spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
+    &&& call.children@.len() > 0
+    &&& arguments_are_determined(call.arguments@)
+    &&& forall|i: int| 0 <= i < call.children@.len() ==>
+        arguments_are_determined((#[trigger] call.children@[i]).arguments@)
+}
+
+/// 根または子に未確定の引数が残る呼び出しは、従来の引数診断へ渡す。
+fn can_lower_nested_arguments(call: &ResolvedTemplateCall) -> (ready: bool)
+    ensures ready == nested_arguments_ready(call),
+{
+    reveal(nested_arguments_ready);
+    if call.children.len() == 0 || !arguments_are_determined_exec(call.arguments) {
+        return false;
+    }
+    let mut child = 0;
+    while child < call.children.len()
+        invariant
+            call.children@.len() > 0,
+            arguments_are_determined(call.arguments@),
+            child <= call.children@.len(),
+            forall|i: int| 0 <= i < child ==> arguments_are_determined((#[trigger] call.children@[i]).arguments@),
+        decreases call.children@.len() - child,
+    {
+        let selected = &call.children[child];
+        if !arguments_are_determined_exec(selected.arguments) {
+            assert(!nested_arguments_ready(call)) by {
+                reveal(nested_arguments_ready);
+                assert(*selected == call.children@[child as int]);
+                assert(!arguments_are_determined(call.children@[child as int].arguments@));
+            };
+            return false;
+        }
+        child += 1;
+    }
+    true
+}
+
 spec fn mixed_body_error_at(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
     before: WiringView, slot: usize, group: usize, nested: Option<NestedWiring>, error: MixedBodyError,
@@ -696,7 +758,7 @@ spec fn mixed_body_error_at(
         MixedBodyError::Flat(error) => {
             &&& mixed_error_at(body, layouts, forms, bindings, limit, before, slot, group, error)
             &&& (error is Call ==> (nested matches Some(mode) ==>
-                group < mode.selected@.len() && mode.selected@[group as int].children@.len() == 0))
+                group < mode.selected@.len() && !nested_arguments_ready(&mode.selected@[group as int])))
         },
         MixedBodyError::Nested(error) => {
             &&& nested matches Some(mode)
@@ -705,7 +767,7 @@ spec fn mixed_body_error_at(
             &&& group < bindings.len() && group < mode.selected@.len()
             &&& bindings[group as int].group.outputs.start == slot
             &&& bindings[group as int]._selection@ == mode.selected@[group as int]
-            &&& mode.selected@[group as int].children@.len() > 0
+            &&& nested_arguments_ready(&mode.selected@[group as int])
             &&& nested_call_group_result(&mode.selected@[group as int], forms, layouts, mode.builtin,
                 before, before, limit, mode.child_limit, definition_widths(body.definitions@), Err(error))
         },
@@ -718,10 +780,10 @@ spec fn wiring_step_uses_mode(step: WiringStep, mode: Option<NestedWiring>) -> b
     } else if let Some(mode) = mode {
         let group = step.group_before as int;
         &&& group < mode.selected@.len()
-        &&& if mode.selected@[group].children@.len() == 0 {
-            step.nested.is_none()
-        } else {
+        &&& if nested_arguments_ready(&mode.selected@[group]) {
             step.nested matches Some(nested) && nested.builtin == *mode.builtin && nested.child_limit == mode.child_limit
+        } else {
+            step.nested.is_none()
         }
     } else {
         step.nested.is_none()
@@ -813,7 +875,7 @@ fn lower_mixed_call<'s, 'p, 'a>(
     let nested_call = match &nested {
         Some(mode) => {
             let selected = &mode.selected[group];
-            if selected.children.len() == 0 { None } else { Some((mode, selected)) }
+            if can_lower_nested_arguments(selected) { Some((mode, selected)) } else { None }
         },
         None => None,
     };
@@ -1261,17 +1323,38 @@ fn mixed_body_passes_outputs_through_successive_calls() {
 #[cfg(all(test, not(verus_only)))]
 #[test]
 fn mixed_body_lowers_a_child_then_uses_the_root_output() {
+    check_mixed_body_nested_fixture(
+        "(using nor) (func id (in a) (out a))
+               (func caller (in a) (out y)
+                   (def earlier (id 0))
+                   (def nested (id (nor earlier a)))
+                   (def y (nor nested nested)))",
+        None,
+    );
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn mixed_body_reports_the_original_argument_before_child_capacity() {
+    check_mixed_body_nested_fixture(
+        "(using nor) (func id (in a) (out a))
+               (func caller (in a) (out y)
+                   (def earlier (id 0))
+                   (def nested (id (nor (nor earlier a) (bit earlier 0))))
+                   (def y (nor nested nested)))",
+        Some("(nor (nor earlier a) (bit earlier 0))"),
+    );
+}
+
+#[cfg(all(test, not(verus_only)))]
+fn check_mixed_body_nested_fixture(text: &str, deferred: Option<&str>) {
     use super::call_arguments::{ChildCallWiringError, builtin_nor_call};
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
 
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "nested-mixed.ncg2",
         revision: 1,
-        text: "(using nor) (func id (in a) (out a))
-               (func caller (in a) (out y)
-                   (def earlier (id 0))
-                   (def nested (id (nor earlier a)))
-                   (def y (nor nested nested)))",
+        text,
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
@@ -1308,6 +1391,13 @@ fn mixed_body_lowers_a_child_then_uses_the_root_output() {
         Some(NestedWiring { selected: &selected, builtin: &builtin, child_limit: 1 }),
         Ghost(Some((&aliases, &plan, &templates, (caller.0, caller.1, 1u64), &prepared))));
 
+    if let Some(expected) = deferred {
+        assert!(selected[1].children.len() > 1);
+        let Err(MixedBodyError::Flat(MixedWiringError::Call(CallGroupError::DeferredArgument(site)))) = lower(0)
+            else { panic!("expected the original argument diagnostic"); };
+        assert_eq!(&site.source.text[site.span], expected);
+        return;
+    }
     let Err(MixedBodyError::Nested(NestedCallWiringError::Child(0, ChildCallWiringError::GateCapacity(site)))) = lower(0)
         else { panic!("expected the child call to reach the gate limit"); };
     assert_eq!(&site.source.text[site.span], "(nor earlier a)");
