@@ -164,6 +164,12 @@ pub proof fn call_argument_positions_from_steps(forms: Seq<Form>, call: CallShap
     };
 }
 
+/// 引数の先頭は、その呼び出しリストの内部にある。
+pub proof fn call_argument_position_bounds(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, port: int)
+    requires call_argument_positions(forms, call, positions), 0 <= port < positions.len(),
+    ensures call.form + 2 <= positions[port] < forms[call.form as int]->List_end <= forms.len(),
+{}
+
 /// 二つの列が同じ呼び出しの引数を列挙するなら、対応する引数の位置は等しい。
 pub proof fn call_argument_positions_agree(forms: Seq<Form>, call: CallShape, a: Seq<usize>, b: Seq<usize>)
     requires call_argument_positions(forms, call, a), call_argument_positions(forms, call, b),

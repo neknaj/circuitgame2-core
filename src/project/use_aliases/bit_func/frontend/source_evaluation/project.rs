@@ -1,6 +1,7 @@
 //! プロジェクト内の呼び出しを含む関数の参照評価と意味保存。
 
 mod determinism;
+mod expressions;
 
 use super::*;
 use crate::project::FunctionExpansionOrder;

@@ -157,7 +157,7 @@ pub(super) open spec fn source_call_argument_value(
 }
 
 /// 同じ引数フォームを同じ幅で評価すると、信号名でもリテラルでも同じ値になる。
-proof fn source_call_argument_values_agree(
+pub(super) proof fn source_call_argument_values_agree(
     source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
     left_wiring: &FuncWiring, right_wiring: &FuncWiring, entry: usize, definition: usize, form: usize, limit: u64,
     inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, width: u64, left: Seq<bool>, right: Seq<bool>,
