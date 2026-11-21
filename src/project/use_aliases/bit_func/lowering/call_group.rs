@@ -645,13 +645,13 @@ pub(super) closed spec fn nor_call_group_result(
     let slot = selected.prepared.output_slot as int;
     let bit = before.definitions.len() as int;
     let input_bits = caller.inputs.total_bits_model();
-    let root = match result { Ok(()) => Ok(after.definitions[bit]), Err(error) => Err(error) };
+    let root = match result { Ok(_) => Ok(after.definitions[bit]), Err(error) => Err(error) };
     &&& exists|invocation: CallerArguments|
         #[trigger] nor_group_invocation_matches(selected, forms, caller, before, invocation)
         && nor_root_wiring_result(selected, references, &invocation, builtin, before.gates, after.gates,
             gate_limit, child_limit, input_bits, root)
     &&& match result {
-        Ok(()) => {
+        Ok(_) => {
             &&& wiring_view_is_prefix(before, after)
             &&& after.origins.len() == after.gates.len() <= gate_limit
             &&& forall|i: int| before.origins.len() <= i < after.origins.len() ==>
@@ -669,6 +669,31 @@ pub(super) closed spec fn nor_call_group_result(
             &&& error matches NestedCallWiringError::Child(index, _) ==> index < selected.children@.len()
         },
     }
+}
+
+/// 根 NOR の配線結果から、本体の走査に必要な状態の条件を取り出す。
+pub(super) proof fn nor_call_group_frame(
+    selected: &ResolvedNorRoot, references: Range<usize>, forms: Seq<Form>,
+    caller: &Layouts, builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView,
+    gate_limit: usize, child_limit: usize, widths: Seq<u64>, result: Result<(), NestedCallWiringError>,
+)
+    requires nor_call_group_result(selected, references, forms, caller, builtin, before, after, gate_limit, child_limit, widths, result),
+    ensures match result {
+        Ok(_) => {
+            let input_bits = caller.inputs.total_bits_model();
+            let slot = selected.prepared.output_slot;
+            &&& nor_call_group_result(selected, references, forms, caller, builtin, before, after,
+                gate_limit, child_limit, widths, Ok(()))
+            &&& wiring_view_is_prefix(before, after)
+            &&& after.definitions.len() == preceding_port_bits(widths, (slot + 1) as nat)
+            &&& after.origins.len() == after.gates.len() <= gate_limit
+            &&& gates_available(after.gates, input_bits as nat, after.gates.len() as int)
+            &&& wires_available(after.definitions, input_bits, after.gates.len())
+        },
+        Err(_) => after == before,
+    },
+{
+    reveal(nor_call_group_result);
 }
 
 /// 根 NOR の出力配線を1本追加し、新しいゲートを根の出力スロットに対応付ける。
