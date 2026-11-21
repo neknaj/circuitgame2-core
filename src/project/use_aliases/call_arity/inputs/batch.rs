@@ -1,6 +1,6 @@
 //! 関数の配線と型を共有し、右辺に現れる呼び出しの引数を検査する。
 
-use super::{CallInputError, FuncAtomTypeError, FuncAtomTypes, FuncWiring, FuncWiringResult, ProjectedCallArgument, UseAliases};
+use super::{CallInputError, FuncAtomTypeError, FuncAtomTypes, FuncWiring, FuncWiringResult, ProjectedCallArgument, RetainedCallTarget, UseAliases};
 use super::super::RootFunctionCall;
 use crate::project::use_aliases::signature_cache::SignatureCache;
 use crate::project::{DefinitionPosition, SignalType};
@@ -18,6 +18,7 @@ use vstd::prelude::*;
 
 #[cfg(test)]
 mod tests {
+    use super::RetainedCallTarget;
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
 
     #[test]
@@ -35,10 +36,16 @@ mod tests {
         let aliases = check_use_aliases(&targets).unwrap();
         let (_, retained) = aliases.check_func_signal_projections(0, 5, 8, false, true).unwrap();
         assert_eq!(retained.call_arguments.reference_argument_ends, [0, 2, 2, 3, 3]);
+        assert!(matches!(
+            retained.call_arguments.reference_targets.as_slice(),
+            [None, Some(RetainedCallTarget::Nor), Some(RetainedCallTarget::Function(0, 3)),
+                Some(RetainedCallTarget::Function(0, 4)), Some(RetainedCallTarget::Function(0, 3))]
+        ));
         assert_eq!(retained.call_arguments.ranges, [2..3]);
         assert_eq!(retained.call_arguments.arguments.len(), 3);
         let (_, regular) = aliases.check_func_signal_projections(0, 5, 8, false, false).unwrap();
         assert!(regular.call_arguments.reference_argument_ends.is_empty());
+        assert!(regular.call_arguments.reference_targets.is_empty());
         assert!(regular.call_arguments.arguments.is_empty());
     }
 }
@@ -55,14 +62,18 @@ pub(in crate::project::use_aliases) struct CallArgumentProjections {
     /// 各範囲は直前の末尾から始まる。先頭の範囲は 0 から始まる。
     /// 型名参照と引数がない呼び出しの範囲は空になる。
     pub(in crate::project::use_aliases) reference_argument_ends: Vec<usize>,
+    /// 引数範囲と同じ参照順の呼び出し先。型名参照は空欄になる。
+    pub(in crate::project::use_aliases) reference_targets: Vec<Option<RetainedCallTarget>>,
 }
 
 impl CallArgumentProjections {
     pub(in crate::project::use_aliases) fn new() -> (projections: Self)
         ensures projections.arguments@.len() == 0, projections.ranges@.len() == 0,
-            projections.reference_argument_ends@.len() == 0,
+            projections.reference_argument_ends@.len() == 0, projections.reference_targets@.len() == 0,
     {
-        Self { arguments: Vec::new(), ranges: Vec::new(), reference_argument_ends: Vec::new() }
+        Self {
+            arguments: Vec::new(), ranges: Vec::new(), reference_argument_ends: Vec::new(), reference_targets: Vec::new(),
+        }
     }
 }
 
@@ -158,6 +169,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn projected_reference_prefix(
         &self, caller: (usize, usize, u64), types: Seq<Option<SignalType>>, wiring: &FuncWiring,
         definition: usize, count: int, ends: Seq<usize>, arguments: Seq<ProjectedCallArgument>,
+        targets: Seq<Option<RetainedCallTarget>>,
     ) -> bool {
         let (file, entry, limit) = caller;
         let parsed = &self.targets.project_model().circuits_model()[file as int];
@@ -165,13 +177,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let refs = parsed.definitions@[frame.definitions.start + definition].references;
         let base = refs.start - frame.references.start;
         &&& 0 <= base && 0 <= count <= refs.end - refs.start
-        &&& base + count <= ends.len()
+        &&& base + count <= ends.len() == targets.len()
         &&& forall|r: int| 0 <= r < count ==> {
             let end = (#[trigger] ends[base + r]) as int;
             let start = Self::argument_boundary(ends, base + r);
             &&& 0 <= start <= end <= arguments.len()
             &&& self.projected_input_arguments((file, entry, definition, r as usize), limit, types, wiring,
                 arguments.subrange(start, end))
+            &&& self.retained_call_target_matches(file, entry, definition, r as usize, limit, targets[base + r])
         }
     }
 
@@ -198,9 +211,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let (file, entry, _) = caller;
         let parsed = &self.targets.project_model().circuits_model()[file as int];
         let frame = parsed.entry_ranges@[entry as int];
+        let targets = projections.reference_targets@;
         &&& ends.len() == frame.references.end - frame.references.start
+        &&& targets.len() == ends.len()
         &&& arguments.len() == Self::argument_boundary(ends, ends.len() as int)
-        &&& self.projected_definitions_before(caller, types, wiring, definition_count(parsed, entry as int), ends, arguments)
+        &&& self.projected_definitions_before(caller, types, wiring, definition_count(parsed, entry as int), ends, arguments, targets)
         &&& projections.ranges@.len() == calls.len()
         &&& forall|i: int| 0 <= i < calls.len() ==> self.root_range_matches_reference(
             caller, calls[i], #[trigger] projections.ranges@[i], ends)
@@ -209,19 +224,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     #[verifier::opaque]
     spec fn projected_definitions_before(
         &self, caller: (usize, usize, u64), types: Seq<Option<SignalType>>, wiring: &FuncWiring,
-        definition: int, ends: Seq<usize>, arguments: Seq<ProjectedCallArgument>,
+        definition: int, ends: Seq<usize>, arguments: Seq<ProjectedCallArgument>, targets: Seq<Option<RetainedCallTarget>>,
     ) -> bool {
         let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
         forall|d: usize| d < definition ==> #[trigger] self.projected_reference_prefix(caller, types, wiring, d,
-            reference_count(parsed, caller.1 as int, d as int), ends, arguments)
+            reference_count(parsed, caller.1 as int, d as int), ends, arguments, targets)
     }
 
     proof fn projected_reference_range_evidence(
         &self, caller: (usize, usize, u64), types: Seq<Option<SignalType>>, wiring: &FuncWiring,
         definition: usize, count: int, reference: usize, ends: Seq<usize>, arguments: Seq<ProjectedCallArgument>,
+        targets: Seq<Option<RetainedCallTarget>>,
     )
         requires reference < count,
-            self.projected_reference_prefix(caller, types, wiring, definition, count, ends, arguments),
+            self.projected_reference_prefix(caller, types, wiring, definition, count, ends, arguments, targets),
         ensures ({
             let (file, entry, limit) = caller;
             let parsed = &self.targets.project_model().circuits_model()[file as int];
@@ -233,21 +249,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& 0 <= index < ends.len() && 0 <= start <= end <= arguments.len()
             &&& self.projected_input_arguments((file, entry, definition, reference), limit, types, wiring,
                 arguments.subrange(start, end))
+            &&& self.retained_call_target_matches(file, entry, definition, reference, limit, targets[index])
         }),
     {
         reveal(UseAliases::projected_reference_prefix);
     }
 
-    /// 型検査で保持した引数範囲を、定義内の参照添字から取り出す。
+    /// 定義内の参照添字から、型検査で保持した引数範囲と呼び出し先を取り出す。
     ///
     /// 同じプロジェクトの型検査で得た投影と、その関数に属する定義・参照の添字を渡す。
-    /// 引数がなければ空の半開範囲を返す。呼び出しと型名参照の区別には元の参照種別を使う。
-    pub(in crate::project::use_aliases) fn retained_call_argument_range(
+    /// 引数がなければ空の半開範囲になる。型名参照には呼び出し先がない。
+    pub(in crate::project::use_aliases) fn retained_call_reference(
         &self, file: usize, entry: usize, definition: usize, reference: usize,
         projections: &CallArgumentProjections,
         Ghost(limit): Ghost<u64>, Ghost(types): Ghost<Seq<Option<SignalType<'p, 'a>>>>,
         Ghost(wiring): Ghost<FuncWiring<'p, 'a>>, Ghost(roots): Ghost<Seq<RootFunctionCall>>,
-    ) -> (range: Range<usize>)
+    ) -> (found: (Range<usize>, Option<RetainedCallTarget>))
         requires
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
@@ -258,9 +275,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && reference < reference_count(parsed, entry as int, definition as int)
             }),
         ensures
-            range.start <= range.end <= projections.arguments@.len(),
+            found.0.start <= found.0.end <= projections.arguments@.len(),
+            self.retained_call_target_matches(file, entry, definition, reference, limit, found.1),
             self.projected_input_arguments((file, entry, definition, reference), limit, types, &wiring,
-                projections.arguments@.subrange(range.start as int, range.end as int)),
+                projections.arguments@.subrange(found.0.start as int, found.0.end as int)),
             ({
                 let parsed = &self.targets.project_model().circuits_model()[file as int];
                 let frame = parsed.entry_ranges@[entry as int];
@@ -268,10 +286,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let key = parsed.definitions@[def].references.start - frame.references.start + reference;
                 let ends = projections.reference_argument_ends@;
                 &&& 0 <= key < ends.len()
-                &&& range.start == if key == 0 { 0 } else { ends[key - 1] }
-                &&& range.end == ends[key]
+                &&& found.0.start == if key == 0 { 0 } else { ends[key - 1] }
+                &&& found.0.end == ends[key]
+                &&& found.1 == projections.reference_targets@[key]
                 &&& forall|i: int| 0 <= i < roots.len() && (#[trigger] roots[i]).definition == def && reference == 0
-                    ==> projections.ranges@[i] == range
+                    ==> projections.ranges@[i] == found.0
             }),
     {
         let project = self.targets.project();
@@ -287,7 +306,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(UseAliases::projected_definitions_before);
             let count = reference_count(parsed, entry as int, definition as int);
             self.projected_reference_range_evidence((file, entry, limit), types, &wiring, definition,
-                count, reference, projections.reference_argument_ends@, projections.arguments@);
+                count, reference, projections.reference_argument_ends@, projections.arguments@, projections.reference_targets@);
         }
         let index = row.references.start - frame.references.start + reference;
         let ends = &projections.reference_argument_ends;
@@ -301,14 +320,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 reveal(UseAliases::root_range_matches_reference);
             };
         }
-        range
+        (range, projections.reference_targets[index])
     }
 
     fn check_definition_input_types(
         &self, file: usize, entry: usize, definition: usize, max_width: u64,
         types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>,
         signatures: &mut SignatureCache<'p, 'a>,
-        projections: &mut Vec<ProjectedCallArgument>, ends: &mut Vec<usize>, retain: bool,
+        projections: &mut Vec<ProjectedCallArgument>, ends: &mut Vec<usize>,
+        targets: &mut Vec<Option<RetainedCallTarget>>, retain: bool,
     ) -> (result: Result<(), (usize, CallInputError<'p, 'a>)>)
         requires
             self.can_resolve(),
@@ -322,20 +342,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let frame = parsed.entry_ranges@[entry as int];
                 let refs = parsed.definitions@[frame.definitions.start + definition].references;
                 &&& refs.start == frame.references.start + old(ends)@.len()
+                &&& old(targets)@.len() == old(ends)@.len()
                 &&& old(projections)@.len() == Self::argument_boundary(old(ends)@, old(ends)@.len() as int)
             }),
         ensures final(signatures).matches(self, max_width),
         result.is_ok() ==> old(projections)@.len() <= final(projections)@.len(),
         result.is_ok() ==> final(projections)@.take(old(projections)@.len() as int) == old(projections)@,
-        result.is_ok() && !retain ==> final(projections)@ == old(projections)@ && final(ends)@ == old(ends)@,
+        result.is_ok() && !retain ==> final(projections)@ == old(projections)@ && final(ends)@ == old(ends)@
+            && final(targets)@ == old(targets)@,
         result.is_ok() && retain ==> ({
             let parsed = &self.targets.project_model().circuits_model()[file as int];
             let count = reference_count(parsed, entry as int, definition as int);
             &&& final(ends)@.len() == old(ends)@.len() + count
             &&& final(ends)@.take(old(ends)@.len() as int) == old(ends)@
+            &&& final(targets)@.len() == final(ends)@.len()
+            &&& final(targets)@.take(old(targets)@.len() as int) == old(targets)@
             &&& final(projections)@.len() == Self::argument_boundary(final(ends)@, final(ends)@.len() as int)
             &&& self.projected_reference_prefix((file, entry, max_width), types@, wiring, definition,
-                count, final(ends)@, final(projections)@)
+                count, final(ends)@, final(projections)@, final(targets)@)
         }),
         ({
             let parsed = &self.targets.project_model().circuits_model()[file as int];
@@ -350,6 +374,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         let ghost previous = projections@;
         let ghost previous_ends = ends@;
+        let ghost previous_targets = targets@;
         let ghost caller = (file, entry, max_width);
         let ghost start = previous.len() as int;
         assert(previous.take(start) =~= previous);
@@ -384,31 +409,40 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 projections@.take(start) == previous,
                 caller == (file, entry, max_width),
                 previous_ends == old(ends)@, first == previous_ends.len(),
-                !retain ==> projections@ == previous && ends@ == previous_ends,
+                previous_targets == old(targets)@,
+                !retain ==> projections@ == previous && ends@ == previous_ends && targets@ == previous_targets,
                 retain ==> ({
                     let frame = parsed.entry_ranges@[entry as int];
                     &&& *row == parsed.definitions@[frame.definitions.start + definition]
                     &&& row.references.start == frame.references.start + first
                     &&& ends@.len() == first + reference
                     &&& ends@.take(first) == previous_ends
+                    &&& targets@.len() == ends@.len()
+                    &&& previous_targets.len() == first
+                    &&& targets@.take(first) == previous_targets
                     &&& projections@.len() == Self::argument_boundary(ends@, ends@.len() as int)
                     &&& self.projected_reference_prefix(caller, types@, wiring, definition,
-                        reference as int, ends@, projections@)
+                        reference as int, ends@, projections@, targets@)
                 }),
             decreases stop - reference,
         {
             let ghost before = projections@;
             let ghost before_ends = ends@;
+            let ghost before_targets = targets@;
+            let mut target = None;
             let _value = match self.check_call_inputs_with_types(file, entry, definition, reference, max_width, types, wiring, false,
-                signatures, projections, retain) {
+                signatures, projections, &mut target, retain) {
                 Ok(value) => value,
                 Err(error) => return Err((reference, error)),
             };
             if retain {
                 ends.push(projections.len());
+                targets.push(target);
                 proof {
                     assert(ends@ =~= before_ends.push(projections@.len() as usize));
                     assert(ends@.take(first) =~= previous_ends);
+                    assert(targets@ =~= before_targets.push(target));
+                    assert(targets@.take(first) =~= previous_targets);
                     assert(projections@.take(start) =~= previous);
                     reveal(UseAliases::projected_reference_prefix);
                     assert forall|r: int| 0 <= r < reference + 1 implies {
@@ -417,12 +451,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         &&& 0 <= begin <= end <= projections@.len()
                         &&& self.projected_input_arguments((file, entry, definition, r as usize), max_width,
                             types@, wiring, projections@.subrange(begin, end))
+                        &&& self.retained_call_target_matches(file, entry, definition, r as usize, max_width, targets@[first + r])
                     } by {
                         let key = first + r;
                         if r < reference {
                             let begin = Self::argument_boundary(before_ends, key);
                             let end = before_ends[key] as int;
-                            assert(ends@[key] == before_ends[key]);
+                            assert(ends@[key] == before_ends[key] && targets@[key] == before_targets[key]);
                             assert(Self::argument_boundary(ends@, key) == begin);
                             assert(projections@.subrange(begin, end) =~= before.subrange(begin, end));
                         } else {
@@ -432,7 +467,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         }
                     };
                     assert(self.projected_reference_prefix(caller, types@, wiring, definition,
-                        reference + 1, ends@, projections@));
+                        reference + 1, ends@, projections@, targets@));
                 }
             }
             proof {
@@ -478,15 +513,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, caller: (usize, usize, u64), types: Seq<Option<SignalType>>, wiring: &FuncWiring,
         definition: usize, before_ends: Seq<usize>, ends: Seq<usize>,
         before: Seq<ProjectedCallArgument>, arguments: Seq<ProjectedCallArgument>,
+        before_targets: Seq<Option<RetainedCallTarget>>, targets: Seq<Option<RetainedCallTarget>>,
     )
         requires
             before_ends.len() <= ends.len(), ends.take(before_ends.len() as int) == before_ends,
             before.len() <= arguments.len(), arguments.take(before.len() as int) == before,
-            self.projected_definitions_before(caller, types, wiring, definition as int, before_ends, before),
+            before_targets.len() <= targets.len(), targets.take(before_targets.len() as int) == before_targets,
+            targets.len() == ends.len(),
+            self.projected_definitions_before(caller, types, wiring, definition as int, before_ends, before, before_targets),
             self.projected_reference_prefix(caller, types, wiring, definition,
                 reference_count(&self.targets.project_model().circuits_model()[caller.0 as int],
-                    caller.1 as int, definition as int), ends, arguments),
-        ensures self.projected_definitions_before(caller, types, wiring, definition + 1, ends, arguments),
+                    caller.1 as int, definition as int), ends, arguments, targets),
+        ensures self.projected_definitions_before(caller, types, wiring, definition + 1, ends, arguments, targets),
     {
         let (file, entry, limit) = caller;
         let parsed = &self.targets.project_model().circuits_model()[file as int];
@@ -494,20 +532,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::projected_definitions_before);
         reveal(UseAliases::projected_reference_prefix);
         assert forall|d: usize| d < definition + 1 implies #[trigger] self.projected_reference_prefix(
-            caller, types, wiring, d, reference_count(parsed, entry as int, d as int), ends, arguments) by {
+            caller, types, wiring, d, reference_count(parsed, entry as int, d as int), ends, arguments, targets) by {
             if d < definition {
                 let count = reference_count(parsed, entry as int, d as int);
                 let base = parsed.definitions@[frame.definitions.start + d].references.start - frame.references.start;
-                assert(self.projected_reference_prefix(caller, types, wiring, d, count, before_ends, before));
+                assert(self.projected_reference_prefix(caller, types, wiring, d, count, before_ends, before, before_targets));
                 assert forall|r: int| 0 <= r < count implies {
                     let end = (#[trigger] ends[base + r]) as int;
                     let start = Self::argument_boundary(ends, base + r);
                     &&& 0 <= start <= end <= arguments.len()
                     &&& self.projected_input_arguments((file, entry, d, r as usize), limit, types, wiring,
                         arguments.subrange(start, end))
+                    &&& self.retained_call_target_matches(file, entry, d, r as usize, limit, targets[base + r])
                 } by {
                     let key = base + r;
-                    assert(ends[key] == before_ends[key]);
+                    assert(ends[key] == before_ends[key] && targets[key] == before_targets[key]);
                     assert(Self::argument_boundary(ends, key) == Self::argument_boundary(before_ends, key));
                     let start = Self::argument_boundary(before_ends, key);
                     let end = before_ends[key] as int;
@@ -566,7 +605,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             old(signatures).matches(self, max_width),
             self.root_call_definitions_in_order(file, entry, calls@),
             old(projections).arguments@.len() == 0, old(projections).ranges@.len() == 0,
-            old(projections).reference_argument_ends@.len() == 0,
+            old(projections).reference_argument_ends@.len() == 0, old(projections).reference_targets@.len() == 0,
             !retain ==> calls@.len() == 0,
         ensures self.prepared_call_inputs_match(file, entry, max_width, types@, wiring, result),
             final(signatures).matches(self, max_width),
@@ -574,7 +613,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && (if retain {
                     self.projected_references_match((file, entry, max_width), types@, wiring,
                         final(projections), calls@)
-                } else { final(projections).reference_argument_ends@.len() == 0 && final(projections).arguments@.len() == 0 }),
+                } else { final(projections).reference_argument_ends@.len() == 0 && final(projections).arguments@.len() == 0
+                    && final(projections).reference_targets@.len() == 0 }),
     {
         let project = self.targets.project();
         proof {
@@ -617,12 +657,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let boundary = if definition == 0 { frame.references.start }
                         else { parsed.definitions@[range.start + definition - 1].references.end };
                     &&& frame.references.start + ends.len() == boundary
+                    &&& projections.reference_targets@.len() == ends.len()
                     &&& projections.arguments@.len() == Self::argument_boundary(ends, ends.len() as int)
                     &&& self.projected_definitions_before((file, entry, max_width), types@, wiring,
-                        definition as int, ends, projections.arguments@)
+                        definition as int, ends, projections.arguments@, projections.reference_targets@)
                 },
                 !retain ==> projections.reference_argument_ends@.len() == 0 && projections.arguments@.len() == 0
-                    && calls@.len() == 0,
+                    && projections.reference_targets@.len() == 0 && calls@.len() == 0,
                 self.root_call_definitions_in_order(file, entry, calls@),
                 file < self.targets.project_model().circuits_model().len(),
                 cursor == projections.ranges@.len() <= calls@.len(),
@@ -638,6 +679,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let start = projections.arguments.len();
             let reference_start = projections.reference_argument_ends.len();
             let ghost before_ends = projections.reference_argument_ends@;
+            let ghost before_targets = projections.reference_targets@;
             let ghost caller = (file, entry, max_width);
             let ghost before = projections.arguments@;
             let ghost previous_cursor = cursor;
@@ -658,7 +700,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
             }
             if let Err((reference, error)) = self.check_definition_input_types(file, entry, definition, max_width, types, wiring, signatures,
-                &mut projections.arguments, &mut projections.reference_argument_ends, retain) {
+                &mut projections.arguments, &mut projections.reference_argument_ends, &mut projections.reference_targets, retain) {
                 let position = DefinitionPosition { file, entry, definition, reference };
                 let error = FuncCallInputsError::Call { position, error };
                 assert(self.prepared_call_inputs_match(file, entry, max_width, types@, wiring, Err(error)));
@@ -673,7 +715,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     projections.reference_argument_ends@);
                 if retain {
                     self.preserve_projected_definitions(caller, types@, wiring, definition, before_ends,
-                        projections.reference_argument_ends@, before, projections.arguments@);
+                        projections.reference_argument_ends@, before, projections.arguments@, before_targets,
+                        projections.reference_targets@);
                 }
             }
             if retain_root {

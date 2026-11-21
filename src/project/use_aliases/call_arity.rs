@@ -7,7 +7,7 @@ mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
 pub(super) use inputs::CallArgumentProjections;
-pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument};
+pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument, RetainedCallTarget};
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
 pub(super) use outputs::RootFunctionCall;
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};

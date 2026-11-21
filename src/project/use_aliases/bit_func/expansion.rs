@@ -2,7 +2,7 @@
 
 use super::frontend::BitFuncError;
 use super::super::{FuncSignalTypes, FuncWiring, FuncWiringResult, FunctionExpansionOrder, TypedFuncCall, UseAliases};
-use super::super::call_arity::{CallArgumentProjections, RootFunctionCall};
+use super::super::call_arity::{CallArgumentProjections, RetainedCallTarget, RootFunctionCall};
 #[cfg(verus_only)]
 use super::super::call_arity::CallArgumentSource;
 use super::super::function_atoms::FuncProjections;
@@ -887,10 +887,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Some(order) => order[order.len() - 1] - row.references.start,
             };
             assert(reference == 0);
-            let arguments = self.retained_call_argument_range(file, entry, definition, reference, &projections.call_arguments,
-                Ghost(limit), Ghost(typed.types@), Ghost(*wiring), Ghost(projections.calls@));
+            let (arguments, selected) = self.retained_call_reference(file, entry, definition, reference,
+                &projections.call_arguments, Ghost(limit), Ghost(typed.types@), Ghost(*wiring), Ghost(projections.calls@));
             assert(arguments == projections.call_arguments.ranges@[index as int]);
-            let target = (root.target_file, root.target_entry);
+            proof { self.retained_target_agrees_with_call(file, entry, definition, reference, limit, selected, group_model.0); }
+            let Some(RetainedCallTarget::Function(target_file, target_entry)) = selected else {
+                proof { assert(false); }
+                unreachable!()
+            };
+            let target = (target_file, target_entry);
             let vertex = plan.template_vertex(target);
             proof { plan.template_vertex_at_position(target, group_model.1.0, vertex); }
             let Some(vertex) = vertex else {

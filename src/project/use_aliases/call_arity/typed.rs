@@ -341,7 +341,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires
             self.can_resolve(),
             self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(Some(typed))),
-        ensures self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(typed.call))), ({
+        ensures self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(typed.call))),
+            self.func_call_at(file, entry, definition, reference), ({
             let project = self.targets.project_model();
             let parsed = project.circuits_model()[file as int];
             let forms = parsed.syntax.forms@;

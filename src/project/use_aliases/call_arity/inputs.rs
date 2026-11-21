@@ -1,7 +1,7 @@
 //! 呼び出しの直接の引数に、宣言順で対応する入力型を照合する。
 
 use super::{CallPortType, FuncCallArity, FuncCallSignatureError, TypedFuncCall, UseAliases};
-use super::FuncCallSignature;
+use super::{FuncCallSignature, FuncCallTarget};
 use super::typed::{cached_signature, signature_port};
 #[cfg(verus_only)]
 use super::typed::cached_call_model;
@@ -44,6 +44,24 @@ pub use batch::FuncCallInputsError;
 pub(in crate::project::use_aliases) use batch::CallArgumentProjections;
 
 verus! {
+
+/// 型検査で解決した呼び出し先。展開はこの位置からテンプレートを選ぶ。
+#[derive(Clone, Copy, Debug)]
+pub(in crate::project::use_aliases) enum RetainedCallTarget {
+    /// 言語組み込みの一ビット NOR。
+    Nor,
+    /// プロジェクト内の関数宣言を指すファイル添字と索引項目。
+    Function(usize, usize),
+}
+
+impl RetainedCallTarget {
+    pub(in crate::project::use_aliases) open spec fn from_arity(arity: FuncCallArity) -> Self {
+        match arity.target {
+            FuncCallTarget::Nor => Self::Nor,
+            FuncCallTarget::Function { file, entry, .. } => Self::Function(file, entry),
+        }
+    }
+}
 
 /// 展開に使う引数の元フォームと配線の取得方法。
 #[derive(Debug)]
@@ -884,27 +902,78 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         proof { self.atom_types_keep_wiring(file, entry, max_width, typed, *wiring); }
         let mut signatures = SignatureCache::new();
         let mut projections = Vec::new();
+        let mut target = None;
         self.check_call_inputs_with_types(file, entry, definition, reference, max_width, typed.types.as_slice(), wiring, true,
-            &mut signatures, &mut projections, false)
+            &mut signatures, &mut projections, &mut target, false)
     }
 
-    /// 呼び出し元の配線と型を再利用し、必要な場合だけ引数の型を実行時の配列に残す。
+    /// 保持した呼び出し先が、同じ参照添字で型検査を通った署名と対応することを表す。
+    pub(in crate::project::use_aliases) closed spec fn retained_call_target_matches(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        target: Option<RetainedCallTarget>,
+    ) -> bool {
+        match target {
+            None => self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(None)),
+            Some(target) => exists|call: TypedFuncCall|
+                #[trigger] self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
+                && target == RetainedCallTarget::from_arity(call.call),
+        }
+    }
 
+    /// 保存した呼び出し先の根拠となった型付き署名を取り出す。
+    pub(in crate::project::use_aliases) proof fn retained_callee_signature(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        target: Option<RetainedCallTarget>,
+    ) -> (call: TypedFuncCall<'p, 'a>)
+        requires
+            self.func_call_at(file, entry, definition, reference),
+            self.retained_call_target_matches(file, entry, definition, reference, limit, target),
+        ensures
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
+            target == Some(RetainedCallTarget::from_arity(call.call)),
+    {
+        if target.is_none() {
+            self.call_has_signature_result(file, entry, definition, reference, limit, Ok(None));
+        }
+        choose|typed: TypedFuncCall|
+            #[trigger] self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(typed)))
+            && target == Some(RetainedCallTarget::from_arity(typed.call))
+    }
+
+    /// 型検査で保持した呼び出し先と、指定した署名の参照先が一致することを示す。
+    pub(in crate::project::use_aliases) proof fn retained_target_agrees_with_call(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
+        target: Option<RetainedCallTarget>, call: TypedFuncCall,
+    )
+        requires
+            self.can_resolve(),
+            self.retained_call_target_matches(file, entry, definition, reference, limit, target),
+            self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
+        ensures target == Some(RetainedCallTarget::from_arity(call.call)),
+    {
+        self.typed_call_arguments_ready(file, entry, definition, reference, limit, call);
+        let chosen = self.retained_callee_signature(file, entry, definition, reference, limit, target);
+        self.successful_call_signatures_agree(file, entry, definition, reference, limit, call, chosen);
+        self.typed_call_arguments_ready(file, entry, definition, reference, limit, chosen);
+    }
+
+    /// 呼び出し元の配線と型を再利用し、展開で使う引数と呼び出し先を必要に応じて保持する。
     fn check_call_inputs_with_types(
         &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64,
         types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>, collect: bool,
         signatures: &mut SignatureCache<'p, 'a>,
-        projections: &mut Vec<ProjectedCallArgument>, retain: bool,
+        projections: &mut Vec<ProjectedCallArgument>, target: &mut Option<RetainedCallTarget>, retain: bool,
     ) -> (result: Result<Option<CheckedCallInputs<'p, 'a>>, CallInputError<'p, 'a>>)
         requires
             self.can_resolve(), self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
             types@.len() == wiring.drivers.definitions@.len(),
-            old(signatures).matches(self, max_width),
+            old(signatures).matches(self, max_width), old(target).is_none(),
         ensures self.scoped_input_result(file, entry, definition, reference, max_width, types@, wiring, collect, result),
             final(signatures).matches(self, max_width),
             result.is_ok() ==> old(projections)@.len() <= final(projections)@.len(),
             result.is_ok() ==> final(projections)@.take(old(projections)@.len() as int) == old(projections)@,
             result.is_ok() && !retain ==> final(projections)@ == old(projections)@,
+            retain && result.is_ok() ==> self.retained_call_target_matches(file, entry, definition, reference, max_width, *final(target)),
             retain && result.is_ok() ==> self.projected_input_arguments((file, entry, definition, reference),
                 max_width, types@, wiring, final(projections)@.skip(old(projections)@.len() as int)),
     {
@@ -1123,6 +1192,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             remaining.start = argument.end;
             ordinal += 1;
+        }
+        if retain {
+            let chosen = match arity.target {
+                FuncCallTarget::Nor => RetainedCallTarget::Nor,
+                FuncCallTarget::Function { file, entry, .. } => RetainedCallTarget::Function(file, entry),
+            };
+            assert(chosen == RetainedCallTarget::from_arity(call.call));
+            assert(self.retained_call_target_matches(file, entry, definition, reference, max_width, Some(chosen)));
+            *target = Some(chosen);
         }
         let result = Ok(if let Some(signature) = owned {
             Some(CheckedCallInputs { call: TypedFuncCall { call: arity, signature }, inputs })
