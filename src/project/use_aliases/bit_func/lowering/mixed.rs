@@ -708,12 +708,12 @@ pub(super) closed spec fn mixed_error_at(
     }
 }
 
-spec fn arguments_are_determined(arguments: Seq<ProjectedCallArgument>) -> bool {
+pub(in crate::project::use_aliases::bit_func) open spec fn arguments_are_determined(arguments: Seq<ProjectedCallArgument>) -> bool {
     forall|port: int| 0 <= port < arguments.len() ==> !((#[trigger] arguments[port]).source is Deferred)
 }
 
 /// 引数に未確定の式が残っていれば、その時点で走査を終える。
-fn arguments_are_determined_exec(arguments: &[ProjectedCallArgument]) -> (determined: bool)
+pub(in crate::project::use_aliases::bit_func) fn arguments_are_determined_exec(arguments: &[ProjectedCallArgument]) -> (determined: bool)
     ensures determined == arguments_are_determined(arguments@),
 {
     let mut port = 0;

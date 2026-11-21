@@ -13,7 +13,9 @@ pub(super) use mixed::{EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluati
 #[cfg(verus_only)]
 pub(super) use mixed::resolved_call_fits_body;
 pub(super) use call_group::CallGroupError;
-pub(super) use mixed::MixedWiringError;
+pub(super) use mixed::{MixedWiringError, arguments_are_determined_exec};
+#[cfg(verus_only)]
+pub(super) use mixed::arguments_are_determined;
 use mixed::lower_resolved_function;
 use super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use super::expansion::PreparedExpansionBody;
@@ -1088,7 +1090,7 @@ spec fn rhs_projection(rhs: BitFuncRhs, gate: usize) -> Projection {
         },
         BitFuncRhs::Constant(bit) => Projection::Wire(Wire::Constant(bit)),
         BitFuncRhs::Nor { .. } => Projection::Wire(Wire::Gate(gate)),
-        BitFuncRhs::Concat | BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => arbitrary(),
+        BitFuncRhs::Concat | BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => arbitrary(),
     }
 }
 
@@ -1169,7 +1171,7 @@ fn lower_rhs(
             proof { existing_wires_keep_availability(wires@, input_bits, gate as nat, gates@.len()); }
             Projection::Wire(Wire::Gate(gate))
         },
-        BitFuncRhs::Concat | BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => {
+        BitFuncRhs::Concat | BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => {
             proof { assert(false); }
             Projection::Wire(Wire::Constant(false))
         },
@@ -1193,7 +1195,7 @@ spec fn slot_wiring_matches(
     let prefix = wires.take(range.start as int);
     let rhs = slot.rhs;
     let gate = if rhs is Nor { wires[range.start as int]->Gate_0 } else { 0usize };
-    &&& !(rhs is CallOutput)
+    &&& !(rhs is CallOutput) && !(rhs is NorCallOutput)
     &&& range.start < range.end <= wires.len()
     &&& match rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), prefix, rhs) {
         Some(expected) => wires[range.start as int] == Wire::Gate(gate)

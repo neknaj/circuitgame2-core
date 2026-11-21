@@ -48,6 +48,8 @@ pub(super) enum BitFuncRhs {
     BitVector,
     /// 展開する呼び出しの番号と、その宣言上の出力ポート番号。
     CallOutput { group: usize, port: usize },
+    /// 根 NOR の候補表を指す添字。出力は1ビット。
+    NorCallOutput { root: usize },
 }
 
 /// 元ソース位置と値の幅が確定した定義。
@@ -139,7 +141,7 @@ pub(super) open spec fn bit_definition_matches(
     &&& location_in_source(definition.expression)
     &&& !(definition.rhs is Concat) ==> definition.operands@.len() == 0
     &&& match definition.rhs {
-        BitFuncRhs::CallOutput { .. } => false,
+        BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => false,
         BitFuncRhs::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(definition.width),
         BitFuncRhs::Constant(_) => definition.width == 1,
         BitFuncRhs::Nor { left, right } => definition.width == 1

@@ -1161,7 +1161,7 @@ fn lowers_the_resolved_nor_root_and_rolls_back_at_its_gate_limit() {
     let parsed = &project.circuits()[position.0];
     let refs = &parsed.definitions[root.definition].references;
     let definitions = [CheckedBitDefinition {
-        expression: copy_location(&root.root.expression), width: 1, rhs: BitFuncRhs::CallOutput { group: 0, port: 0 },
+        expression: copy_location(&root.root.expression), width: 1, rhs: BitFuncRhs::NorCallOutput { root: 0 },
         operands: Vec::new(),
     }];
     let layouts = prepare_body_layouts(&[1], &definitions, &[1], 1).unwrap();

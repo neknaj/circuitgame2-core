@@ -753,7 +753,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     scope.types@, concat)
                 && concat.target == i && concat.operands@ == operands,
             BitFuncRhs::BitVector => bit_vector_form(forms[root]),
-            BitFuncRhs::CallOutput { .. } => false,
+            BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => false,
         } }
     }
 
@@ -1300,7 +1300,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(bits == checked.width);
                 },
                 BitFuncRhs::BitVector => {},
-                BitFuncRhs::CallOutput { .. } => { assert(false); },
+                BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => { assert(false); },
             }
         }
         assert(scope.types@[index] matches Some(ty) && self.port_width_matches(ty.ty, checked.width, scope.layouts));

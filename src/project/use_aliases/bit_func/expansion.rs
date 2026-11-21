@@ -2218,6 +2218,46 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             rank, prepared.postorder@)
     }
 
+    /// 根 NOR の出力スロットと式全体のソース範囲を、定義の投影に渡す。
+    pub(super) proof fn prepared_nor_output_evidence(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, index: int,
+    )
+        requires
+            self.can_resolve(), self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+        ensures ({
+            let root = prepared.nor_roots@[index];
+            let wiring = prepared.typed.literals.wiring->Checked_0;
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[caller.0 as int];
+            let expr = parsed.definitions@[root.definition as int].expression;
+            let at = root.output_slot as int;
+            &&& root.definition < parsed.definitions@.len()
+            &&& at < prepared.typed.types@.len() == wiring.drivers.definitions@.len()
+            &&& prepared.typed.types@[at] matches Some(ty) && ty.ty == crate::project::ResolvedPortType::Bits(1)
+            &&& wiring.drivers.definitions@[at].definition == root.definition
+            &&& wiring.drivers.definitions@[at].result_index == 0
+            &&& location_in_source(root.root.expression)
+            &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[caller.0 as int].text,
+                parsed.syntax.forms@, expr.start as int, expr.end as int)
+        }),
+    {
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let root = prepared.nor_roots@[index];
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[caller.0 as int];
+        let parsed = &project.circuits_model()[caller.0 as int];
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        self.checked_types_keep_wiring(caller.0, caller.1, caller.2, prepared.typed, wiring);
+        self.checked_wiring_is_func(caller.0, caller.1, caller.2, wiring);
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*source, *parsed);
+        let form = root.root._signature@.call.call.form;
+        assert(is_form_location(source, parsed.syntax.forms@[form as int], root.root.expression));
+    }
+
     /// 根と子の実引数を元のフォーム、先行する定義、または後順の子の出力に対応付ける。
     pub(super) proof fn prepared_nor_argument_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,

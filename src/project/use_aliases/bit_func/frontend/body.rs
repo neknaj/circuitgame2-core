@@ -4,7 +4,10 @@ use super::*;
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 #[cfg(verus_only)]
 use super::super::templates::{ResolvedExpressionCall, ResolvedNorRoot};
-use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
+use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, arguments_are_determined_exec, lower_projected_expansion};
+#[cfg(verus_only)]
+use super::super::lowering::arguments_are_determined;
+use vstd::slice::slice_subrange;
 #[cfg(verus_only)]
 use super::super::lowering::{
     expanded_definition_values, projected_lowering_output_values, projected_lowering_view, resolved_call_fits_body,
@@ -18,7 +21,7 @@ use crate::netlist::{
     gate_values_match, nor_evaluation, nor_evaluation_ready, output_values_match, port_bit_layout_port,
     port_bit_layout_result, preceding_port_bits,
 };
-use super::super::expansion::{ExpansionSlot, PreparedExpansionBody, expansion_call_at_slot};
+use super::super::expansion::{ExpansionSlot, PreparedExpansionBody, PreparedNorRoot, expansion_call_at_slot};
 #[cfg(verus_only)]
 use super::super::expansion::{PreparedExpressionCall, prepared_nested_output_matches};
 use super::super::super::FunctionExpansionOrder;
@@ -29,8 +32,9 @@ use super::super::super::function_atoms::{
 #[cfg(verus_only)]
 use crate::syntax::circuit::{ordinary_call_at, ordinary_call_excludes_special_forms};
 
+use crate::project::use_aliases::call_arity::ProjectedCallArgument;
 #[cfg(verus_only)]
-use crate::project::use_aliases::call_arity::{CallArgumentSource, ProjectedCallArgument};
+use crate::project::use_aliases::call_arity::CallArgumentSource;
 #[cfg(verus_only)]
 use super::super::lowering::literal_argument_matches_width;
 
@@ -155,10 +159,188 @@ spec fn projected_call_slot(
     &&& slot.operands@.len() == 0
 }
 
+/// 投影する根 NOR を、元の候補表の添字と組にする。
+pub(super) struct NorDefinition<'s, 'p, 'a> {
+    pub(super) index: usize,
+    pub(super) root: &'s PreparedNorRoot<'p, 'a>,
+}
+
+pub(super) open spec fn nor_covers(roots: Seq<NorDefinition>, at: int) -> bool {
+    exists|index: int| 0 <= index < roots.len() && (#[trigger] roots[index]).root.output_slot == at
+}
+
+spec fn projected_nor_slot(roots: Seq<NorDefinition>, index: int, at: int, slot: CheckedBitDefinition) -> bool {
+    let row = roots[index];
+    &&& row.root.output_slot == at
+    &&& slot.rhs == BitFuncRhs::NorCallOutput { root: row.index }
+    &&& slot.expression == row.root.root.expression
+    &&& slot.width == 1
+    &&& slot.operands@.len() == 0
+}
+
+pub(super) open spec fn retained_range_determined(arguments: Seq<ProjectedCallArgument>, range: core::ops::Range<usize>) -> bool {
+    &&& range.start <= range.end <= arguments.len()
+    &&& arguments_are_determined(arguments.subrange(range.start as int, range.end as int))
+}
+
+#[verifier::opaque]
+pub(super) open spec fn nor_definition_determined(root: &PreparedNorRoot, arguments: Seq<ProjectedCallArgument>) -> bool {
+    &&& retained_range_determined(arguments, root.root.arguments)
+    &&& forall|i: int| 0 <= i < root.postorder@.len() ==>
+        retained_range_determined(arguments, (#[trigger] root.postorder@[i]).arguments)
+}
+
+#[verifier::opaque]
+spec fn nor_definition_ranges_fit(root: &PreparedNorRoot, len: nat) -> bool {
+    &&& root.root.arguments.start <= root.root.arguments.end <= len
+    &&& forall|i: int| 0 <= i < root.postorder@.len() ==> {
+        let row = #[trigger] root.postorder@[i];
+        row.arguments.start <= row.arguments.end <= len
+    }
+}
+
+/// 根と後順列のすべての子について、引数の配線方法が確定しているかを調べる。
+fn nor_definition_determined_exec(root: &PreparedNorRoot, arguments: &[ProjectedCallArgument]) -> (ready: bool)
+    requires nor_definition_ranges_fit(root, arguments@.len()),
+    ensures ready == nor_definition_determined(root, arguments@),
+{
+    reveal(nor_definition_determined);
+    reveal(nor_definition_ranges_fit);
+    let root_args = slice_subrange(arguments, root.root.arguments.start, root.root.arguments.end);
+    if !arguments_are_determined_exec(root_args) {
+        return false;
+    }
+    let mut i = 0;
+    while i < root.postorder.len()
+        invariant
+            i <= root.postorder@.len(),
+            retained_range_determined(arguments@, root.root.arguments),
+            forall|j: int| 0 <= j < root.postorder@.len() ==> {
+                let row = #[trigger] root.postorder@[j];
+                row.arguments.start <= row.arguments.end <= arguments@.len()
+            },
+            forall|j: int| 0 <= j < i ==> retained_range_determined(arguments@, (#[trigger] root.postorder@[j]).arguments),
+        decreases root.postorder@.len() - i,
+    {
+        let child = &root.postorder[i];
+        let args = slice_subrange(arguments, child.arguments.start, child.arguments.end);
+        if !arguments_are_determined_exec(args) {
+            assert(!nor_definition_determined(root, arguments@)) by {
+                reveal(nor_definition_determined);
+                assert(*child == root.postorder@[i as int]);
+                assert(!retained_range_determined(arguments@, child.arguments));
+            };
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+#[verifier::opaque]
+spec fn nor_selection_prefix(prepared: &PreparedExpansionBody, at: int, selected: Seq<NorDefinition>) -> bool {
+    let arguments = prepared.projections.call_arguments.arguments@;
+    &&& forall|i: int| 0 <= i < selected.len() ==> {
+        let row = #[trigger] selected[i];
+        &&& row.index < at && *row.root == prepared.nor_roots@[row.index as int]
+        &&& nor_definition_determined(row.root, arguments)
+    }
+    &&& forall|a: int, b: int| 0 <= a < b < selected.len() ==>
+        (#[trigger] selected[a]).index < (#[trigger] selected[b]).index
+}
+
+#[verifier::opaque]
+spec fn nor_selection_covers(prepared: &PreparedExpansionBody, at: int, indices: Seq<usize>) -> bool {
+    let arguments = prepared.projections.call_arguments.arguments@;
+    forall|i: int| 0 <= i < at
+        && #[trigger] nor_definition_determined(&prepared.nor_roots@[i], arguments)
+        ==> indices.contains(i as usize)
+}
+
+spec fn nor_selection_indices(rows: Seq<NorDefinition>) -> Seq<usize> {
+    Seq::new(rows.len(), |i: int| rows[i].index)
+}
+
+proof fn extend_nor_selection_coverage(
+    prepared: &PreparedExpansionBody, at: usize, root: &PreparedNorRoot, ready: bool,
+    before: Seq<NorDefinition>, after: Seq<NorDefinition>,
+)
+    requires
+        at < prepared.nor_roots@.len(), *root == prepared.nor_roots@[at as int],
+        ready == nor_definition_determined(&prepared.nor_roots@[at as int], prepared.projections.call_arguments.arguments@),
+        nor_selection_covers(prepared, at as int, nor_selection_indices(before)),
+        after == if ready { before.push(NorDefinition { index: at, root }) } else { before },
+    ensures nor_selection_covers(prepared, at + 1, nor_selection_indices(after)),
+{
+    reveal(nor_selection_covers);
+    let old_indices = nor_selection_indices(before);
+    let indices = nor_selection_indices(after);
+    if ready {
+        assert(indices =~= old_indices.push(at));
+    }
+    assert forall|i: int| 0 <= i <= at
+        && #[trigger] nor_definition_determined(&prepared.nor_roots@[i], prepared.projections.call_arguments.arguments@)
+        implies indices.contains(i as usize) by {
+        if i < at {
+            assert(old_indices.contains(i as usize));
+        } else {
+            assert(i == at && ready);
+        }
+        if ready {
+            vstd::seq_lib::lemma_seq_contains_after_push(old_indices, at, i as usize);
+        }
+    };
+}
+
+#[verifier::spinoff_prover]
+proof fn extend_nor_selection(
+    prepared: &PreparedExpansionBody, at: usize, root: &PreparedNorRoot, ready: bool,
+    before: Seq<NorDefinition>, after: Seq<NorDefinition>,
+)
+    requires
+        at < prepared.nor_roots@.len(), *root == prepared.nor_roots@[at as int],
+        ready == nor_definition_determined(root, prepared.projections.call_arguments.arguments@),
+        nor_selection_prefix(prepared, at as int, before),
+        after == if ready { before.push(NorDefinition { index: at, root }) } else { before },
+    ensures nor_selection_prefix(prepared, at + 1, after),
+{
+    reveal(nor_selection_prefix);
+    let arguments = prepared.projections.call_arguments.arguments@;
+    let count = before.len() as int;
+    assert(after.len() == count + if ready { 1int } else { 0int });
+    assert(after.take(count) =~= before);
+    if ready {
+        assert(after[count] == (NorDefinition { index: at, root }));
+    }
+    assert forall|i: int| 0 <= i < after.len() implies {
+        let row = #[trigger] after[i];
+        &&& row.index < at + 1 && *row.root == prepared.nor_roots@[row.index as int]
+        &&& nor_definition_determined(row.root, arguments)
+    } by {
+        if i < count {
+            assert(after[i] == before[i]);
+            assert(before[i].index < at);
+        } else {
+            assert(i == count && ready);
+        }
+    };
+    assert forall|a: int, b: int| 0 <= a < b < after.len() implies
+        (#[trigger] after[a]).index < (#[trigger] after[b]).index by {
+        assert(a < count && after[a] == before[a]);
+        if b < count {
+            assert(after[b] == before[b]);
+        } else {
+            assert(b == count && ready);
+            assert(before[a].index < at);
+        }
+    };
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     #[verifier::opaque]
     pub(super) closed spec fn expansion_definition_prefix(
-        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, slots: Seq<CheckedBitDefinition>,
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, roots: Seq<NorDefinition>,
+        slots: Seq<CheckedBitDefinition>,
     ) -> bool {
         &&& slots.len() <= scope.types@.len()
         &&& forall|at: int| 0 <= at < slots.len() ==> {
@@ -166,10 +348,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if call_covers(calls, at) {
                 exists|group: int| 0 <= group < calls.len()
                     && #[trigger] projected_call_slot(calls, group, at, slot)
+            } else if nor_covers(roots, at) {
+                exists|index: int| 0 <= index < roots.len() && #[trigger] projected_nor_slot(roots, index, at, slot)
             } else {
                 self.bit_definition_from_source(scope, slots.take(at), at, slot)
             }
         }
+    }
+
+    /// 根 NOR が型、元の定義、他の投影と両立することを表す。
+    #[verifier::opaque]
+    pub(super) closed spec fn body_nor_slots_match(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, roots: Seq<NorDefinition>,
+        concats: Seq<ConcatProjection>,
+    ) -> bool {
+        &&& forall|index: int| 0 <= index < roots.len() ==> {
+            let row = #[trigger] roots[index];
+            let at = row.root.output_slot as int;
+            &&& at < scope.types@.len() && at < scope.wiring.drivers.definitions@.len()
+            &&& location_in_source(row.root.root.expression)
+            &&& !call_covers(calls, at)
+            &&& scope.types@[at] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1)
+            &&& scope.wiring.drivers.definitions@[at].definition == row.root.definition
+            &&& scope.wiring.drivers.definitions@[at].result_index == 0
+            &&& forall|j: int| 0 <= j < scope.structures@.len() ==> (#[trigger] scope.structures@[j]).target != at
+            &&& forall|j: int| 0 <= j < concats.len() ==> (#[trigger] concats[j]).target != at
+        }
+        &&& forall|a: int, b: int| 0 <= a < b < roots.len() ==>
+            (#[trigger] roots[a]).root.output_slot < (#[trigger] roots[b]).root.output_slot
     }
 
     #[verifier::opaque]
@@ -194,7 +400,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn special_projections_outside_call(
-        &self, scope: &FuncProjection, call: CheckedExpansionCall, definition: usize,
+        &self, scope: &FuncProjection, outputs: core::ops::Range<usize>, definition: usize,
         concats: Seq<ConcatProjection>,
     )
         requires
@@ -203,15 +409,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let expr = scope.parsed.definitions@[definition as int].expression;
                 ordinary_call_at(scope.source.text, scope.parsed.syntax.forms@, expr.start as int, expr.end as int)
             }),
-            forall|i: int| call.outputs.start <= i < call.outputs.end ==>
+            forall|i: int| outputs.start <= i < outputs.end ==>
                 (#[trigger] scope.wiring.drivers.definitions@[i]).definition == definition,
             concat_projections_match(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
                 scope.wiring, scope.types@, concats),
         ensures
             forall|j: int| 0 <= j < scope.structures@.len() ==>
-                !(call.outputs.start <= (#[trigger] scope.structures@[j]).target < call.outputs.end),
+                !(outputs.start <= (#[trigger] scope.structures@[j]).target < outputs.end),
             forall|j: int| 0 <= j < concats.len() ==>
-                !(call.outputs.start <= (#[trigger] concats[j]).target < call.outputs.end),
+                !(outputs.start <= (#[trigger] concats[j]).target < outputs.end),
     {
         let expr = scope.parsed.definitions@[definition as int].expression;
         ordinary_call_excludes_special_forms(scope.source.text, scope.parsed.syntax.forms@,
@@ -220,24 +426,159 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             scope.wiring, scope.types@, concats);
 
         assert forall|j: int| 0 <= j < concats.len() implies
-            !(call.outputs.start <= (#[trigger] concats[j]).target < call.outputs.end) by {
+            !(outputs.start <= (#[trigger] concats[j]).target < outputs.end) by {
             let row = concats[j];
-            if call.outputs.start <= row.target < call.outputs.end {
+            if outputs.start <= row.target < outputs.end {
                 assert(scope.wiring.drivers.definitions@[row.target as int].definition == definition);
                 concat_projection_positions(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
                     scope.wiring, scope.types@, row);
             }
         };
         assert forall|j: int| 0 <= j < scope.structures@.len() implies
-            !(call.outputs.start <= (#[trigger] scope.structures@[j]).target < call.outputs.end) by {
+            !(outputs.start <= (#[trigger] scope.structures@[j]).target < outputs.end) by {
             let row = scope.structures@[j];
-            if call.outputs.start <= row.target < call.outputs.end {
+            if outputs.start <= row.target < outputs.end {
                 assert(scope.wiring.drivers.definitions@[row.target as int].definition == definition);
                 assert(scope.layouts.is_some());
                 let table = scope.layouts->Some_0;
                 ordinary_call_excludes_structure_projection(self, scope.file, scope.entry, scope.limit,
                     scope.wiring, *table, scope.types@, row);
             }
+        };
+    }
+
+    proof fn nor_selection_argument_ranges(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, at: int,
+    )
+        requires
+            self.can_resolve(), self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= at < prepared.nor_roots@.len(),
+        ensures nor_definition_ranges_fit(&prepared.nor_roots@[at], prepared.projections.call_arguments.arguments@.len()),
+    {
+        self.nor_root_template_evidence(plan, caller, prepared, at);
+        reveal(nor_definition_ranges_fit);
+        let root = prepared.nor_roots@[at];
+        let len = prepared.projections.call_arguments.arguments@.len();
+        assert forall|i: int| 0 <= i < root.postorder@.len() implies {
+            let row = #[trigger] root.postorder@[i];
+            row.arguments.start <= row.arguments.end <= len
+        } by {
+            assert(self.expression_template_ready(&plan, caller.2, root._caller_rank@, len, root.postorder@[i]));
+        };
+    }
+
+    /// 展開できる根 NOR を集め、元の候補添字を残す。
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(40)]
+    pub(super) fn select_nor_definitions<'s>(
+        &self, prepared: &'s PreparedExpansionBody<'p, 'a>,
+        Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(caller): Ghost<(usize, usize, u64)>,
+    ) -> (selected: Vec<NorDefinition<'s, 'p, 'a>>)
+        requires self.can_resolve(), self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+        ensures
+            forall|i: int| 0 <= i < selected@.len() ==> {
+                let row = #[trigger] selected@[i];
+                &&& row.index < prepared.nor_roots@.len() && *row.root == prepared.nor_roots@[row.index as int]
+                &&& nor_definition_determined(row.root, prepared.projections.call_arguments.arguments@)
+            },
+            forall|a: int, b: int| 0 <= a < b < selected@.len() ==> (#[trigger] selected@[a]).index < (#[trigger] selected@[b]).index,
+            forall|i: int| 0 <= i < prepared.nor_roots@.len()
+                && nor_definition_determined(&prepared.nor_roots@[i], prepared.projections.call_arguments.arguments@) ==>
+                exists|j: int| 0 <= j < selected@.len() && #[trigger] selected@[j].index == i,
+    {
+        let mut selected: Vec<NorDefinition<'s, 'p, 'a>> = Vec::new();
+        let arguments = prepared.projections.call_arguments.arguments.as_slice();
+        let mut at = 0;
+        proof {
+            assert forall|i: int| 0 <= i < prepared.nor_roots@.len() implies
+                nor_definition_ranges_fit(&(#[trigger] prepared.nor_roots@[i]), arguments@.len()) by {
+                self.nor_selection_argument_ranges(plan, caller, prepared, i);
+            };
+        }
+        assert(nor_selection_prefix(prepared, 0, selected@)) by { reveal(nor_selection_prefix); };
+        assert(nor_selection_covers(prepared, 0, nor_selection_indices(selected@))) by { reveal(nor_selection_covers); };
+        while at < prepared.nor_roots.len()
+            invariant
+                arguments@ == prepared.projections.call_arguments.arguments@,
+                at <= prepared.nor_roots@.len(),
+                forall|i: int| 0 <= i < prepared.nor_roots@.len() ==>
+                    nor_definition_ranges_fit(&(#[trigger] prepared.nor_roots@[i]), arguments@.len()),
+                nor_selection_prefix(prepared, at as int, selected@),
+                nor_selection_covers(prepared, at as int, nor_selection_indices(selected@)),
+            decreases prepared.nor_roots@.len() - at,
+        {
+            let root = &prepared.nor_roots[at];
+            let ghost before = selected@;
+            let ready = nor_definition_determined_exec(root, arguments);
+            if ready {
+                selected.push(NorDefinition { index: at, root });
+            }
+            proof {
+                extend_nor_selection(prepared, at, root, ready, before, selected@);
+                extend_nor_selection_coverage(prepared, at, root, ready, before, selected@);
+            }
+            at += 1;
+        }
+        reveal(nor_selection_prefix);
+        proof {
+            reveal(nor_selection_covers);
+            let indices = nor_selection_indices(selected@);
+            assert forall|i: int| 0 <= i < prepared.nor_roots@.len()
+                && nor_definition_determined(&prepared.nor_roots@[i], arguments@) implies
+                exists|j: int| 0 <= j < selected@.len() && #[trigger] selected@[j].index == i by {
+                assert(indices.contains(i as usize));
+                let j = choose|j: int| 0 <= j < indices.len() && indices[j] == i as usize;
+                assert(indices[j] == selected@[j].index);
+            };
+        }
+        selected
+    }
+
+    /// 選択した根 NOR が、元の定義位置と1ビット幅を保つことを示す。
+    pub(super) proof fn prepared_nor_slots_fit_body(
+        &self, scope: &FuncProjection, plan: FunctionExpansionOrder, prepared: &PreparedExpansionBody,
+        roots: Seq<NorDefinition>,
+    )
+        requires
+            self.projection_context(scope), self.projection_structures_match(scope),
+            self.prepared_expansion_body_matches(plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            forall|i: int| 0 <= i < roots.len() ==> {
+                let row = #[trigger] roots[i];
+                &&& row.index < prepared.nor_roots@.len() && *row.root == prepared.nor_roots@[row.index as int]
+            },
+            forall|i: int, j: int| 0 <= i < j < roots.len() ==> (#[trigger] roots[i]).index < (#[trigger] roots[j]).index,
+        ensures self.body_nor_slots_match(scope, prepared.calls@, roots, prepared.projections.concats@),
+    {
+        reveal(UseAliases::body_nor_slots_match);
+        reveal(UseAliases::nor_call_slots_disjoint);
+        let concats = prepared.projections.concats@;
+        let calls = prepared.calls@;
+        vstd::std_specs::vec::axiom_spec_len(scope.types);
+        assert(scope.types@.len() <= usize::MAX);
+        assert forall|i: int| 0 <= i < roots.len() implies {
+            let row = #[trigger] roots[i];
+            let at = row.root.output_slot as int;
+            &&& at < scope.types@.len() && at < scope.wiring.drivers.definitions@.len()
+            &&& location_in_source(row.root.root.expression)
+            &&& !call_covers(calls, at)
+            &&& scope.types@[at] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1)
+            &&& scope.wiring.drivers.definitions@[at].definition == row.root.definition
+            &&& scope.wiring.drivers.definitions@[at].result_index == 0
+            &&& forall|j: int| 0 <= j < scope.structures@.len() ==> (#[trigger] scope.structures@[j]).target != at
+            &&& forall|j: int| 0 <= j < concats.len() ==> (#[trigger] concats[j]).target != at
+        } by {
+            let row = roots[i];
+            let at = row.root.output_slot;
+            self.prepared_nor_output_evidence(plan, (scope.file, scope.entry, scope.limit), prepared, row.index as int);
+            assert(!call_covers(calls, at as int));
+            assert(at < scope.types@.len() && at as int + 1 <= usize::MAX);
+            let end = (at + 1) as usize;
+            assert(end == at as int + 1);
+            assert(scope.wiring.drivers.definitions@[at as int].definition == row.root.definition);
+            self.special_projections_outside_call(scope, at..end, row.root.definition, concats);
         };
     }
 
@@ -276,7 +617,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.expansion_call_output_types(plan, caller, prepared.typed, scope.wiring, root,
                 prepared.projections.call_arguments.ranges@[i], &prepared.projections.call_arguments, call);
             self.call_definition_widths_from_signature(scope, &call, widths[i]@);
-            self.special_projections_outside_call(scope, call, root.definition, concats);
+            self.special_projections_outside_call(scope, call.outputs, root.definition, concats);
         };
     }
 
@@ -726,7 +1067,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         match result {
             Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
-                && self.expansion_definition_prefix(scope, calls, slots@)
+                && self.expansion_definition_prefix(scope, calls, Seq::empty(), slots@)
                 && self.definition_widths_match(scope, slots@)
                 && (forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls, slot) ==>
                     bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]))
@@ -752,7 +1093,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     #[trigger] expression_argument_matches_width(scope.source, scope.parsed.syntax.forms@,
                         scope.inputs@, slots@, selected[group], child, port, scope.limit),
             Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
-                #[trigger] self.expansion_definition_prefix(scope, calls, prefix)
+                #[trigger] self.expansion_definition_prefix(scope, calls, Seq::empty(), prefix)
                 && self.definition_widths_match(scope, prefix)
                 && prefix.len() < scope.wiring.drivers.definitions@.len()
                 && !call_covers(calls, prefix.len() as int)
@@ -827,7 +1168,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             self.prepared_calls_fit_body(scope, plan, &prepared, call_widths@);
         }
-        let result = self.project_definition_body(scope, calls, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed));
+        let roots: &[NorDefinition] = &[];
+        assert(roots@ =~= Seq::empty());
+        assert(self.body_nor_slots_match(scope, calls@, roots@, concats@)) by {
+            reveal(UseAliases::body_nor_slots_match);
+        };
+        let result = self.project_definition_body(scope, calls, roots, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed));
         proof {
             if let Ok(slots) = &result {
                 reveal(UseAliases::body_calls_match);
@@ -891,32 +1237,41 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     proof fn keep_body_prefix(
-        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>,
-        before: Seq<CheckedBitDefinition>, after: Seq<CheckedBitDefinition>, active: Option<usize>,
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, roots: Seq<NorDefinition>,
+        before: Seq<CheckedBitDefinition>, after: Seq<CheckedBitDefinition>,
+        active: ExpansionSlot, group: usize, nor: usize,
     )
         requires
-            self.expansion_definition_prefix(scope, calls, before),
+            self.expansion_definition_prefix(scope, calls, roots, before),
             before.len() < after.len() <= scope.types@.len(),
             after.take(before.len() as int) == before,
             forall|j: int| 0 <= j < before.len() ==>
                 location_in_source((#[trigger] before[j]).expression) && before[j].width > 0,
             match active {
-                Some(g) => {
-                    &&& g < calls.len()
-                    &&& calls[g as int].outputs.start == before.len()
-                    &&& calls[g as int].outputs.end == after.len()
-                    &&& location_in_source(calls[g as int].expression)
+                ExpansionSlot::Function => {
+                    &&& group < calls.len()
+                    &&& calls[group as int].outputs.start == before.len()
+                    &&& calls[group as int].outputs.end == after.len()
+                    &&& location_in_source(calls[group as int].expression)
                     &&& forall|j: int| before.len() <= j < after.len() ==>
-                        projected_call_slot(calls, g as int, j, #[trigger] after[j]) && after[j].width > 0
+                        projected_call_slot(calls, group as int, j, #[trigger] after[j]) && after[j].width > 0
                 },
-                None => {
+                ExpansionSlot::Nor => {
+                    &&& nor < roots.len()
                     &&& after.len() == before.len() + 1
                     &&& !call_covers(calls, before.len() as int)
+                    &&& projected_nor_slot(roots, nor as int, before.len() as int, after[before.len() as int])
+                    &&& location_in_source(roots[nor as int].root.root.expression)
+                },
+                ExpansionSlot::Local => {
+                    &&& after.len() == before.len() + 1
+                    &&& !call_covers(calls, before.len() as int)
+                    &&& !nor_covers(roots, before.len() as int)
                     &&& self.bit_definition_from_source(scope, before, before.len() as int, after[before.len() as int])
                 },
             },
         ensures
-            self.expansion_definition_prefix(scope, calls, after),
+            self.expansion_definition_prefix(scope, calls, roots, after),
             forall|j: int| 0 <= j < after.len() ==>
                 location_in_source((#[trigger] after[j]).expression) && after[j].width > 0,
     {
@@ -926,6 +1281,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& location_in_source(slot.expression) && slot.width > 0
             &&& if call_covers(calls, j) {
                 exists|g: int| 0 <= g < calls.len() && #[trigger] projected_call_slot(calls, g, j, slot)
+            } else if nor_covers(roots, j) {
+                exists|n: int| 0 <= n < roots.len() && #[trigger] projected_nor_slot(roots, n, j, slot)
             } else {
                 self.bit_definition_from_source(scope, after.take(j), j, slot)
             }
@@ -936,15 +1293,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 if call_covers(calls, j) {
                     let g = choose|g: int| 0 <= g < calls.len() && #[trigger] projected_call_slot(calls, g, j, before[j]);
                     assert(projected_call_slot(calls, g, j, after[j]));
+                } else if nor_covers(roots, j) {
+                    let n = choose|n: int| 0 <= n < roots.len() && #[trigger] projected_nor_slot(roots, n, j, before[j]);
+                    assert(projected_nor_slot(roots, n, j, after[j]));
                 } else {
                     assert(self.bit_definition_from_source(scope, before.take(j), j, before[j]));
                 }
-            } else if let Some(g) = active {
-                assert(projected_call_slot(calls, g as int, j, after[j]));
-                assert(call_covers(calls, j));
             } else {
-                assert(j == before.len());
-                assert(after.take(j) == before);
+                match active {
+                    ExpansionSlot::Function => {
+                        assert(projected_call_slot(calls, group as int, j, after[j]));
+                        assert(call_covers(calls, j));
+                    },
+                    ExpansionSlot::Nor => {
+                        assert(j == before.len());
+                        assert(projected_nor_slot(roots, nor as int, j, after[j]));
+                        assert(nor_covers(roots, j));
+                    },
+                    ExpansionSlot::Local => {
+                        assert(j == before.len());
+                        assert(after.take(j) == before);
+                    },
+                }
             }
         };
     }
@@ -967,6 +1337,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if group < g {
                 assert(calls[group as int].outputs.end <= calls[g].outputs.start);
             }
+        };
+    }
+
+    proof fn extend_nor_definition_widths(
+        &self, scope: &FuncProjection, before: Seq<CheckedBitDefinition>, after: Seq<CheckedBitDefinition>,
+    )
+        requires
+            self.definition_widths_match(scope, before),
+            after.len() == before.len() + 1 <= scope.types@.len(),
+            after.take(before.len() as int) == before,
+            scope.types@[before.len() as int] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+            after[before.len() as int].width == 1,
+        ensures self.definition_widths_match(scope, after),
+    {
+        reveal(UseAliases::definition_widths_match);
+        let at = before.len() as int;
+        assert(self.port_width_matches(ResolvedPortType::Bits(1), 1, scope.layouts));
+        assert forall|j: int| 0 <= j < after.len() implies {
+            let checked = #[trigger] after[j];
+            scope.types@[j] matches Some(ty) && self.port_width_matches(ty.ty, checked.width, scope.layouts)
+        } by {
+            if j < at { assert(after[j] == before[j]); }
         };
     }
 
@@ -997,7 +1389,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::body_calls_match);
         let calls: &[CheckedExpansionCall] = &[];
         assert(calls@ =~= Seq::empty());
-        let result = self.project_definition_body(scope, calls, &[], literal_widths, concats, Ghost(typed));
+        let roots: &[NorDefinition] = &[];
+        assert(roots@ =~= Seq::empty());
+        assert(self.body_nor_slots_match(scope, calls@, roots@, concats@)) by {
+            reveal(UseAliases::body_nor_slots_match);
+        };
+        let result = self.project_definition_body(scope, calls, roots, &[], literal_widths, concats, Ghost(typed));
         proof {
             reveal(UseAliases::expansion_definition_prefix);
             reveal(UseAliases::definition_prefix);
@@ -1005,7 +1402,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(slots) => { assert(self.definition_prefix(scope, slots@)); },
                 Err(error) => {
                     let prefix = choose|prefix: Seq<CheckedBitDefinition>|
-                        #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                        #[trigger] self.expansion_definition_prefix(scope, calls@, Seq::empty(), prefix)
                         && self.definition_widths_match(scope, prefix)
                         && prefix.len() < scope.wiring.drivers.definitions@.len()
                         && !call_covers(calls@, prefix.len() as int)
@@ -1023,10 +1420,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// # Errors
     ///
     /// 通常の右辺を取り出せない場合は、定義順で最初に失敗した式の診断を返す。
-    #[verifier::rlimit(32)]
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(72)]
     pub(super) fn project_definition_body<'b>(
         &self, scope: &FuncProjection<'_, 'p, 'a>, calls: &[CheckedExpansionCall<'p, 'a>],
-        call_widths: &[&'b [u64]], literal_widths: &[Option<u64>], mut concats: Vec<ConcatProjection>,
+        roots: &[NorDefinition<'_, 'p, 'a>], call_widths: &[&'b [u64]], literal_widths: &[Option<u64>], mut concats: Vec<ConcatProjection>,
         Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
     ) -> (result: Result<Vec<CheckedBitDefinition<'p, 'a>>, BitFuncError<'p, 'a>>)
         requires
@@ -1043,15 +1441,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             super::super::super::function_atoms::concat_projections_match(scope.file, scope.entry, scope.limit,
                 scope.source, scope.parsed, scope.wiring, scope.types@, concats@),
             self.body_calls_match(scope, calls@, call_widths@, concats@),
+            self.body_nor_slots_match(scope, calls@, roots@, concats@),
         ensures match result {
             Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
-                && self.expansion_definition_prefix(scope, calls@, slots@)
+                && self.expansion_definition_prefix(scope, calls@, roots@, slots@)
                 && self.definition_widths_match(scope, slots@),
             Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
-                #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                #[trigger] self.expansion_definition_prefix(scope, calls@, roots@, prefix)
                 && self.definition_widths_match(scope, prefix)
                 && prefix.len() < scope.wiring.drivers.definitions@.len()
                 && !call_covers(calls@, prefix.len() as int)
+                && !nor_covers(roots@, prefix.len() as int)
                 && self.definition_error(scope, prefix, error),
         },
     {
@@ -1059,14 +1459,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut slots: Vec<CheckedBitDefinition<'p, 'a>> = Vec::new();
         let mut i = 0usize;
         let mut group = 0usize;
+        let mut nor = 0usize;
         let mut next_structure = 0usize;
         let mut next_concat = 0usize;
         proof {
             concat_projections_order(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
                 scope.wiring, scope.types@, concat_model);
             reveal(concat_cursor_ready);
-            reveal(UseAliases::expansion_definition_prefix);
-            reveal(UseAliases::definition_widths_match);
+            assert(self.expansion_definition_prefix(scope, calls@, roots@, slots@)) by {
+                reveal(UseAliases::expansion_definition_prefix);
+            };
+            assert(self.definition_widths_match(scope, slots@)) by {
+                reveal(UseAliases::definition_widths_match);
+            };
         }
         while i < scope.wiring.drivers.definitions.len()
             invariant
@@ -1081,10 +1486,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
                 self.func_concat_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, concat_model),
                 self.body_calls_match(scope, calls@, call_widths@, concat_model),
+                self.body_nor_slots_match(scope, calls@, roots@, concat_model),
                 i == slots@.len() <= scope.wiring.drivers.definitions@.len(),
                 group <= calls@.len(),
                 forall|j: int| 0 <= j < group ==> (#[trigger] calls@[j]).outputs.end <= i,
                 forall|j: int| group <= j < calls@.len() ==> i <= (#[trigger] calls@[j]).outputs.start,
+                nor <= roots@.len(),
+                forall|j: int| 0 <= j < nor ==> (#[trigger] roots@[j]).root.output_slot < i,
+                forall|j: int| nor <= j < roots@.len() ==> i <= (#[trigger] roots@[j]).root.output_slot,
                 next_structure <= scope.structures@.len(),
                 forall|j: int| 0 <= j < next_structure ==> (#[trigger] scope.structures@[j]).target < i,
                 forall|j: int| next_structure <= j < scope.structures@.len() ==> i <= (#[trigger] scope.structures@[j]).target,
@@ -1094,7 +1503,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 forall|j: int| 0 <= j < concat_model.len() ==> concat_projection_matches(
                     scope.file, scope.entry, scope.limit, scope.source, scope.parsed, scope.wiring, scope.types@,
                     #[trigger] concat_model[j]),
-                self.expansion_definition_prefix(scope, calls@, slots@),
+                self.expansion_definition_prefix(scope, calls@, roots@, slots@),
                 self.definition_widths_match(scope, slots@),
                 forall|j: int| 0 <= j < slots@.len() ==>
                     location_in_source((#[trigger] slots@[j]).expression) && slots@[j].width > 0,
@@ -1102,7 +1511,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         {
             let ghost before = slots@;
             let head = if group < calls.len() { Some(calls[group].outputs.start) } else { None };
-            if matches!(expansion_call_at_slot(head, None, i), ExpansionSlot::Function) {
+            let nor_head = if nor < roots.len() { Some(roots[nor].root.output_slot) } else { None };
+            proof {
+                reveal(UseAliases::body_nor_slots_match);
+                if group < calls.len() && nor < roots.len() {
+                    reveal(UseAliases::body_calls_match);
+                    let at = roots@[nor as int].root.output_slot as int;
+                    assert(!call_covers(calls@, at));
+                    if calls@[group as int].outputs.start == at {
+                        assert(call_covers(calls@, at));
+                    }
+                }
+            }
+            let kind = expansion_call_at_slot(head, nor_head, i);
+            if matches!(kind, ExpansionSlot::Function) {
                 let call = &calls[group];
                 proof { reveal(UseAliases::body_calls_match); }
                 self.append_call_definitions(scope, call, group, call_widths[group], &mut slots);
@@ -1114,7 +1536,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         let port = j - call.outputs.start;
                         assert(slots@[call.outputs.start + port] == slots@[j]);
                     };
-                    self.keep_body_prefix(scope, calls@, before, slots@, Some(group));
+                    self.keep_body_prefix(scope, calls@, roots@, before, slots@, ExpansionSlot::Function, group, nor);
+                    assert forall|j: int| nor <= j < roots@.len() implies
+                        call.outputs.end <= (#[trigger] roots@[j]).root.output_slot by {
+                        assert(calls@[group as int] == *call);
+                        assert(!call_covers(calls@, roots@[j].root.output_slot as int));
+                    };
                     assert forall|j: int| group < j < calls@.len() implies
                         call.outputs.end <= (#[trigger] calls@[j]).outputs.start by {
                         assert(calls@[group as int].outputs.end <= calls@[j].outputs.start);
@@ -1140,6 +1567,41 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Self::next_call_is_later(calls@, group, i);
             }
 
+            if matches!(kind, ExpansionSlot::Nor) {
+                let row = &roots[nor];
+                let slot = CheckedBitDefinition { expression: copy_location(&row.root.root.expression),
+                    width: 1, rhs: BitFuncRhs::NorCallOutput { root: row.index }, operands: Vec::new() };
+                slots.push(slot);
+                proof {
+                    assert(slots@.take(before.len() as int) =~= before);
+                    self.keep_body_prefix(scope, calls@, roots@, before, slots@, ExpansionSlot::Nor, group, nor);
+                    self.extend_nor_definition_widths(scope, before, slots@);
+                    assert forall|j: int| nor < j < roots@.len() implies
+                        i < (#[trigger] roots@[j]).root.output_slot by {
+                        assert(roots@[nor as int] == *row);
+                    };
+                    assert forall|j: int| next_structure <= j < scope.structures@.len() implies
+                        i < (#[trigger] scope.structures@[j]).target by {};
+                    reveal(concat_cursor_ready);
+                    assert forall|j: int| next_concat <= j < concat_model.len() implies
+                        i < (#[trigger] concat_model[j]).target by {
+                        assert(concats@[j] == concat_model[j]);
+                        assert(i <= concat_model[j].target);
+                        assert(concat_model[j].target != i);
+                    };
+                }
+                i += 1;
+                nor += 1;
+                continue;
+            }
+            proof {
+                assert forall|j: int| nor <= j < roots@.len() implies
+                    i < (#[trigger] roots@[j]).root.output_slot by {
+                    if nor < j { assert(roots@[nor as int].root.output_slot < roots@[j].root.output_slot); }
+                };
+                assert(!nor_covers(roots@, i as int));
+            }
+
             let (cursor, structure) = next_structure_projection(scope.structures.as_slice(), next_structure, i);
             next_structure = cursor;
             let (cursor, concat) = take_concat_projection(&mut concats, next_concat, i, Ghost(concat_model));
@@ -1157,10 +1619,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(slot) => slot,
                 Err(error) => {
                     assert(exists|prefix: Seq<CheckedBitDefinition>|
-                        #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                        #[trigger] self.expansion_definition_prefix(scope, calls@, roots@, prefix)
                         && self.definition_widths_match(scope, prefix)
                         && prefix.len() < scope.wiring.drivers.definitions@.len()
                         && !call_covers(calls@, prefix.len() as int)
+                        && !nor_covers(roots@, prefix.len() as int)
                         && self.definition_error(scope, prefix, error));
                     return Err(error);
                 },
@@ -1169,7 +1632,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             slots.push(slot);
             proof {
                 assert(slots@.take(before.len() as int) =~= before);
-                self.keep_body_prefix(scope, calls@, before, slots@, None);
+                self.keep_body_prefix(scope, calls@, roots@, before, slots@, ExpansionSlot::Local, group, nor);
             }
             i += 1;
         }
@@ -1570,6 +2033,52 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
             original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
         result
+    }
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn projects_ready_nor_roots_and_preserves_unsupported_definition_order() {
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let text = "(using nor) (func id (in a) (out a))
+        (func supported (in a) (out y)
+            (def p (id a)) (def x (nor (nor p a) a)) (def y x))
+        (func unsupported (in a) (out y)
+            (def x (nor (id (bit a 0)) a))
+            (def y (nor (nor x a) a)))";
+    let project = parse_circuit_project(&[SourceSnapshot { path: "nor-definitions.ncg2", revision: 1, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    for entry in [2usize, 3usize] {
+        let prepared = aliases.prepare_expansion_body(&plan, 0, entry, 8).unwrap();
+        let FuncWiringResult::Checked(wiring) = &prepared.typed.literals.wiring else {
+            panic!("expected checked wiring");
+        };
+        let ports = aliases.prepare_expanded_routine_ports(0, entry, 8, wiring, None, &[]).unwrap();
+        let scope = FuncProjection { file: 0, entry, limit: 8, source: &project.sources()[0],
+            parsed: &project.circuits()[0], wiring, inputs: &ports.inputs, outputs: &ports.outputs,
+            structures: &prepared.projections.entries };
+        let roots = aliases.select_nor_definitions(&prepared, Ghost(plan), Ghost((0usize, entry, 8u64)));
+        let [row] = roots.as_slice() else { panic!("expected one ready root"); };
+        let widths: &[&[u64]] = if entry == 2 { &[&[1]] } else { &[] };
+        let result = aliases.project_definition_body(&scope, &prepared.calls, &roots, widths,
+            &prepared.typed.literals.widths, Vec::new(), Ghost(prepared.typed));
+        if entry == 2 {
+            let slots = result.unwrap();
+            assert_eq!((row.index, row.root.output_slot), (0, 1));
+            assert!(matches!(slots[0].rhs, BitFuncRhs::CallOutput { group: 0, port: 0 }));
+            assert!(matches!(slots[1].rhs, BitFuncRhs::NorCallOutput { root: 0 }));
+            assert_eq!(slots[1].width, 1);
+            assert!(matches!(slots[2].rhs, BitFuncRhs::Driver(OutputDriver::Definition(1))));
+        } else {
+            assert_eq!((row.index, row.root.output_slot), (1, 1));
+            let Err(BitFuncError::Unsupported(_, site)) = result else {
+                panic!("expected the preceding unsupported definition");
+            };
+            assert_eq!(&text[site.span], "(nor (id (bit a 0)) a)");
+        }
     }
 }
 
