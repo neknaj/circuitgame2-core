@@ -215,6 +215,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& plan.position_model(source) == Some((caller.0, caller.1))
             &&& group.vertex == plan.order_model()[callee]
             &&& group._signature@.signature matches crate::project::FuncCallSignature::Function(signature)
+            &&& *group.expression.source == self.targets.project_model().sources_model()[caller.0 as int]
             &&& group.arguments == prepared.projections.call_arguments.ranges@[index]
             &&& group.arguments.start <= group.arguments.end <= prepared.projections.call_arguments.arguments@.len()
             &&& group.arguments.end - group.arguments.start == signature.inputs@.len()

@@ -523,6 +523,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 比較した二つのポート型が、同じ配置表で同じ表現幅を持つことを示す。
+    proof fn equivalent_port_widths(
+        &self, layouts: Option<&StructureLayouts>, left: ResolvedPortType, left_width: u64,
+        right: ResolvedPortType, right_width: u64,
+    )
+        requires
+            self.can_resolve(),
+            self.port_width_matches(left, left_width, layouts),
+            self.port_width_matches(right, right_width, layouts),
+            crate::project::port_types_equal(left, right),
+        ensures left_width == right_width,
+    {
+        if let ResolvedPortType::Struct { .. } = left {
+            let table = layouts->Some_0;
+            self.layout_port_is_declared(table, left, left_width as int);
+            self.layout_port_is_declared(table, right, right_width as int);
+            self.equivalent_declared_port_types(left, right);
+            self.layout_port_widths_agree(table, left, left_width as int, right_width as int);
+        }
+    }
+
     spec fn port_widths_match(&self, ports: Seq<TypedPort>, widths: Seq<u64>, layouts: Option<&StructureLayouts>) -> bool {
         &&& widths.len() == ports.len()
         &&& forall|i: int| 0 <= i < widths.len() ==> self.port_width_matches(ports[i].ty, #[trigger] widths[i], layouts)

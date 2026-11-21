@@ -169,6 +169,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 解決済みのポート型を完全修飾名で比較すると、構造体の元宣言も一致する。
+    pub(super) proof fn equivalent_declared_port_types(&self, left: ResolvedPortType, right: ResolvedPortType)
+        requires
+            self.can_resolve(), self.declared_port_type(left), self.declared_port_type(right), port_types_equal(left, right),
+        ensures left == right,
+    {
+        if let (ResolvedPortType::Struct { source: a, form: af }, ResolvedPortType::Struct { source: b, form: bf }) =
+            (left, right) {
+            let table = &self.targets.exports_model().declarations_model();
+            let key = form_key(*af);
+            crate::project::declarations::same_declaration_key(table, form_key(*bf), key, b, bf);
+            self.targets.declarations_cover_project();
+            crate::project::declarations::declaration_sites_agree(&self.targets.project_model(), table, key, a, af, b, bf);
+        }
+    }
+
     proof fn typed_ports_are_declared(&self, context: &PortContext, declared: Seq<CheckedPort>, types: Seq<TypedPort>)
         requires self.typed_ports_before(context, declared, types),
         ensures forall|i: int| 0 <= i < types.len() ==> self.declared_port_type((#[trigger] types[i]).ty),

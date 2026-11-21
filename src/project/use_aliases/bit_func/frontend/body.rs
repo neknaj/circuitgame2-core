@@ -11,7 +11,30 @@ use super::super::super::function_atoms::{
 #[cfg(verus_only)]
 use crate::syntax::circuit::{ordinary_call_at, ordinary_call_excludes_special_forms};
 
+#[cfg(verus_only)]
+use crate::project::use_aliases::call_arity::{CallArgumentSource, ProjectedCallArgument};
+#[cfg(verus_only)]
+use super::super::lowering::literal_argument_matches_width;
+
 verus! {
+
+pub(in crate::project::use_aliases::bit_func) open spec fn argument_matches_width(
+    source: &ProjectSource, forms: Seq<Form>, inputs: Seq<u64>, prior: Seq<CheckedBitDefinition>,
+    argument: ProjectedCallArgument, width: u64, limit: u64,
+) -> bool {
+    &&& argument.form < forms.len()
+    &&& match argument.source {
+        CallArgumentSource::Driver(driver) => bit_driver_width(inputs, prior, driver) == Some(width),
+        CallArgumentSource::Literal(bits) => {
+            let span = crate::syntax::form_span(forms[argument.form as int]);
+            let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+            &&& width == bits
+            &&& literal_argument_matches_width(source, forms, argument.form, width as int)
+            &&& circuit_literal_width_matches(bytes, Some(width), limit, Ok(width))
+        },
+        CallArgumentSource::Deferred => true,
+    }
+}
 
 pub(super) open spec fn call_covers(calls: Seq<CheckedExpansionCall>, at: int) -> bool {
     exists|group: int| 0 <= group < calls.len()
@@ -155,6 +178,70 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    /// 呼び出し先のポート幅と、呼び出し元の駆動元またはリテラルの幅を照合する。
+    proof fn prepared_argument_matches_width(
+        &self, scope: &FuncProjection, plan: FunctionExpansionOrder, prepared: &PreparedExpansionBody,
+        selected: ResolvedTemplateCall, group: int, port: int, slots: Seq<CheckedBitDefinition>,
+    )
+        requires
+            self.projection_context(scope), self.projection_port_widths_match(scope),
+            self.structure_layout_for_ports(scope.limit, scope.layouts),
+            self.prepared_expansion_body_matches(plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            self.resolved_template_call_matches(&plan, (scope.file, scope.entry, scope.limit), prepared, group, selected),
+            selected.group.outputs.start <= slots.len(),
+            self.definition_widths_match(scope, slots),
+            0 <= port < selected.arguments@.len(),
+            scope.layouts.is_none() ==>
+                !has_structure_port(selected.template.signature_model().inputs@)
+                    && !has_structure_port(selected.template.signature_model().outputs@),
+        ensures argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+            slots.take(selected.group.outputs.start as int), selected.arguments@[port],
+            selected.template.input_widths_model()[port], scope.limit),
+    {
+        let call = *selected.group;
+        let template = selected.template;
+        let signature = template.signature_model();
+        let inputs = template.input_widths_model();
+        let position = plan.position_model(call._order@.0)->Some_0;
+        self.template_port_evidence(position, scope.limit, template);
+        self.template_widths_in_caller_layout(signature, scope.limit, inputs,
+            template.output_widths_model(), template.structure_layouts_model(), scope.layouts);
+
+        self.expansion_callee_template_evidence(plan, (scope.file, scope.entry, scope.limit), prepared, group);
+        let root = prepared.projections.calls@[group];
+        assert(call == prepared.calls@[group]);
+        self.expansion_argument_evidence(plan, (scope.file, scope.entry, scope.limit), prepared.typed,
+            scope.wiring, root, call.arguments, &prepared.projections.call_arguments, call, port);
+        let arg = selected.arguments@[port];
+        assert(arg == prepared.projections.call_arguments.arguments@[call.arguments.start + port]);
+        let expected = signature.inputs@[port].ty;
+        let width = inputs[port];
+        assert(self.port_width_matches(expected, width, scope.layouts));
+        if let CallArgumentSource::Driver(driver) = arg.source {
+            let prefix = slots.take(call.outputs.start as int);
+            reveal(UseAliases::definition_widths_match);
+            assert forall|i: int| 0 <= i < prefix.len() implies {
+                let definition = #[trigger] prefix[i];
+                scope.types@[i] matches Some(ty) && self.port_width_matches(ty.ty, definition.width, scope.layouts)
+            } by {
+                assert(prefix[i] == slots[i]);
+            };
+            let actual = bit_driver_width(scope.inputs@, prefix, driver)->Some_0;
+            assert(bit_driver_width(scope.inputs@, prefix, driver) == Some(actual)) by {
+                match driver {
+                    OutputDriver::Input(i) => { assert(i < scope.inputs@.len()); },
+                    OutputDriver::Definition(i) => { assert(i < prefix.len()); },
+                }
+            };
+            self.driver_type_matches_width(scope, prefix, driver, actual);
+            let known = signal_type_at(scope.wiring, scope.types@, driver)->Some_0;
+            assert(signal_type_at(scope.wiring, scope.types@.take(prefix.len() as int), driver) == Some(known));
+            self.equivalent_port_widths(scope.layouts, known.ty, actual, expected, width);
+        }
+    }
+
     fn resolved_call_output_widths<'s>(
         &self, scope: &FuncProjection<'_, 'p, 'a>, selected: &[ResolvedTemplateCall<'s, 'p, 'a>],
         Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(prepared): Ghost<PreparedExpansionBody<'p, 'a>>,
@@ -255,7 +342,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures match result {
             Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
                 && self.expansion_definition_prefix(scope, calls@, slots@)
-                && self.definition_widths_match(scope, slots@),
+                && self.definition_widths_match(scope, slots@)
+                && form_spans_valid(scope.source.text, scope.parsed.syntax.forms@, scope.source.text.spec_bytes().len() as int)
+                && (forall|group: int| 0 <= group < selected@.len()
+                    ==> *(#[trigger] selected@[group]).group.expression.source == *scope.source)
+                && forall|group: int, port: int| 0 <= group < selected@.len()
+                    && 0 <= port < selected@[group].arguments@.len() ==>
+                    argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+                        slots@.take(selected@[group].group.outputs.start as int), #[trigger] selected@[group].arguments@[port],
+                        selected@[group].template.input_widths_model()[port], scope.limit),
             Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
                 #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
                 && self.definition_widths_match(scope, prefix)
@@ -274,7 +369,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             self.prepared_calls_fit_body(scope, plan, &prepared, call_widths@);
         }
-        self.project_definition_body(scope, calls, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed))
+        let result = self.project_definition_body(scope, calls, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed));
+        proof {
+            if let Ok(slots) = &result {
+                parsed_index_evidence(*scope.source, *scope.parsed);
+                assert forall|group: int| 0 <= group < selected@.len()
+                    implies *(#[trigger] selected@[group]).group.expression.source == *scope.source by {
+                    self.expansion_callee_template_evidence(plan, (scope.file, scope.entry, scope.limit), &prepared, group);
+                };
+                assert forall|group: int, port: int| 0 <= group < selected@.len()
+                    && 0 <= port < selected@[group].arguments@.len() implies
+                    argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+                        slots@.take(selected@[group].group.outputs.start as int), #[trigger] selected@[group].arguments@[port],
+                        selected@[group].template.input_widths_model()[port], scope.limit) by {
+                    reveal(UseAliases::body_calls_match);
+                    let group_call = calls@[group];
+                    assert(selected@[group].group.outputs.start == group_call.outputs.start);
+                    self.prepared_argument_matches_width(scope, plan, &prepared, selected@[group], group, port, slots@);
+                };
+            }
+        }
+        result
     }
 
     proof fn keep_body_prefix(

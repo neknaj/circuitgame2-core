@@ -48,6 +48,16 @@ pub(super) open spec fn argument_wires_ready(caller: &CallerArguments, argument:
         caller.wires@.len() as int, argument, width)
 }
 
+pub(in crate::project::use_aliases::bit_func) open spec fn literal_argument_matches_width(
+    source: &ProjectSource, forms: Seq<Form>, form: usize, width: int,
+) -> bool {
+    let span = form_span(forms[form as int]);
+    let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+    &&& forms[form as int] is Atom
+    &&& ((width == 1 && bytes.len() == 1 && (bytes[0] == b'0' || bytes[0] == b'1'))
+        || bare_atom_kind(bytes) == Some(AtomKind::Binary) || bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal))
+}
+
 pub(super) open spec fn layout_argument_ready(
     source: &ProjectSource, forms: Seq<Form>, inputs: Seq<Range<usize>>, definitions: Seq<Range<usize>>,
     used: int, argument: ProjectedCallArgument, width: usize,
@@ -56,14 +66,8 @@ pub(super) open spec fn layout_argument_ready(
     &&& match argument.source {
         CallArgumentSource::Driver(driver) => forall|bit: int| 0 <= bit < width ==>
             #[trigger] driver_bit_available(inputs, definitions, used, driver, bit),
-        CallArgumentSource::Literal(bits) => {
-            let span = form_span(forms[argument.form as int]);
-            let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
-            &&& forms[argument.form as int] is Atom
-            &&& width == bits
-            &&& ((width == 1 && bytes.len() == 1 && (bytes[0] == b'0' || bytes[0] == b'1'))
-                || bare_atom_kind(bytes) == Some(AtomKind::Binary) || bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal))
-        },
+        CallArgumentSource::Literal(bits) => width == bits
+            && literal_argument_matches_width(source, forms, argument.form, width as int),
         CallArgumentSource::Deferred => true,
     }
 }

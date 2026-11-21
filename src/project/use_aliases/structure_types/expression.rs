@@ -116,6 +116,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && layouts.representation_width_matches(field, width)
     }
 
+    pub(in crate::project::use_aliases) proof fn layout_port_is_declared(
+        &self, layouts: &StructureLayouts, port: ResolvedPortType, width: int,
+    )
+        requires self.can_resolve(), self.layout_port_width_matches(layouts, port, width),
+        ensures self.declared_port_type(port),
+    {
+        let ty = choose|ty: StructureFieldType| #[trigger] self.expression_port_matches(ty, port)
+            && layouts.representation_width_matches(ty, width);
+        if let StructureFieldType::Struct(position) = ty {
+            self.structure_port_type_resolved(position, Some(port));
+        }
+    }
+
     pub(in crate::project::use_aliases) proof fn layout_port_widths_agree(
         &self, layouts: &StructureLayouts, port: ResolvedPortType, left: int, right: int,
     )
