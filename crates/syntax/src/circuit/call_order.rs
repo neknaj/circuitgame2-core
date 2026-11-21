@@ -5,8 +5,10 @@ use super::*;
 use super::call_shapes::definition_call_index;
 #[cfg(verus_only)]
 use super::expression_forest::{
-    expression_callee_location, expression_references, expression_references_in_order,
+    expression_callee_location, expression_references, expression_references_in_order, expression_root_callee,
 };
+#[cfg(verus_only)]
+use super::expressions::after_form;
 
 verus! {
 
@@ -310,6 +312,49 @@ pub proof fn call_postorder_positions(
         }
         (a, b)
     }
+
+/// 右辺全体が通常呼び出しなら、その参照は順序の最後に現れる。
+pub proof fn root_call_postorder_last(
+    source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,
+    order: Seq<usize>,
+)
+    requires
+        definition_call_index(source, forms, row, references), forms.len() <= usize::MAX,
+        super::expression_forest::ordinary_call_at(source, forms, row.expression.start as int, row.expression.end as int),
+        call_references_in_postorder(forms, references, row.references, order),
+    ensures order.len() > 0, order.last() == row.references.start,
+{
+    let first = row.references.start;
+    let a = row.expression.start as int;
+    let b = row.expression.end as int;
+    row_reference_bounds(source, forms, references, row);
+    assert(after_form(forms, a) == b);
+    expression_root_callee(source, forms, a, b);
+    let refs = expression_references(source, forms, a, b);
+    assert(refs[0] == references[first as int]);
+    reveal(reference_bounds);
+    reveal(call_references_in_postorder);
+    assert(order.contains(first));
+    let at = order.lemma_contains_to_index(first);
+    let last = order.len() - 1;
+    if at < last {
+        let other = order[last];
+        order.lemma_index_contains(last);
+        assert(order.contains(other));
+        assert(first <= other < row.references.end);
+        if first < other {
+            expression_callee_location(source, forms, a, b, other - first);
+            let offset = other - first;
+            assert(expression_references(source, forms, a, b)[offset] == references[other as int]);
+            assert(call_end(forms, references, other) <= b);
+            assert(call_start(references, first) < call_start(references, other));
+        }
+        assert(call_end(forms, references, first) == b);
+        assert(precedes(forms, references, order[at], order[last]));
+        assert(false);
+    }
+    assert(order.last() == order[last]);
+}
 
 /// 定義内の呼び出しを、子から親の順に並べて参照添字を返す。
 ///

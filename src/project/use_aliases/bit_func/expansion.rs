@@ -19,11 +19,44 @@ use crate::project::circuits::form_location;
 use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
+use crate::syntax::circuit::postorder_call_references;
+#[cfg(verus_only)]
+use crate::syntax::circuit::{call_references_in_postorder, root_call_postorder_last};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    #[test]
+    fn prepares_the_nested_call_order_for_a_checked_root() {
+        let text = concat!(
+            "(using nor) (func id (in a) (out a)) ",
+            "(func caller (in a) (out y) ",
+            " (def earlier (id a)) (def y (id (id (nor earlier a)))))",
+        );
+        let project = parse_circuit_project(&[SourceSnapshot { path: "calls.ncg2", revision: 1, text }]).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let aliases = check_use_aliases(&targets).unwrap();
+        let plan = aliases.prepare_function_expansion().unwrap();
+        let prepared = aliases.prepare_expansion_body(&plan, 0, 2, 8).unwrap();
+        assert!(prepared.calls[0].postorder.is_none());
+        let order = prepared.calls[1].postorder.as_deref().unwrap();
+        let refs = &project.circuits()[0].references;
+        let locations: Vec<_> = order.iter().map(|&r| refs[r].span.start).collect();
+        assert_eq!(locations, [
+            text.find("nor earlier").unwrap(),
+            text.find("id (nor").unwrap(),
+            text.find("id (id").unwrap(),
+        ]);
+        assert_eq!(prepared.calls[1].arguments, 1..2);
+    }
+}
 
 verus! {
 
@@ -35,6 +68,8 @@ pub(super) struct CheckedExpansionCall<'p, 'a> {
     pub(super) outputs: Range<usize>,
     /// 関数の平坦な実引数列における区間。
     pub(super) arguments: Range<usize>,
+    /// 右辺に複数の参照がある場合の、子から親へ並べた呼び出し参照。
+    pub(super) postorder: Option<Vec<usize>>,
     /// 展開済み回路を保持する配列における呼び出し先の番号。
     pub(super) vertex: usize,
     pub(super) _signature: Ghost<TypedFuncCall<'p, 'a>>,
@@ -443,7 +478,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let parsed = &project.circuits_model()[file as int];
         let source = &project.sources_model()[file as int];
         let definitions = parsed.entry_ranges@[entry as int].definitions;
-        let expression = parsed.definitions@[root.definition as int].expression;
+        let row = parsed.definitions@[root.definition as int];
+        let expression = row.expression;
         let signature = group._signature@;
         let (callee_at, caller_at) = group._order@;
         &&& self.function_expansion_evidence(Ok(plan))
@@ -456,6 +492,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& is_form_location(source, parsed.syntax.forms@[parsed.definitions@[root.definition as int].expression.start as int],
             group.expression)
         &&& group.arguments == inputs && inputs.start <= inputs.end <= arguments.arguments@.len()
+        &&& match group.postorder {
+            None => row.references.end == row.references.start + 1,
+            Some(order) => row.references.end > row.references.start + 1
+                && call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, order@)
+                && order@.len() > 0 && order@.last() == row.references.start,
+        }
         &&& 0 <= callee_at < caller_at < plan.order_model().len()
         &&& plan.position_model(callee_at) == Some((root.target_file, root.target_entry))
         &&& plan.position_model(caller_at) == Some((file, entry))
@@ -821,13 +863,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 projections.calls@, index as int);
             let start = parsed.entry_ranges[entry].definitions.start;
             let definition = root.definition - start;
+            let row = &parsed.definitions[root.definition];
             proof {
-                let refs = parsed.definitions@[root.definition as int].references;
+                parsed_index_evidence(*source, *parsed);
+                build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
+                let refs = row.references;
                 assert(definition < super::super::definitions::definition_count(parsed, entry as int));
                 assert(super::super::definitions::reference_count(parsed, entry as int, definition as int)
                     == refs.end - refs.start > 0);
             }
-            let arguments = self.retained_call_argument_range(file, entry, definition, 0, &projections.call_arguments,
+            let postorder = if row.references.end - row.references.start == 1 {
+                None
+            } else {
+                let order = postorder_call_references(source.text, forms, row, parsed.references.as_slice());
+                proof {
+                    vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+                    root_call_postorder_last(source.text, forms@, parsed.references@, *row, order@);
+                }
+                Some(order)
+            };
+            let reference = match &postorder {
+                None => 0,
+                Some(order) => order[order.len() - 1] - row.references.start,
+            };
+            assert(reference == 0);
+            let arguments = self.retained_call_argument_range(file, entry, definition, reference, &projections.call_arguments,
                 Ghost(limit), Ghost(typed.types@), Ghost(*wiring), Ghost(projections.calls@));
             assert(arguments == projections.call_arguments.ranges@[index as int]);
             let target = (root.target_file, root.target_entry);
@@ -850,7 +910,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 expression,
                 outputs: root.first_output..root.first_output + root.count,
                 arguments: arguments.start..arguments.end,
-                vertex, _signature: Ghost(group_model.0), _order: Ghost(group_model.1),
+                postorder, vertex, _signature: Ghost(group_model.0), _order: Ghost(group_model.1),
             };
             assert(self.checked_expansion_call_matches(*plan, caller, *typed, wiring, *root, arguments,
                 &projections.call_arguments, group)) by { reveal(UseAliases::checked_expansion_call_matches); };
