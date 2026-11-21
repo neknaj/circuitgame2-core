@@ -13,6 +13,7 @@ use super::{lowered_bit_func_result, lowering::standalone_template_layouts};
 use crate::netlist::{nor_evaluation_ready, port_bit_layout_result};
 use super::super::call_arity::ProjectedCallArgument;
 use alloc::vec::Vec;
+use core::ops::Range;
 use vstd::slice::slice_subrange;
 use vstd::prelude::*;
 
@@ -63,6 +64,28 @@ pub(super) struct ResolvedNorRoot<'s, 'p, 'a> {
     pub(super) prepared: &'s PreparedNorRoot<'p, 'a>,
     pub(super) arguments: &'s [ProjectedCallArgument],
     pub(super) children: Vec<ResolvedExpressionCall<'s, 'p, 'a>>,
+}
+
+/// 配線に渡す根 NOR と、その元候補の添字および厳格定義の参照区間。
+pub(super) struct NorBinding<'s, 'p, 'a> {
+    pub(super) candidate: usize,
+    pub(super) selected: ResolvedNorRoot<'s, 'p, 'a>,
+    pub(super) references: &'s Range<usize>,
+}
+
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) open spec fn nor_binding_context(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, limit: u64,
+        arguments: Seq<ProjectedCallArgument>, binding: NorBinding,
+    ) -> bool {
+        let root = binding.selected.prepared;
+        let range = root.root.arguments;
+        &&& binding.references.start == root.root.reference
+        &&& self.expression_children_in_reference_range(*binding.references, root.root.expression.source, Some(root.postorder))
+        &&& range.start + 2 == range.end <= arguments.len()
+        &&& binding.selected.arguments@ == arguments.subrange(range.start as int, range.end as int)
+        &&& self.resolved_expression_calls_match(plan, table, limit, Some(root.postorder), arguments, binding.selected.children@)
+    }
 }
 
 /// 展開順の先頭から格納する。実際の配列の添字には頂点番号を使う。

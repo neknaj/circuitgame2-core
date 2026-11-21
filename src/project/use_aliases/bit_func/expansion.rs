@@ -2218,6 +2218,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             rank, prepared.postorder@)
     }
 
+    /// 根とすべての子が属する参照区間を、元の厳格定義から得る。
+    pub(super) proof fn prepared_nor_reference_evidence(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, index: int,
+    )
+        requires
+            self.can_resolve(), self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+        ensures ({
+            let root = prepared.nor_roots@[index];
+            let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+            let source = &self.targets.project_model().sources_model()[caller.0 as int];
+            let references = parsed.definitions@[root.definition as int].references;
+            &&& root.definition < parsed.definitions@.len()
+            &&& root.root.expression.source == source
+            &&& references.start == root.root.reference
+            &&& self.expression_children_in_reference_range(references, root.root.expression.source, Some(root.postorder))
+        }),
+    {
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+    }
+
     /// 根 NOR の出力スロットと式全体のソース範囲を、定義の投影に渡す。
     pub(super) proof fn prepared_nor_output_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
