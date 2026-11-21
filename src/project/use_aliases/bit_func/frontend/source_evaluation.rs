@@ -2,6 +2,7 @@
 
 mod determinism;
 mod field_selection;
+mod project;
 
 use super::*;
 use super::super::semantics::{
@@ -361,6 +362,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.checked_slot_preserves_source_value(scope, definitions@, inputs, values, i);
     }
 
+
+    spec fn source_value_has_type(
+        &self, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>, values: Seq<Seq<bool>>, i: int,
+    ) -> bool {
+        &&& 0 <= i < types.len() && i < values.len()
+        &&& values[i].len() <= u64::MAX
+        &&& types[i] matches Some(ty)
+        &&& self.port_width_matches(ty.ty, values[i].len() as u64, layouts)
+    }
+
     /// 展開した関数の通常の定義が、元の構文に従う値を持つことを示す。
     proof fn projected_ordinary_definitions_preserve_source_values(
         &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
@@ -370,6 +381,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires
             self.projection_context(scope),
             self.projection_structures_match(scope),
+            self.projection_port_widths_match(scope),
             self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
             projected_lowering_view(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
                 scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(*function)),
@@ -385,7 +397,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let values = expanded_definition_values(function, inputs, gates);
             let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
                 source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
+            &&& self.source_inputs_match(scope.wiring, scope.layouts, incoming)
             &&& values.len() == definitions@.len()
+            &&& forall|i: int| #![trigger values[i]] 0 <= i < values.len()
+                ==> self.source_value_has_type(scope.layouts, scope.types@, values, i)
             &&& forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) ==>
                 #[trigger] self.source_definition_value(&context, scope.layouts, scope.types@, incoming, values, i)
         }),
@@ -398,6 +413,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             scope.parsed.syntax.forms@, selected, calls, layout_limit, gate_limit, function, inputs, gates);
         let incoming = port_values(function.input_layout_model(), inputs);
         let values = expanded_definition_values(function, inputs, gates);
+        assert(self.source_inputs_match(scope.wiring, scope.layouts, incoming));
+        self.prepared_definition_width_evidence(scope, calls, selected, definitions);
+        assert(values.len() <= scope.types@.len()) by { reveal(UseAliases::definition_widths_match); };
+        assert forall|i: int| #![trigger values[i]] 0 <= i < values.len() implies
+            self.source_value_has_type(scope.layouts, scope.types@, values, i) by {
+            reveal(UseAliases::definition_widths_match);
+            assert(values[i].len() == definitions@[i].width);
+        };
         let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
             source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
         assert forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) implies

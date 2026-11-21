@@ -360,6 +360,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(super) proof fn prepared_definition_width_evidence(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        definitions: Vec<CheckedBitDefinition>,
+    )
+        requires self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+        ensures
+            definitions@.len() == scope.wiring.drivers.definitions@.len(),
+            self.definition_widths_match(scope, definitions@),
+    {}
+
     /// 展開準備が成功したとき、通常の定義が元の右辺と型に対応することを取り出す。
     pub(super) proof fn prepared_ordinary_definition_evidence(
         &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
@@ -830,7 +840,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 展開に成功した本体から、元ソースの検査結果と同じ呼び出し先を取り出す。
-    proof fn expanded_body_success<'w>(
+    pub(super) proof fn expanded_body_success<'w>(
         &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
         prepared: &'w PreparedExpansionBody<'p, 'a>, bit_limit: usize, gate_limit: usize, value: &'w ExpandedBody<'p, 'a>,
     ) -> (witness: (FuncProjection<'w, 'p, 'a>, Seq<ResolvedTemplateCall<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>))
@@ -847,6 +857,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 layouts: match &ports.layouts { Some(table) => Some(table), None => None },
                 types: &prepared.typed.types, structures: &prepared.projections.entries })
             &&& self.projection_context(&scope)
+            &&& self.projection_port_widths_match(&scope)
+            &&& self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
+                ==> self.projection_structures_match(&scope)
             &&& self.expansion_selection_matches(plan, table, caller, prepared, selected)
             &&& self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, selected, Ok(*ports))
             &&& self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
@@ -878,6 +891,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
             && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
                 parsed.syntax.forms@, selected, bit_limit, gate_limit, Ok(value.circuit));
+        reveal(UseAliases::routine_ports_result);
+        assert(self.projection_port_widths_match(&scope));
+        assert(self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
+            ==> self.projection_structures_match(&scope)) by {
+            if prepared.projections.layouts.is_none() {
+                assert(self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
+                    ==> prepared.projections.entries@.len() == 0);
+            }
+        };
         (scope, selected, slots)
     }
 
@@ -921,8 +943,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
             nor_evaluation(value.circuit.netlist_model(), input, output),
         ensures
+            input.len() == value.circuit.input_layout_model().total_bits_model(),
             gate_values_match(input, value.circuit.netlist_model().gates@, gates),
-            gates.len() == value.circuit.netlist_model().gates@.len(),
+            gates.len() == value.circuit.netlist_model().gates@.len() <= usize::MAX,
             source_outputs_match(&prepared.typed.literals.wiring->Checked_0,
                 port_values(value.circuit.input_layout_model(), input), expanded_definition_values(&value.circuit, input, gates),
                 port_values(value.circuit.output_layout_model(), output)),
@@ -935,6 +958,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             selected, bit_limit, gate_limit, circuit);
         reveal(UseAliases::routine_ports_result);
         reveal(nor_evaluation);
+        vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
         let gates = choose|gates: Seq<bool>| #[trigger] gate_values_match(input, netlist.gates@, gates)
             && gates.len() == netlist.gates@.len() && output_values_match(input, gates, netlist.outputs@, output);
         reveal(UseAliases::template_port_widths_match);

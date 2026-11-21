@@ -8,7 +8,11 @@ use crate::project::{CircuitProject, LocatedName};
 #[cfg(verus_only)]
 use super::templates::complete_circuit_table;
 #[cfg(verus_only)]
-use crate::netlist::nor_evaluation_ready;
+use crate::netlist::{NorEvaluationError, nor_evaluation_ready, nor_evaluation_result};
+#[cfg(verus_only)]
+use super::lowering::port_values;
+#[cfg(verus_only)]
+use alloc::vec::Vec;
 use vstd::prelude::*;
 
 verus! {
@@ -168,6 +172,44 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Err(failure))
                 && expansion_diagnostic(failure) == error,
         }
+    }
+
+    /// 指定した宣言をソースの規則で評価したとき、入出力の値が対応することを表す。
+    pub closed spec fn expanded_function_source_evaluation(
+        &self, expanded: &ExpandedFunctions, file: usize, entry: usize, width_limit: u64,
+        inputs: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
+    ) -> bool {
+        exists|rank: int| 0 <= rank < expanded.plan.order_model().len()
+            && #[trigger] expanded.plan.position_model(rank) == Some((file, entry))
+            && self.project_source_func_evaluation(&expanded.plan, width_limit, rank, inputs, outputs)
+    }
+
+    /// 宣言された入力ビット数で評価すると成功し、ソースの規則で同じ出力が得られることを示す。
+    pub proof fn expanded_function_evaluate_has_source_result(
+        &self, expanded: &ExpandedFunctions, file: usize, entry: usize, circuit: &LoweredBitFunc,
+        width_limit: u64, bit_limit: usize, gate_limit: usize, input: Seq<bool>, result: Result<Vec<bool>, NorEvaluationError>,
+    )
+        requires
+            self.can_resolve(),
+            self.expand_functions_result(width_limit, bit_limit, gate_limit, Ok(*expanded)),
+            expanded.circuit_at(file, entry, circuit),
+            input.len() == circuit.input_layout_model().total_bits_model(),
+            nor_evaluation_result(circuit.netlist_model(), input, result),
+        ensures result matches Ok(output) && self.expanded_function_source_evaluation(expanded, file, entry, width_limit,
+            port_values(circuit.input_layout_model(), input), port_values(circuit.output_layout_model(), output@)),
+    {
+        self.completed_templates_ready(&expanded.plan, width_limit, bit_limit, gate_limit, &expanded.table);
+        let rank = choose|rank: int| {
+            &&& 0 <= rank < expanded.plan.order_model().len()
+            &&& #[trigger] expanded.plan.position_model(rank) == Some((file, entry))
+            &&& expanded.plan.order_model()[rank] < expanded.table.slots_model().len()
+            &&& expanded.table.slots_model()[expanded.plan.order_model()[rank] as int] matches Some(template)
+            &&& circuit == template.circuit_model()
+        };
+        assert(nor_evaluation_ready(circuit.netlist_model(), input.len()));
+        let output = result->Ok_0;
+        self.completed_template_preserves_source_evaluation(&expanded.plan, width_limit, bit_limit, gate_limit,
+            &expanded.table, rank, input, output@);
     }
 
     /// プロジェクト内のすべての `func` を依存順にネットリストへ展開する。
