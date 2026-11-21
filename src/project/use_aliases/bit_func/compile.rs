@@ -56,6 +56,17 @@ pub enum FunctionBuildDiagnostic<'p, 'a> {
     LocalGateCapacity(LocatedName<'p, 'a>),
     /// 呼び出し先の展開でゲート数の上限を超えた呼び出し式の範囲。
     CallGateCapacity(LocatedName<'p, 'a>),
+    /// 子の出力を保持する一時配線表の長さ上限を超えた。
+    CallOutputCapacity {
+        /// 出力の追加で上限を超えた子の呼び出し式の範囲。
+        site: LocatedName<'p, 'a>,
+        /// 追加前の配線本数。
+        used: usize,
+        /// 追加しようとした配線本数。
+        width: usize,
+        /// 一時配線表に保持できる配線本数の上限。
+        capacity: usize,
+    },
 }
 
 spec fn expansion_diagnostic<'p, 'a>(error: FunctionTemplateBuildError<'p, 'a>) -> ExpandFunctionsError<'p, 'a> {
@@ -70,6 +81,8 @@ spec fn expansion_diagnostic<'p, 'a>(error: FunctionTemplateBuildError<'p, 'a>) 
                 MixedWiringError::LocalGateCapacity(site) => FunctionBuildDiagnostic::LocalGateCapacity(site),
                 MixedWiringError::Call(CallGroupError::DeferredArgument(site)) => FunctionBuildDiagnostic::Argument(site),
                 MixedWiringError::Call(CallGroupError::GateCapacity(site)) => FunctionBuildDiagnostic::CallGateCapacity(site),
+                MixedWiringError::CallOutputCapacity { site, used, width, capacity } =>
+                    FunctionBuildDiagnostic::CallOutputCapacity { site, used, width, capacity },
             },
         }),
     };
@@ -90,6 +103,8 @@ fn public_diagnostic<'p, 'a>(error: FunctionTemplateBuildError<'p, 'a>) -> (resu
                 MixedWiringError::LocalGateCapacity(site) => FunctionBuildDiagnostic::LocalGateCapacity(site),
                 MixedWiringError::Call(CallGroupError::DeferredArgument(site)) => FunctionBuildDiagnostic::Argument(site),
                 MixedWiringError::Call(CallGroupError::GateCapacity(site)) => FunctionBuildDiagnostic::CallGateCapacity(site),
+                MixedWiringError::CallOutputCapacity { site, used, width, capacity } =>
+                    FunctionBuildDiagnostic::CallOutputCapacity { site, used, width, capacity },
             },
         }),
     };
@@ -233,14 +248,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// `width_limit` は型のビット幅の上限、`bit_limit` は入力・定義・出力それぞれの
     /// ビット配列の上限、`gate_limit` は呼び出しを展開した関数ごとの NOR ゲート数の上限。
-    /// 通常の呼び出しは `def` の右辺全体で扱う。実引数には型が確定した信号名または
-    /// 対応するリテラルを使う。配線を確定できない引数には診断を返す。
+    /// 通常関数を `def` の右辺全体で呼び出せる。その実引数には型が確定した信号名、
+    /// 対応するリテラル、出力が一つの通常関数や基底 NOR の呼び出しを使える。
     /// 基底の宣言などプロジェクト全体の検査には [crate::project::analyze_definitions] を使う。
     ///
     /// # Errors
     ///
     /// 呼び出し先を解決できない場合や呼び出しに循環がある場合は、計画の診断を返す。
     /// 計画ができた場合は、展開順で最初に変換できなかった関数の位置と診断を返す。
+    /// 子の出力を保持する一時配線表には、`bit_limit` と独立した実行環境ごとの長さ上限がある。
     ///
     /// # Examples
     ///

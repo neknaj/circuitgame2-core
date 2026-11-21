@@ -23,7 +23,9 @@ use crate::syntax::Form;
 use super::frontend::call_covers;
 #[cfg(verus_only)]
 use mixed::{CallBinding, WiringStep, binding_covers, bindings_match_calls, bindings_preserve_definition_order,
-    flat_trace_arguments_match, mixed_function_call_evaluation, mixed_function_local_value, mixed_function_result};
+    mixed_function_call_evaluation, mixed_function_local_value, mixed_function_result};
+#[cfg(verus_only)]
+use super::super::call_arity::ProjectedCallArgument;
 #[cfg(verus_only)]
 use super::expansion::CheckedExpansionCall;
 #[cfg(verus_only)]
@@ -172,7 +174,7 @@ pub(super) enum ProjectedLoweringError<'p, 'a> {
 
 pub(super) closed spec fn projected_lowering_result(
     inputs: &[u64], definitions: &[CheckedBitDefinition], outputs: &[u64], drivers: &[OutputDriver],
-    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, arguments: Seq<ProjectedCallArgument>, layout_limit: usize, gate_limit: usize,
     result: Result<LoweredBitFunc, ProjectedLoweringError>,
 ) -> bool {
     let body = LoweringBody { input_widths: inputs, definitions };
@@ -184,18 +186,18 @@ pub(super) closed spec fn projected_lowering_result(
         {
             &&& body_layouts_result(inputs@, definitions@, outputs@, layout_limit, Ok(layouts))
             &&& bindings_match_calls(bindings, selected)
-            &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs@, drivers@, gate_limit, result)
+            &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs@, drivers@, arguments, gate_limit, result)
         },
     }
 }
 
 spec fn projected_wiring_result(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    outputs: Seq<u64>, drivers: Seq<OutputDriver>, gate_limit: usize,
+    outputs: Seq<u64>, drivers: Seq<OutputDriver>, arguments: Seq<ProjectedCallArgument>, gate_limit: usize,
     result: Result<LoweredBitFunc, ProjectedLoweringError>,
 ) -> bool {
     exists|lowered: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError>|
-        #[trigger] mixed_function_result(body, layouts, forms, bindings, outputs, drivers, gate_limit, lowered)
+        #[trigger] mixed_function_result(body, layouts, forms, bindings, outputs, drivers, arguments, gate_limit, lowered)
         && result == match lowered {
             Ok((value, _)) => Ok(value),
             Err(error) => Err(ProjectedLoweringError::Wiring(error)),
@@ -204,54 +206,55 @@ spec fn projected_wiring_result(
 
 pub(super) open spec fn projected_lowering_view(
     inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
-    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, arguments: Seq<ProjectedCallArgument>, layout_limit: usize, gate_limit: usize,
     result: Result<LoweredBitFunc, ProjectedLoweringError>,
 ) -> bool {
     exists|a: &[u64], b: &[CheckedBitDefinition], c: &[u64], d: &[OutputDriver]|
         a@ == inputs && b@ == definitions && c@ == outputs && d@ == drivers
-        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, layout_limit, gate_limit, result)
+        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, arguments, layout_limit, gate_limit, result)
 }
 
 /// 同じ変換結果から、型付きの本体、配置、呼び出しの束縛、変換履歴を取り出す。
 proof fn projected_lowering_success<'s, 'p, 'a>(
     inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition<'p, 'a>>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
-    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall<'s, 'p, 'a>>, layout_limit: usize, gate_limit: usize,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall<'s, 'p, 'a>>, arguments: Seq<ProjectedCallArgument>,
+    layout_limit: usize, gate_limit: usize,
     value: &LoweredBitFunc,
 ) -> (witness: (LoweringBody<'s, 'p, 'a>, Layouts, Seq<CallBinding<'s, 'p, 'a>>, Ghost<Seq<WiringStep>>))
-    requires projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+    requires projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, Ok(*value)),
     ensures
         witness.0.input_widths@ == inputs && witness.0.definitions@ == definitions,
         body_layouts_result(inputs, definitions, outputs, layout_limit, Ok(witness.1)),
         bindings_match_calls(witness.2, selected),
-        mixed_function_result(&witness.0, &witness.1, forms, witness.2, outputs, drivers, gate_limit, Ok((*value, witness.3))),
+        mixed_function_result(&witness.0, &witness.1, forms, witness.2, outputs, drivers, arguments, gate_limit, Ok((*value, witness.3))),
 {
     let (a, b, c, d) = choose|a: &'s [u64], b: &'s [CheckedBitDefinition<'p, 'a>], c: &[u64], d: &[OutputDriver]|
         a@ == inputs && b@ == definitions && c@ == outputs && d@ == drivers
-        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, layout_limit, gate_limit, Ok(*value));
+        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, arguments, layout_limit, gate_limit, Ok(*value));
     let body = LoweringBody { input_widths: a, definitions: b };
     let (layouts, bindings) = choose|layouts: Layouts, bindings: Seq<CallBinding<'s, 'p, 'a>>| {
         &&& #[trigger] body_layouts_result(inputs, definitions, outputs, layout_limit, Ok(layouts))
         &&& #[trigger] bindings_match_calls(bindings, selected)
-        &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs, drivers, gate_limit, Ok(*value))
+        &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs, drivers, arguments, gate_limit, Ok(*value))
     };
     let steps = choose|steps: Ghost<Seq<WiringStep>>|
-        #[trigger] mixed_function_result(&body, &layouts, forms, bindings, outputs, drivers, gate_limit, Ok((*value, steps)));
+        #[trigger] mixed_function_result(&body, &layouts, forms, bindings, outputs, drivers, arguments, gate_limit, Ok((*value, steps)));
     (body, layouts, bindings, steps)
 }
 
 /// 展開した回路の入力・出力の配置と、評価に必要な配線の条件を取り出す。
 pub(super) proof fn projected_lowering_ports(
     inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
-    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize, value: &LoweredBitFunc,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, arguments: Seq<ProjectedCallArgument>, layout_limit: usize, gate_limit: usize, value: &LoweredBitFunc,
 )
-    requires projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+    requires projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, Ok(*value)),
     ensures
         port_bit_layout_result(inputs, layout_limit, Ok(*value.input_layout_model())),
         port_bit_layout_result(outputs, layout_limit, Ok(*value.output_layout_model())),
         nor_evaluation_ready(value.netlist_model(), value.input_layout_model().total_bits_model() as nat),
         value.netlist_model().outputs@.len() == value.output_layout_model().total_bits_model(),
 {
-    let _ = projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, value);
+    let _ = projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, value);
 }
 
 /// 展開した関数の定義値を、最終配線と評価済みのゲート値から得る。
@@ -264,11 +267,11 @@ pub(super) closed spec fn expanded_definition_values(
 /// 展開した関数の通常の定義が、最終配線を評価したときに右辺の値を保つことを示す。
 pub(super) proof fn projected_lowering_local_values(
     inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
-    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, calls: Seq<CheckedExpansionCall>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, calls: Seq<CheckedExpansionCall>, arguments: Seq<ProjectedCallArgument>,
     layout_limit: usize, gate_limit: usize, value: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>,
 )
     requires
-        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, Ok(*value)),
         calls.len() == selected.len(),
         forall|g: int| 0 <= g < selected.len() ==> *(#[trigger] selected[g]).group == calls[g],
         forall|a: int, b: int| 0 <= a < b < calls.len()
@@ -290,7 +293,7 @@ pub(super) proof fn projected_lowering_local_values(
     }),
 {
     let (body, layouts, bindings, steps) =
-        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, value);
+        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, value);
     assert forall|g: int| 0 <= g < bindings.len() implies *(#[trigger] bindings[g]).group == calls[g] by {
         assert(*bindings[g].group == *selected[g].group);
     };
@@ -318,11 +321,11 @@ pub(super) proof fn projected_lowering_local_values(
 /// 展開後のネットリストの出力を、宣言順に各駆動元の値へ対応付ける。
 pub(super) proof fn projected_lowering_output_values(
     inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
-    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, arguments: Seq<ProjectedCallArgument>, layout_limit: usize, gate_limit: usize,
     value: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>, output: Seq<bool>,
 )
     requires
-        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, Ok(*value)),
         outputs.len() == drivers.len(),
         forall|i: int| 0 <= i < drivers.len() ==>
             bit_driver_width(inputs, definitions, #[trigger] drivers[i]) == Some(outputs[i]),
@@ -342,7 +345,7 @@ pub(super) proof fn projected_lowering_output_values(
     }),
 {
     let (_, layouts, _, _) =
-        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, value);
+        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, value);
     evaluation::output_ports_follow_drivers(inputs, definitions, outputs, drivers, layout_limit, &layouts,
         value.definition_wires@, value.netlist.outputs@, input, gates, output);
 }
@@ -364,7 +367,8 @@ pub(super) proof fn projected_lowering_call_evaluation(
             &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
             &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
         }),
-        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected,
+            prepared.projections.call_arguments.arguments@, layout_limit, gate_limit, Ok(*value)),
         selected.len() == prepared.calls@.len(),
         forall|i: int| 0 <= i < selected.len() ==>
             aliases.resolved_template_call_matches(plan, caller, prepared, i, #[trigger] selected[i]),
@@ -386,13 +390,13 @@ pub(super) proof fn projected_lowering_call_evaluation(
         }
     }),
 {
+    let arguments = prepared.projections.call_arguments.arguments@;
     let (body, layouts, bindings, steps) =
-        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, value);
+        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, arguments, layout_limit, gate_limit, value);
     assert forall|i: int| 0 <= i < bindings.len() implies *(#[trigger] bindings[i]).group == prepared.calls@[i] by {
         assert(*bindings[i].group == *selected[i].group);
     };
     bindings_preserve_definition_order(bindings, prepared.calls@);
-    flat_trace_arguments_match(steps@, prepared.projections.call_arguments.arguments@);
     mixed_function_call_evaluation(aliases, plan, caller, prepared, selected[index], index, &body, &layouts, forms,
         bindings, outputs, drivers, layout_limit, gate_limit, value, steps, input, gates)
 }
@@ -410,6 +414,7 @@ pub(super) fn lower_projected_expansion<'s, 'p, 'a>(
     Ghost(templates): Ghost<&FunctionTemplates<'p, 'a>>,
 ) -> (result: Result<LoweredBitFunc, ProjectedLoweringError<'p, 'a>>)
     requires
+        aliases.can_resolve(),
         aliases.prepared_expansion_body_matches(*context.0, context.1.0, context.1.1, context.1.2, context.2),
         outputs@.len() == drivers@.len(),
         forall|p: int| 0 <= p < outputs@.len() ==>
@@ -419,7 +424,8 @@ pub(super) fn lower_projected_expansion<'s, 'p, 'a>(
             resolved_call_fits_body(#[trigger] selected@[g], inputs@, definitions@, forms@, context.1.2),
         forall|slot: int| 0 <= slot < definitions@.len() && !call_covers(context.2.calls@, slot) ==>
             bit_definition_matches(inputs@, definitions@.take(slot), #[trigger] definitions@[slot]),
-    ensures projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@, layout_limit, gate_limit, result),
+    ensures projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@,
+        context.2.projections.call_arguments.arguments@, layout_limit, gate_limit, result),
 {
     reveal(projected_lowering_result);
     let layouts = match prepare_body_layouts(inputs, definitions, outputs, layout_limit) {
@@ -427,22 +433,23 @@ pub(super) fn lower_projected_expansion<'s, 'p, 'a>(
         Err(error) => return Err(ProjectedLoweringError::Layout(error)),
     };
     let body = LoweringBody { input_widths: inputs, definitions };
+    let ghost arguments = context.2.projections.call_arguments.arguments@;
     let lowered = lower_resolved_function(aliases, &body, layouts, forms, selected, outputs, drivers,
         layout_limit, gate_limit, Ghost(context), Ghost(templates));
     let result = match lowered {
         Ok((value, _)) => Ok(value),
         Err(error) => Err(ProjectedLoweringError::Wiring(error)),
     };
-    assert(projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@, layout_limit, gate_limit, result)) by {
+    assert(projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@, arguments, layout_limit, gate_limit, result)) by {
         let bindings = choose|bindings: Seq<CallBinding>| #[trigger] bindings_match_calls(bindings, selected@)
-            && mixed_function_result(&body, &layouts, forms@, bindings, outputs@, drivers@, gate_limit, lowered);
+            && mixed_function_result(&body, &layouts, forms@, bindings, outputs@, drivers@, arguments, gate_limit, lowered);
         assert(body_layouts_result(inputs@, definitions@, outputs@, layout_limit, Ok(layouts)));
-        assert(projected_wiring_result(&body, &layouts, forms@, bindings, outputs@, drivers@, gate_limit, result)) by {
+        assert(projected_wiring_result(&body, &layouts, forms@, bindings, outputs@, drivers@, arguments, gate_limit, result)) by {
             assert(result == match lowered {
                 Ok((value, _)) => Ok(value),
                 Err(error) => Err(ProjectedLoweringError::Wiring(error)),
             });
-            assert(mixed_function_result(&body, &layouts, forms@, bindings, outputs@, drivers@, gate_limit, lowered));
+            assert(mixed_function_result(&body, &layouts, forms@, bindings, outputs@, drivers@, arguments, gate_limit, lowered));
         };
     };
     result

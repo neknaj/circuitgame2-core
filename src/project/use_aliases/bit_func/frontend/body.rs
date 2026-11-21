@@ -1045,7 +1045,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             layouts: match &ports.layouts { Some(table) => Some(table), None => None },
                             types: &prepared.typed.types, structures: &prepared.projections.entries,
                         };
-                        self.expanded_definition_lowering_result(&scope, prepared.calls@, selected, layout_limit, gate_limit, result)
+                        self.expanded_definition_lowering_result(&scope, prepared.calls@, selected,
+                            prepared.projections.call_arguments.arguments@, layout_limit, gate_limit, result)
                     },
             }
         }
@@ -1053,7 +1054,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     spec fn expanded_definition_lowering_result(
         &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
-        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
+        arguments: Seq<ProjectedCallArgument>, layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
     ) -> bool {
         let drivers = scope.wiring.drivers.outputs@;
         &&& self.projection_context(scope)
@@ -1066,11 +1067,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         &scope.wiring.drivers.signature, scope.inputs@, scope.outputs@, slots@, drivers, error),
                     Ok(value) => output_widths_before(scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
                         && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(value.circuit)),
+                            drivers, scope.parsed.syntax.forms@, selected, arguments, layout_limit, gate_limit, Ok(value.circuit)),
                     Err(ExpandedBodyError::Lowering(error)) => output_widths_before(
                         scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
                         && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Err(error)),
+                            drivers, scope.parsed.syntax.forms@, selected, arguments, layout_limit, gate_limit, Err(error)),
                     _ => false,
                 },
         }
@@ -1102,7 +1103,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
             &&& output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
             &&& projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
-                selected, bit_limit, gate_limit, Ok(value.circuit))
+                selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit))
             &&& value.has_structure_ports <==> has_structure_port(wiring.drivers.signature.inputs@)
                 || has_structure_port(wiring.drivers.signature.outputs@)
         }),
@@ -1121,13 +1122,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let selected = choose|rows: Seq<ResolvedTemplateCall<'w, 'p, 'a>>|
             #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, rows)
             && self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, rows, Ok(*ports))
-            && self.expanded_definition_lowering_result(&scope, prepared.calls@, rows, bit_limit, gate_limit, Ok(*value));
+            && self.expanded_definition_lowering_result(&scope, prepared.calls@, rows, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(*value));
         let drivers = wiring.drivers.outputs@;
         let slots = choose|slots: Vec<CheckedBitDefinition>|
             #[trigger] self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
             && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
             && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
-                parsed.syntax.forms@, selected, bit_limit, gate_limit, Ok(value.circuit));
+                parsed.syntax.forms@, selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit));
         reveal(UseAliases::routine_ports_result);
         assert(self.projection_port_widths_match(&scope));
         assert(self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
@@ -1167,7 +1168,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::routine_ports_result);
         reveal(UseAliases::template_port_widths_match);
         projected_lowering_ports(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, bit_limit, gate_limit, &value.circuit);
+            selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, &value.circuit);
     }
 
     /// 展開後の評価結果を、ソースが出力ポートごとに指定した駆動元の値に結び付ける。
@@ -1192,7 +1193,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let netlist = circuit.netlist_model();
         let drivers = scope.wiring.drivers.outputs@;
         projected_lowering_ports(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, bit_limit, gate_limit, circuit);
+            selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit);
         reveal(UseAliases::routine_ports_result);
         reveal(nor_evaluation);
         vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
@@ -1200,7 +1201,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && gates.len() == netlist.gates@.len() && output_values_match(input, gates, netlist.outputs@, output);
         reveal(UseAliases::template_port_widths_match);
         projected_lowering_output_values(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, bit_limit, gate_limit, circuit, input, gates, output);
+            selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit, input, gates, output);
         let incoming = port_values(circuit.input_layout_model(), input);
         let values = expanded_definition_values(circuit, input, gates);
         let outgoing = port_values(circuit.output_layout_model(), output);
@@ -1358,13 +1359,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(definitions) => definitions,
             Err(error) => {
                 let result = Err(ExpandedBodyError::Definition(error));
-                assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
+                assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
+                    original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
                 return result;
             },
         };
         if let Err(error) = check_output_widths(wiring, ports.inputs.as_slice(), ports.outputs.as_slice(), definitions.as_slice()) {
             let result = Err(ExpandedBodyError::Output(error));
-            assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
+            assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
+                original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
             return result;
         }
         let forms = parsed.syntax.forms.as_slice();
@@ -1383,7 +1386,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(circuit) => Ok(ExpandedBody { circuit, ports, has_structure_ports }),
             Err(error) => Err(ExpandedBodyError::Lowering(error)),
         };
-        assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
+        assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
+            original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
         result
     }
 }

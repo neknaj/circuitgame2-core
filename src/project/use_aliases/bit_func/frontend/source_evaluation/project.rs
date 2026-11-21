@@ -385,7 +385,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert forall|g: int| 0 <= g < selected.len() implies *(#[trigger] selected[g]).group == calls[g] by {
             assert(self.resolved_template_call_matches(plan, caller, &prepared, g, selected[g]));
         };
-        self.projected_ordinary_definitions_preserve_source_values(&scope, calls, selected, slots, bit_limit,
+        self.projected_ordinary_definitions_preserve_source_values(&scope, calls, selected, slots,
+            prepared.projections.call_arguments.arguments@, bit_limit,
             gate_limit, circuit, input, gates);
         self.prepared_definition_width_evidence(&scope, calls, selected, slots);
         self.checked_wiring_is_func(file, entry, width_limit, *scope.wiring);

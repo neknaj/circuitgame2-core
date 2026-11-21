@@ -23,6 +23,7 @@ use crate::project::{FunctionExpansionOrder, UseAliases};
 use super::super::frontend::{argument_matches_width, call_covers, expression_argument_matches_width, root_argument_matches_width};
 use super::super::super::call_arity::{CallArgumentSource, ProjectedCallArgument};
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group, lower_nested_call_group};
+use super::call_arguments::{CallWiringError, ChildCallWiringError, builtin_nor_call};
 use super::call_arguments::child_calls::NestedCallWiringError;
 use crate::syntax::Form;
 #[cfg(verus_only)]
@@ -62,6 +63,8 @@ pub(in crate::project::use_aliases::bit_func) enum MixedWiringError<'p, 'a> {
     LocalGateCapacity(LocatedName<'p, 'a>),
     /// 呼び出し式または実引数の診断。
     Call(CallGroupError<'p, 'a>),
+    /// 子の出力を保持する一時配線表の容量を超えた。
+    CallOutputCapacity { site: LocatedName<'p, 'a>, used: usize, width: usize, capacity: usize },
 }
 
 /// 子を含む呼び出しを、同じ本体の配線ループで処理するための入力。
@@ -76,7 +79,7 @@ struct NestedWiring<'s, 'p, 'a> {
 /// 定義順の配線で失敗した箇所と、その処理が返した診断。
 enum MixedBodyError<'p, 'a> {
     Flat(MixedWiringError<'p, 'a>),
-    Nested(NestedCallWiringError<'p, 'a>),
+    Nested(LocatedName<'p, 'a>, NestedCallWiringError<'p, 'a>),
 }
 
 pub(super) struct WiringStep {
@@ -112,14 +115,6 @@ pub(super) closed spec fn flat_wiring_trace(steps: Seq<WiringStep>) -> bool {
 pub(super) closed spec fn wiring_trace_arguments_match(steps: Seq<WiringStep>, arguments: Seq<ProjectedCallArgument>) -> bool {
     forall|i: int| 0 <= i < steps.len() ==> ((#[trigger] steps[i]).nested matches Some(nested)
         ==> nested.arguments == arguments)
-}
-
-pub(super) proof fn flat_trace_arguments_match(steps: Seq<WiringStep>, arguments: Seq<ProjectedCallArgument>)
-    requires flat_wiring_trace(steps),
-    ensures wiring_trace_arguments_match(steps, arguments),
-{
-    reveal(flat_wiring_trace);
-    reveal(wiring_trace_arguments_match);
 }
 
 pub(super) open spec fn binding_covers(bindings: Seq<CallBinding>, slot: int) -> bool {
@@ -708,6 +703,7 @@ pub(super) closed spec fn mixed_error_at(
                 call_group_result(binding.group, forms, binding.arguments@, layouts, binding.callee, before, before,
                     limit, definition_widths(body.definitions@), binding._output_widths@, Err(error))
             },
+        MixedWiringError::CallOutputCapacity { .. } => false,
     }
 }
 
@@ -856,13 +852,14 @@ spec fn mixed_body_error_at(
             &&& (error is Call ==> (nested matches Some(mode) ==>
                 group < mode.selected@.len() && !nested_arguments_ready(&mode.selected@[group as int])))
         },
-        MixedBodyError::Nested(error) => {
+        MixedBodyError::Nested(site, error) => {
             &&& nested matches Some(mode)
             &&& slot < body.definitions@.len()
             &&& binding_cursor(bindings, slot, group as int)
             &&& group < bindings.len() && group < mode.selected@.len()
             &&& bindings[group as int].group.outputs.start == slot
             &&& bindings[group as int]._selection@ == mode.selected@[group as int]
+            &&& site == mode.selected@[group as int].group.expression
             &&& nested_arguments_ready(&mode.selected@[group as int])
             &&& selected_children_reachable(&mode.selected@[group as int], mode._arguments@)
             &&& match error {
@@ -1007,7 +1004,7 @@ fn lower_mixed_call<'s, 'p, 'a>(
                         gate_limit, mode.child_limit, widths, outcome);
                     assert(state.model() == before);
                 }
-                return Err(MixedBodyError::Nested(error));
+                return Err(MixedBodyError::Nested(copy_location(&selected.group.expression), error));
             },
             Ok(()) => proof {
                 assert(outcome is Ok);
@@ -1215,18 +1212,94 @@ pub(super) open spec fn mixed_function_success(
             gates: value.netlist.gates@, origins: value.gate_definitions@ })
 }
 
+/// 一つの式の中間出力を保持できる配線数を、対象環境の配列のバイト上限から求める。
+fn child_output_limit() -> (limit: usize)
+    ensures limit == child_output_limit_spec(),
+{
+    let element_size = core::mem::size_of::<Wire>();
+    if element_size == 0 { usize::MAX } else { isize::MAX as usize / element_size }
+}
+
+spec fn child_output_limit_spec() -> usize {
+    let element_size = vstd::layout::size_of::<Wire>();
+    if element_size == 0 { usize::MAX } else { (isize::MAX as nat / element_size) as usize }
+}
+
+spec fn mixed_wiring_diagnostic<'p, 'a>(error: MixedBodyError<'p, 'a>) -> MixedWiringError<'p, 'a> {
+    match error {
+        MixedBodyError::Flat(error) => error,
+        MixedBodyError::Nested(site, error) => match error {
+            NestedCallWiringError::Child(_, ChildCallWiringError::OutputCapacity { site, used, width, capacity }) =>
+                MixedWiringError::CallOutputCapacity { site, used, width, capacity },
+            NestedCallWiringError::Child(_, ChildCallWiringError::DeferredArgument(argument))
+            | NestedCallWiringError::Root(CallWiringError::DeferredArgument(argument)) =>
+                MixedWiringError::Call(CallGroupError::DeferredArgument(argument)),
+            NestedCallWiringError::Child(_, ChildCallWiringError::GateCapacity(child)) =>
+                MixedWiringError::Call(CallGroupError::GateCapacity(child)),
+            NestedCallWiringError::Root(CallWiringError::GateCapacity) =>
+                MixedWiringError::Call(CallGroupError::GateCapacity(site)),
+        },
+    }
+}
+
+/// 失敗した引数や式の範囲を保ち、一時配線表の上限違反を区別する。
+fn normalize_mixed_wiring_diagnostic<'p, 'a>(error: MixedBodyError<'p, 'a>) -> (diagnostic: MixedWiringError<'p, 'a>)
+    ensures diagnostic == mixed_wiring_diagnostic(error),
+{
+    match error {
+        MixedBodyError::Flat(error) => error,
+        MixedBodyError::Nested(site, error) => match error {
+            NestedCallWiringError::Child(_, ChildCallWiringError::OutputCapacity { site, used, width, capacity }) =>
+                MixedWiringError::CallOutputCapacity { site, used, width, capacity },
+            NestedCallWiringError::Child(_, ChildCallWiringError::DeferredArgument(argument))
+            | NestedCallWiringError::Root(CallWiringError::DeferredArgument(argument)) =>
+                MixedWiringError::Call(CallGroupError::DeferredArgument(argument)),
+            NestedCallWiringError::Child(_, ChildCallWiringError::GateCapacity(child)) =>
+                MixedWiringError::Call(CallGroupError::GateCapacity(child)),
+            NestedCallWiringError::Root(CallWiringError::GateCapacity) =>
+                MixedWiringError::Call(CallGroupError::GateCapacity(site)),
+        },
+    }
+}
+
+spec fn resolved_mixed_mode_matches(
+    bindings: Seq<CallBinding>, arguments: Seq<ProjectedCallArgument>, mode: Option<NestedWiring>,
+) -> bool {
+    match mode {
+        Some(mode) => mode._arguments@ == arguments && mode.child_limit == child_output_limit_spec()
+            && builtin_nor_call_matches(mode.builtin) && bindings_match_calls(bindings, mode.selected@)
+            && exists|i: int| 0 <= i < mode.selected@.len() && (#[trigger] mode.selected@[i]).children@.len() > 0,
+        None => forall|i: int| 0 <= i < bindings.len() ==> (#[trigger] bindings[i])._selection@.children@.len() == 0,
+    }
+}
+
+pub(super) closed spec fn resolved_mixed_trace(
+    bindings: Seq<CallBinding>, arguments: Seq<ProjectedCallArgument>, steps: Seq<WiringStep>,
+) -> bool {
+    exists|mode: Option<NestedWiring>| #[trigger] wiring_trace_uses_mode(steps, mode)
+        && resolved_mixed_mode_matches(bindings, arguments, mode)
+}
+
+pub(super) closed spec fn mixed_function_failure(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    arguments: Seq<ProjectedCallArgument>, gate_limit: usize, diagnostic: MixedWiringError,
+) -> bool {
+    exists|mode: Option<NestedWiring>, raw: MixedBodyError|
+        #[trigger] mixed_body_failed(body, layouts, forms, bindings, gate_limit, mode, raw)
+        && mixed_wiring_diagnostic(raw) == diagnostic
+        && resolved_mixed_mode_matches(bindings, arguments, mode)
+}
+
 pub(super) open spec fn mixed_function_result(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    output_widths: Seq<u64>, output_drivers: Seq<OutputDriver>, gate_limit: usize,
+    output_widths: Seq<u64>, output_drivers: Seq<OutputDriver>, arguments: Seq<ProjectedCallArgument>, gate_limit: usize,
     result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError>,
 ) -> bool {
     match result {
         Ok((value, steps)) => mixed_function_success(body, layouts, forms, bindings, output_widths, output_drivers,
-            gate_limit, &value, steps@) && flat_wiring_trace(steps@),
-        Err(error) => exists|steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView|
-            #[trigger] mixed_trace(body, layouts, forms, bindings, gate_limit, steps, slot, group, wiring)
-            && flat_wiring_trace(steps)
-            && mixed_error_at(body, layouts, forms, bindings, gate_limit, wiring, slot, group, error),
+            gate_limit, &value, steps@) && wiring_trace_arguments_match(steps@, arguments)
+            && resolved_mixed_trace(bindings, arguments, steps@),
+        Err(error) => mixed_function_failure(body, layouts, forms, bindings, arguments, gate_limit, error),
     }
 }
 
@@ -1270,7 +1343,9 @@ fn lower_mixed_function_with_mode<'s, 'p, 'a>(
                 gate_limit, &value, steps@)
             &&& wiring_trace_uses_mode(steps@, nested)
             &&& (nested.is_none() ==> flat_wiring_trace(steps@))
-            &&& (nested matches Some(mode) ==> wiring_trace_arguments_match(steps@, mode._arguments@))
+            &&& forall|arguments: Seq<ProjectedCallArgument>| #![trigger wiring_trace_arguments_match(steps@, arguments)]
+                (nested.is_none() || (nested matches Some(mode) && mode._arguments@ == arguments))
+                    ==> wiring_trace_arguments_match(steps@, arguments)
         },
         Err(error) => mixed_body_failed(body, &layouts, forms@, bindings@, gate_limit, nested, error),
     },
@@ -1289,54 +1364,18 @@ fn lower_mixed_function_with_mode<'s, 'p, 'a>(
     let netlist = NorNetlist { input_count, outputs, gates: state.gates };
     assert(nor_evaluation_ready(&netlist, input_count as nat));
     let lowered = LoweredBitFunc { netlist, layouts, definition_wires: state.definitions, gate_definitions: state.origins };
-    proof {
-        if let Some(mode) = nested {
-            assert(wiring_trace_arguments_match(steps, mode._arguments@)) by {
-                reveal(wiring_trace_arguments_match);
-                assert forall|i: int| 0 <= i < steps.len() implies ((#[trigger] steps[i]).nested matches Some(step)
-                    ==> step.arguments == mode._arguments@) by {
-                    assert(wiring_step_uses_mode(steps[i], nested));
-                };
-            };
-        }
-    }
+    assert forall|arguments: Seq<ProjectedCallArgument>|
+        nested.is_none() || (nested matches Some(mode) && mode._arguments@ == arguments) implies
+        #[trigger] wiring_trace_arguments_match(steps, arguments) by {
+        reveal(wiring_trace_arguments_match);
+        assert forall|i: int| 0 <= i < steps.len() implies ((#[trigger] steps[i]).nested matches Some(step)
+            ==> step.arguments == arguments) by {
+            assert(wiring_step_uses_mode(steps[i], nested));
+        };
+    };
     Ok((lowered, Ghost(steps)))
 }
 
-/// 平坦な呼び出しを含む関数のネットリストを作る。
-///
-/// # Errors
-///
-/// 配線に変換できなかった最初の定義または呼び出しの診断を返す。
-pub(super) fn lower_mixed_function<'s, 'p, 'a>(
-    body: &LoweringBody<'s, 'p, 'a>, layouts: Layouts, forms: &[Form], bindings: &[CallBinding<'s, 'p, 'a>],
-    output_widths: &[u64], output_drivers: &[OutputDriver],
-    layout_limit: usize, gate_limit: usize,
-) -> (result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError<'p, 'a>>)
-    requires
-        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, &layouts),
-        widths_layout(output_widths@, layout_limit, &layouts.outputs),
-        output_widths@.len() == output_drivers@.len(),
-        forall|p: int| 0 <= p < output_widths@.len() ==>
-            bit_driver_width(body.input_widths@, body.definitions@, #[trigger] output_drivers@[p]) == Some(output_widths@[p]),
-        ordered_bindings(bindings@),
-        forall|g: int| 0 <= g < bindings@.len() ==> binding_ready(
-            #[trigger] bindings@[g], &layouts, forms@, definition_widths(body.definitions@)),
-        forall|slot: int| 0 <= slot < body.definitions@.len() && !binding_covers(bindings@, slot) ==>
-            bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
-    ensures mixed_function_result(body, &layouts, forms@, bindings@, output_widths@, output_drivers@, gate_limit, result),
-{
-    proof { reveal(mixed_body_failed); }
-    match lower_mixed_function_with_mode(body, layouts, forms, bindings, output_widths, output_drivers,
-        layout_limit, gate_limit, None, Ghost(None)) {
-        Ok(lowered) => Ok(lowered),
-        Err(MixedBodyError::Flat(error)) => Err(error),
-        Err(MixedBodyError::Nested(_)) => {
-            proof { assert(false); }
-            unreachable!()
-        },
-    }
-}
 pub(super) open spec fn bindings_match_calls(
     bindings: Seq<CallBinding>, selected: Seq<ResolvedTemplateCall>,
 ) -> bool {
@@ -1375,6 +1414,24 @@ pub(super) proof fn bindings_preserve_definition_order(
     };
 }
 
+/// 一時配線を使う子呼び出しがあるか、解決済みの一覧から調べる。
+fn selected_has_child_calls(selected: &[ResolvedTemplateCall]) -> (present: bool)
+    ensures present <==> exists|i: int| 0 <= i < selected@.len() && (#[trigger] selected@[i]).children@.len() > 0,
+{
+    let mut i = 0;
+    while i < selected.len()
+        invariant i <= selected@.len(),
+            forall|j: int| 0 <= j < i ==> (#[trigger] selected@[j]).children@.len() == 0,
+        decreases selected@.len() - i,
+    {
+        if !selected[i].children.is_empty() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// 解決済みの呼び出しと通常の定義を合わせ、同じ定義順で配線へ変換する。
 ///
 /// # Errors
@@ -1388,6 +1445,7 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
     Ghost(templates): Ghost<&FunctionTemplates<'p, 'a>>,
 ) -> (result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError<'p, 'a>>)
     requires
+        aliases.can_resolve(),
         aliases.prepared_expansion_body_matches(*context.0, context.1.0, context.1.1, context.1.2, context.2),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, &layouts),
         widths_layout(output_widths@, layout_limit, &layouts.outputs),
@@ -1401,7 +1459,8 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
     ensures exists|bindings: Seq<CallBinding>|
         #[trigger] bindings_match_calls(bindings, selected@)
-            && mixed_function_result(body, &layouts, forms@, bindings, output_widths@, output_drivers@, gate_limit, result),
+            && mixed_function_result(body, &layouts, forms@, bindings, output_widths@, output_drivers@,
+                context.2.projections.call_arguments.arguments@, gate_limit, result),
 {
     let bindings = bind_resolved_calls(aliases, selected, body, &layouts, Ghost(forms@), Ghost(layout_limit), Ghost(context));
     proof {
@@ -1416,10 +1475,41 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
             assert(!call_covers(context.2.calls@, slot));
         };
     }
-    let result = lower_mixed_function(body, layouts, forms, bindings.as_slice(),
-        output_widths, output_drivers, layout_limit, gate_limit);
+    let builtin = if selected_has_child_calls(selected) { Some(builtin_nor_call()) } else { None };
+    let ghost arguments = context.2.projections.call_arguments.arguments@;
+    let nested = match &builtin {
+        Some(builtin) => Some(NestedWiring { selected, builtin, child_limit: child_output_limit(), _arguments: Ghost(arguments) }),
+        None => None,
+    };
+    assert(resolved_mixed_mode_matches(bindings@, arguments, nested)) by {
+        if nested.is_none() {
+            assert forall|i: int| 0 <= i < bindings@.len() implies
+                (#[trigger] bindings@[i])._selection@.children@.len() == 0 by {
+                assert(bindings@[i]._selection@ == selected@[i]);
+            };
+        }
+    };
+    let raw = lower_mixed_function_with_mode(body, layouts, forms, bindings.as_slice(),
+        output_widths, output_drivers, layout_limit, gate_limit, nested,
+        Ghost(Some((aliases, context.0, templates, context.1, context.2))));
+    let result = match raw {
+        Ok(lowered) => {
+            assert(resolved_mixed_trace(bindings@, arguments, lowered.1@)) by {
+                assert(wiring_trace_uses_mode(lowered.1@, nested));
+            };
+            Ok(lowered)
+        },
+        Err(error) => {
+            let ghost cause = error;
+            let diagnostic = normalize_mixed_wiring_diagnostic(error);
+            assert(mixed_function_failure(body, &layouts, forms@, bindings@, arguments, gate_limit, diagnostic)) by {
+                assert(mixed_body_failed(body, &layouts, forms@, bindings@, gate_limit, nested, cause));
+            };
+            Err(diagnostic)
+        },
+    };
     assert(exists|rows: Seq<CallBinding>| #[trigger] bindings_match_calls(rows, selected@)
-        && mixed_function_result(body, &layouts, forms@, rows, output_widths@, output_drivers@, gate_limit, result)) by {
+        && mixed_function_result(body, &layouts, forms@, rows, output_widths@, output_drivers@, arguments, gate_limit, result)) by {
         assert(bindings_match_calls(bindings@, selected@));
     };
     result
@@ -1587,7 +1677,7 @@ fn check_mixed_body_nested_fixture(text: &str, deferred: Option<&str>) {
         assert_eq!(&site.source.text[site.span], expected);
         return;
     }
-    let Err(MixedBodyError::Nested(NestedCallWiringError::Child(0, ChildCallWiringError::GateCapacity(site)))) = lower(0)
+    let Err(MixedBodyError::Nested(_, NestedCallWiringError::Child(0, ChildCallWiringError::GateCapacity(site)))) = lower(0)
         else { panic!("expected the child call to reach the gate limit"); };
     assert_eq!(&site.source.text[site.span], "(nor earlier a)");
     let Ok((circuit, _)) = lower(2) else { panic!("expected a wired body"); };
