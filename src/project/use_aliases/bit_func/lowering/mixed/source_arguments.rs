@@ -257,6 +257,7 @@ proof fn trace_call_frame(
         mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
         0 <= at < steps.len(),
         steps[at].group_before != steps[at].group_after,
+        steps[at].nested.is_none(),
     ensures ({
         let step = steps[at];
         let binding = bindings[step.group_before as int];
@@ -349,6 +350,7 @@ proof fn mixed_trace_source_call_values(
         mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
         0 <= at < steps.len(),
         steps[at].group_before != steps[at].group_after,
+        steps[at].nested.is_none(),
         ({
             let index = steps[at].group_before as int;
             &&& aliases.resolved_template_call_matches(plan, caller, prepared, index, selected)
@@ -513,6 +515,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_
             }
         }
     };
+    assert(step.nested.is_none()) by { reveal(flat_wiring_trace); };
     let result = mixed_trace_source_call_values(aliases, plan, caller, prepared, selected, body, layouts, forms, bindings,
         gate_limit, layout_limit, steps@, slot, group, wiring, at, inputs, values);
     reveal(wiring_step_valid);

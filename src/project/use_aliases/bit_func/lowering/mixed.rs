@@ -21,6 +21,7 @@ use crate::syntax::Form;
 #[cfg(verus_only)]
 use super::call_group::{
     WiringView, call_group_result, call_group_values, call_group_wires_match, call_output_bit_has_value, wiring_view_is_prefix,
+    nested_call_group_frame, nested_call_group_result,
 };
 #[cfg(verus_only)]
 use super::super::instances::{instance_gates_match, instance_wire_values};
@@ -28,6 +29,8 @@ use super::super::instances::{instance_gates_match, instance_wire_values};
 use crate::netlist::{gate_values_match, nor_evaluation};
 #[cfg(verus_only)]
 use super::call_arguments::{CallerArguments, layout_argument_from_width, layout_argument_ready};
+#[cfg(verus_only)]
+use super::call_arguments::builtin_nor_call_matches;
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
 
@@ -67,6 +70,19 @@ pub(super) struct WiringStep {
     before: WiringView,
     #[cfg(verus_only)]
     after: WiringView,
+    #[cfg(verus_only)]
+    nested: Option<NestedCallStep>,
+}
+
+/// 入れ子呼び出しの配線結果を照合するための基底回路と一時配線の上限。
+#[cfg(verus_only)]
+struct NestedCallStep {
+    builtin: (NorNetlist, PortBitLayout),
+    child_limit: usize,
+}
+
+pub(super) closed spec fn flat_wiring_trace(steps: Seq<WiringStep>) -> bool {
+    forall|i: int| 0 <= i < steps.len() ==> (#[trigger] steps[i]).nested.is_none()
 }
 
 pub(super) open spec fn binding_covers(bindings: Seq<CallBinding>, slot: int) -> bool {
@@ -324,15 +340,23 @@ spec fn wiring_step_valid(
     &&& step.before.gates.len() == step.before.origins.len() <= limit
     &&& step.after.gates.len() == step.after.origins.len() <= limit
     &&& if step.group_before == step.group_after {
-        !binding_covers(bindings, step.from as int) && local_step(body, layouts, step)
+        step.nested.is_none() && !binding_covers(bindings, step.from as int) && local_step(body, layouts, step)
     } else {
         let group = step.group_before as int;
         let binding = bindings[group];
         &&& 0 <= group < bindings.len() && step.group_after == group + 1
         &&& step.from == binding.group.outputs.start && step.to == binding.group.outputs.end
         &&& binding_ready(binding, layouts, forms, widths)
-        &&& call_group_result(binding.group, forms, binding.arguments@, layouts, binding.callee,
-            step.before, step.after, limit, definition_widths(body.definitions@), binding._output_widths@, Ok(()))
+        &&& match step.nested {
+            None => call_group_result(binding.group, forms, binding.arguments@, layouts, binding.callee,
+                step.before, step.after, limit, widths, binding._output_widths@, Ok(())),
+            Some(nested) => {
+                &&& binding_matches_selection(binding, binding._selection@)
+                &&& builtin_nor_call_matches(&nested.builtin)
+                &&& nested_call_group_result(&binding._selection@, forms, layouts, &nested.builtin,
+                    step.before, step.after, limit, nested.child_limit, widths, Ok(()))
+            },
+        }
     }
 }
 
@@ -402,6 +426,10 @@ proof fn wiring_step_keeps_prefix(
         }
         assert(step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions);
         assert(step.after.origins.take(step.before.origins.len() as int) =~= step.before.origins);
+    } else if let Some(nested) = step.nested {
+        let binding = bindings[step.group_before as int];
+        nested_call_group_frame(&binding._selection@, forms, layouts, &nested.builtin, step.before, step.after,
+            limit, nested.child_limit, definition_widths(body.definitions@), Ok(()));
     } else {
         let binding = bindings[step.group_before as int];
         let (invocation, mapped, outputs) = choose|invocation: CallerArguments, mapped: Seq<Wire>, outputs: Seq<Wire>|
@@ -562,6 +590,7 @@ proof fn mixed_trace_call_values(
         mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
         0 <= at < steps.len(),
         steps[at].group_before != steps[at].group_after,
+        steps[at].nested.is_none(),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
         gate_values_match(inputs, final_wiring.gates, values),
         values.len() == final_wiring.gates.len() <= usize::MAX,
@@ -665,6 +694,7 @@ pub(super) fn lower_mixed_body<'s, 'p, 'a>(
         Ok((state, steps)) => {
             &&& mixed_trace(body, layouts, forms@, bindings@, gate_limit, steps@, body.definitions@.len() as usize,
                 bindings@.len() as usize, state.model())
+            &&& flat_wiring_trace(steps@)
             &&& state.definitions@.len() == layouts.definitions.total_bits_model()
             &&& state.gates@.len() == state.origins@.len() <= gate_limit
             &&& gates_available(state.gates@, layouts.inputs.total_bits_model() as nat, state.gates@.len() as int)
@@ -672,6 +702,7 @@ pub(super) fn lower_mixed_body<'s, 'p, 'a>(
         },
         Err(error) => exists|steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView|
             #[trigger] mixed_trace(body, layouts, forms@, bindings@, gate_limit, steps, slot, group, wiring)
+            && flat_wiring_trace(steps)
             && mixed_error_at(body, layouts, forms@, bindings@, gate_limit, wiring, slot, group, error),
     },
 {
@@ -710,6 +741,7 @@ pub(super) fn lower_mixed_body<'s, 'p, 'a>(
             gates_available(state.gates@, input_count as nat, state.gates@.len() as int),
             wires_available(state.definitions@, input_count, state.gates@.len()),
             mixed_trace(body, layouts, forms@, bindings@, gate_limit, steps, slot, group, state.model()),
+            flat_wiring_trace(steps),
         decreases body.definitions@.len() - slot,
     {
         let ghost before = state.model();
@@ -746,9 +778,11 @@ pub(super) fn lower_mixed_body<'s, 'p, 'a>(
             slot += 1;
         }
         proof {
-            let step = WiringStep { from: start, to: slot, group_before: cursor, group_after: group, before, after: state.model() };
+            let step = WiringStep { from: start, to: slot, group_before: cursor, group_after: group,
+                before, after: state.model(), nested: None };
             assert(wiring_step_valid(body, layouts, forms@, bindings@, gate_limit, step)) by { reveal(wiring_step_valid); };
             extend_mixed_trace(body, layouts, forms@, bindings@, gate_limit, steps, step);
+            assert(flat_wiring_trace(steps.push(step)));
             steps = steps.push(step);
         }
     }
@@ -779,12 +813,14 @@ pub(super) open spec fn mixed_function_result(
             &&& nor_evaluation_ready(&value.netlist, layouts.inputs.total_bits_model() as nat)
             &&& body_output_wiring_matches(output_drivers, layouts, value.definition_wires@, value.netlist.outputs@,
                 output_widths.len() as int)
+            &&& flat_wiring_trace(steps@)
             &&& mixed_trace(body, layouts, forms, bindings, gate_limit, steps@, body.definitions@.len() as usize,
                 bindings.len() as usize, WiringView { definitions: value.definition_wires@,
                     gates: value.netlist.gates@, origins: value.gate_definitions@ })
         },
         Err(error) => exists|steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView|
             #[trigger] mixed_trace(body, layouts, forms, bindings, gate_limit, steps, slot, group, wiring)
+            && flat_wiring_trace(steps)
             && mixed_error_at(body, layouts, forms, bindings, gate_limit, wiring, slot, group, error),
     }
 }
