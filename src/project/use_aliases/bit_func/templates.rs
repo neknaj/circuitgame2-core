@@ -723,6 +723,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& forall|i: int| 0 <= i < selected.len() ==> {
             let call = #[trigger] selected[i];
             &&& self.resolved_template_call_matches(plan, caller, prepared, i, call)
+            &&& self.expansion_child_scope(call.group)
             &&& table.slots_model()[call.group.vertex as int] == Some(*call.template)
             &&& self.resolved_expression_calls_match(plan, table, caller.2, call.group.postorder,
                 prepared.projections.call_arguments.arguments@, call.children@)
@@ -760,6 +761,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 forall|i: int| 0 <= i < selected@.len() ==> {
                     let call = #[trigger] selected@[i];
                     &&& self.resolved_template_call_matches(plan, caller, &prepared, i, call)
+                    &&& self.expansion_child_scope(call.group)
                     &&& table.slots_model()[call.group.vertex as int] == Some(*call.template)
                     &&& self.resolved_expression_calls_match(plan, table, caller.2, call.group.postorder,
                         arguments@, call.children@)
@@ -769,6 +771,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let group = &groups[index];
             proof {
                 self.expansion_callee_template_evidence(*plan, caller, &prepared, index as int);
+                self.expansion_child_scope_evidence(*plan, caller, &prepared, index as int);
                 self.template_rank_from_position(*plan, (caller.0, caller.1), group._order@.1, table.next_rank() as int);
             }
             let template = self.template_for_expansion_call(plan, table, group, Ghost(caller), Ghost(&prepared), Ghost(index as int));
@@ -788,6 +791,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert forall|i: int| 0 <= i < selected@.len() implies {
                 let row = #[trigger] selected@[i];
                 &&& self.resolved_template_call_matches(plan, caller, &prepared, i, row)
+                &&& self.expansion_child_scope(row.group)
                 &&& table.slots_model()[row.group.vertex as int] == Some(*row.template)
                 &&& self.resolved_expression_calls_match(plan, table, caller.2, row.group.postorder,
                     arguments@, row.children@)

@@ -1,6 +1,8 @@
 //! 子呼び出しを内側から展開し、失敗したときは追加したゲートを取り除く。
 
 use super::*;
+use super::super::super::templates::{FunctionTemplates, ResolvedExpressionCall, ResolvedTemplateCall};
+use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
 use super::super::{existing_wires_keep_availability, port_values};
 #[cfg(verus_only)]
@@ -18,6 +20,119 @@ pub(in crate::project::use_aliases::bit_func::lowering) struct ChildCall<'s> {
     pub(in crate::project::use_aliases::bit_func::lowering) circuit: &'s NorNetlist,
     pub(in crate::project::use_aliases::bit_func::lowering) _input_widths: Ghost<Seq<u64>>,
     pub(in crate::project::use_aliases::bit_func::lowering) _layout_limit: Ghost<usize>,
+}
+
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_abi(call: ChildCall) -> bool {
+    &&& port_bit_layout_result(call._input_widths@, call._layout_limit@, Ok(*call.inputs))
+    &&& call.arguments@.len() == call.inputs.ranges_model().len() == call._input_widths@.len()
+    &&& nor_evaluation_ready(call.circuit, call.inputs.total_bits_model() as nat)
+}
+
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_binding(
+    selected: ResolvedExpressionCall, references: Range<usize>, builtin: &(NorNetlist, PortBitLayout), call: ChildCall,
+) -> bool {
+    &&& references.start <= selected.child.reference < references.end
+    &&& call.reference == selected.child.reference - references.start
+    &&& call.arguments@ == selected.arguments@
+    &&& child_call_abi(call)
+    &&& match selected.template {
+        Some(template) => {
+            &&& call.inputs == template.circuit_model().input_layout_model()
+            &&& call.circuit == template.circuit_model().netlist_model()
+            &&& call._input_widths@ == template.input_widths_model()
+            &&& call._layout_limit@ == template.bit_limit_model()
+        },
+        None => builtin_nor_call_matches(builtin) && *call.inputs == builtin.1 && *call.circuit == builtin.0
+            && call._input_widths@ == seq![1u64, 1u64] && call._layout_limit@ == 2,
+    }
+}
+
+/// 同じ定義の子を後順に並べたまま参照添字を相対化し、実引数、入力配置、回路を借りる。
+pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 'p, 'a>(
+    selected: &'s ResolvedTemplateCall<'s, 'p, 'a>, builtin: &'s (NorNetlist, PortBitLayout),
+    Ghost(aliases): Ghost<&UseAliases<'_, 'p, 'a>>,
+    context: Ghost<(&FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, u64, Seq<ProjectedCallArgument>)>,
+) -> (bound: (usize, Vec<ChildCall<'s>>))
+    requires
+        aliases.expansion_child_scope(selected.group),
+        aliases.resolved_expression_calls_match(context@.0, context@.1, context@.2, selected.group.postorder,
+            context@.3, selected.children@),
+        builtin_nor_call_matches(builtin),
+    ensures
+        bound.0 == selected.group.references.end - selected.group.references.start,
+        bound.1@.len() == selected.children@.len(),
+        forall|i: int| 0 <= i < bound.1@.len() ==>
+            (#[trigger] bound.1@[i]).reference < bound.0
+            && child_call_binding(selected.children@[i], selected.group.references, builtin, bound.1@[i]),
+        forall|i: int, j: int| 0 <= i < j < bound.1@.len() ==>
+            (#[trigger] bound.1@[i]).reference != (#[trigger] bound.1@[j]).reference,
+{
+    let references = &selected.group.references;
+    let count = references.end - references.start;
+    let mut calls: Vec<ChildCall<'s>> = Vec::new();
+    let mut index = 0;
+    while index < selected.children.len()
+        invariant
+            references == &selected.group.references,
+            count == references.end - references.start,
+            aliases.expansion_child_scope(selected.group),
+            aliases.resolved_expression_calls_match(context@.0, context@.1, context@.2, selected.group.postorder,
+                context@.3, selected.children@),
+            builtin_nor_call_matches(builtin),
+            index == calls@.len() <= selected.children@.len(),
+            forall|i: int| 0 <= i < calls@.len() ==>
+                (#[trigger] calls@[i]).reference < count
+                && child_call_binding(selected.children@[i], *references, builtin, calls@[i]),
+        decreases selected.children@.len() - index,
+    {
+        let child = &selected.children[index];
+        proof {
+            reveal(UseAliases::resolved_expression_call_matches);
+            assert(selected.group.postorder is Some);
+            let row = selected.group.postorder->Some_0@[index as int];
+            assert(aliases.resolved_expression_call_matches(context@.0, context@.1, context@.2, context@.3, row, *child));
+            assert(references.start <= child.child.reference < references.end);
+        }
+        let reference = child.child.reference - references.start;
+        let call = if let Some(template) = child.template {
+            proof {
+                let target = context@.0.position_model(child.child._rank@->Some_0)->Some_0;
+                aliases.template_circuit_evidence(target, context@.2, template);
+                aliases.template_port_evidence(target, context@.2, template);
+                aliases.template_port_counts(template.signature_model(), context@.2, template.input_widths_model(),
+                    template.output_widths_model(), template.structure_layouts_model());
+                port_bit_layout_size(template.input_widths_model(), template.bit_limit_model(),
+                    template.circuit_model().input_layout_model());
+            }
+            let circuit = template.circuit();
+            ChildCall { reference, arguments: child.arguments, inputs: circuit.inputs(), circuit: circuit.netlist(),
+                _input_widths: Ghost(template.input_widths_model()), _layout_limit: Ghost(template.bit_limit_model()) }
+        } else {
+            let ghost widths = seq![1u64, 1u64];
+            proof { port_bit_layout_size(widths, 2, &builtin.1); }
+            ChildCall { reference, arguments: child.arguments, inputs: &builtin.1, circuit: &builtin.0,
+                _input_widths: Ghost(widths), _layout_limit: Ghost(2usize) }
+        };
+        assert(child_call_binding(*child, *references, builtin, call));
+        let ghost before = calls@;
+        calls.push(call);
+        assert forall|i: int| 0 <= i < calls@.len() implies
+            (#[trigger] calls@[i]).reference < count
+                && child_call_binding(selected.children@[i], *references, builtin, calls@[i]) by {
+            if i < index { assert(calls@[i] == before[i]); }
+        };
+        index += 1;
+    }
+    proof {
+        assert forall|i: int, j: int| 0 <= i < j < calls@.len() implies
+            (#[trigger] calls@[i]).reference != (#[trigger] calls@[j]).reference by {
+            reveal(UseAliases::resolved_expression_call_matches);
+            let source = selected.group.postorder->Some_0;
+            assert(*selected.children@[i].child == source@[i] && *selected.children@[j].child == source@[j]);
+            assert(source@[i].reference != source@[j].reference);
+        };
+    }
+    (count, calls)
 }
 
 /// 子を一件ずつ処理した境界の、検証に使う配線表とゲート列。
@@ -400,9 +515,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_
     &&& 0 <= index < calls.len()
     &&& ({
         let call = calls[index];
-        &&& port_bit_layout_result(call._input_widths@, call._layout_limit@, Ok(*call.inputs))
-        &&& call.arguments@.len() == call.inputs.ranges_model().len() == call._input_widths@.len()
-        &&& nor_evaluation_ready(call.circuit, call.inputs.total_bits_model() as nat)
+        &&& child_call_abi(call)
         &&& forall|port: int| 0 <= port < call.arguments@.len() ==> {
             let argument = #[trigger] call.arguments@[port];
             let span = call.inputs.ranges_model()[port];

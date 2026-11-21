@@ -639,16 +639,19 @@ pub(super) enum CallWiringError<'p, 'a> {
     GateCapacity,
 }
 
+pub(super) open spec fn builtin_nor_call_matches(builtin: &(NorNetlist, PortBitLayout)) -> bool {
+    &&& nor_evaluation_ready(&builtin.0, 2)
+    &&& builtin.0.gates@ == seq![NorGate { left: Wire::Input(0), right: Wire::Input(1) }]
+    &&& builtin.0.outputs@ == seq![Wire::Gate(0)]
+    &&& builtin.1.total_bits_model() == 2
+    &&& port_bit_layout_result(seq![1u64, 1u64], 2, Ok(builtin.1))
+}
+
 /// 基底 NOR を入力2本、出力1本の呼び出しとして扱うための回路と入力配置。
 ///
 /// 呼び出し元のビット上限が1でも同じ信号を両入力に渡せるよう、入力配置の容量は2とする。
 pub(super) fn builtin_nor_call() -> (builtin: (NorNetlist, PortBitLayout))
-    ensures
-        nor_evaluation_ready(&builtin.0, 2),
-        builtin.0.gates@ == seq![NorGate { left: Wire::Input(0), right: Wire::Input(1) }],
-        builtin.0.outputs@ == seq![Wire::Gate(0)],
-        builtin.1.total_bits_model() == 2,
-        port_bit_layout_result(seq![1u64, 1u64], 2, Ok(builtin.1)),
+    ensures builtin_nor_call_matches(&builtin),
 {
     let widths: &[u64] = &[1, 1];
     proof {
@@ -941,13 +944,15 @@ fn nested_argument_uses_the_saved_child_output_range() {
 #[test]
 fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
-    use child_calls::{ChildCall, lower_child_calls};
+    use child_calls::{bind_child_calls, lower_child_calls};
 
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "calls.ncg2",
         revision: 1,
         text: "(using nor) (func id (in a) (out a))
-               (func caller (in a) (out y) (def y (id (id (nor (nor a a) 0)))))",
+               (func caller (in a) (out y)
+                   (def earlier (id a))
+                   (def y (id (id (nor (nor a a) 0)))))",
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
@@ -963,29 +968,18 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     let prepared = aliases.prepare_expansion_body(&plan, position.0, position.1, 1).unwrap();
     let selected = aliases.resolve_template_calls(&plan, &templates, &prepared.calls,
         &prepared.projections.call_arguments.arguments, Ghost(prepared), Ghost((position.0, position.1, 1u64)));
-    let parent = &selected[0];
+    let parent = &selected[1];
     let parsed = &project.circuits()[position.0];
-    let references = &parsed.definitions[0].references;
     let base = CallerArguments {
         source: &project.sources()[position.0], forms: &parsed.syntax.forms,
         inputs: &[0..1], definitions: &[], wires: &[], child_ranges: &[], child_wires: &[],
     };
-    let (nor, layout) = builtin_nor_call();
-    let mut calls = Vec::new();
-    for child in &parent.children {
-        let reference = child.child.reference - references.start;
-        let arguments = child.arguments;
-        let call = if let Some(template) = child.template {
-            let circuit = template.circuit();
-            ChildCall { reference, arguments, inputs: circuit.inputs(), circuit: circuit.netlist(),
-                _input_widths: Ghost(seq![1u64]), _layout_limit: Ghost(1usize) }
-        } else {
-            ChildCall { reference, arguments, inputs: &layout, circuit: &nor,
-                _input_widths: Ghost(seq![1u64, 1u64]), _layout_limit: Ghost(2usize) }
-        };
-        calls.push(call);
-    }
-    let count = references.end - references.start;
+    let builtin = builtin_nor_call();
+    let (count, calls) = bind_child_calls(parent, &builtin, Ghost(&aliases),
+        Ghost((&plan, &templates, 1u64, prepared.projections.call_arguments.arguments@)));
+    assert!(parent.group.references.start > 0);
+    assert_eq!(count, 4);
+    assert_eq!(calls.iter().map(|call| call.reference).collect::<Vec<_>>(), [3, 2, 1]);
     let prefix = NorGate { left: Wire::Constant(false), right: Wire::Constant(false) };
     let mut gates = alloc::vec![prefix];
     let at_limit = lower_child_calls(&base, &calls, count, &mut gates, 2, Ghost(1usize));

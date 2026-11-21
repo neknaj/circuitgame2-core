@@ -283,6 +283,18 @@ pub proof fn call_postorder_reference(
     assert(order.contains(order[index]));
 }
 
+/// 後順の異なる位置では、同じ呼び出し参照が繰り返されない。
+pub proof fn call_postorder_references_distinct(
+    forms: Seq<Form>, refs: Seq<ExpressionReference>, range: Range<usize>, order: Seq<usize>,
+    i: int, j: int,
+)
+    requires call_references_in_postorder(forms, refs, range, order), 0 <= i < j < order.len(),
+    ensures order[i] != order[j],
+{
+    reveal(call_references_in_postorder);
+    assert(precedes(forms, refs, order[i], order[j]));
+}
+
 /// 元ソースで先に始まる呼び出しと、後から始まる呼び出しの処理順を取り出す。
 ///
 /// 後の呼び出しが前の呼び出しの内側なら子を先に処理する。区間が離れていれば元ソース順になる。

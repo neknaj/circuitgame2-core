@@ -22,7 +22,7 @@ use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges
 use crate::syntax::circuit::postorder_call_references;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    call_postorder_reference, call_references_in_postorder, definition_reference_form_unique,
+    call_postorder_reference, call_postorder_references_distinct, call_references_in_postorder, definition_reference_form_unique,
     nested_call_postorder_position, root_call_postorder_last,
 };
 use alloc::vec::Vec;
@@ -92,6 +92,8 @@ pub(super) struct CheckedExpansionCall<'p, 'a> {
     pub(super) arguments: Range<usize>,
     /// 入れ子の呼び出しを、内側から外側へ処理する順に保持する。
     pub(super) postorder: Option<Vec<PreparedExpressionCall<'p, 'a>>>,
+    /// 同じ定義に属する参照が収まる、ファイル全体の参照配列上の区間。
+    pub(super) references: Range<usize>,
     /// 展開済み回路を保持する配列における呼び出し先の番号。
     pub(super) vertex: usize,
     pub(super) _signature: Ghost<TypedFuncCall<'p, 'a>>,
@@ -514,6 +516,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& is_form_location(source, parsed.syntax.forms@[parsed.definitions@[root.definition as int].expression.start as int],
             group.expression)
         &&& group.arguments == inputs && inputs.start <= inputs.end <= arguments.arguments@.len()
+        &&& group.references == row.references
+        &&& group.references.start <= group.references.end
         &&& match group.postorder {
             None => row.references.end == row.references.start + 1,
             Some(children) => row.references.end > row.references.start + 1
@@ -865,6 +869,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(super) open spec fn expansion_child_scope(&self, group: &CheckedExpansionCall) -> bool {
+        &&& group.references.start <= group.references.end
+        &&& group.postorder matches Some(children) ==> {
+            &&& forall|i: int| 0 <= i < children@.len() ==>
+                group.references.start <= (#[trigger] children@[i]).reference < group.references.end
+            &&& forall|i: int, j: int| 0 <= i < j < children@.len() ==>
+                (#[trigger] children@[i]).reference != (#[trigger] children@[j]).reference
+        }
+    }
+
+    /// 子が同じ定義の参照区間に属し、同じ参照を繰り返さないことを示す。
+    pub(super) proof fn expansion_child_scope_evidence(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, index: int,
+    )
+        requires
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.calls@.len(),
+        ensures self.expansion_child_scope(&prepared.calls@[index]),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+    }
+
     /// 子の引数区間と、構文上の同じ呼び出しから得た署名を取り出す。
     pub(super) proof fn expansion_child_template_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
@@ -1008,6 +1036,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, source_order)
         &&& forall|i: int| 0 <= i < children.len() ==> self.prepared_expression_call_matches(
             plan, caller, definition, projections, types, wiring, caller_rank, #[trigger] children[i])
+        &&& forall|i: int, j: int| 0 <= i < j < children.len() ==>
+            (#[trigger] children[i]).reference != (#[trigger] children[j]).reference
     }
 
     /// 実引数の位置から、親より先に展開する子の位置と出力型を取り出す。
@@ -1189,6 +1219,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(UseAliases::prepared_expression_children_match);
             let references = Seq::new(children@.len(), |i: int| children@[i].reference);
             assert(references.push(row.references.start) =~= order@);
+            assert forall|i: int, j: int| 0 <= i < j < children@.len() implies
+                (#[trigger] children@[i]).reference != (#[trigger] children@[j]).reference by {
+                assert(order@[i] == children@[i].reference && order@[j] == children@[j].reference);
+                call_postorder_references_distinct(parsed.syntax.forms@, parsed.references@, row.references, order@, i, j);
+            };
         }
         children
     }
@@ -1312,6 +1347,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 expression,
                 outputs: root.first_output..root.first_output + root.count,
                 arguments: arguments.start..arguments.end,
+                references: row.references.start..row.references.end,
                 postorder, vertex, _signature: Ghost(group_model.0), _order: Ghost(group_model.1),
             };
             assert(self.checked_expansion_call_matches(*plan, caller, *typed, wiring, *root, arguments,
