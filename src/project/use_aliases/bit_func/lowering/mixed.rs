@@ -19,7 +19,9 @@ use super::super::super::call_arity::ProjectedCallArgument;
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group};
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use super::call_group::{WiringView, call_group_result, call_group_values, call_group_wires_match, call_output_bit_has_value};
+use super::call_group::{
+    WiringView, call_group_result, call_group_values, call_group_wires_match, call_output_bit_has_value, wiring_view_is_prefix,
+};
 #[cfg(verus_only)]
 use super::super::instances::{instance_gates_match, instance_wire_values};
 #[cfg(verus_only)]
@@ -373,15 +375,6 @@ proof fn mixed_trace_definition_step(
         assert(end > 0 && steps[end - 1].to == steps[end].from);
         mixed_trace_definition_step(body, layouts, forms, bindings, limit, steps, slot, group, wiring, end - 1, definition)
     }
-}
-
-spec fn wiring_view_is_prefix(before: WiringView, after: WiringView) -> bool {
-    &&& before.gates.len() <= after.gates.len()
-    &&& before.definitions.len() <= after.definitions.len()
-    &&& before.origins.len() <= after.origins.len()
-    &&& after.origins.take(before.origins.len() as int) == before.origins
-    &&& after.gates.take(before.gates.len() as int) == before.gates
-    &&& after.definitions.take(before.definitions.len() as int) == before.definitions
 }
 
 proof fn wiring_step_keeps_prefix(
