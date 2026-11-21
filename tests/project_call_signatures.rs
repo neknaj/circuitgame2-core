@@ -56,7 +56,13 @@ fn projects_types_in_the_declaring_scope_and_arguments_in_caller_order() {
     assert!(matches!(first_output.ty, ResolvedPortType::Bits(1)));
     assert_eq!(&library[first_output.annotation.unwrap().span.clone()], "b");
     assert!(typed.signature.port(PortDirection::Output, 2).is_none());
-    let nor = aliases.resolve_func_call_signature(0, main, 0, 1, 0).unwrap().unwrap();
+    let nested = next_call_argument(&parsed.syntax.forms, call_argument_range(&parsed.syntax.forms, &typed.call.call))
+        .unwrap();
+    let nor = aliases.resolve_func_call_signature_at_form(0, main, 0, nested.start, 0).unwrap().unwrap();
+    assert_eq!(nor.call.call.form, nested.start);
+    assert_eq!(&caller[nor.call.call.span.clone()], "(nor a a)");
+    assert!(aliases.resolve_func_call_signature_at_form(0, main, 0, nested.start + 1, 8).unwrap().is_none());
+    assert!(aliases.resolve_func_call_signature_at_form(0, main, 1, nested.start, 8).unwrap().is_none());
     assert!(matches!(nor.signature, FuncCallSignature::Nor));
     for index in [0, 1] {
         let port = nor.signature.port(PortDirection::Input, index).unwrap();
@@ -83,7 +89,8 @@ fn preserves_the_call_site_and_the_callee_signature_diagnostic() {
     .unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
-    let error = aliases.resolve_func_call_signature(0, 0, 0, 0, 8).unwrap_err();
+    let form = project.circuits()[0].definitions[0].expression.start;
+    let error = aliases.resolve_func_call_signature_at_form(0, 0, 0, form, 8).unwrap_err();
     let FuncCallSignatureError::Signature {
         call,
         error: TypedSignatureError::TypeReference { reference, .. },

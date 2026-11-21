@@ -477,6 +477,9 @@ pub fn callee_reference_at_form(
         reference.is_some() <==>
             row.expression.start <= form < row.expression.end
                 && ordinary_call_at(_source, _forms@, form as int, row.expression.end as int),
+        row.expression.start <= form < row.expression.end ==>
+            (reference.is_some() <==> exists|i: int| row.references.start <= i < row.references.end
+                && (#[trigger] references@[i]).form == form + 1 && references@[i].kind is Callee),
         reference matches Some(at) ==>
             row.references.start <= at < row.references.end
                 && references@[at as int].form == form + 1
