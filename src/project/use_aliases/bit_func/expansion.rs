@@ -893,6 +893,113 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::prepared_expression_call_matches);
     }
 
+    /// 子の実引数を呼び出し直下のフォームに対応付ける。
+    ///
+    /// 信号、リテラル、入れ子の呼び出しについて、入力ポートとの型の一致を示す。
+    /// 信号は先行する駆動元に、入れ子の呼び出しは後順で先行する単一出力に対応する。
+    pub(super) proof fn expansion_child_argument_evidence(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, group_index: int, parent_index: int, port: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            prepared.calls@[group_index].postorder matches Some(children)
+                && 0 <= parent_index < children@.len()
+                && 0 <= port < children@[parent_index].arguments.end - children@[parent_index].arguments.start,
+        ensures ({
+            let group = prepared.calls@[group_index];
+            let children = group.postorder->Some_0@;
+            let parent = children[parent_index];
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[caller.0 as int];
+            let source = &project.sources_model()[caller.0 as int];
+            let wiring = prepared.typed.literals.wiring->Checked_0;
+            let arg = prepared.projections.call_arguments.arguments@[parent.arguments.start + port];
+            let expected = match parent._signature@.signature {
+                crate::project::FuncCallSignature::Nor => crate::project::ResolvedPortType::Bits(1),
+                crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+            };
+            &&& parent.arguments.start <= parent.arguments.end <= prepared.projections.call_arguments.arguments@.len()
+            &&& match parent._signature@.signature {
+                crate::project::FuncCallSignature::Nor => parent.arguments.end - parent.arguments.start == 2,
+                crate::project::FuncCallSignature::Function(ports) =>
+                    parent.arguments.end - parent.arguments.start == ports.inputs@.len(),
+            }
+            &&& arg.form < parsed.syntax.forms@.len()
+            &&& crate::syntax::circuit::direct_call_argument(parsed.syntax.forms@, parent._signature@.call.call, arg.form as int)
+            &&& match arg.source {
+                CallArgumentSource::Driver(driver) => {
+                    &&& signal_type_at(&wiring, prepared.typed.types@, driver) matches Some(known)
+                        && crate::project::port_types_equal(known.ty, expected)
+                    &&& match driver {
+                        super::super::OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
+                        super::super::OutputDriver::Definition(i) => i < group.outputs.start,
+                    }
+                },
+                CallArgumentSource::Literal(width) => {
+                    let form = parsed.syntax.forms@[arg.form as int];
+                    let span = crate::syntax::form_span(form);
+                    let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+                    &&& expected == crate::project::ResolvedPortType::Bits(width)
+                    &&& span.start < span.end <= source.text.spec_bytes().len()
+                    &&& crate::project::circuit_literal_width_matches(bytes, Some(width), caller.2, Ok(width))
+                    &&& super::lowering::literal_argument_matches_width(source, parsed.syntax.forms@, arg.form, width as int)
+                },
+                CallArgumentSource::NestedCall(reference) =>
+                    exists|i: int| 0 <= i < parent_index && (#[trigger] children[i]).reference == group.references.start + reference
+                        && children[i]._signature@.call.call.form == arg.form
+                        && children[i]._signature@.call.target.port_counts().outputs == 1
+                        && match children[i]._signature@.signature {
+                            crate::project::FuncCallSignature::Nor =>
+                                crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
+                            crate::project::FuncCallSignature::Function(ports) =>
+                                ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected),
+                        },
+                CallArgumentSource::Deferred => true,
+            }
+        }),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let (file, entry, limit) = caller;
+        let group = prepared.calls@[group_index];
+        let children = group.postorder->Some_0@;
+        let parent = children[parent_index];
+        let root = prepared.projections.calls@[group_index];
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        self.checked_types_keep_wiring(file, entry, limit, prepared.typed, wiring);
+        self.checked_wiring_is_func(file, entry, limit, wiring);
+        self.targets.parsed_project_model();
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let definition = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let row = parsed.definitions@[root.definition as int];
+        let reference = (parent.reference - row.references.start) as usize;
+        let arguments = &prepared.projections.call_arguments;
+        let projected = arguments.arguments@.subrange(parent.arguments.start as int, parent.arguments.end as int);
+        assert(projected[port] == arguments.arguments@[parent.arguments.start + port]);
+        self.typed_call_arguments_ready(file, entry, definition, reference, limit, parent._signature@);
+        self.checked_projected_argument((file, entry, definition, reference), limit, prepared.typed.types@,
+            &wiring, parent._signature@, projected, port);
+        if projected[port].source is NestedCall {
+            let i = self.prepared_nested_argument(plan, caller, definition, arguments, prepared.typed.types@,
+                &wiring, group._order@.1, children, parent_index, reference, parent._signature@, projected, port);
+            assert(children[i].reference == group.references.start + projected[port].source->NestedCall_0);
+        }
+        if let CallArgumentSource::Driver(super::super::OutputDriver::Definition(driver)) = projected[port].source {
+            self.expansion_call_output_types(plan, caller, prepared.typed, &wiring, root, group.arguments, arguments, group);
+            let first = group.outputs.start as int;
+            assert(wiring.drivers.definitions@[first].definition == root.definition);
+            assert(wiring.drivers.definitions@[driver as int].definition < root.definition);
+            if first < driver {
+                assert(wiring.drivers.definitions@[first].definition <= wiring.drivers.definitions@[driver as int].definition);
+            }
+            assert(driver < first);
+        }
+    }
+
     /// 子の引数区間と、構文上の同じ呼び出しから得た署名を取り出す。
     pub(super) proof fn expansion_child_template_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
