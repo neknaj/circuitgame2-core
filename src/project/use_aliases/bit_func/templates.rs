@@ -2,6 +2,10 @@
 
 use super::super::{FunctionExpansionOrder, StructureLayouts, TypedRoutineSignature, UseAliases};
 use super::{CheckedBitFunc, LoweredBitFunc};
+use super::super::StructureTypeError;
+use super::frontend::contains_structure_port;
+#[cfg(verus_only)]
+use super::frontend::has_structure_port;
 use super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 #[cfg(verus_only)]
 use super::{lowered_bit_func_result, lowering::standalone_template_layouts};
@@ -27,6 +31,7 @@ pub(super) struct FunctionTemplate<'p, 'a> {
     pub(super) _structure_layouts: Ghost<Option<StructureLayouts<'p, 'a>>>,
     pub(super) _bit_limit: Ghost<usize>,
     _origin: Ghost<TemplateOrigin<'p, 'a>>,
+    has_structure_ports: bool,
 }
 
 /// 一つの呼び出しと、その実引数および変換済みの呼び出し先。
@@ -54,6 +59,15 @@ impl<'p, 'a> FunctionTemplate<'p, 'a> {
 
     pub(super) closed spec fn circuit_model(&self) -> &LoweredBitFunc { &self.circuit }
     pub(super) closed spec fn bit_limit_model(&self) -> usize { self._bit_limit@ }
+
+    pub(super) closed spec fn has_structure_ports_model(&self) -> bool { self.has_structure_ports }
+
+    /// 入出力の署名に構造体型が含まれるかを返す。
+    pub(super) fn has_structure_ports(&self) -> (value: bool)
+        ensures value == self.has_structure_ports_model(),
+    {
+        self.has_structure_ports
+    }
 
     /// 展開時に複製する配線と、入出力のビット配置を借りる。
     pub(super) fn circuit(&self) -> (circuit: &LoweredBitFunc)
@@ -83,11 +97,73 @@ impl<'p, 'a> FunctionTemplates<'p, 'a> {
     pub(super) closed spec fn slots_model(&self) -> Seq<Option<FunctionTemplate<'p, 'a>>> { self.slots@ }
 }
 
+pub(super) open spec fn call_ports_need_structure_layout(selected: Seq<ResolvedTemplateCall>) -> bool {
+    exists|i: int| 0 <= i < selected.len() && (#[trigger] selected[i]).template.has_structure_ports_model()
+}
+
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) open spec fn called_structure_layout_result(
+        &self, selected: Seq<ResolvedTemplateCall>, limit: u64,
+        layouts: Option<StructureLayouts>, result: Result<Option<StructureLayouts>, StructureTypeError>,
+    ) -> bool {
+        match result {
+            Ok(value) => {
+                &&& layouts.is_some() ==> value == layouts
+                &&& value.is_some() <==> layouts.is_some() || call_ports_need_structure_layout(selected)
+                &&& value matches Some(table) ==> self.structure_types_match(limit, Ok(table))
+            },
+            Err(error) => layouts.is_none() && call_ports_need_structure_layout(selected)
+                && self.structure_types_match(limit, Err(error)),
+        }
+    }
+
+    /// 既存の構造体配置を使う。配置がなければ、呼び出し先の署名に必要な場合に検査する。
+    ///
+    /// # Errors
+    ///
+    /// 呼び出し先の署名に構造体があり、構造体の配置を検査できなかった場合に、その診断を返す。
+    pub(super) fn prepare_called_structure_layout(
+        &self, selected: &[ResolvedTemplateCall<'_, 'p, 'a>], limit: u64,
+        layouts: Option<StructureLayouts<'p, 'a>>,
+    ) -> (result: Result<Option<StructureLayouts<'p, 'a>>, StructureTypeError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            layouts matches Some(table) ==> self.structure_types_match(limit, Ok(table)),
+        ensures self.called_structure_layout_result(selected@, limit, layouts, result),
+    {
+        reveal(UseAliases::called_structure_layout_result);
+        if layouts.is_some() {
+            return Ok(layouts);
+        }
+        let mut index = 0;
+        while index < selected.len()
+            invariant
+                self.can_resolve(),
+                layouts.is_none(),
+                index <= selected@.len(),
+                forall|i: int| 0 <= i < index ==> !(#[trigger] selected@[i]).template.has_structure_ports_model(),
+            decreases selected@.len() - index,
+        {
+            if selected[index].template.has_structure_ports() {
+                assert(call_ports_need_structure_layout(selected@));
+                return match self.check_structure_types(limit) {
+                    Ok(table) => Ok(Some(table)),
+                    Err(error) => Err(error),
+                };
+            }
+            index += 1;
+        }
+        Ok(None)
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) closed spec fn function_template_matches(
         &self, position: (usize, usize), width_limit: u64, template: &FunctionTemplate,
     ) -> bool {
         &&& self.typed_signature_evidence(position.0, position.1, width_limit, Ok(Some(template._signature@)))
+        &&& template.has_structure_ports_model() <==> has_structure_port(template._signature@.inputs@)
+            || has_structure_port(template._signature@.outputs@)
         &&& self.template_port_widths_match(template._signature@, width_limit, template.inputs@, template.outputs@,
             template._structure_layouts@)
         &&& port_bit_layout_result(template.inputs@, template._bit_limit@, Ok(*template.circuit.input_layout_model()))
@@ -142,7 +218,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let ghost table = self.standalone_template_ports(position.0, position.1, width_limit, &checked);
         proof { standalone_template_layouts(&checked, _bit_limit, &circuit); }
         let ghost origin = TemplateOrigin::Standalone(checked);
-        let template = FunctionTemplate { circuit, inputs: checked.input_widths, outputs: checked.output_widths,
+        let has_structure_ports = contains_structure_port(checked.signature.inputs.as_slice())
+            || contains_structure_port(checked.signature.outputs.as_slice());
+        let template = FunctionTemplate { circuit, inputs: checked.input_widths, outputs: checked.output_widths, has_structure_ports,
             _signature: Ghost(checked.signature), _structure_layouts: Ghost(table), _bit_limit: Ghost(_bit_limit), _origin: Ghost(origin) };
         assert(self.function_template_matches(position, width_limit, &template)) by {
             reveal(UseAliases::function_template_matches);
@@ -275,6 +353,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             group.arguments.start as int, group.arguments.end as int)
         &&& selected.arguments@.len() == selected.template.signature_model().inputs@.len()
         &&& selected.arguments@.len() == selected.template.input_widths_model().len()
+        &&& selected.template.has_structure_ports_model() <==> has_structure_port(selected.template.signature_model().inputs@)
+            || has_structure_port(selected.template.signature_model().outputs@)
         &&& 0 <= group._order@.0 < group._order@.1 < plan.order_model().len()
         &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
         &&& group.vertex == plan.order_model()[group._order@.0]
@@ -360,6 +440,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             0 <= index < prepared.calls@.len() && prepared.calls@[index] == *group,
             group._order@.1 == table.next_rank(),
         ensures
+            template.has_structure_ports_model() <==> has_structure_port(template.signature_model().inputs@)
+                || has_structure_port(template.signature_model().outputs@),
             plan.position_model(group._order@.0) matches Some(target)
                 && self.function_template_matches(target, caller.2, template),
             group._signature@.signature matches crate::project::FuncCallSignature::Function(signature)

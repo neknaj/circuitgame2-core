@@ -11,6 +11,9 @@ use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc};
 use super::expansion::CheckedExpansionCall;
+use super::templates::ResolvedTemplateCall;
+#[cfg(verus_only)]
+use super::templates::call_ports_need_structure_layout;
 use super::super::{
     FuncCallSignatureError, FuncCallTarget, FuncSignalTypeError, FuncSignalTypes, FuncWiring, FuncWiringResult, OutputDriver,
     ResolvedPortType, SelectionArgumentError, SingleBitOperand, StructureLayouts, StructureTypeError,
@@ -144,11 +147,11 @@ struct FuncProjection<'w, 'p, 'a> {
     structures: &'w Vec<StructureProjection>,
 }
 
-spec fn has_structure_port(ports: Seq<TypedPort>) -> bool {
+pub(super) open spec fn has_structure_port(ports: Seq<TypedPort>) -> bool {
     exists|i: int| 0 <= i < ports.len() && (#[trigger] ports[i]).ty is Struct
 }
 
-fn contains_structure_port(ports: &[TypedPort]) -> (has_structure: bool)
+pub(super) fn contains_structure_port(ports: &[TypedPort]) -> (has_structure: bool)
     ensures has_structure == has_structure_port(ports@),
 {
     let mut i = 0;
@@ -477,7 +480,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.can_resolve(),
             self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
             layouts matches Some(table) ==> self.structure_types_match(limit, Ok(table)),
-        ensures self.routine_ports_result(file, entry, limit, wiring, layouts, result),
+        ensures
+            self.routine_ports_result(file, entry, limit, wiring, layouts, result),
+            result matches Ok(ports) ==> (ports.layouts.is_some() <==> layouts.is_some()
+                || has_structure_port(wiring.drivers.signature.inputs@)
+                || has_structure_port(wiring.drivers.signature.outputs@)),
     {
         reveal(UseAliases::routine_ports_result);
         let ghost original = layouts;
@@ -512,6 +519,71 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let inputs = self.collect_port_widths(signature.inputs.as_slice(), layouts.as_ref(), limit);
         let outputs = self.collect_port_widths(signature.outputs.as_slice(), layouts.as_ref(), limit);
         Ok(PreparedBitFuncPorts { inputs, outputs, layouts })
+    }
+
+    /// 呼び出し元のポートを検査し、呼び出し先の署名を扱うために必要な構造体配置も確保する。
+    ///
+    /// # Errors
+    ///
+    /// 呼び出し元のポート検査が失敗した場合はその診断を返す。
+    /// ポートが妥当で、呼び出し先に必要な構造体配置の検査が失敗した場合は、その診断を返す。
+    pub(super) fn prepare_expanded_routine_ports(
+        &self, file: usize, entry: usize, limit: u64, wiring: &FuncWiring<'p, 'a>,
+        layouts: Option<StructureLayouts<'p, 'a>>, selected: &[ResolvedTemplateCall<'_, 'p, 'a>],
+    ) -> (result: Result<PreparedBitFuncPorts<'p, 'a>, BitFuncError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
+            layouts matches Some(table) ==> self.structure_types_match(limit, Ok(table)),
+        ensures match result {
+            Ok(ports) => self.routine_ports_result(file, entry, limit, wiring, layouts, Ok(ports))
+                && (ports.layouts.is_some() <==> layouts.is_some()
+                    || has_structure_port(wiring.drivers.signature.inputs@)
+                    || has_structure_port(wiring.drivers.signature.outputs@)
+                    || call_ports_need_structure_layout(selected@)),
+            Err(error) => self.routine_ports_result(file, entry, limit, wiring, layouts, Err(error))
+                || (error matches BitFuncError::PortLayout(diagnostic) && exists|ports: PreparedBitFuncPorts|
+                    #[trigger] self.routine_ports_result(file, entry, limit, wiring, layouts, Ok(ports))
+                    && self.called_structure_layout_result(selected@, limit, ports.layouts, Err(diagnostic))),
+        },
+    {
+        reveal(UseAliases::routine_ports_result);
+        let mut ports = match self.prepare_routine_ports(file, entry, limit, wiring, layouts) {
+            Ok(ports) => ports,
+            Err(error) => return Err(error),
+        };
+        if ports.layouts.is_some() {
+            return Ok(ports);
+        }
+        let ghost original = ports;
+        let table = match self.prepare_called_structure_layout(selected, limit, ports.layouts) {
+            Ok(table) => table,
+            Err(error) => {
+                assert(exists|before: PreparedBitFuncPorts| #[trigger] self.routine_ports_result(file, entry, limit, wiring,
+                    layouts, Ok(before)) && self.called_structure_layout_result(selected@, limit, before.layouts, Err(error)));
+                return Err(BitFuncError::PortLayout(error));
+            },
+        };
+        ports.layouts = table;
+        proof {
+
+            let new_table = match &ports.layouts { Some(table) => Some(table), None => None };
+            self.widths_without_structure_layout(wiring.drivers.signature.inputs@, original.inputs@, new_table);
+            self.widths_without_structure_layout(wiring.drivers.signature.outputs@, original.outputs@, new_table);
+        }
+        Ok(ports)
+    }
+
+    proof fn widths_without_structure_layout(
+        &self, ports: Seq<TypedPort>, widths: Seq<u64>, layouts: Option<&StructureLayouts>,
+    )
+        requires self.port_widths_match(ports, widths, None),
+        ensures self.port_widths_match(ports, widths, layouts),
+    {
+        assert forall|i: int| 0 <= i < widths.len() implies
+            self.port_width_matches(ports[i].ty, #[trigger] widths[i], layouts) by {
+            assert(self.port_width_matches(ports[i].ty, widths[i], None));
+        };
     }
 
     spec fn port_width_matches(
@@ -1923,7 +1995,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
 #[cfg(all(test, not(verus_only)))]
 #[test]
-fn body_projects_concat_after_call_outputs() {
+fn body_projects_concat_after_call_with_a_structure_output() {
     use alloc::vec;
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
 
@@ -1931,48 +2003,57 @@ fn body_projects_concat_after_call_outputs() {
         path: "calls.ncg2",
         revision: 1,
         text: "(using nor)
-               (func pair (in (a (bits 4)) b) (out (a (bits 4)) b))
+               (struct Word (width 4))
+               (func pair (in (a (bits 4)) b) (out (a (bits 4)) b (boxed Word))
+                   (def boxed (as Word a)))
                (func caller (in (a (bits 4)) b) (out y)
-                   (def (word passthrough) (pair a b))
+                   (def (word passthrough unused) (pair a b))
                    (def joined (concat word passthrough))
                    (def y (bit joined 3)))",
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
     let plan = aliases.prepare_function_expansion().unwrap();
-    let prepared = aliases.prepare_expansion_body(&plan, 0, 2, 8).unwrap();
+    let prepared = aliases.prepare_expansion_body(&plan, 0, 3, 8).unwrap();
     let FuncWiringResult::Checked(wiring) = &prepared.typed.literals.wiring else {
         panic!("expected checked function wiring");
     };
+
+    let mut templates = aliases.new_function_templates(&plan, Ghost(8u64));
+    let position = plan.get(templates.next_index()).unwrap();
+    let checked = aliases.check_bit_func(position.0, position.1, 8).unwrap();
+    let lowered = checked.lower_bit_func(16).unwrap();
+    let callee = aliases.standalone_function_template(position, 8, checked, lowered, 16);
+    aliases.insert_function_template(&plan, &mut templates, callee, Ghost(8u64));
+    let selected = aliases.resolve_template_calls(&plan, &templates, prepared.calls.as_slice(),
+        prepared.projections.call_arguments.arguments.as_slice(), Ghost(prepared), Ghost((0usize, 3usize, 8u64)));
+    assert!(prepared.projections.layouts.is_none());
+    let ports = aliases.prepare_expanded_routine_ports(
+        0, 3, 8, wiring, prepared.projections.layouts, selected.as_slice(),
+    ).unwrap();
+    assert!(ports.layouts.is_some());
     let scope = FuncProjection {
         file: 0,
-        entry: 2,
+        entry: 3,
         limit: 8,
         source: &project.sources()[0],
         parsed: &project.circuits()[0],
         wiring,
-        inputs: &vec![4, 1],
-        outputs: &vec![1],
+        inputs: &ports.inputs,
+        outputs: &ports.outputs,
         structures: &prepared.projections.entries,
     };
-    let mut templates = aliases.new_function_templates(&plan, Ghost(8u64));
-    let position = plan.get(templates.next_index()).unwrap();
-    let checked = aliases.check_bit_func(position.0, position.1, 8).unwrap();
-    let lowered = checked.lower_bit_func(8).unwrap();
-    let callee = aliases.standalone_function_template(position, 8, checked, lowered, 8);
-    aliases.insert_function_template(&plan, &mut templates, callee, Ghost(8u64));
-    let selected = aliases.resolve_template_calls(&plan, &templates, prepared.calls.as_slice(),
-        prepared.projections.call_arguments.arguments.as_slice(), Ghost(prepared), Ghost((0usize, 2usize, 8u64)));
     let definitions = aliases.project_prepared_definition_body(
         &scope, prepared.calls.as_slice(), selected.as_slice(),
         prepared.typed.literals.widths.as_slice(), prepared.projections.concats, Ghost(plan), Ghost(prepared),
     ).unwrap();
-    assert_eq!(definitions.len(), 4);
-    assert!(matches!(definitions[2].rhs, BitFuncRhs::Concat));
-    assert_eq!(definitions[2].width, 5);
-    let local = &definitions[3];
+    assert_eq!(definitions.len(), 5);
+    assert_eq!(definitions[2].width, 4);
+    assert!(matches!(definitions[3].rhs, BitFuncRhs::Concat));
+    assert_eq!(definitions[3].width, 5);
+    let local = &definitions[4];
     assert_eq!(local.width, 1);
-    let BitFuncRhs::Selection { input: OutputDriver::Definition(2), selection } = local.rhs else {
+    let BitFuncRhs::Selection { input: OutputDriver::Definition(3), selection } = local.rhs else {
         panic!("expected selection from the concatenated call outputs");
     };
     assert_eq!(selection.start, 3);
