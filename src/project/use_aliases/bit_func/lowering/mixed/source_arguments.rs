@@ -16,6 +16,7 @@ use super::super::super::expansion::{
 };
 use super::super::super::frontend::{expression_input_width, nor_root_arguments_match_widths};
 use super::super::super::semantics::driver_values;
+use super::super::super::templates::ResolvedExpressionCall;
 use super::super::super::super::call_arity::CallArgumentSource;
 use crate::netlist::wire_value;
 use crate::project::FuncWiringResult;
@@ -260,6 +261,84 @@ pub(in crate::project::use_aliases::bit_func) struct EvaluatedCallBits {
     pub(in crate::project::use_aliases::bit_func) input: Seq<bool>,
     pub(in crate::project::use_aliases::bit_func) ports: Seq<Seq<bool>>,
     pub(in crate::project::use_aliases::bit_func) output: Seq<bool>,
+}
+
+/// 子の評価値と、その入力値を読んだ配線を同じ後順履歴から得る。
+#[verifier::spinoff_prover]
+proof fn trace_child_wire_values<'s, 'p, 'a>(
+    selected: ResolvedExpressionCall<'s, 'p, 'a>, references: core::ops::Range<usize>,
+    builtin: &(NorNetlist, PortBitLayout), invocation: CallerArguments<'s, 'p, 'a>,
+    calls: Seq<ChildCall<'s, 'p, 'a>>, initial: Seq<NorGate>, root: &NestedRootEvaluation<'s, 'p, 'a>,
+    combined: Seq<NorGate>, inputs: Seq<bool>, gates: Seq<bool>, input_bits: usize, child_index: usize,
+) -> (result: (EvaluatedCallBits, CallerArguments<'s, 'p, 'a>, Seq<Wire>))
+    requires
+        references.start <= references.end, child_index < calls.len(),
+        child_call_binding(selected, references, builtin, calls[child_index as int]),
+        child_wiring_trace_matches(&invocation, calls, calls.len(), (references.end - references.start) as usize,
+            initial, root.trace, root.end, input_bits),
+        child_ranges_match(calls, calls.len(), root.end.table.ranges@),
+        root.end.gates.len() <= combined.len() && root.end.gates == combined.take(root.end.gates.len() as int),
+        inputs.len() == input_bits,
+        gate_values_match(inputs, combined, gates), gates.len() == combined.len() <= usize::MAX,
+    ensures ({
+        let (evaluation, mapped_from, mapped) = result;
+        let call = calls[child_index as int];
+        let before = root.trace[child_index as int].table;
+        let reference = call.reference as int;
+        &&& child_index < root.trace.len()
+        &&& mapped_from.source == invocation.source && mapped_from.forms@ == invocation.forms@
+        &&& mapped_from.inputs@ == invocation.inputs@ && mapped_from.definitions@ == invocation.definitions@
+        &&& mapped_from.wires@ == invocation.wires@
+        &&& mapped_from.child_ranges@ == before.ranges@ && mapped_from.child_wires@ == before.wires@
+        &&& argument_prefix_wires(&mapped_from, call.arguments@, call.inputs.ranges_model(), call.arguments@.len() as int, mapped)
+        &&& mapped.len() == call.inputs.total_bits_model()
+        &&& evaluation.input == instance_wire_values(mapped, inputs, gates)
+        &&& evaluation.ports == port_values(call.inputs, evaluation.input)
+        &&& evaluation.ports.len() == call.arguments@.len()
+        &&& nor_evaluation(call.circuit, evaluation.input, evaluation.output)
+        &&& (selected.template.is_none() ==> {
+            let input = evaluation.input;
+            &&& input.len() == 2
+            &&& evaluation.ports == seq![seq![input[0]], seq![input[1]]]
+            &&& evaluation.output == seq![!(input[0] || input[1])]
+        })
+        &&& arguments_are_determined(call.arguments@)
+        &&& 0 <= reference < root.end.table.ranges@.len()
+        &&& root.end.table.ranges@[reference] matches Some(range)
+            && range.start <= range.end <= root.end.table.wires@.len()
+            && evaluation.output == instance_wire_values(
+                root.end.table.wires@.subrange(range.start as int, range.end as int), inputs, gates)
+    }),
+{
+    let child = child_index as int;
+    let call = calls[child];
+    let count = (references.end - references.start) as usize;
+    let (input, output) = child_output_evaluates(&invocation, calls, calls.len(), count, initial, root.trace, root.end,
+        child_index, combined, inputs, gates, input_bits);
+    if selected.template.is_none() {
+        super::super::call_arguments::builtin_nor_evaluation(builtin, input, output);
+    }
+    assert(root.trace.len() == calls.len() + 1) by { reveal(child_wiring_trace_matches); };
+    let before = root.trace[child].table;
+    let (mapped_from, mapped) = choose|mapped_from: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>|
+        #[trigger] argument_prefix_wires(&mapped_from, call.arguments@, call.inputs.ranges_model(),
+            call.arguments@.len() as int, mapped)
+        && mapped_from.source == invocation.source && mapped_from.forms@ == invocation.forms@
+        && mapped_from.inputs@ == invocation.inputs@ && mapped_from.definitions@ == invocation.definitions@
+        && mapped_from.wires@ == invocation.wires@
+        && mapped_from.child_ranges@ == before.ranges@ && mapped_from.child_wires@ == before.wires@
+        && mapped.len() == call.inputs.total_bits_model() && input == instance_wire_values(mapped, inputs, gates);
+    let ports = port_values(call.inputs, input);
+    assert(ports.len() == call.arguments@.len()) by { reveal(port_values); };
+    port_bit_layout_size(call._input_widths@, call._layout_limit@, call.inputs);
+    assert forall|p: int| 0 <= p < call.arguments@.len() implies
+        !((#[trigger] call.arguments@[p]).source is Deferred) by {
+        reveal(argument_prefix_wires);
+        let slot = call.inputs.ranges_model()[p];
+        assert(slot.end <= mapped.len());
+        assert(argument_source_available(&mapped_from, call.arguments@[p].source));
+    };
+    (EvaluatedCallBits { input, ports, output }, mapped_from, mapped)
 }
 
 pub(super) open spec fn nor_source_binding_matches(
@@ -623,21 +702,8 @@ proof fn nested_child_values<'s, 'p, 'a>(
     let selected_child = selected.children@[child];
     assert(child_call_binding(selected_child, selected.group.references, builtin, call));
     let count = (selected.group.references.end - selected.group.references.start) as usize;
-    let result = child_output_evaluates(&invocation, calls, calls.len(), count, step.before.gates, root.trace, root.end,
-        child_index, combined, inputs, gates, layouts.inputs.total_bits_model());
-    if selected_child.template.is_none() {
-        super::super::call_arguments::builtin_nor_evaluation(builtin, result.0, result.1);
-    }
-    assert(root.trace.len() == calls.len() + 1) by { reveal(child_wiring_trace_matches); };
-    let before = root.trace[child].table;
-    let (arguments_from, mapped) = choose|arguments_from: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>|
-        #[trigger] argument_prefix_wires(&arguments_from, call.arguments@, call.inputs.ranges_model(),
-            call.arguments@.len() as int, mapped)
-        && arguments_from.source == invocation.source && arguments_from.forms@ == invocation.forms@
-        && arguments_from.inputs@ == invocation.inputs@ && arguments_from.definitions@ == invocation.definitions@
-        && arguments_from.wires@ == invocation.wires@
-        && arguments_from.child_ranges@ == before.ranges@ && arguments_from.child_wires@ == before.wires@
-        && mapped.len() == call.inputs.total_bits_model() && result.0 == instance_wire_values(mapped, inputs, gates);
+    let (evaluation, arguments_from, mapped) = trace_child_wire_values(selected_child, selected.group.references, builtin,
+        invocation, calls, step.before.gates, root, combined, inputs, gates, layouts.inputs.total_bits_model(), child_index);
     aliases.expansion_callee_template_evidence(*plan, caller, prepared, index);
     aliases.expansion_child_arguments_in_source_order(*plan, caller, prepared, index, child);
     let project = aliases.targets.project_model();
@@ -650,32 +716,10 @@ proof fn nested_child_values<'s, 'p, 'a>(
     assert(call.arguments@ == projected);
     let positions = Seq::new(call.arguments@.len(), |port: int| call.arguments@[port].form);
     assert(call_argument_positions(forms, selected_child.child._signature@.call.call, positions));
-    let ports = port_values(call.inputs, result.0);
+    let ports = evaluation.ports;
     let incoming = port_values(&layouts.inputs, inputs);
     let prior = prior_definition_values(layouts, step, inputs, gates);
-    port_bit_layout_size(call._input_widths@, call._layout_limit@, call.inputs);
     reveal(port_values);
-    assert(ports.len() == call.arguments@.len());
-    assert(nor_evaluation(call.circuit, result.0, result.1));
-    assert(selected_child.template.is_none() ==> {
-        &&& result.0.len() == 2
-        &&& ports == seq![seq![result.0[0]], seq![result.0[1]]]
-        &&& result.1 == seq![!(result.0[0] || result.0[1])]
-    });
-    let reference = call.reference as int;
-    assert(0 <= reference < root.end.table.ranges@.len());
-    assert(root.end.table.ranges@[reference] matches Some(output_range)
-            && output_range.start <= output_range.end <= root.end.table.wires@.len()
-            && result.1 == instance_wire_values(
-                root.end.table.wires@.subrange(output_range.start as int, output_range.end as int), inputs, gates));
-    assert forall|port: int| 0 <= port < call.arguments@.len() implies
-        !((#[trigger] call.arguments@[port]).source is Deferred) by {
-        reveal(argument_prefix_wires);
-        let slot = call.inputs.ranges_model()[port];
-        assert(slot.end <= mapped.len());
-        assert(argument_source_available(&arguments_from, call.arguments@[port].source));
-    };
-    assert(arguments_are_determined(call.arguments@));
     assert forall|port: int| 0 <= port < call.arguments@.len()
         && call.arguments@[port].source.has_direct_wires() implies
         source_call_argument_value(source, parsed, &wiring, caller.1, definition, #[trigger] positions[port],
@@ -692,11 +736,11 @@ proof fn nested_child_values<'s, 'p, 'a>(
     assert forall|port: usize| port < call.arguments@.len()
         && (#[trigger] call.arguments@[port as int]).source is NestedCall implies
         exists|producer: usize| #[trigger] child_port_reads_producer(calls, root.end, producer, child_index, port,
-            result.0, inputs, gates)
+            evaluation.input, inputs, gates)
             && selected.children@[producer as int].child._signature@.call.call.form == positions[port as int] by {
         let producer = child_nested_port_value(&invocation, calls, calls.len(), count, step.before.gates, root.trace,
             root.end, child_index, port, &arguments_from, mapped, inputs, gates, layouts.inputs.total_bits_model());
-        assert(child_port_reads_producer(calls, root.end, producer, child_index, port, result.0, inputs, gates));
+        assert(child_port_reads_producer(calls, root.end, producer, child_index, port, evaluation.input, inputs, gates));
         assert(call.arguments@[port as int] == prepared.projections.call_arguments.arguments@[range.start + port]);
         aliases.expansion_child_argument_evidence(*plan, caller, prepared, index, child, port as int);
         let group = selected.group;
@@ -714,7 +758,6 @@ proof fn nested_child_values<'s, 'p, 'a>(
         }
         assert(earlier == producer);
     };
-    let evaluation = EvaluatedCallBits { input: result.0, ports, output: result.1 };
     assert(evaluated_nested_child(aliases, caller, prepared, index, selected, layouts, step, forms,
         calls, root, inputs, gates, child_index, evaluation));
     evaluation
