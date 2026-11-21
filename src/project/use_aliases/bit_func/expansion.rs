@@ -2282,6 +2282,44 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(is_form_location(source, parsed.syntax.forms@[form as int], root.root.expression));
     }
 
+    /// 根と子の引数位置を厳格構文木の出現順に対応付ける。引数のない子には空の列を対応させる。
+    pub(super) proof fn prepared_nor_arguments_in_source_order(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, index: int, parent_index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+            0 <= parent_index <= prepared.nor_roots@[index].postorder@.len(),
+        ensures ({
+            let root = prepared.nor_roots@[index];
+            let children = root.postorder@;
+            let parent = if parent_index == children.len() { root.root } else { children[parent_index] };
+            let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+            let projected = prepared.projections.call_arguments.arguments@.subrange(parent.arguments.start as int, parent.arguments.end as int);
+            &&& parent.arguments.start <= parent.arguments.end <= prepared.projections.call_arguments.arguments@.len()
+            &&& crate::syntax::circuit::call_argument_positions(forms, parent._signature@.call.call,
+                Seq::new(projected.len(), |port: int| projected[port].form))
+        }),
+    {
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let (file, entry, limit) = caller;
+        let root = prepared.nor_roots@[index];
+        let children = root.postorder@;
+        let parent = if parent_index == children.len() { root.root } else { children[parent_index] };
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        self.checked_types_keep_wiring(file, entry, limit, prepared.typed, wiring);
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let reference = (parent.reference - parsed.definitions@[root.definition as int].references.start) as usize;
+        let projected = prepared.projections.call_arguments.arguments@.subrange(parent.arguments.start as int, parent.arguments.end as int);
+        self.projected_arguments_in_source_order((file, entry, local, reference), limit, prepared.typed.types@,
+            &wiring, parent._signature@, projected);
+    }
+
     /// 根と子の実引数を元のフォーム、先行する定義、または後順の子の出力に対応付ける。
     pub(super) proof fn prepared_nor_argument_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
@@ -2310,6 +2348,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let parsed = &project.circuits_model()[caller.0 as int];
             let source = &project.sources_model()[caller.0 as int];
             let row = parsed.definitions@[root.definition as int];
+            let frame = parsed.entry_ranges@[caller.1 as int];
             let wiring = prepared.typed.literals.wiring->Checked_0;
             let arg = prepared.projections.call_arguments.arguments@[parent.arguments.start + port];
             let form = parsed.syntax.forms@[arg.form as int];
@@ -2319,8 +2358,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             &&& parent.arguments.start <= parent.arguments.end <= prepared.projections.call_arguments.arguments@.len()
             &&& arg.form < parsed.syntax.forms@.len()
+            &&& caller.1 < parsed.entry_ranges@.len()
+            &&& frame.definitions.start <= root.definition < frame.definitions.end <= parsed.definitions@.len()
+            &&& row.signals.end <= parsed.signals@.len()
             &&& match arg.source {
                 CallArgumentSource::Driver(driver) => {
+                    &&& form is Atom && form->Atom_kind is Name
+                    &&& exists|position: int| row.signals.start <= position < row.signals.end
+                        && (#[trigger] parsed.signals@[position]) == arg.form
+                        && 0 <= position - frame.signals.start < wiring.signals@.len()
+                        && wiring.signals@[position - frame.signals.start].driver == driver
                     &&& signal_type_at(&wiring, prepared.typed.types@, driver) matches Some(known)
                         && crate::project::port_types_equal(known.ty, expected)
                     &&& match driver {
@@ -2332,11 +2379,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let span = crate::syntax::form_span(form);
                     let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
                     &&& expected == crate::project::ResolvedPortType::Bits(width)
+                    &&& form is Atom && !(form->Atom_kind is Name)
+                    &&& span.start < span.end <= source.text.spec_bytes().len()
                     &&& super::lowering::literal_argument_matches_width(source, parsed.syntax.forms@, arg.form, width as int)
                     &&& crate::project::circuit_literal_width_matches(bytes, Some(width), caller.2, Ok(width))
+                    &&& ((width == 1 && bytes.len() == 1 && (bytes[0] == b'0' || bytes[0] == b'1'))
+                        || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Binary)
+                        || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Hexadecimal))
                 },
                 CallArgumentSource::NestedCall(_) =>
-                    prepared_nested_output_matches(children, row.references.start, parent_index, arg, expected),
+                    form is List && prepared_nested_output_matches(children, row.references.start, parent_index, arg, expected),
                 CallArgumentSource::Deferred => true,
             }
         }),
@@ -2351,7 +2403,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let wiring = prepared.typed.literals.wiring->Checked_0;
         self.checked_types_keep_wiring(file, entry, limit, prepared.typed, wiring);
         self.checked_wiring_is_func(file, entry, limit, wiring);
-        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        parsed_index_evidence(*source, *parsed);
+        build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
         let row = parsed.definitions@[root.definition as int];
         let definition = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
         let reference = (parent.reference - row.references.start) as usize;

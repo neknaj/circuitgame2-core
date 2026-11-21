@@ -747,8 +747,7 @@ proof fn rooted_trace_preserves_prefix(
 /// 本体に展開した根 NOR の配線状態と、同じ配線を評価した値。
 #[cfg(verus_only)]
 pub(super) struct RootedNorEvaluation<'s, 'p, 'a> {
-    pub(super) before: WiringView,
-    pub(super) after: WiringView,
+    pub(super) step: WiringStep,
     pub(super) builtin: (NorNetlist, PortBitLayout),
     pub(super) evaluation: (Seq<ChildCall<'s, 'p, 'a>>, CallerArguments<'s, 'p, 'a>, NestedRootEvaluation<'s, 'p, 'a>),
 }
@@ -765,6 +764,8 @@ proof fn rooted_trace_step_for_nor(
     ensures
         0 <= at < steps.len(),
         steps[at].nor_before == index,
+        steps[at].from == roots[index].selected.prepared.output_slot,
+        steps[at].before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), steps[at].from as nat),
         steps[at].nested.is_some(),
         ({
             let binding = roots[index];
@@ -773,6 +774,7 @@ proof fn rooted_trace_step_for_nor(
             nor_call_group_result(&binding.selected, *binding.references, forms, layouts, &nested.builtin,
                 step.before, step.after, limit, nested.child_limit, definition_widths(body.definitions@), Ok(()))
         }),
+        wiring_view_is_prefix(steps[at].before, steps[at].after),
         wiring_view_is_prefix(steps[at].before, final_wiring),
         wiring_view_is_prefix(steps[at].after, final_wiring),
 {
@@ -804,9 +806,9 @@ proof fn nor_evaluation_matches_final_definition(
     final_wiring: WiringView, inputs: Seq<bool>, values: Seq<bool>,
 )
     requires
-        wiring_view_is_prefix(result.after, final_wiring),
+        wiring_view_is_prefix(result.step.after, final_wiring),
         nor_call_group_evaluation_matches(&binding.selected, *binding.references, forms, layouts, &result.builtin,
-            result.before, result.after, final_wiring.gates, inputs, values, result.evaluation),
+            result.step.before, result.step.after, final_wiring.gates, inputs, values, result.evaluation),
     ensures ({
         let definition = binding.selected.prepared.output_slot as int;
         let definitions = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values);
@@ -818,8 +820,8 @@ proof fn nor_evaluation_matches_final_definition(
 {
     reveal(nor_call_group_evaluation_matches);
     let definition = binding.selected.prepared.output_slot as int;
-    let bit = result.before.definitions.len() as int;
-    assert(final_wiring.definitions[bit] == result.after.definitions[bit]);
+    let bit = result.step.before.definitions.len() as int;
+    assert(final_wiring.definitions[bit] == result.step.after.definitions[bit]);
     let definitions = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values);
     assert(definitions[definition].len() == 1);
     assert(definitions[definition][0] == result.evaluation.2.outputs[0]);
@@ -828,7 +830,7 @@ proof fn nor_evaluation_matches_final_definition(
 
 /// 最終配線から根 NOR の入力と出力を取り出し、元の候補が指す定義の値に対応付ける。
 #[verifier::spinoff_prover]
-pub(super) proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
+proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding<'s, 'p, 'a>>,
     limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
     index: int, inputs: Seq<bool>, values: Seq<bool>,
@@ -842,10 +844,13 @@ pub(super) proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
         values.len() == final_wiring.gates.len() <= usize::MAX,
         inputs.len() == layouts.inputs.total_bits_model(),
     ensures
-        wiring_view_is_prefix(result.before, final_wiring),
-        wiring_view_is_prefix(result.after, final_wiring),
+        result.step.from == roots[index].selected.prepared.output_slot,
+        result.step.before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), result.step.from as nat),
+        wiring_view_is_prefix(result.step.before, result.step.after),
+        wiring_view_is_prefix(result.step.before, final_wiring),
+        wiring_view_is_prefix(result.step.after, final_wiring),
         nor_call_group_evaluation_matches(&roots[index].selected, *roots[index].references, forms, layouts, &result.builtin,
-            result.before, result.after, final_wiring.gates, inputs, values, result.evaluation),
+            result.step.before, result.step.after, final_wiring.gates, inputs, values, result.evaluation),
         ({
             let definition = roots[index].selected.prepared.output_slot as int;
             let definitions = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values);
@@ -862,7 +867,7 @@ pub(super) proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
     let evaluation = nor_call_group_values(&binding.selected, *binding.references, forms, layouts, &nested.builtin,
         step.before, step.after, limit, nested.child_limit, definition_widths(body.definitions@),
         final_wiring.gates, inputs, values);
-    let result = RootedNorEvaluation { before: step.before, after: step.after, builtin: nested.builtin, evaluation };
+    let result = RootedNorEvaluation { step, builtin: nested.builtin, evaluation };
     nor_evaluation_matches_final_definition(&binding, forms, layouts, &result, final_wiring, inputs, values);
     result
 }
