@@ -573,7 +573,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& argument.form < parsed.syntax.forms@.len()
             &&& crate::syntax::circuit::direct_call_argument(
                 parsed.syntax.forms@, group._signature@.call.call, argument.form as int)
-            &&& form is Atom || argument.source is Deferred
+            &&& form is Atom || !argument.source.has_direct_wires()
             &&& match argument.source {
                 CallArgumentSource::Driver(driver) => {
                     &&& form is Atom && form->Atom_kind is Name
@@ -600,6 +600,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Binary)
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Hexadecimal))
                 },
+                CallArgumentSource::NestedCall => {
+                    let local = (root.definition - frame.definitions.start) as usize;
+                    &&& form is List
+                    &&& exists|reference: usize, child: TypedFuncCall|
+                        #[trigger] self.func_call_form_reference(caller.0, caller.1, local, argument.form, reference)
+                        && #[trigger] self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child)))
+                        && child.call.target.port_counts().outputs == 1
+                        && match child.signature {
+                            crate::project::FuncCallSignature::Nor =>
+                                crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
+                            crate::project::FuncCallSignature::Function(ports) =>
+                                crate::project::port_types_equal(ports.outputs@[0].ty, expected),
+                        }
+                },
                 CallArgumentSource::Deferred => true,
             }
         }),
@@ -613,6 +627,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let projected = arguments.arguments@.subrange(range.start as int, range.end as int);
         self.checked_projected_argument((file, entry, local, 0), limit, typed.types@, wiring, group._signature@, projected, port);
         assert(projected[port] == arguments.arguments@[range.start + port]);
+        if projected[port].source is NestedCall {
+            let form = projected[port].form;
+            let expected = group._signature@.signature->Function_0.inputs@[port].ty;
+            let (reference, child) = self.projected_nested_call_signature((file, entry, local), limit, form, expected);
+            assert(self.func_call_form_reference(file, entry, local, form, reference));
+            assert(self.func_call_signature_evidence(file, entry, local, reference, limit, Ok(Some(child))));
+        }
         if let CallArgumentSource::Driver(super::super::OutputDriver::Definition(i)) = projected[port].source {
             self.checked_wiring_is_func(file, entry, limit, *wiring);
             let first = group.outputs.start as int;
@@ -651,7 +672,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             project.circuits_model()[caller.0 as int].syntax.forms@, argument.form);
                         width == bits && value == Seq::new(width as nat, |bit: int| call_literal_bit(bytes, bit as nat))
                     },
-                    CallArgumentSource::Deferred => false,
+                    CallArgumentSource::Deferred | CallArgumentSource::NestedCall => false,
                 }
             }),
         ensures ({

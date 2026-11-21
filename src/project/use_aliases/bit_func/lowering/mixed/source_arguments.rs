@@ -118,7 +118,7 @@ proof fn expanded_port_value(
                 let bytes = source_argument_bytes(binding.group.expression.source, forms, argument.form);
                 width == bits && value == Seq::new(width as nat, |bit: int| call_literal_bit(bytes, bit as nat))
             },
-            CallArgumentSource::Deferred => false,
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => false,
         }
     }),
 {
@@ -159,7 +159,7 @@ proof fn expanded_port_value(
             assert(raw == source);
             assert(value == Seq::new(bits as nat, |bit: int| call_literal_bit(source, bit as nat)));
         },
-        CallArgumentSource::Deferred => {},
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => {},
     };
 }
 

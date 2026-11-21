@@ -74,7 +74,7 @@ pub(super) open spec fn layout_argument_ready(
             #[trigger] driver_bit_available(inputs, definitions, used, driver, bit),
         CallArgumentSource::Literal(bits) => width == bits
             && literal_argument_matches_width(source, forms, argument.form, width as int),
-        CallArgumentSource::Deferred => true,
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => true,
     }
 }
 
@@ -87,7 +87,7 @@ pub(super) closed spec fn argument_wire(caller: &CallerArguments, argument: Proj
             Wire::Constant(call_literal_bit(bytes, bit as nat))
 
         },
-        CallArgumentSource::Deferred => arbitrary(),
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => arbitrary(),
     }
 }
 
@@ -102,7 +102,7 @@ proof fn append_argument_contract(
         previous.len() <= after.len(),
         after.take(previous.len() as int) == previous,
         argument_prefix_wires(caller, arguments, ranges, port, previous),
-        !(arguments[port].source is Deferred),
+        arguments[port].source.has_direct_wires(),
         forall|bit: int| 0 <= bit < ranges[port].end - ranges[port].start
             ==> (#[trigger] after[ranges[port].start + bit]) == argument_wire(caller, arguments[port], bit),
     ensures argument_prefix_wires(caller, arguments, ranges, port + 1, after),
@@ -110,7 +110,7 @@ proof fn append_argument_contract(
     reveal(argument_prefix_wires);
     assert forall|i: int| 0 <= i < port + 1 implies {
         let range = #[trigger] ranges[i];
-        &&& !(arguments[i].source is Deferred)
+        &&& arguments[i].source.has_direct_wires()
         &&& range.end <= after.len()
         &&& forall|bit: int| 0 <= bit < range.end - range.start
             ==> (#[trigger] after[range.start + bit]) == argument_wire(caller, arguments[i], bit)
@@ -133,7 +133,7 @@ pub(super) open spec fn argument_prefix_wires(
     &&& 0 <= ports <= ranges.len() == arguments.len()
     &&& forall|i: int| 0 <= i < ports ==> {
         let range = #[trigger] ranges[i];
-        &&& !(arguments[i].source is Deferred)
+        &&& arguments[i].source.has_direct_wires()
         &&& range.end <= wires.len()
         &&& forall|bit: int| 0 <= bit < range.end - range.start
             ==> (#[trigger] wires[range.start + bit]) == argument_wire(caller, arguments[i], bit)
@@ -190,7 +190,7 @@ pub(super) proof fn lowered_argument_port_value(
                     &&& bits == widths[port as int]
                     &&& literal_argument_matches_width(caller.source, caller.forms@, form, bits as int)
                 },
-                CallArgumentSource::Deferred => true,
+                CallArgumentSource::Deferred | CallArgumentSource::NestedCall => true,
             }
         }),
     ensures ({
@@ -202,7 +202,7 @@ pub(super) proof fn lowered_argument_port_value(
             CallArgumentSource::Literal(bits) =>
                 bits == widths[port as int]
                 && value == Seq::new(bits as nat, |bit: int| call_literal_bit(literal_word(caller, argument.form), bit as nat)),
-            CallArgumentSource::Deferred => false,
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => false,
         }
     }),
 {
@@ -217,9 +217,9 @@ pub(super) proof fn lowered_argument_port_value(
         CallArgumentSource::Driver(driver) => argument_driver_value(caller, inputs, gates, driver),
         CallArgumentSource::Literal(bits) =>
             Seq::new(bits as nat, |bit: int| call_literal_bit(literal_word(caller, argument.form), bit as nat)),
-        CallArgumentSource::Deferred => arbitrary(),
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => arbitrary(),
     };
-    assert(!(argument.source is Deferred));
+    assert(argument.source.has_direct_wires());
     assert forall|bit: int| 0 <= bit < value.len() implies #[trigger] value[bit] == expected[bit] by {
         assert(mapped[range.start + bit] == argument_wire(caller, argument, bit));
         let wire = mapped[range.start + bit];
@@ -236,7 +236,7 @@ pub(super) proof fn lowered_argument_port_value(
             CallArgumentSource::Literal(_) => {
                 assert(wire == Wire::Constant(call_literal_bit(literal_word(caller, argument.form), bit as nat)));
             },
-            CallArgumentSource::Deferred => {},
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => {},
         }
         assert(value[bit] == wire_value(wire, inputs, gates));
     };
@@ -363,9 +363,9 @@ pub(super) fn lower_call_arguments<'s, 'p, 'a>(
     ensures match result {
         Ok(wires) => wires@.len() == callee.total_bits_model() && wires_available(wires@, input_bits, gates)
             && argument_prefix_wires(caller, arguments@, callee.ranges_model(), arguments@.len() as int, wires@),
-        Err(site) => exists|port: int| 0 <= port < arguments@.len() && (#[trigger] arguments@[port]).source is Deferred
+        Err(site) => exists|port: int| 0 <= port < arguments@.len() && !(#[trigger] arguments@[port]).source.has_direct_wires()
             && is_form_location(caller.source, caller.forms@[arguments@[port].form as int], site)
-            && forall|earlier: int| 0 <= earlier < port ==> !((#[trigger] arguments@[earlier]).source is Deferred),
+            && forall|earlier: int| 0 <= earlier < port ==> (#[trigger] arguments@[earlier]).source.has_direct_wires(),
     },
 {
     let ranges = callee.ranges();
@@ -402,7 +402,7 @@ pub(super) fn lower_call_arguments<'s, 'p, 'a>(
                 append_argument_driver(caller, &mut wires, driver, width, Ghost(input_bits), Ghost(gates)),
             CallArgumentSource::Literal(_) =>
                 append_argument_literal(caller, &mut wires, argument, width, Ghost(input_bits), Ghost(gates)),
-            CallArgumentSource::Deferred => {
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => {
                 proof { reveal(argument_prefix_wires); }
                 return Err(form_location(caller.source, caller.forms, argument.form));
             },
@@ -459,11 +459,11 @@ pub(super) fn lower_projected_call<'s, 'p, 'a>(
         },
         Err(error) => final(gates)@ == old(gates)@ && match error {
             CallWiringError::DeferredArgument(site) =>
-                exists|port: int| 0 <= port < arguments@.len() && (#[trigger] arguments@[port]).source is Deferred
+                exists|port: int| 0 <= port < arguments@.len() && !(#[trigger] arguments@[port]).source.has_direct_wires()
                     && is_form_location(caller.source, caller.forms@[arguments@[port].form as int], site)
-                    && forall|earlier: int| 0 <= earlier < port ==> !((#[trigger] arguments@[earlier]).source is Deferred),
+                    && forall|earlier: int| 0 <= earlier < port ==> (#[trigger] arguments@[earlier]).source.has_direct_wires(),
             CallWiringError::GateCapacity => old(gates)@.len() + callee.gates@.len() > capacity
-                && forall|port: int| 0 <= port < arguments@.len() ==> !((#[trigger] arguments@[port]).source is Deferred),
+                && forall|port: int| 0 <= port < arguments@.len() ==> (#[trigger] arguments@[port]).source.has_direct_wires(),
         },
     },
 {

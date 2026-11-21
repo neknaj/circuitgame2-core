@@ -52,12 +52,24 @@ pub(in crate::project::use_aliases) struct ProjectedCallArgument {
     pub(in crate::project::use_aliases) source: CallArgumentSource,
 }
 
-/// 入力検査で確定した駆動元またはリテラル幅。複合式や型の未確定な信号は保留する。
+/// 型検査後の実引数を、配線生成での扱いに応じて表す。
+///
+/// 専用フォームや信号のうち、型が確定しなかった実引数は保留する。
 #[derive(Debug)]
 pub(in crate::project::use_aliases) enum CallArgumentSource {
     Driver(OutputDriver),
     Literal(u64),
+    /// 元フォームを起点に展開する、型が確定した単一出力の通常呼び出し。
+    NestedCall,
+    /// 型を保留した実引数。
     Deferred,
+}
+
+impl CallArgumentSource {
+    /// 追加の式展開をせず、局所信号かリテラルから配線を取得できることを表す。
+    pub(in crate::project::use_aliases) open spec fn has_direct_wires(self) -> bool {
+        self is Driver || self is Literal
+    }
 }
 
 /// 一つの呼び出しと、宣言順に対応する引数の確定型。
@@ -352,7 +364,8 @@ spec fn argument_projection_matches(
             forms[at as int] is Atom && (forms[at as int]->Atom_kind is Natural
                 || forms[at as int]->Atom_kind is Binary || forms[at as int]->Atom_kind is Hexadecimal)
                 && (value matches Some(ty) && ty.ty == ResolvedPortType::Bits(width)),
-        CallArgumentSource::Deferred => value.is_none() || forms[at as int] is List,
+        CallArgumentSource::NestedCall => forms[at as int] is List && value.is_some(),
+        CallArgumentSource::Deferred => value.is_none(),
     }
 }
 
@@ -610,6 +623,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             form < forms.len() && direct_call_argument(forms, call.call.call, form as int),
             input_port_matches(call, index as int, leaf.0),
             leaf_result(call.call.source, forms[form as int], &leaf.0, leaf.1, limit, Ok(value)),
+            known_argument(context, limit, forms, wiring, types, slots, start, form, leaf.1),
     {
         reveal(argument_result);
         let (port, known, result) = choose|port: CallPortType, known: Option<SignalType>, result: Result<Option<SignalType>, CallInputReason>|
@@ -695,6 +709,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             || crate::syntax::bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal))
                     }
                 },
+                CallArgumentSource::NestedCall =>
+                    self.projected_nested_call_has_type((at.0, at.1, at.2), limit, form, expected),
                 CallArgumentSource::Deferred => true,
             }
         }),
@@ -759,8 +775,55 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(circuit_literal_width_matches(bytes, Some(expected), limit, Ok(width)));
                 crate::project::literal_width::checked_literal_for_port(bytes, expected, limit, width);
             },
+            CallArgumentSource::NestedCall => {
+                assert(forms[form as int] is List && value == known);
+                assert(nested_output_type((self, file, entry, definition), form, limit, value));
+                assert(port_types_equal(value->Some_0.ty, port.ty));
+            },
             CallArgumentSource::Deferred => {},
         }
+    }
+
+    /// 型が確定した子の出力型と、同じ位置に渡す入力型が一致することを表す。
+    pub(in crate::project::use_aliases) closed spec fn projected_nested_call_has_type(
+        &self, caller: (usize, usize, usize), limit: u64, form: usize, expected: ResolvedPortType,
+    ) -> bool {
+        let (file, entry, definition) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        &&& form < parsed.syntax.forms@.len() && parsed.syntax.forms@[form as int] is List
+        &&& exists|actual: SignalType|
+            #[trigger] nested_output_type((self, file, entry, definition), form, limit, Some(actual))
+            && port_types_equal(actual.ty, expected)
+    }
+
+    /// 子を展開するときに使う参照添字と、出力型を照合した署名を取り出す。
+    pub(in crate::project::use_aliases) proof fn projected_nested_call_signature(
+        &self, caller: (usize, usize, usize), limit: u64, form: usize, expected: ResolvedPortType,
+    ) -> (witness: (usize, TypedFuncCall<'p, 'a>))
+        requires self.projected_nested_call_has_type(caller, limit, form, expected),
+        ensures
+            self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@[form as int] is List,
+            self.func_call_form_reference(caller.0, caller.1, caller.2, form, witness.0),
+            self.func_call_signature_evidence(caller.0, caller.1, caller.2, witness.0, limit, Ok(Some(witness.1))),
+            witness.1.call.target.port_counts().outputs == 1,
+            match witness.1.signature {
+                FuncCallSignature::Nor => port_types_equal(ResolvedPortType::Bits(1), expected),
+                FuncCallSignature::Function(signature) => port_types_equal(signature.outputs@[0].ty, expected),
+            },
+    {
+        let (file, entry, definition) = caller;
+        let context = (self, file, entry, definition);
+        let actual = choose|actual: SignalType|
+            #[trigger] nested_output_type(context, form, limit, Some(actual))
+            && port_types_equal(actual.ty, expected);
+        reveal(nested_output_type);
+        let result = choose|result: Result<Option<TypedFuncCall>, FuncCallSignatureError>|
+            #[trigger] self.func_call_signature_at_form_evidence(file, entry, definition, form, limit, result)
+            && Some(actual) == nested_output_from_signature(result);
+        assert(result matches Ok(Some(call)) && call.call.target.port_counts().outputs == 1);
+        let call = result->Ok_0->Some_0;
+        let reference = self.call_signature_at_form_reference(caller, form, limit, call);
+        (reference, call)
     }
 
     spec fn scoped_input_result(
@@ -1024,10 +1087,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             let ghost previous_projections = projections@;
             if retain {
-                let source = if matches!(forms[root], Form::List { .. }) {
-                    CallArgumentSource::Deferred
-                } else if let Some(typed) = &value {
-                    if let Some(driver) = driver {
+                let source = if let Some(typed) = &value {
+                    if matches!(forms[root], Form::List { .. }) {
+                        CallArgumentSource::NestedCall
+                    } else if let Some(driver) = driver {
                         CallArgumentSource::Driver(driver)
                     } else if let ResolvedPortType::Bits(width) = typed.ty {
                         CallArgumentSource::Literal(width)

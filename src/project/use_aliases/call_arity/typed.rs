@@ -468,6 +468,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 成功した型付き署名が指す定義内の参照添字を取り出す。
+    pub(super) proof fn call_signature_at_form_reference(
+        &self, caller: (usize, usize, usize), form: usize, limit: u64, call: TypedFuncCall,
+    ) -> (reference: usize)
+        requires self.func_call_signature_at_form_evidence(caller.0, caller.1, caller.2, form, limit, Ok(Some(call))),
+        ensures
+            self.func_call_form_reference(caller.0, caller.1, caller.2, form, reference),
+            self.func_call_signature_evidence(caller.0, caller.1, caller.2, reference, limit, Ok(Some(call))),
+    {
+        let (file, entry, definition) = caller;
+        choose|r: usize| #[trigger] self.func_call_form_reference(file, entry, definition, form, r)
+            && self.func_call_signature_evidence(file, entry, definition, r, limit, Ok(Some(call)))
+    }
+
     /// 呼び出し先を解決し、関数の型付き署名を必要なときだけ登録する。
     ///
     /// # Errors

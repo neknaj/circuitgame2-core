@@ -44,7 +44,7 @@ pub(in crate::project::use_aliases::bit_func) open spec fn argument_matches_widt
             &&& literal_argument_matches_width(source, forms, argument.form, width as int)
             &&& circuit_literal_width_matches(bytes, Some(width), limit, Ok(width))
         },
-        CallArgumentSource::Deferred => true,
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => true,
     }
 }
 

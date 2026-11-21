@@ -110,12 +110,12 @@ pub(super) open spec fn call_group_result(
             &&& after.origins == before.origins
             &&& match error {
                 CallGroupError::DeferredArgument(site) => exists|port: int| 0 <= port < arguments.len()
-                    && (#[trigger] arguments[port]).source is Deferred
+                    && !(#[trigger] arguments[port]).source.has_direct_wires()
                     && is_form_location(group.expression.source, forms[arguments[port].form as int], site)
-                    && forall|earlier: int| 0 <= earlier < port ==> !((#[trigger] arguments[earlier]).source is Deferred),
+                    && forall|earlier: int| 0 <= earlier < port ==> (#[trigger] arguments[earlier]).source.has_direct_wires(),
                 CallGroupError::GateCapacity(site) => site == group.expression
                     && before.gates.len() + callee.netlist_model().gates@.len() > gate_limit
-                    && forall|port: int| 0 <= port < arguments.len() ==> !((#[trigger] arguments[port]).source is Deferred),
+                    && forall|port: int| 0 <= port < arguments.len() ==> (#[trigger] arguments[port]).source.has_direct_wires(),
             }
         },
     }
