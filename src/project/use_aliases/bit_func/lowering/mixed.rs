@@ -12,9 +12,13 @@ use super::super::super::call_arity::ProjectedCallArgument;
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group};
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use super::call_group::{WiringView, call_group_result};
+use super::call_group::{WiringView, call_group_result, call_group_values, call_group_wires_match, call_output_bit_has_value};
 #[cfg(verus_only)]
-use super::call_arguments::layout_argument_ready;
+use super::super::instances::{instance_gates_match, instance_wire_values};
+#[cfg(verus_only)]
+use crate::netlist::{gate_values_match, nor_evaluation};
+#[cfg(verus_only)]
+use super::call_arguments::{CallerArguments, layout_argument_ready};
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
 
@@ -318,6 +322,7 @@ spec fn wiring_step_valid(
         let binding = bindings[group];
         &&& 0 <= group < bindings.len() && step.group_after == group + 1
         &&& step.from == binding.group.outputs.start && step.to == binding.group.outputs.end
+        &&& binding_ready(binding, layouts, forms, widths)
         &&& call_group_result(binding.group, forms, binding.arguments@, layouts, binding.callee,
             step.before, step.after, limit, definition_widths(body.definitions@), binding._output_widths@, Ok(()))
     }
@@ -342,6 +347,122 @@ pub(super) closed spec fn mixed_trace(
                 prior.to == step.from && prior.group_after == step.group_before && prior.after == step.before
             }
     }
+}
+
+spec fn wiring_view_is_prefix(before: WiringView, after: WiringView) -> bool {
+    &&& before.gates.len() <= after.gates.len()
+    &&& before.definitions.len() <= after.definitions.len()
+    &&& after.gates.take(before.gates.len() as int) == before.gates
+    &&& after.definitions.take(before.definitions.len() as int) == before.definitions
+}
+
+proof fn wiring_step_keeps_prefix(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    limit: usize, step: WiringStep,
+)
+    requires wiring_step_valid(body, layouts, forms, bindings, limit, step),
+    ensures wiring_view_is_prefix(step.before, step.after),
+{
+    reveal(wiring_step_valid);
+    if step.group_before == step.group_after {
+        reveal(gate_step_matches);
+        let definition = body.definitions@[step.from as int];
+        if let Some(gate) = rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
+            step.before.definitions, definition.rhs) {
+            assert(step.after.gates == step.before.gates.push(gate));
+            assert(step.after.gates.take(step.before.gates.len() as int) =~= step.before.gates);
+        } else {
+            assert(step.after.gates == step.before.gates);
+            assert(step.after.gates.take(step.before.gates.len() as int) =~= step.before.gates);
+        }
+        assert(step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions);
+    } else {
+        let binding = bindings[step.group_before as int];
+        let (invocation, mapped, outputs) = choose|invocation: CallerArguments, mapped: Seq<Wire>, outputs: Seq<Wire>|
+            #[trigger] call_group_wires_match(binding.group, forms, binding.arguments@, layouts, binding.callee,
+                step.before, step.after, binding._output_widths@, invocation, mapped, outputs);
+        assert(instance_gates_match(step.before.gates, binding.callee.netlist_model().gates@, mapped, step.after.gates));
+        assert(step.after.gates.take(step.before.gates.len() as int) == step.before.gates);
+        assert(step.after.definitions.take(step.before.definitions.len() as int) =~= step.before.definitions);
+    }
+    assert(step.before.definitions.len() <= step.after.definitions.len()) by {
+        let widths = definition_widths(body.definitions@);
+        preceding_port_bits_grow(widths, step.from as nat, step.to as nat);
+    };
+}
+
+/// 途中で追加したゲートと配線が、最終状態でも同じ添字にあることを示す。
+proof fn mixed_trace_preserves_prefix(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
+    steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int, end: int,
+)
+    requires
+        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        0 <= at <= end < steps.len(),
+    ensures wiring_view_is_prefix(steps[at].after, steps[end].after),
+    decreases end - at,
+{
+    reveal(mixed_trace);
+    if at < end {
+        mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at, end - 1);
+        let early = steps[at].after;
+        let last = steps[end];
+        assert(last.before == steps[end - 1].after);
+        wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, last);
+        assert(last.after.gates.take(early.gates.len() as int) =~= early.gates);
+        assert(last.after.definitions.take(early.definitions.len() as int) =~= early.definitions);
+    } else {
+        assert(steps[end].after.gates.take(steps[end].after.gates.len() as int) =~= steps[end].after.gates);
+        assert(steps[end].after.definitions.take(steps[end].after.definitions.len() as int) =~= steps[end].after.definitions);
+    }
+}
+
+/// 評価済みの最終配線から、指定した呼び出しの入力と出力を得る。
+proof fn mixed_trace_call_values(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
+    layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int,
+    inputs: Seq<bool>, values: Seq<bool>,
+) -> (result: (Seq<bool>, Seq<bool>))
+    requires
+        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        0 <= at < steps.len(),
+        steps[at].group_before != steps[at].group_after,
+        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
+        gate_values_match(inputs, final_wiring.gates, values),
+        values.len() == final_wiring.gates.len() <= usize::MAX,
+        inputs.len() == layouts.inputs.total_bits_model(),
+    ensures ({
+        let step = steps[at];
+        let binding = bindings[step.group_before as int];
+
+        &&& nor_evaluation(binding.callee.netlist_model(), result.0, result.1)
+        &&& exists|invocation: CallerArguments, mapped: Seq<Wire>, wires: Seq<Wire>|
+            #[trigger] call_group_wires_match(binding.group, forms, binding.arguments@, layouts,
+                binding.callee, step.before, step.after, binding._output_widths@, invocation, mapped, wires)
+            && result.0 == instance_wire_values(mapped, inputs, values)
+            && result.1 == instance_wire_values(wires, inputs, values)
+        &&& forall|port: int, bit: int| 0 <= port < binding._output_widths@.len() && 0 <= bit < binding._output_widths@[port] ==>
+            #[trigger] call_output_bit_has_value(layouts, binding.callee, final_wiring.definitions, step.from, port, bit,
+                inputs, values, result.1)
+    }),
+{
+    reveal(mixed_trace);
+    reveal(wiring_step_valid);
+    reveal(binding_ready);
+    mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group,
+        final_wiring, at, steps.len() as int - 1);
+    let step = steps[at];
+    let binding = bindings[step.group_before as int];
+    let result = call_group_values(binding.group, forms, binding.arguments@, layouts, binding.callee,
+        step.before, step.after, limit, definition_widths(body.definitions@), binding._output_widths@,
+        layout_limit, binding._layout_limit@, final_wiring.gates, inputs, values);
+    assert forall|port: int, bit: int| 0 <= port < binding._output_widths@.len() && 0 <= bit < binding._output_widths@[port]
+        implies #[trigger] call_output_bit_has_value(layouts, binding.callee, final_wiring.definitions, step.from, port, bit,
+            inputs, values, result.1) by {
+        assert(call_output_bit_has_value(layouts, binding.callee, step.after.definitions, step.from, port, bit,
+            inputs, values, result.1));
+    };
+    result
 }
 
 proof fn extend_mixed_trace(

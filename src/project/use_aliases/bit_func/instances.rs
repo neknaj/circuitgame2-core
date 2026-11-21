@@ -315,6 +315,99 @@ pub(super) proof fn instance_preserves_outputs(
     };
 }
 
+/// 配線列を同じ順序で値に写す。各配線が参照可能であることは呼び出し側で示す。
+pub(super) open spec fn instance_wire_values(wires: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>) -> Seq<bool> {
+    Seq::new(wires.len(), |i: int| wire_value(wires[i], inputs, gates))
+}
+
+/// 呼び出し元で評価したゲートのうち、展開で追加した区間が呼び出し先の NOR 評価を満たすことを示す。
+pub(super) proof fn instance_gate_slice_evaluates_callee(
+    before: Seq<NorGate>, callee: &NorNetlist, combined: Seq<NorGate>, arguments: Seq<Wire>,
+    inputs: Seq<bool>, values: Seq<bool>,
+)
+    requires
+        before.len() + callee.gates@.len() <= combined.len(),
+        instance_gates_match(before, callee.gates@, arguments, combined.take((before.len() + callee.gates@.len()) as int)),
+        gate_values_match(inputs, combined, values), values.len() == combined.len() <= usize::MAX,
+        nor_evaluation_ready(callee, arguments.len()),
+        forall|i: int| 0 <= i < arguments.len() ==> wire_available(#[trigger] arguments[i], inputs.len(), before.len()),
+    ensures ({
+        let local_inputs = instance_wire_values(arguments, inputs, values);
+        let local_values = values.subrange(before.len() as int, (before.len() + callee.gates@.len()) as int);
+        &&& instance_arguments_match(arguments, inputs, values, before.len(), local_inputs)
+        &&& gate_values_match(local_inputs, callee.gates@, local_values)
+    }),
+{
+    let base = before.len() as usize;
+    let end = (before.len() + callee.gates@.len()) as int;
+    let local_inputs = instance_wire_values(arguments, inputs, values);
+    let local_values = values.subrange(base as int, end);
+    reveal(gate_values_match);
+    assert forall|i: int| 0 <= i < arguments.len() implies {
+        let argument = #[trigger] arguments[i];
+        wire_available(argument, inputs.len(), before.len())
+            && wire_value(argument, inputs, values) == local_inputs[i]
+    } by {
+        assert(local_inputs[i] == wire_value(arguments[i], inputs, values));
+    };
+    assert(instance_arguments_match(arguments, inputs, values, before.len(), local_inputs));
+    assert forall|i: int| 0 <= i < local_values.len() implies {
+        let gate = callee.gates@[i];
+        (#[trigger] local_values[i])
+            == !(wire_value(gate.left, local_inputs, local_values) || wire_value(gate.right, local_inputs, local_values))
+    } by {
+        let gate = callee.gates@[i];
+        let installed = combined[base + i];
+        assert(installed == combined.take(end)[base + i]);
+        assert(installed.left == instance_wire(gate.left, arguments, base));
+        assert(installed.right == instance_wire(gate.right, arguments, base));
+        let prior = local_values.take(i);
+        assert forall|j: int| 0 <= j < prior.len() implies values[base + j] == #[trigger] prior[j] by {};
+        instance_wire_preserves_value(gate.left, arguments, base, inputs, values, local_inputs, prior);
+        instance_wire_preserves_value(gate.right, arguments, base, inputs, values, local_inputs, prior);
+        assert(wire_value(gate.left, local_inputs, prior) == wire_value(gate.left, local_inputs, local_values));
+        assert(wire_value(gate.right, local_inputs, prior) == wire_value(gate.right, local_inputs, local_values));
+        assert(local_values[i] == values[base + i]);
+    };
+}
+
+/// 展開後の出力配線から値を読むと、実引数の値を渡した呼び出し先の出力になることを示す。
+pub(super) proof fn instance_evaluates_from_caller(
+    before: Seq<NorGate>, callee: &NorNetlist, combined: Seq<NorGate>, arguments: Seq<Wire>, mapped: Seq<Wire>,
+    inputs: Seq<bool>, values: Seq<bool>,
+)
+    requires
+        before.len() + callee.gates@.len() <= combined.len(),
+        instance_gates_match(before, callee.gates@, arguments, combined.take((before.len() + callee.gates@.len()) as int)),
+        instance_outputs_match(callee.outputs@, arguments, before.len() as usize, mapped),
+        gate_values_match(inputs, combined, values), values.len() == combined.len() <= usize::MAX,
+        nor_evaluation_ready(callee, arguments.len()),
+        forall|i: int| 0 <= i < arguments.len() ==> wire_available(#[trigger] arguments[i], inputs.len(), before.len()),
+    ensures ({
+        let local_inputs = instance_wire_values(arguments, inputs, values);
+        let outputs = instance_wire_values(mapped, inputs, values);
+        &&& output_values_match(inputs, values, mapped, outputs)
+        &&& nor_evaluation(callee, local_inputs, outputs)
+    }),
+{
+    instance_gate_slice_evaluates_callee(before, callee, combined, arguments, inputs, values);
+    let base = before.len() as usize;
+    let local_inputs = instance_wire_values(arguments, inputs, values);
+    let local_values = values.subrange(base as int, (before.len() + callee.gates@.len()) as int);
+    let outputs = instance_wire_values(mapped, inputs, values);
+    assert forall|i: int| 0 <= i < local_values.len() implies values[base + i] == #[trigger] local_values[i] by {};
+    assert forall|i: int| 0 <= i < outputs.len() implies {
+        &&& wire_available(#[trigger] mapped[i], inputs.len(), values.len())
+        &&& (#[trigger] outputs[i]) == wire_value(mapped[i], inputs, values)
+        &&& outputs[i] == wire_value(callee.outputs@[i], local_inputs, local_values)
+    } by {
+        instance_wire_preserves_value(callee.outputs@[i], arguments, base, inputs, values, local_inputs, local_values);
+        assert(mapped[i] == instance_wire(callee.outputs@[i], arguments, base));
+    };
+    assert(output_values_match(local_inputs, local_values, callee.outputs@, outputs));
+    reveal(nor_evaluation);
+}
+
 proof fn ordered_output_bit_offset(definitions: Seq<u64>, outputs: Seq<u64>, first: nat, count: nat)
     requires
         first + outputs.len() <= definitions.len(), count <= outputs.len(),
