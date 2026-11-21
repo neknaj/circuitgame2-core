@@ -105,6 +105,36 @@ impl<'p, 'a> FunctionExpansionOrder<'p, 'a> {
         }
     }
 
+    /// 展開する宣言を頂点番号で引き、展開済み回路を格納する位置を求める。
+    pub(in crate::project::use_aliases) fn template_vertex(&self, position: (usize, usize))
+        -> (vertex: Option<usize>)
+        ensures self.template_vertex_matches(position, vertex),
+    {
+        self.vertices.get(position)
+    }
+
+    /// 展開順の位置から、同じ関数の格納先となる頂点番号を返す。
+    pub(in crate::project::use_aliases) fn template_at(&self, index: usize) -> (vertex: Option<usize>)
+        ensures vertex == if index < self.order_model().len() { Some(self.order_model()[index as int]) } else { None },
+    {
+        if index < self.order.len() { Some(self.order[index]) } else { None }
+    }
+
+    pub(in crate::project::use_aliases) closed spec fn template_vertex_matches(
+        &self, position: (usize, usize), vertex: Option<usize>,
+    ) -> bool {
+        self.vertices.vertex_at(position, vertex)
+    }
+
+    pub(in crate::project::use_aliases) proof fn template_vertex_at_position(
+        &self, position: (usize, usize), at: int, vertex: Option<usize>,
+    )
+        requires self.position_model(at) == Some(position), self.template_vertex_matches(position, vertex),
+        ensures 0 <= at < self.order_model().len(), vertex == Some(self.order_model()[at]),
+    {
+        assert(self.vertices.positions_model()[self.order@[at] as int] == position);
+    }
+
     /// 展開順が全関数の宣言位置を重複なく含むことを表す。
     pub closed spec fn source_positions_complete(&self) -> bool {
         let circuits = self.project_model().circuits_model();
@@ -643,6 +673,47 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] self.definition_bindings_match(found)
                 && self.function_expansion_order_matches(found, Err(references)),
         }
+    }
+
+    /// 展開順の各頂点を重複のない格納先として使えることを示す。
+    pub(in crate::project::use_aliases) proof fn template_index_evidence(&self, plan: FunctionExpansionOrder)
+        requires self.function_expansion_evidence(Ok(plan)),
+        ensures
+            plan.project_model() == self.targets.project_model(),
+            forall|rank: int| 0 <= rank < plan.order_model().len() ==>
+                (#[trigger] plan.order_model()[rank]) < plan.order_model().len()
+                    && plan.position_model(rank).is_some(),
+            forall|a: int, b: int| 0 <= a < b < plan.order_model().len() ==>
+                (#[trigger] plan.order_model()[a]) != (#[trigger] plan.order_model()[b]),
+    {
+        let found = choose|found: Seq<IndexedDefinitionBinding>| #[trigger] self.definition_bindings_match(found)
+            && self.function_expansion_order_matches(found, Ok(plan));
+        let (flat, graph, sites, vertices) = choose|flat: Seq<IndexedFunctionCallSite>, graph: Seq<Vec<Option<usize>>>,
+            sites: Seq<Vec<usize>>, vertices: FunctionVertices|
+            #![trigger self.function_call_sites_match(found, found.len() as int, flat),
+                self.function_graph_sites_match(vertices.positions_model(), graph, flat, sites)]
+            self.function_call_sites_match(found, found.len() as int, flat)
+            && vertices.matches(&self.targets.project_model())
+            && self.function_graph_sites_match(vertices.positions_model(), graph, flat, sites)
+            && self.call_site_prefix_matches(flat.len() as int, sites)
+            && plan.project_model() == self.targets.project_model() && plan.vertices == vertices
+            && complete_dependency_order(graph, plan.order@) && plan.source_positions_complete();
+        let order = plan.order_model();
+        let rank = choose|rank: Seq<nat>| #[trigger] super::super::dependency_order::dependencies_in_order(graph, rank)
+            && order.len() == graph.len() && super::super::dependency_order::completion_order_matches(order, rank)
+            && (forall|node: int| #![trigger rank[node]] 0 <= node < graph.len()
+                ==> rank[node] < order.len() && order[rank[node] as int] == node);
+        assert(rank.len() == graph.len());
+        assert forall|a: int, b: int| 0 <= a < b < order.len()
+            implies (#[trigger] order[a]) != (#[trigger] order[b]) by {
+            assert(rank[order[a] as int] == a);
+            assert(rank[order[b] as int] == b);
+        };
+        assert forall|i: int| 0 <= i < order.len() implies
+            (#[trigger] order[i]) < order.len() && plan.position_model(i).is_some() by {
+            assert(order[i] < rank.len());
+            assert(plan.position_model(i).is_some()) by { reveal(FunctionExpansionOrder::source_positions_complete); };
+        };
     }
 
     /// 循環診断の呼び出しが、元の関数参照と一致することを表す。

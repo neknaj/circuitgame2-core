@@ -2,6 +2,9 @@
 
 #[cfg(verus_only)]
 mod evaluation;
+mod call_arguments;
+mod call_group;
+mod mixed;
 #[cfg(verus_only)]
 pub use evaluation::{bit_func_lowering_preserves_evaluation, port_values};
 
@@ -10,6 +13,8 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc, OutputDriver, SingleBitOperand};
+use super::super::function_atoms::copy_location;
+use crate::project::LocatedName;
 use crate::netlist::{NorGate, NorNetlist, PortBitLayout, PortBitLayoutError, Wire};
 use crate::syntax::{BitLiteral, read_bit_literal};
 use crate::project::circuits::read_source_span;
@@ -55,6 +60,23 @@ struct Layouts {
     outputs: PortBitLayout,
 }
 
+struct LoweringBody<'s, 'p, 'a> {
+    input_widths: &'s [u64],
+    definitions: &'s [CheckedBitDefinition<'p, 'a>],
+}
+
+spec fn body_definition_layouts(input_widths: Seq<u64>, definitions: Seq<CheckedBitDefinition>, capacity: usize, layouts: &Layouts) -> bool {
+    &&& widths_layout(input_widths, capacity, &layouts.inputs)
+    &&& widths_layout(definition_widths(definitions), capacity, &layouts.definitions)
+}
+
+proof fn body_inputs_end_within_layout(body: &LoweringBody, capacity: usize, layouts: &Layouts)
+    requires body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+    ensures forall|i: int| 0 <= i < layouts.inputs.ranges_model().len()
+        ==> (#[trigger] layouts.inputs.ranges_model()[i]).end <= layouts.inputs.total_bits_model(),
+{
+}
+
 spec fn definition_widths(definitions: Seq<CheckedBitDefinition>) -> Seq<u64> {
     Seq::new(definitions.len(), |i: int| definitions[i].width)
 }
@@ -91,9 +113,14 @@ proof fn layout_entries_fit(widths: Seq<u64>, capacity: usize, layout: &PortBitL
 spec fn layouts_result(
     source: &CheckedBitFunc, capacity: usize, result: Result<Layouts, BitFuncLowerError>,
 ) -> bool {
-    let inputs = source.input_widths@;
-    let definitions = definition_widths(source.definitions@);
-    let outputs = source.output_widths@;
+    body_layouts_result(source.input_widths@, source.definitions@, source.output_widths@, capacity, result)
+}
+
+spec fn body_layouts_result(
+    inputs: Seq<u64>, slots: Seq<CheckedBitDefinition>, outputs: Seq<u64>,
+    capacity: usize, result: Result<Layouts, BitFuncLowerError>,
+) -> bool {
+    let definitions = definition_widths(slots);
     match result {
         Ok(layouts) => widths_layout(inputs, capacity, &layouts.inputs)
             && widths_layout(definitions, capacity, &layouts.definitions)
@@ -135,35 +162,47 @@ fn collect_definition_widths(definitions: &[CheckedBitDefinition]) -> (widths: V
 fn prepare_layouts(source: &CheckedBitFunc, capacity: usize) -> (result: Result<Layouts, BitFuncLowerError>)
     ensures layouts_result(source, capacity, result),
 {
-    proof { use_type_invariant(source); }
-    let input_widths = &source.input_widths;
-    let inputs = match PortBitLayout::from_widths(input_widths.as_slice(), capacity) {
+    let result = prepare_body_layouts(
+        source.input_widths.as_slice(), source.definitions.as_slice(), source.output_widths.as_slice(), capacity,
+    );
+    assert(layouts_result(source, capacity, result)) by { reveal(layouts_result); };
+    result
+}
+
+/// 入力、定義、出力それぞれのビット範囲を、並び順に割り当てる。
+///
+/// # Errors
+///
+/// 入力、定義、出力の順に調べ、各列で最初に見つかった幅または容量の違反を返す。
+fn prepare_body_layouts(
+    input_widths: &[u64], slots: &[CheckedBitDefinition], output_widths: &[u64], capacity: usize,
+) -> (result: Result<Layouts, BitFuncLowerError>)
+    ensures body_layouts_result(input_widths@, slots@, output_widths@, capacity, result),
+{
+    let inputs = match PortBitLayout::from_widths(input_widths, capacity) {
         Ok(layout) => layout,
         Err(error) => {
             let result = Err(BitFuncLowerError::Input(error));
-            assert(layouts_result(source, capacity, result)) by { reveal(layouts_result); };
+            assert(body_layouts_result(input_widths@, slots@, output_widths@, capacity, result));
             return result;
         },
     };
-    let local_widths = collect_definition_widths(source.definitions.as_slice());
+    let local_widths = collect_definition_widths(slots);
     let definitions = match PortBitLayout::from_widths(local_widths.as_slice(), capacity) {
         Ok(layout) => layout,
         Err(error) => {
             let result = Err(BitFuncLowerError::Definition(error));
-            assert(layouts_result(source, capacity, result)) by {
-                reveal(layouts_result);
+            assert(body_layouts_result(input_widths@, slots@, output_widths@, capacity, result)) by {
                 assert(port_bit_layout_result(input_widths@, capacity, Ok(inputs)));
             };
             return result;
         },
     };
-    let output_widths = &source.output_widths;
-    let outputs = match PortBitLayout::from_widths(output_widths.as_slice(), capacity) {
+    let outputs = match PortBitLayout::from_widths(output_widths, capacity) {
         Ok(layout) => layout,
         Err(error) => {
             let result = Err(BitFuncLowerError::Output(error));
-            assert(layouts_result(source, capacity, result)) by {
-                reveal(layouts_result);
+            assert(body_layouts_result(input_widths@, slots@, output_widths@, capacity, result)) by {
                 assert(port_bit_layout_result(input_widths@, capacity, Ok(inputs)));
                 assert(port_bit_layout_result(local_widths@, capacity, Ok(definitions)));
             };
@@ -176,7 +215,7 @@ fn prepare_layouts(source: &CheckedBitFunc, capacity: usize) -> (result: Result<
         layout_entries_fit(output_widths@, capacity, &outputs);
     }
     let result = Ok(Layouts { inputs, definitions, outputs });
-    assert(layouts_result(source, capacity, result)) by { reveal(layouts_result); };
+    assert(body_layouts_result(input_widths@, slots@, output_widths@, capacity, result));
     result
 }
 
@@ -405,15 +444,30 @@ proof fn driver_bits_fit_layout(
     ensures driver_bit_available(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), used, driver, bit),
 {
     reveal(layouts_result);
+    body_driver_bits_fit_layout(source.input_widths@, source.definitions@, layouts, capacity, scope, used, driver, width, bit);
+}
+
+proof fn body_driver_bits_fit_layout(
+    input_widths: Seq<u64>, definitions: Seq<CheckedBitDefinition>, layouts: &Layouts, capacity: usize, scope: int, used: int,
+    driver: OutputDriver, width: u64, bit: int,
+)
+    requires
+        body_definition_layouts(input_widths, definitions, capacity, layouts),
+        0 <= scope <= definitions.len(),
+        used == preceding_port_bits(definition_widths(definitions), scope as nat),
+        bit_driver_width(input_widths, definitions.take(scope), driver) == Some(width),
+        0 <= bit < width,
+    ensures driver_bit_available(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), used, driver, bit),
+{
     match driver {
         OutputDriver::Input(port) => {
-            let widths = source.input_widths@;
+            let widths = input_widths;
             let range = layouts.inputs.ranges_model()[port as int];
             assert(widths[port as int] == width);
             assert(range.end - range.start == widths[port as int]);
         },
         OutputDriver::Definition(index) => {
-            let widths = definition_widths(source.definitions@);
+            let widths = definition_widths(definitions);
             let range = layouts.definitions.ranges_model()[index as int];
             assert(widths[index as int] == width);
             assert(range.end - range.start == widths[index as int]);
@@ -432,11 +486,11 @@ spec fn concat_operand_projection(operand: SingleBitOperand) -> Projection {
 
 /// 引数を低位から並べて追加し、先行する引数と定義の配線を保持する。
 fn append_concat_operand(
-    _source: &CheckedBitFunc, layouts: &Layouts, _capacity: usize, _scope: usize,
+    _source: &LoweringBody, layouts: &Layouts, _capacity: usize, _scope: usize,
     wires: &mut Vec<Wire>, operand: SingleBitOperand, width: usize,
 )
     requires
-        layouts_result(_source, _capacity, Ok(*layouts)),
+        body_definition_layouts(_source.input_widths@, _source.definitions@, _capacity, layouts),
         _scope < _source.definitions@.len(),
         preceding_port_bits(definition_widths(_source.definitions@), _scope as nat) <= old(wires)@.len(),
         old(wires)@.len() + width <= usize::MAX,
@@ -464,7 +518,7 @@ fn append_concat_operand(
             #[trigger] projected_bit_available(inputs, definitions, wires@.len() as int, projection, bit) by {
             if let SingleBitOperand::Driver(driver) = operand {
                 let used = preceding_port_bits(definition_widths(_source.definitions@), _scope as nat) as int;
-                driver_bits_fit_layout(_source, layouts, _capacity, _scope as int, used, driver, width as u64, bit);
+                body_driver_bits_fit_layout(_source.input_widths@, _source.definitions@, layouts, _capacity, _scope as int, used, driver, width as u64, bit);
                 assert(driver_bit_available(inputs, definitions, wires@.len() as int, driver, bit));
             }
         };
@@ -482,11 +536,11 @@ spec fn concat_operand_wires(
 
 /// 引数順に配線を連接する。幅と開始位置には、型検査で得た各引数の幅を使う。
 fn append_concat_operands(
-    source: &CheckedBitFunc, layouts: &Layouts, capacity: usize, scope: usize,
+    source: &LoweringBody, layouts: &Layouts, capacity: usize, scope: usize,
     wires: &mut Vec<Wire>, operands: &[(SingleBitOperand, u64)], Ghost(gates): Ghost<nat>,
 )
     requires
-        layouts_result(source, capacity, Ok(*layouts)),
+        body_definition_layouts(source.input_widths@, source.definitions@, capacity, layouts),
         scope < source.definitions@.len(),
         old(wires)@.len() == preceding_port_bits(definition_widths(source.definitions@), scope as nat),
         wires_available(old(wires)@, layouts.inputs.total_bits_model(), gates),
@@ -516,14 +570,14 @@ fn append_concat_operands(
         assert(widths[i] == operands@[i].1);
     };
     proof {
-        use_layouts(source, capacity, layouts);
+        body_inputs_end_within_layout(source, capacity, layouts);
         concat_flatten_prefix_len(parts, widths, 0);
     }
     let mut i: usize = 0;
     while i < operands.len()
         invariant
             i <= operands@.len() == widths.len() == parts.len(),
-            layouts_result(source, capacity, Ok(*layouts)),
+            body_definition_layouts(source.input_widths@, source.definitions@, capacity, layouts),
             scope < source.definitions@.len(),
             inputs == layouts.inputs.ranges_model(), definitions == layouts.definitions.ranges_model(),
             input_bits == layouts.inputs.total_bits_model(),
@@ -573,10 +627,12 @@ fn append_concat_operands(
                     assert(0 <= bit < width <= usize::MAX);
                     match operand {
                         SingleBitOperand::Driver(driver) => {
-                            driver_bits_fit_layout(source, layouts, capacity, scope as int, initial.len() as int, driver, width, bit);
+                            body_driver_bits_fit_layout(source.input_widths@, source.definitions@, layouts, capacity, scope as int, initial.len() as int, driver, width, bit);
                             driver_wire_is_available(inputs, definitions, initial, driver, bit, input_bits, gates);
                             assert(projection == Projection::Driver { source: driver, start: 0, stride: 1 });
                             assert(bit <= u64::MAX);
+                            assert(driver_bit_available(inputs, definitions, initial.len() as int, driver, bit));
+                            assert(0 <= 0 + bit * 1 == bit);
                             assert(projected_bit_available(inputs, definitions, initial.len() as int, projection, bit));
                         },
                         SingleBitOperand::Constant(value) => {
@@ -602,11 +658,11 @@ fn append_concat_operands(
 }
 
 proof fn rhs_projection_is_available(
-    source: &CheckedBitFunc, layouts: &Layouts, capacity: usize, scope: int, used: int,
+    source: &LoweringBody, layouts: &Layouts, capacity: usize, scope: int, used: int,
     definition: CheckedBitDefinition, projection: Projection, bit: int,
 )
     requires
-        layouts_result(source, capacity, Ok(*layouts)),
+        body_definition_layouts(source.input_widths@, source.definitions@, capacity, layouts),
         0 <= scope < source.definitions@.len(),
         used == preceding_port_bits(definition_widths(source.definitions@), scope as nat),
         bit_definition_matches(source.input_widths@, source.definitions@.take(scope), definition),
@@ -622,12 +678,12 @@ proof fn rhs_projection_is_available(
 {
     match definition.rhs {
         BitFuncRhs::Driver(driver) => {
-            driver_bits_fit_layout(source, layouts, capacity, scope, used, driver, definition.width, bit);
+            body_driver_bits_fit_layout(source.input_widths@, source.definitions@, layouts, capacity, scope, used, driver, definition.width, bit);
         },
         BitFuncRhs::Selection { input, selection } => {
             let width = bit_driver_width(source.input_widths@, source.definitions@.take(scope), input)->Some_0;
             selected_bit_in_range(width, selection.start, selection.count, selection.stride, selection.last, bit);
-            driver_bits_fit_layout(source, layouts, capacity, scope, used, input, width,
+            body_driver_bits_fit_layout(source.input_widths@, source.definitions@, layouts, capacity, scope, used, input, width,
                 selection.start + bit * selection.stride);
         },
         _ => {},
@@ -677,11 +733,11 @@ spec fn operand_wire(
 }
 
 fn lower_nor_operand(
-    _source: &CheckedBitFunc, layouts: &Layouts, _capacity: usize, _scope: usize, wires: &[Wire], _gate_count: usize,
+    _source: &LoweringBody, layouts: &Layouts, _capacity: usize, _scope: usize, wires: &[Wire], _gate_count: usize,
     operand: SingleBitOperand,
 ) -> (wire: Wire)
     requires
-        layouts_result(_source, _capacity, Ok(*layouts)),
+        body_definition_layouts(_source.input_widths@, _source.definitions@, _capacity, layouts),
         _scope <= _source.definitions@.len(),
         wires@.len() == preceding_port_bits(definition_widths(_source.definitions@), _scope as nat),
         nor_operand_matches(_source.input_widths@, _source.definitions@.take(_scope as int), operand),
@@ -694,8 +750,8 @@ fn lower_nor_operand(
         SingleBitOperand::Constant(bit) => Wire::Constant(bit),
         SingleBitOperand::Driver(driver) => {
             proof {
-                use_layouts(_source, _capacity, layouts);
-                driver_bits_fit_layout(_source, layouts, _capacity, _scope as int, wires@.len() as int, driver, 1, 0);
+                body_inputs_end_within_layout(_source, _capacity, layouts);
+                body_driver_bits_fit_layout(_source.input_widths@, _source.definitions@, layouts, _capacity, _scope as int, wires@.len() as int, driver, 1, 0);
                 driver_wire_is_available(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
                     wires@, driver, 0, layouts.inputs.total_bits_model(), _gate_count as nat);
             }
@@ -713,7 +769,7 @@ spec fn rhs_projection(rhs: BitFuncRhs, gate: usize) -> Projection {
         },
         BitFuncRhs::Constant(bit) => Projection::Wire(Wire::Constant(bit)),
         BitFuncRhs::Nor { .. } => Projection::Wire(Wire::Gate(gate)),
-        BitFuncRhs::Concat | BitFuncRhs::BitVector => arbitrary(),
+        BitFuncRhs::Concat | BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => arbitrary(),
     }
 }
 
@@ -742,31 +798,33 @@ spec fn gate_step_matches(
 }
 
 fn lower_rhs(
-    source: &CheckedBitFunc, layouts: &Layouts, capacity: usize, index: usize,
+    source: &LoweringBody, layouts: &Layouts, capacity: usize, _gate_limit: usize, index: usize,
     wires: &[Wire], gates: &mut Vec<NorGate>, origins: &mut Vec<usize>,
 ) -> (projection: Projection)
     requires
-        checked_bit_func_available(source),
-        layouts_result(source, capacity, Ok(*layouts)),
+        body_definition_layouts(source.input_widths@, source.definitions@, capacity, layouts),
         index < source.definitions@.len(),
+        bit_definition_matches(source.input_widths@, source.definitions@.take(index as int),
+            source.definitions@[index as int]),
         !(source.definitions@[index as int].rhs is Concat || source.definitions@[index as int].rhs is BitVector),
         wires@.len() == preceding_port_bits(definition_widths(source.definitions@), index as nat),
         wires_available(wires@, layouts.inputs.total_bits_model(), old(gates)@.len()),
         gates_available(old(gates)@, layouts.inputs.total_bits_model() as nat, old(gates)@.len() as int),
-        old(gates)@.len() == old(origins)@.len() <= index,
+        old(gates)@.len() == old(origins)@.len(),
+        old(gates)@.len() + (if source.definitions@[index as int].rhs is Nor { 1int } else { 0int }) <= _gate_limit,
     ensures
         projection == rhs_projection(source.definitions@[index as int].rhs, old(gates)@.len() as usize),
         gate_step_matches(layouts, wires@, source.definitions@[index as int].rhs, index,
             old(gates)@, final(gates)@, old(origins)@, final(origins)@),
         wires_available(wires@, layouts.inputs.total_bits_model(), final(gates)@.len()),
         gates_available(final(gates)@, layouts.inputs.total_bits_model() as nat, final(gates)@.len() as int),
-        final(gates)@.len() == final(origins)@.len() <= index + 1,
+        final(gates)@.len() == final(origins)@.len() <= _gate_limit,
+        final(gates)@.len() == old(gates)@.len() + (if source.definitions@[index as int].rhs is Nor { 1int } else { 0int }),
         final(gates)@.len() >= old(gates)@.len(),
         if let Projection::Wire(wire) = projection {
             wire_available(wire, layouts.inputs.total_bits_model() as nat, final(gates)@.len())
         } else { true },
 {
-    proof { use_bit_definition(source, index as int); }
     let rhs = source.definitions[index].rhs;
     let gate = gates.len();
     let ghost before = gates@;
@@ -792,7 +850,7 @@ fn lower_rhs(
             proof { existing_wires_keep_availability(wires@, input_bits, gate as nat, gates@.len()); }
             Projection::Wire(Wire::Gate(gate))
         },
-        BitFuncRhs::Concat | BitFuncRhs::BitVector => {
+        BitFuncRhs::Concat | BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => {
             proof { assert(false); }
             Projection::Wire(Wire::Constant(false))
         },
@@ -806,10 +864,17 @@ fn lower_rhs(
 spec fn definition_wiring_matches(
     source: &CheckedBitFunc, layouts: &Layouts, wires: Seq<Wire>, gates: Seq<NorGate>, origins: Seq<usize>, i: int,
 ) -> bool {
+    slot_wiring_matches(source.definitions@[i], layouts, wires, gates, origins, i)
+}
+
+spec fn slot_wiring_matches(
+    slot: CheckedBitDefinition, layouts: &Layouts, wires: Seq<Wire>, gates: Seq<NorGate>, origins: Seq<usize>, i: int,
+) -> bool {
     let range = layouts.definitions.ranges_model()[i];
     let prefix = wires.take(range.start as int);
-    let rhs = source.definitions@[i].rhs;
+    let rhs = slot.rhs;
     let gate = if rhs is Nor { wires[range.start as int]->Gate_0 } else { 0usize };
+    &&& !(rhs is CallOutput)
     &&& range.start < range.end <= wires.len()
     &&& match rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), prefix, rhs) {
         Some(expected) => wires[range.start as int] == Wire::Gate(gate)
@@ -819,11 +884,11 @@ spec fn definition_wiring_matches(
     &&& if rhs is BitVector {
         forall|bit: int| 0 <= bit < range.end - range.start ==>
             (#[trigger] wires[range.start + bit]) == Wire::Constant(
-                bit_literal_value_at(literal_bytes(source.definitions@[i].expression), bit as nat))
+                bit_literal_value_at(literal_bytes(slot.expression), bit as nat))
     } else if rhs is Concat {
         wires.subrange(range.start as int, range.end as int)
             == concat_operand_wires(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), prefix,
-                source.definitions@[i].operands@).flatten()
+                slot.operands@).flatten()
     } else {
         forall|j: int| range.start <= j < range.end ==> (#[trigger] wires[j]) == projected_wire(layouts.inputs.ranges_model(),
             layouts.definitions.ranges_model(), prefix, rhs_projection(rhs, gate), j - range.start)
@@ -942,42 +1007,67 @@ proof fn gate_origins_preserved(
     };
 }
 
-fn lower_definition(
-    source: &CheckedBitFunc, layouts: &Layouts, capacity: usize, i: usize,
+/// 通常の定義を1件だけ配線に変換し、既存の配線とゲートを保つ。
+///
+/// NOR のときだけゲートを1個追加する。
+///
+/// # Errors
+///
+/// ゲート数が上限に達しているときに NOR を追加しようとすると、元の右辺の範囲を返す。
+/// 失敗時は配線、ゲート、ゲートと定義の対応を保つ。
+fn lower_definition<'p, 'a>(
+    source: &LoweringBody<'_, 'p, 'a>, layouts: &Layouts, capacity: usize, gate_limit: usize, i: usize,
     wires: &mut Vec<Wire>, gates: &mut Vec<NorGate>, gate_definitions: &mut Vec<usize>,
-)
+) -> (result: Result<(), LocatedName<'p, 'a>>)
     requires
-        checked_bit_func_available(source),
-        layouts_result(source, capacity, Ok(*layouts)),
+        body_definition_layouts(source.input_widths@, source.definitions@, capacity, layouts),
         i < source.definitions@.len(),
+        bit_definition_matches(source.input_widths@, source.definitions@.take(i as int),
+            source.definitions@[i as int]),
         old(wires)@.len() == preceding_port_bits(definition_widths(source.definitions@), i as nat),
         wires_available(old(wires)@, layouts.inputs.total_bits_model(), old(gates)@.len()),
         gates_available(old(gates)@, layouts.inputs.total_bits_model() as nat, old(gates)@.len() as int),
-        old(gates)@.len() == old(gate_definitions)@.len() <= i,
-    ensures
-        final(wires)@.len() == preceding_port_bits(definition_widths(source.definitions@), (i + 1) as nat),
-        wires_available(final(wires)@, layouts.inputs.total_bits_model(), final(gates)@.len()),
-        gates_available(final(gates)@, layouts.inputs.total_bits_model() as nat, final(gates)@.len() as int),
-        final(gates)@.len() == final(gate_definitions)@.len() <= i + 1,
-        definition_wiring_matches(source, layouts, final(wires)@, final(gates)@, final(gate_definitions)@, i as int),
-        final(gates)@.take(old(gates)@.len() as int) == old(gates)@,
-        final(gate_definitions)@.take(old(gate_definitions)@.len() as int) == old(gate_definitions)@,
-        final(gates)@.len() >= old(gates)@.len(),
-        gate_step_matches(layouts, old(wires)@, source.definitions@[i as int].rhs, i,
-            old(gates)@, final(gates)@, old(gate_definitions)@, final(gate_definitions)@),
-        old(wires)@.len() == layouts.definitions.ranges_model()[i as int].start,
-        final(wires)@.len() > old(wires)@.len(),
-        source.definitions@[i as int].rhs is Nor ==>
-            final(wires)@[old(wires)@.len() as int] == Wire::Gate(old(gates)@.len() as usize),
-        final(wires)@.take(old(wires)@.len() as int) == old(wires)@,
-        !(source.definitions@[i as int].rhs is Concat || source.definitions@[i as int].rhs is BitVector)
-            ==> forall|bit: int| 0 <= bit < source.definitions@[i as int].width ==>
-            (#[trigger] final(wires)@[old(wires)@.len() + bit]) == projected_wire(
-                layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), old(wires)@,
-                rhs_projection(source.definitions@[i as int].rhs, old(gates)@.len() as usize), bit,
-            ),
+        old(gates)@.len() == old(gate_definitions)@.len(),
+        old(gates)@.len() <= gate_limit,
+    ensures match result {
+        Err(site) => {
+            &&& source.definitions@[i as int].rhs is Nor
+            &&& old(gates)@.len() == gate_limit
+            &&& site == source.definitions@[i as int].expression
+            &&& final(wires)@ == old(wires)@
+            &&& final(gates)@ == old(gates)@
+            &&& final(gate_definitions)@ == old(gate_definitions)@
+        },
+        Ok(()) => {
+            &&& final(wires)@.len() == preceding_port_bits(definition_widths(source.definitions@), (i + 1) as nat)
+            &&& wires_available(final(wires)@, layouts.inputs.total_bits_model(), final(gates)@.len())
+            &&& gates_available(final(gates)@, layouts.inputs.total_bits_model() as nat, final(gates)@.len() as int)
+            &&& final(gates)@.len() == final(gate_definitions)@.len() <= gate_limit
+            &&& final(gates)@.len() == old(gates)@.len() + (if source.definitions@[i as int].rhs is Nor { 1int } else { 0int })
+            &&& slot_wiring_matches(source.definitions@[i as int], layouts, final(wires)@, final(gates)@, final(gate_definitions)@, i as int)
+            &&& final(gates)@.take(old(gates)@.len() as int) == old(gates)@
+            &&& final(gate_definitions)@.take(old(gate_definitions)@.len() as int) == old(gate_definitions)@
+            &&& final(gates)@.len() >= old(gates)@.len()
+            &&& gate_step_matches(layouts, old(wires)@, source.definitions@[i as int].rhs, i,
+                old(gates)@, final(gates)@, old(gate_definitions)@, final(gate_definitions)@)
+            &&& old(wires)@.len() == layouts.definitions.ranges_model()[i as int].start
+            &&& final(wires)@.len() > old(wires)@.len()
+            &&& source.definitions@[i as int].rhs is Nor ==>
+                final(wires)@[old(wires)@.len() as int] == Wire::Gate(old(gates)@.len() as usize)
+            &&& final(wires)@.take(old(wires)@.len() as int) == old(wires)@
+            &&& !(source.definitions@[i as int].rhs is Concat || source.definitions@[i as int].rhs is BitVector)
+                ==> forall|bit: int| 0 <= bit < source.definitions@[i as int].width ==>
+                (#[trigger] final(wires)@[old(wires)@.len() + bit]) == projected_wire(
+                    layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), old(wires)@,
+                    rhs_projection(source.definitions@[i as int].rhs, old(gates)@.len() as usize), bit,
+                )
+        },
+    },
 {
-    proof { use_layouts(source, capacity, layouts); }
+    if gates.len() == gate_limit && matches!(source.definitions[i].rhs, BitFuncRhs::Nor { .. }) {
+        return Err(copy_location(&source.definitions[i].expression));
+    }
+    proof { body_inputs_end_within_layout(source, capacity, layouts); }
     let ghost input_bits = layouts.inputs.total_bits_model();
     let inputs = layouts.inputs.ranges();
     let ranges = layouts.definitions.ranges();
@@ -986,7 +1076,6 @@ fn lower_definition(
     let range = &ranges[i];
     proof {
         port_bit_layout_port(definition_widths(source.definitions@), capacity, layouts.definitions, i);
-        use_bit_definition(source, i as int);
     }
     let width = range.end - range.start;
     let ghost prior = wires@;
@@ -1000,7 +1089,7 @@ fn lower_definition(
         assert(text.spec_bytes() == literal_bytes(*expression));
         let Some(literal) = read_bit_literal(text) else {
             proof { assert(false); }
-            return;
+            return Ok(());
         };
         append_bit_literal_wires(&literal, width, wires);
         proof {
@@ -1014,10 +1103,10 @@ fn lower_definition(
                     assert(wires@[prior.len() + bit] is Constant);
                 }
             };
-            reveal(definition_wiring_matches);
+            reveal(slot_wiring_matches);
             reveal(gate_step_matches);
         }
-        return;
+        return Ok(());
     }
     if matches!(source.definitions[i].rhs, BitFuncRhs::Concat) {
         let operands = source.definitions[i].operands.as_slice();
@@ -1033,12 +1122,12 @@ fn lower_definition(
             assert(parts.flatten().len() == width);
             assert(wires@.subrange(range.start as int, range.end as int) =~= parts.flatten());
             assert(wires@.take(prior.len() as int) =~= prior);
-            reveal(definition_wiring_matches);
+            reveal(slot_wiring_matches);
             reveal(gate_step_matches);
         }
-        return;
+        return Ok(());
     }
-    let projection = lower_rhs(source, layouts, capacity, i, wires.as_slice(), gates, gate_definitions);
+    let projection = lower_rhs(source, layouts, capacity, gate_limit, i, wires.as_slice(), gates, gate_definitions);
     assert(projection == rhs_projection(definition.rhs, gate));
     assert forall|bit: int| 0 <= bit < width implies
         #[trigger] projected_bit_available(inputs@, ranges@, prior.len() as int, projection, bit) by {
@@ -1076,8 +1165,8 @@ fn lower_definition(
             assert(wires@[prior.len() as int] == Wire::Gate(gate));
             assert(gates@[gate as int] == rhs_gate(inputs@, ranges@, prior, definition.rhs)->Some_0);
         }
-        assert(definition_wiring_matches(source, layouts, wires@, gates@, gate_definitions@, i as int)) by {
-            reveal(definition_wiring_matches);
+        assert(slot_wiring_matches(*definition, layouts, wires@, gates@, gate_definitions@, i as int)) by {
+            reveal(slot_wiring_matches);
             assert forall|j: int| range.start <= j < range.end implies
                 (#[trigger] wires@[j]) == projected_wire(inputs@, ranges@, prior,
                     rhs_projection(definition.rhs, if definition.rhs is Nor { gate } else { 0usize }), j - range.start) by {
@@ -1085,59 +1174,64 @@ fn lower_definition(
             };
         };
     }
+    Ok(())
 }
 
 #[verifier::opaque]
 spec fn output_wiring_matches(
     source: &CheckedBitFunc, layouts: &Layouts, wires: Seq<Wire>, outputs: Seq<Wire>, end_port: int,
 ) -> bool {
+    body_output_wiring_matches(source.output_drivers@, layouts, wires, outputs, end_port)
+}
+
+spec fn body_output_wiring_matches(
+    drivers: Seq<OutputDriver>, layouts: &Layouts, wires: Seq<Wire>, outputs: Seq<Wire>, end_port: int,
+) -> bool {
     forall|port: int, bit: int| {
         let range = layouts.outputs.ranges_model()[port];
         0 <= port < end_port && 0 <= bit < range.end - range.start
     } ==> (#[trigger] outputs[layouts.outputs.ranges_model()[port].start + bit])
         == driver_wire(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), wires,
-            source.output_drivers@[port], bit)
+            drivers[port], bit)
 }
 
 proof fn output_port_preserves_wiring(
-    source: &CheckedBitFunc, layouts: &Layouts, capacity: usize, wires: Seq<Wire>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, layouts: &Layouts, capacity: usize, wires: Seq<Wire>,
     prior: Seq<Wire>, outputs: Seq<Wire>, port: usize,
 )
     requires
-        port_bit_layout_result(source.output_widths@, capacity, Ok(layouts.outputs)),
-        port < source.output_widths@.len(),
+        port_bit_layout_result(widths, capacity, Ok(layouts.outputs)),
+        port < widths.len(),
         port < layouts.outputs.ranges_model().len(),
-        port < source.output_drivers@.len(),
+        port < drivers.len(),
         prior.len() == layouts.outputs.ranges_model()[port as int].start,
         layouts.outputs.ranges_model()[port as int].end <= outputs.len(),
         outputs.take(prior.len() as int) == prior,
-        output_wiring_matches(source, layouts, wires, prior, port as int),
+        body_output_wiring_matches(drivers, layouts, wires, prior, port as int),
         forall|bit: int| 0 <= bit < layouts.outputs.ranges_model()[port as int].end
                 - layouts.outputs.ranges_model()[port as int].start ==>
             (#[trigger] outputs[prior.len() + bit]) == driver_wire(
                 layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), wires,
-                source.output_drivers@[port as int], bit),
-    ensures output_wiring_matches(source, layouts, wires, outputs, port + 1),
+                drivers[port as int], bit),
+    ensures body_output_wiring_matches(drivers, layouts, wires, outputs, port + 1),
 {
-    reveal(output_wiring_matches);
     let ranges = layouts.outputs.ranges_model();
-    let widths = source.output_widths@;
     port_bit_layout_port(widths, capacity, layouts.outputs, port);
     assert forall|p: int, b: int| 0 <= p < port + 1 && 0 <= b < ranges[p].end - ranges[p].start implies
         (#[trigger] outputs[ranges[p].start + b])
             == driver_wire(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), wires,
-                source.output_drivers@[p], b) by {
+                drivers[p], b) by {
         if p < port {
             port_bit_layout_port(widths, capacity, layouts.outputs, p as usize);
             preceding_port_bits_grow(widths, (p + 1) as nat, port as nat);
             let i = ranges[p].start + b;
             assert(outputs[i] == prior[i]);
             assert(prior[ranges[p].start + b] == driver_wire(
-                layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), wires, source.output_drivers@[p], b));
+                layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), wires, drivers[p], b));
         } else {
             assert(p == port);
             assert(outputs[prior.len() + b] == driver_wire(layouts.inputs.ranges_model(),
-                layouts.definitions.ranges_model(), wires, source.output_drivers@[p], b));
+                layouts.definitions.ranges_model(), wires, drivers[p], b));
         }
     };
 }
@@ -1155,7 +1249,43 @@ fn lower_outputs(
         output_wiring_matches(source, layouts, wires@, outputs@, source.output_widths@.len() as int),
         output_ports_available(outputs@, layouts.inputs.total_bits_model() as nat, _gate_count as nat, outputs@.len() as int),
 {
-    proof { use_layouts(source, _capacity, layouts); }
+    proof {
+        reveal(layouts_result);
+        assert forall|p: int| 0 <= p < source.output_widths@.len() implies
+            bit_driver_width(source.input_widths@, source.definitions@, #[trigger] source.output_drivers@[p])
+                == Some(source.output_widths@[p]) by {
+            use_bit_output(source, p);
+        };
+        use_type_invariant(source);
+        reveal(checked_bit_func_available);
+    }
+    let body = LoweringBody { input_widths: source.input_widths.as_slice(), definitions: source.definitions.as_slice() };
+    let outputs = lower_body_outputs(&body, source.output_widths.as_slice(), source.output_drivers.as_slice(),
+        layouts, _capacity, wires, _gate_count);
+    assert(output_wiring_matches(source, layouts, wires@, outputs@, source.output_widths@.len() as int)) by {
+        reveal(output_wiring_matches);
+    };
+    outputs
+}
+
+fn lower_body_outputs(
+    body: &LoweringBody, widths: &[u64], drivers: &[OutputDriver],
+    layouts: &Layouts, _capacity: usize, wires: &[Wire], _gate_count: usize,
+) -> (outputs: Vec<Wire>)
+    requires
+        widths@.len() == drivers@.len(),
+        forall|p: int| 0 <= p < widths@.len() ==>
+            bit_driver_width(body.input_widths@, body.definitions@, #[trigger] drivers@[p]) == Some(widths@[p]),
+        body_definition_layouts(body.input_widths@, body.definitions@, _capacity, layouts),
+        widths_layout(widths@, _capacity, &layouts.outputs),
+        wires@.len() == preceding_port_bits(definition_widths(body.definitions@), body.definitions@.len()),
+        wires_available(wires@, layouts.inputs.total_bits_model(), _gate_count as nat),
+    ensures
+        outputs@.len() == layouts.outputs.total_bits_model(),
+        body_output_wiring_matches(drivers@, layouts, wires@, outputs@, widths@.len() as int),
+        output_ports_available(outputs@, layouts.inputs.total_bits_model() as nat, _gate_count as nat, outputs@.len() as int),
+{
+    proof { body_inputs_end_within_layout(body, _capacity, layouts); }
     let ghost input_bits = layouts.inputs.total_bits_model();
     let inputs = layouts.inputs.ranges();
     let ranges = layouts.definitions.ranges();
@@ -1163,48 +1293,49 @@ fn lower_outputs(
     let ports = layouts.outputs.ranges();
     let mut outputs = Vec::new();
     let mut port = 0;
-    assert(output_wiring_matches(source, layouts, wires@, outputs@, 0)) by { reveal(output_wiring_matches); };
-    assert(preceding_port_bits(source.output_widths@, 0) == 0) by { reveal(preceding_port_bits); };
+    assert(body_output_wiring_matches(drivers@, layouts, wires@, outputs@, 0));
+    assert(preceding_port_bits(widths@, 0) == 0) by { reveal(preceding_port_bits); };
     while port < ports.len()
         invariant
-            checked_bit_func_available(source),
-            layouts_result(source, _capacity, Ok(*layouts)),
+            widths@.len() == drivers@.len(),
+            forall|p: int| 0 <= p < widths@.len() ==>
+                bit_driver_width(body.input_widths@, body.definitions@, #[trigger] drivers@[p]) == Some(widths@[p]),
+            body_definition_layouts(body.input_widths@, body.definitions@, _capacity, layouts),
             inputs@ == layouts.inputs.ranges_model(),
             ranges@ == layouts.definitions.ranges_model(),
             ports@ == layouts.outputs.ranges_model(),
-            ports@.len() == source.output_widths@.len(),
-            port_bit_layout_result(source.output_widths@, _capacity, Ok(layouts.outputs)),
+            ports@.len() == widths@.len(),
+            port_bit_layout_result(widths@, _capacity, Ok(layouts.outputs)),
             input_bits == layouts.inputs.total_bits_model(),
             forall|j: int| 0 <= j < inputs@.len() ==> (#[trigger] inputs@[j]).end <= input_bits,
-            wires@.len() == preceding_port_bits(definition_widths(source.definitions@), source.definitions@.len()),
+            wires@.len() == preceding_port_bits(definition_widths(body.definitions@), body.definitions@.len()),
             wires_available(wires@, input_bits, _gate_count as nat),
             port <= ports@.len(),
-            output_wiring_matches(source, layouts, wires@, outputs@, port as int),
-            outputs@.len() == preceding_port_bits(source.output_widths@, port as nat),
+            body_output_wiring_matches(drivers@, layouts, wires@, outputs@, port as int),
+            outputs@.len() == preceding_port_bits(widths@, port as nat),
             output_ports_available(outputs@, input_bits as nat, _gate_count as nat, outputs@.len() as int),
         decreases ports@.len() - port,
     {
         proof {
-            port_bit_layout_port(source.output_widths@, _capacity, layouts.outputs, port);
-            use_bit_output(source, port as int);
+            port_bit_layout_port(widths@, _capacity, layouts.outputs, port);
         }
         let range = &ports[port];
         let width = range.end - range.start;
-        let driver = source.output_drivers[port];
+        let driver = drivers[port];
         let ghost prior = outputs@;
         assert(outputs@.take(range.start as int) =~= prior);
         let mut bit = 0;
         while bit < width
             invariant
-                layouts_result(source, _capacity, Ok(*layouts)),
+                body_definition_layouts(body.input_widths@, body.definitions@, _capacity, layouts),
                 inputs@ == layouts.inputs.ranges_model(), ranges@ == layouts.definitions.ranges_model(),
                 input_bits == layouts.inputs.total_bits_model(),
                 forall|j: int| 0 <= j < inputs@.len() ==> (#[trigger] inputs@[j]).end <= input_bits,
-                port < source.output_widths@.len() == source.output_drivers@.len(),
-                driver == source.output_drivers@[port as int],
-                width == source.output_widths@[port as int],
-                bit_driver_width(source.input_widths@, source.definitions@, driver) == Some(width as u64),
-                wires@.len() == preceding_port_bits(definition_widths(source.definitions@), source.definitions@.len()),
+                port < widths@.len() == drivers@.len(),
+                driver == drivers@[port as int],
+                width == widths@[port as int],
+                bit_driver_width(body.input_widths@, body.definitions@, driver) == Some(width as u64),
+                wires@.len() == preceding_port_bits(definition_widths(body.definitions@), body.definitions@.len()),
                 wires_available(wires@, input_bits, _gate_count as nat),
                 bit <= width,
                 outputs@.len() == range.start + bit,
@@ -1216,7 +1347,7 @@ fn lower_outputs(
             decreases width - bit,
         {
             proof {
-                driver_bits_fit_layout(source, layouts, _capacity, source.definitions@.len() as int,
+                body_driver_bits_fit_layout(body.input_widths@, body.definitions@, layouts, _capacity, body.definitions@.len() as int,
                     wires@.len() as int, driver, width as u64, bit as int);
                 driver_wire_is_available(inputs@, ranges@, wires@, driver, bit as int, input_bits, _gate_count as nat);
             }
@@ -1234,10 +1365,10 @@ fn lower_outputs(
             };
             bit += 1;
         }
-        proof { output_port_preserves_wiring(source, layouts, _capacity, wires@, prior, outputs@, port); }
+        proof { output_port_preserves_wiring(widths@, drivers@, layouts, _capacity, wires@, prior, outputs@, port); }
         port += 1;
     }
-    proof { port_bit_layout_size(source.output_widths@, _capacity, &layouts.outputs); }
+    proof { port_bit_layout_size(widths@, _capacity, &layouts.outputs); }
     outputs
 }
 
@@ -1312,6 +1443,19 @@ pub closed spec fn lowered_bit_func_result(
             && output_wiring_matches(source, &value.layouts, value.definition_wires@,
                 value.netlist.outputs@, source.output_widths@.len() as int),
     }
+}
+
+/// 単独関数の変換結果から、再利用するネットリストの入出力配置を取り出す。
+pub(super) proof fn standalone_template_layouts(source: &CheckedBitFunc, limit: usize, lowered: &LoweredBitFunc)
+    requires lowered_bit_func_result(source, limit, Ok(*lowered)),
+    ensures
+        port_bit_layout_result(source.input_widths@, limit, Ok(*lowered.input_layout_model())),
+        port_bit_layout_result(source.output_widths@, limit, Ok(*lowered.output_layout_model())),
+        nor_evaluation_ready(lowered.netlist_model(), lowered.input_layout_model().total_bits_model() as nat),
+        lowered.netlist_model().outputs@.len() == lowered.output_layout_model().total_bits_model(),
+{
+    reveal(lowered_bit_func_result);
+    reveal(layouts_result);
 }
 
 impl<'p, 'a> CheckedBitFunc<'p, 'a> {
@@ -1404,7 +1548,16 @@ impl<'p, 'a> CheckedBitFunc<'p, 'a> {
             let ghost prior = wires@;
             let ghost prior_gates = gates@;
             let ghost prior_origins = gate_definitions@;
-            lower_definition(self, &layouts, capacity, i, &mut wires, &mut gates, &mut gate_definitions);
+            let body = LoweringBody { input_widths: self.input_widths.as_slice(), definitions: self.definitions.as_slice() };
+            proof {
+                reveal(layouts_result);
+                use_bit_definition(self, i as int);
+            }
+            let _lowered = lower_definition(&body, &layouts, capacity, usize::MAX, i,
+                &mut wires, &mut gates, &mut gate_definitions);
+            proof { assert(_lowered.is_ok()); }
+            assert(definition_wiring_matches(self, &layouts, wires@, gates@, gate_definitions@, i as int))
+                by { reveal(definition_wiring_matches); };
             proof {
                 gate_origins_preserved(self, &layouts, i, prior, prior_gates, prior_origins,
                     wires@, gates@, gate_definitions@);
@@ -1428,6 +1581,29 @@ impl<'p, 'a> CheckedBitFunc<'p, 'a> {
         assert(lowered_bit_func_result(self, capacity, result)) by { reveal(lowered_bit_func_result); };
         result
     }
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn local_nor_reports_a_full_gate_budget_at_its_source() {
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let text = "(using nor) (func invert (in a) (out y) (def t a) (def y (nor t t)))";
+    let project = parse_circuit_project(&[SourceSnapshot { path: "invert.ncg2", revision: 1, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let checked = aliases.check_bit_func(0, 1, 8).unwrap();
+    let layout = prepare_layouts(&checked, 8).unwrap();
+    let body = LoweringBody { input_widths: checked.input_widths.as_slice(), definitions: checked.definitions.as_slice() };
+    let mut wires = Vec::new();
+    let mut gates = Vec::new();
+    let mut origins = Vec::new();
+
+    lower_definition(&body, &layout, 8, 0, 0, &mut wires, &mut gates, &mut origins).unwrap();
+    let error = lower_definition(&body, &layout, 8, 0, 1, &mut wires, &mut gates, &mut origins).unwrap_err();
+    assert_eq!(&text[error.span], "(nor t t)");
+    assert_eq!(wires.as_slice(), &[Wire::Input(0)]);
+    assert!(gates.is_empty() && origins.is_empty());
 }
 
 } // verus!

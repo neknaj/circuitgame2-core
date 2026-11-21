@@ -1,0 +1,475 @@
+//! 通常の右辺と関数呼び出しの出力を、定義順に取り出す。
+
+use super::*;
+use super::super::expansion::PreparedExpansionBody;
+use super::super::super::FunctionExpansionOrder;
+#[cfg(verus_only)]
+use super::super::super::function_atoms::{
+    concat_projection_positions, concat_projections_match, ordinary_call_excludes_structure_projection,
+};
+#[cfg(verus_only)]
+use crate::syntax::circuit::{ordinary_call_at, ordinary_call_excludes_special_forms};
+
+verus! {
+
+pub(super) open spec fn call_covers(calls: Seq<CheckedExpansionCall>, at: int) -> bool {
+    exists|group: int| 0 <= group < calls.len()
+        && (#[trigger] calls[group]).outputs.start <= at < calls[group].outputs.end
+}
+
+spec fn projected_call_slot(
+    calls: Seq<CheckedExpansionCall>, group: int, at: int, slot: CheckedBitDefinition,
+) -> bool {
+    let call = calls[group];
+    &&& call.outputs.start <= at < call.outputs.end
+    &&& slot.rhs == BitFuncRhs::CallOutput {
+        group: group as usize, port: (at - call.outputs.start) as usize,
+    }
+    &&& slot.expression == call.expression
+    &&& slot.operands@.len() == 0
+}
+
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    #[verifier::opaque]
+    pub(super) closed spec fn expansion_definition_prefix(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, slots: Seq<CheckedBitDefinition>,
+    ) -> bool {
+        &&& slots.len() <= scope.types@.len()
+        &&& forall|at: int| 0 <= at < slots.len() ==> {
+            let slot = #[trigger] slots[at];
+            if call_covers(calls, at) {
+                exists|group: int| 0 <= group < calls.len()
+                    && #[trigger] projected_call_slot(calls, group, at, slot)
+            } else {
+                self.bit_definition_from_source(scope, slots.take(at), at, slot)
+            }
+        }
+    }
+
+    #[verifier::opaque]
+    pub(super) closed spec fn body_calls_match(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, widths: Seq<&[u64]>,
+        concats: Seq<ConcatProjection>,
+    ) -> bool {
+        &&& calls.len() == widths.len()
+        &&& forall|group: int| 0 <= group < calls.len() ==> {
+            let call = #[trigger] calls[group];
+            &&& call.outputs.start < call.outputs.end <= scope.types@.len()
+            &&& location_in_source(call.expression)
+            &&& widths[group]@.len() == call.outputs.end - call.outputs.start
+            &&& self.call_definition_widths_match(scope, call.outputs.start, widths[group]@)
+            &&& forall|j: int| 0 <= j < scope.structures@.len() ==>
+                ! (call.outputs.start <= (#[trigger] scope.structures@[j]).target < call.outputs.end)
+            &&& forall|j: int| 0 <= j < concats.len() ==>
+                ! (call.outputs.start <= (#[trigger] concats[j]).target < call.outputs.end)
+        }
+        &&& forall|a: int, b: int| 0 <= a < b < calls.len() ==>
+            (#[trigger] calls[a]).outputs.end <= (#[trigger] calls[b]).outputs.start
+    }
+
+    proof fn special_projections_outside_call(
+        &self, scope: &FuncProjection, call: CheckedExpansionCall, definition: usize,
+        concats: Seq<ConcatProjection>,
+    )
+        requires
+            self.projection_context(scope), self.projection_structures_match(scope),
+            ({
+                let expr = scope.parsed.definitions@[definition as int].expression;
+                ordinary_call_at(scope.source.text, scope.parsed.syntax.forms@, expr.start as int, expr.end as int)
+            }),
+            forall|i: int| call.outputs.start <= i < call.outputs.end ==>
+                (#[trigger] scope.wiring.drivers.definitions@[i]).definition == definition,
+            concat_projections_match(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                scope.wiring, scope.types@, concats),
+        ensures
+            forall|j: int| 0 <= j < scope.structures@.len() ==>
+                !(call.outputs.start <= (#[trigger] scope.structures@[j]).target < call.outputs.end),
+            forall|j: int| 0 <= j < concats.len() ==>
+                !(call.outputs.start <= (#[trigger] concats[j]).target < call.outputs.end),
+    {
+        let expr = scope.parsed.definitions@[definition as int].expression;
+        ordinary_call_excludes_special_forms(scope.source.text, scope.parsed.syntax.forms@,
+            expr.start as int, expr.end as int);
+        concat_projections_order(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+            scope.wiring, scope.types@, concats);
+
+        assert forall|j: int| 0 <= j < concats.len() implies
+            !(call.outputs.start <= (#[trigger] concats[j]).target < call.outputs.end) by {
+            let row = concats[j];
+            if call.outputs.start <= row.target < call.outputs.end {
+                assert(scope.wiring.drivers.definitions@[row.target as int].definition == definition);
+                concat_projection_positions(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                    scope.wiring, scope.types@, row);
+            }
+        };
+        assert forall|j: int| 0 <= j < scope.structures@.len() implies
+            !(call.outputs.start <= (#[trigger] scope.structures@[j]).target < call.outputs.end) by {
+            let row = scope.structures@[j];
+            if call.outputs.start <= row.target < call.outputs.end {
+                assert(scope.wiring.drivers.definitions@[row.target as int].definition == definition);
+                assert(scope.layouts.is_some());
+                let table = scope.layouts->Some_0;
+                ordinary_call_excludes_structure_projection(self, scope.file, scope.entry, scope.limit,
+                    scope.wiring, *table, scope.types@, row);
+            }
+        };
+    }
+
+    proof fn prepared_calls_fit_body(
+        &self, scope: &FuncProjection, plan: FunctionExpansionOrder, prepared: &PreparedExpansionBody,
+        widths: Seq<&[u64]>,
+    )
+        requires
+            self.projection_context(scope), self.projection_structures_match(scope),
+            self.prepared_expansion_body_matches(plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            prepared.calls@.len() == widths.len(),
+            forall|i: int| 0 <= i < widths.len() ==> {
+                let signature = (#[trigger] prepared.calls@[i])._signature@.signature;
+                signature is Function && self.port_widths_match(signature->Function_0.outputs@, widths[i]@, scope.layouts)
+            },
+        ensures self.body_calls_match(scope, prepared.calls@, widths, prepared.projections.concats@),
+    {
+        reveal(UseAliases::body_calls_match);
+        let caller = (scope.file, scope.entry, scope.limit);
+        let concats = prepared.projections.concats@;
+        assert forall|i: int| 0 <= i < prepared.calls@.len() implies {
+            let call = #[trigger] prepared.calls@[i];
+            &&& call.outputs.start < call.outputs.end <= scope.types@.len()
+            &&& location_in_source(call.expression)
+            &&& widths[i]@.len() == call.outputs.end - call.outputs.start
+            &&& self.call_definition_widths_match(scope, call.outputs.start, widths[i]@)
+            &&& forall|j: int| 0 <= j < scope.structures@.len() ==>
+                !(call.outputs.start <= (#[trigger] scope.structures@[j]).target < call.outputs.end)
+            &&& forall|j: int| 0 <= j < concats.len() ==>
+                !(call.outputs.start <= (#[trigger] concats[j]).target < call.outputs.end)
+        } by {
+            let call = prepared.calls@[i];
+            let root = prepared.projections.calls@[i];
+            self.expansion_call_output_types(plan, caller, prepared.typed, scope.wiring, root,
+                prepared.projections.call_arguments.ranges@[i], &prepared.projections.call_arguments, call);
+            self.call_definition_widths_from_signature(scope, &call, widths[i]@);
+            self.special_projections_outside_call(scope, call, root.definition, concats);
+        };
+    }
+
+    /// 展開準備で確定した呼び出しと実際の出力幅から、関数本体を定義順に取り出す。
+    ///
+    /// # Errors
+    ///
+    /// 通常の右辺の変換で最初に見つかったエラーを返す。
+    pub(super) fn project_prepared_definition_body(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, calls: &[CheckedExpansionCall<'p, 'a>],
+        call_widths: &[&[u64]], literal_widths: &[Option<u64>], concats: Vec<ConcatProjection>,
+        Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(prepared): Ghost<PreparedExpansionBody<'p, 'a>>,
+    ) -> (result: Result<Vec<CheckedBitDefinition<'p, 'a>>, BitFuncError<'p, 'a>>)
+        requires
+            self.projection_context(scope), self.projection_port_widths_match(scope), self.projection_structures_match(scope),
+            self.prepared_expansion_body_matches(plan, scope.file, scope.entry, scope.limit, &prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            calls@ == prepared.calls@,
+            literal_widths@ == prepared.typed.literals.widths@ && literal_widths@.len() == scope.types@.len(),
+            concats@ == prepared.projections.concats@,
+            scope.structures@ == prepared.projections.entries@,
+            calls@.len() == call_widths@.len(),
+            forall|i: int| 0 <= i < calls@.len() ==> {
+                let signature = (#[trigger] calls@[i])._signature@.signature;
+                signature is Function
+                    && self.port_widths_match(signature->Function_0.outputs@, call_widths@[i]@, scope.layouts)
+            },
+        ensures match result {
+            Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
+                && self.expansion_definition_prefix(scope, calls@, slots@)
+                && self.definition_widths_match(scope, slots@),
+            Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
+                #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                && self.definition_widths_match(scope, prefix)
+                && prefix.len() < scope.wiring.drivers.definitions@.len()
+                && !call_covers(calls@, prefix.len() as int)
+                && self.definition_error(scope, prefix, error),
+        },
+    {
+        proof { self.prepared_calls_fit_body(scope, plan, &prepared, call_widths@); }
+        self.project_definition_body(scope, calls, call_widths, literal_widths, concats, Ghost(prepared.typed))
+    }
+
+    proof fn keep_body_prefix(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>,
+        before: Seq<CheckedBitDefinition>, after: Seq<CheckedBitDefinition>, active: Option<usize>,
+    )
+        requires
+            self.expansion_definition_prefix(scope, calls, before),
+            before.len() < after.len() <= scope.types@.len(),
+            after.take(before.len() as int) == before,
+            forall|j: int| 0 <= j < before.len() ==>
+                location_in_source((#[trigger] before[j]).expression) && before[j].width > 0,
+            match active {
+                Some(g) => {
+                    &&& g < calls.len()
+                    &&& calls[g as int].outputs.start == before.len()
+                    &&& calls[g as int].outputs.end == after.len()
+                    &&& location_in_source(calls[g as int].expression)
+                    &&& forall|j: int| before.len() <= j < after.len() ==>
+                        projected_call_slot(calls, g as int, j, #[trigger] after[j]) && after[j].width > 0
+                },
+                None => {
+                    &&& after.len() == before.len() + 1
+                    &&& !call_covers(calls, before.len() as int)
+                    &&& self.bit_definition_from_source(scope, before, before.len() as int, after[before.len() as int])
+                },
+            },
+        ensures
+            self.expansion_definition_prefix(scope, calls, after),
+            forall|j: int| 0 <= j < after.len() ==>
+                location_in_source((#[trigger] after[j]).expression) && after[j].width > 0,
+    {
+        reveal(UseAliases::expansion_definition_prefix);
+        assert forall|j: int| 0 <= j < after.len() implies {
+            let slot = #[trigger] after[j];
+            &&& location_in_source(slot.expression) && slot.width > 0
+            &&& if call_covers(calls, j) {
+                exists|g: int| 0 <= g < calls.len() && #[trigger] projected_call_slot(calls, g, j, slot)
+            } else {
+                self.bit_definition_from_source(scope, after.take(j), j, slot)
+            }
+        } by {
+            if j < before.len() {
+                assert(after[j] == before[j]);
+                assert(after.take(j) =~= before.take(j));
+            } else if let Some(g) = active {
+                assert(projected_call_slot(calls, g as int, j, after[j]));
+                assert(call_covers(calls, j));
+            }
+        };
+    }
+
+    proof fn next_call_is_later(
+        calls: Seq<CheckedExpansionCall>, group: usize, at: usize,
+    )
+        requires
+            group <= calls.len(),
+            group < calls.len() ==> at < calls[group as int].outputs.start,
+            forall|g: int| 0 <= g < group ==> (#[trigger] calls[g]).outputs.end <= at,
+            forall|a: int, b: int| 0 <= a < b < calls.len() ==>
+                (#[trigger] calls[a]).outputs.end <= (#[trigger] calls[b]).outputs.start,
+            forall|g: int| 0 <= g < calls.len() ==> (#[trigger] calls[g]).outputs.start < calls[g].outputs.end,
+        ensures
+            !call_covers(calls, at as int),
+            forall|g: int| group <= g < calls.len() ==> at < (#[trigger] calls[g]).outputs.start,
+    {
+        assert forall|g: int| group <= g < calls.len() implies at < (#[trigger] calls[g]).outputs.start by {
+            if group < g {
+                assert(calls[group as int].outputs.end <= calls[g].outputs.start);
+            }
+        };
+    }
+
+    pub(super) fn project_standalone_definitions(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, literal_widths: &[Option<u64>], concats: Vec<ConcatProjection>,
+        Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
+    ) -> (result: Result<Vec<CheckedBitDefinition<'p, 'a>>, BitFuncError<'p, 'a>>)
+        requires
+            self.projection_context(scope), self.projection_port_widths_match(scope), self.projection_structures_match(scope),
+            0 < scope.wiring.drivers.signature.outputs@.len(),
+            supported_ports(scope.wiring.drivers.signature.inputs@),
+            supported_ports(scope.wiring.drivers.signature.outputs@),
+            self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            typed.types@ == scope.types@,
+            literal_widths@ == typed.literals.widths@,
+            literal_widths@.len() == scope.types@.len(),
+            self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
+            self.func_concat_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, concats@),
+            super::super::super::function_atoms::concat_projections_match(scope.file, scope.entry, scope.limit,
+                scope.source, scope.parsed, scope.wiring, scope.types@, concats@),
+        ensures match result {
+            Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
+                && self.definition_prefix(scope, slots@) && self.definition_widths_match(scope, slots@),
+            Err(error) => self.projection_failure(scope, error),
+        },
+    {
+        reveal(UseAliases::body_calls_match);
+        let calls: &[CheckedExpansionCall] = &[];
+        assert(calls@ =~= Seq::empty());
+        let result = self.project_definition_body(scope, calls, &[], literal_widths, concats, Ghost(typed));
+        proof {
+            reveal(UseAliases::expansion_definition_prefix);
+            reveal(UseAliases::definition_prefix);
+            match &result {
+                Ok(slots) => { assert(self.definition_prefix(scope, slots@)); },
+                Err(error) => {
+                    let prefix = choose|prefix: Seq<CheckedBitDefinition>|
+                        #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                        && self.definition_widths_match(scope, prefix)
+                        && prefix.len() < scope.wiring.drivers.definitions@.len()
+                        && !call_covers(calls@, prefix.len() as int)
+                        && self.definition_error(scope, prefix, *error);
+                    assert(self.definition_prefix(scope, prefix));
+                    assert(self.projection_failure(scope, *error));
+                },
+            }
+        }
+        result
+    }
+
+    /// 検査済みの定義をソース順に取り出す。呼び出しは全出力を登録してから次の定義へ進む。
+    ///
+    /// # Errors
+    ///
+    /// 通常の右辺を取り出せない場合は、定義順で最初に失敗した式の診断を返す。
+    #[verifier::rlimit(32)]
+    pub(super) fn project_definition_body<'b>(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, calls: &[CheckedExpansionCall<'p, 'a>],
+        call_widths: &[&'b [u64]], literal_widths: &[Option<u64>], mut concats: Vec<ConcatProjection>,
+        Ghost(typed): Ghost<FuncSignalTypes<'p, 'a>>,
+    ) -> (result: Result<Vec<CheckedBitDefinition<'p, 'a>>, BitFuncError<'p, 'a>>)
+        requires
+            self.projection_context(scope),
+            self.projection_port_widths_match(scope),
+            self.projection_structures_match(scope),
+            self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+            typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            typed.types@ == scope.types@,
+            literal_widths@ == typed.literals.widths@,
+            literal_widths@.len() == scope.types@.len(),
+            self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
+            self.func_concat_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, concats@),
+            super::super::super::function_atoms::concat_projections_match(scope.file, scope.entry, scope.limit,
+                scope.source, scope.parsed, scope.wiring, scope.types@, concats@),
+            self.body_calls_match(scope, calls@, call_widths@, concats@),
+        ensures match result {
+            Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
+                && self.expansion_definition_prefix(scope, calls@, slots@)
+                && self.definition_widths_match(scope, slots@),
+            Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
+                #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                && self.definition_widths_match(scope, prefix)
+                && prefix.len() < scope.wiring.drivers.definitions@.len()
+                && !call_covers(calls@, prefix.len() as int)
+                && self.definition_error(scope, prefix, error),
+        },
+    {
+        let ghost concat_model = concats@;
+        let mut slots: Vec<CheckedBitDefinition<'p, 'a>> = Vec::new();
+        let mut i = 0usize;
+        let mut group = 0usize;
+        let mut next_structure = 0usize;
+        let mut next_concat = 0usize;
+        proof {
+            concat_projections_order(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,
+                scope.wiring, scope.types@, concat_model);
+            reveal(concat_cursor_ready);
+            reveal(UseAliases::expansion_definition_prefix);
+            reveal(UseAliases::definition_widths_match);
+        }
+        while i < scope.wiring.drivers.definitions.len()
+            invariant
+                self.projection_context(scope),
+                self.projection_port_widths_match(scope),
+                self.projection_structures_match(scope),
+                self.func_signal_types_evidence(scope.file, scope.entry, scope.limit, Ok(typed)),
+                typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+                typed.types@ == scope.types@,
+                literal_widths@ == typed.literals.widths@,
+                literal_widths@.len() == scope.types@.len(),
+                self.func_structure_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, scope.structures@),
+                self.func_concat_projections_complete(scope.file, scope.entry, scope.limit, typed, scope.wiring, concat_model),
+                self.body_calls_match(scope, calls@, call_widths@, concat_model),
+                i == slots@.len() <= scope.wiring.drivers.definitions@.len(),
+                group <= calls@.len(),
+                forall|j: int| 0 <= j < group ==> (#[trigger] calls@[j]).outputs.end <= i,
+                forall|j: int| group <= j < calls@.len() ==> i <= (#[trigger] calls@[j]).outputs.start,
+                next_structure <= scope.structures@.len(),
+                forall|j: int| 0 <= j < next_structure ==> (#[trigger] scope.structures@[j]).target < i,
+                forall|j: int| next_structure <= j < scope.structures@.len() ==> i <= (#[trigger] scope.structures@[j]).target,
+                concat_cursor_ready(concats@, concat_model, next_concat, i as int),
+                forall|a: int, b: int| 0 <= a < b < concat_model.len()
+                    ==> (#[trigger] concat_model[a]).target < (#[trigger] concat_model[b]).target,
+                forall|j: int| 0 <= j < concat_model.len() ==> concat_projection_matches(
+                    scope.file, scope.entry, scope.limit, scope.source, scope.parsed, scope.wiring, scope.types@,
+                    #[trigger] concat_model[j]),
+                self.expansion_definition_prefix(scope, calls@, slots@),
+                self.definition_widths_match(scope, slots@),
+                forall|j: int| 0 <= j < slots@.len() ==>
+                    location_in_source((#[trigger] slots@[j]).expression) && slots@[j].width > 0,
+            decreases scope.wiring.drivers.definitions@.len() - i,
+        {
+            let ghost before = slots@;
+            if group < calls.len() && calls[group].outputs.start == i {
+                let call = &calls[group];
+                proof { reveal(UseAliases::body_calls_match); }
+                self.append_call_definitions(scope, call, group, call_widths[group], &mut slots);
+                proof {
+                    reveal(concat_cursor_ready);
+                    assert forall|j: int| before.len() <= j < slots@.len() implies
+                        projected_call_slot(calls@, group as int, j, #[trigger] slots@[j]) && slots@[j].width > 0 by {
+                        assert(calls@[group as int] == *call);
+                        let port = j - call.outputs.start;
+                        assert(slots@[call.outputs.start + port] == slots@[j]);
+                    };
+                    self.keep_body_prefix(scope, calls@, before, slots@, Some(group));
+                    assert forall|j: int| group < j < calls@.len() implies
+                        call.outputs.end <= (#[trigger] calls@[j]).outputs.start by {
+                        assert(calls@[group as int].outputs.end <= calls@[j].outputs.start);
+                    };
+                    assert forall|j: int| next_structure <= j < scope.structures@.len() implies
+                        call.outputs.end <= (#[trigger] scope.structures@[j]).target by {
+                        assert(!(call.outputs.start <= scope.structures@[j].target < call.outputs.end));
+                    };
+                    assert forall|j: int| next_concat <= j < concat_model.len() implies
+                        call.outputs.end <= (#[trigger] concat_model[j]).target by {
+                        assert(concats@[j] == concat_model[j]);
+                        assert(i <= concat_model[j].target);
+                        assert(!(call.outputs.start <= concat_model[j].target < call.outputs.end));
+                    };
+                }
+                i = call.outputs.end;
+                group += 1;
+                continue;
+            }
+
+            proof {
+                reveal(UseAliases::body_calls_match);
+                Self::next_call_is_later(calls@, group, i);
+            }
+
+            let (cursor, structure) = next_structure_projection(scope.structures.as_slice(), next_structure, i);
+            next_structure = cursor;
+            let (cursor, concat) = take_concat_projection(&mut concats, next_concat, i, Ghost(concat_model));
+            proof {
+                if let Some(row) = &concat {
+                    assert(*row == concat_model[next_concat as int]);
+                } else if concat_type_ready(scope, i as int) {
+                    self.ready_concat_has_row(scope, typed, concat_model, i as int);
+                    assert(false);
+                }
+            }
+            next_concat = cursor;
+            let slot = match self.project_definition(scope, slots.as_slice(), i, structure, concat,
+                literal_widths[i], Ghost(typed)) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    assert(exists|prefix: Seq<CheckedBitDefinition>|
+                        #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
+                        && self.definition_widths_match(scope, prefix)
+                        && prefix.len() < scope.wiring.drivers.definitions@.len()
+                        && !call_covers(calls@, prefix.len() as int)
+                        && self.definition_error(scope, prefix, error));
+                    return Err(error);
+                },
+            };
+            proof { self.extend_definition_widths(scope, typed, before, slot, structure); }
+            slots.push(slot);
+            proof {
+                assert(slots@.take(before.len() as int) =~= before);
+                self.keep_body_prefix(scope, calls@, before, slots@, None);
+            }
+            i += 1;
+        }
+        Ok(slots)
+    }
+}
+
+} // verus!

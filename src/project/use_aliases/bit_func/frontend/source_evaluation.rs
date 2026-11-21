@@ -610,7 +610,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.bit_rhs_from_source(scope, definitions, index, checked.rhs, checked.operands@));
         assert(!(exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == index));
         match checked.rhs {
-            BitFuncRhs::BitVector => { assert(false); },
+            BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => { assert(false); },
             BitFuncRhs::Concat => {
                 let projection = choose|concat: ConcatProjection|
                     #[trigger] concat_projection_matches(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,

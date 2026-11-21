@@ -154,6 +154,72 @@ spec fn drivers_before(
             && (#[trigger] drivers[i]).definition == d && drivers[i].result_index == r
 }
 
+#[verifier::opaque]
+spec fn driver_run(
+    drivers: Seq<DefinitionDriver>, first: int, definition: usize, count: nat,
+) -> bool {
+    &&& 0 <= first && first + count <= drivers.len()
+    &&& forall|j: int| 0 <= j < count ==> {
+        let entry = #[trigger] drivers[first + j];
+        entry.definition == definition && entry.result_index == j
+    }
+}
+
+proof fn adjacent_result_position(drivers: Seq<DefinitionDriver>, definition: usize, i: int, j: int)
+    requires
+        0 <= i < drivers.len(), 0 <= j < drivers.len(),
+        drivers[i].definition == definition, drivers[j].definition == definition,
+        drivers[i].result_index + 1 == drivers[j].result_index,
+        forall|a: int, b: int| 0 <= a < b < drivers.len() ==> {
+            let first = #[trigger] drivers[a];
+            let last = #[trigger] drivers[b];
+            ordered(first.definition as int, first.result_index as int, last.definition as int, last.result_index as int)
+        },
+    ensures j == i + 1,
+{
+    if j < i {
+        assert(ordered(definition as int, drivers[j].result_index as int, definition as int, drivers[i].result_index as int));
+    } else if i + 1 < j {
+        let middle = drivers[i + 1];
+        assert(ordered(definition as int, drivers[i].result_index as int, middle.definition as int, middle.result_index as int));
+        assert(ordered(middle.definition as int, middle.result_index as int, definition as int, drivers[j].result_index as int));
+    }
+}
+
+proof fn driver_run_from_targets(
+    source: &str, forms: Seq<Form>, definitions: Seq<BuildDefinition>, begin: int, end: int,
+    drivers: Seq<DefinitionDriver>, first: int, definition: usize, count: nat,
+)
+    requires
+        drivers_before(source, forms, definitions, begin, end, end, 0, drivers),
+        0 <= first < drivers.len(), drivers[first].definition == definition, drivers[first].result_index == 0,
+        0 < count,
+        target_position(forms, definitions, begin, end, definition as int, count - 1),
+    ensures driver_run(drivers, first, definition, count),
+    decreases count,
+{
+    reveal(driver_run);
+    if count > 1 {
+        let previous = count - 1;
+        assert(target_position(forms, definitions, begin, end, definition as int, previous - 1));
+        driver_run_from_targets(source, forms, definitions, begin, end, drivers, first, definition, previous as nat);
+        assert(ordered(definition as int, previous, end, 0));
+        let next = choose|j: int| 0 <= j < drivers.len()
+            && (#[trigger] drivers[j]).definition == definition && drivers[j].result_index == previous;
+        let offset = previous - 1;
+        let last = first + offset;
+        assert(0 <= offset < previous && driver_run(drivers, first, definition, previous as nat));
+        assert(drivers[last].definition == definition && drivers[last].result_index == previous - 1);
+        adjacent_result_position(drivers, definition, last, next);
+        assert forall|j: int| 0 <= j < count implies {
+            let row = #[trigger] drivers[first + j];
+            row.definition == definition && row.result_index == j
+        } by {
+            if j == previous { assert(first + j == next); }
+        };
+    }
+}
+
 pub(super) open spec fn same_definition_driver(left: DefinitionDriver, right: DefinitionDriver) -> bool {
     &&& left.definition == right.definition
     &&& left.result_index == right.result_index
@@ -826,7 +892,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && frame.start <= driver.definition < frame.end <= parsed.definitions@.len()
                 })
             &&& forall|i: int, j: int| 0 <= i < j < checked.definitions@.len()
-                ==> (#[trigger] checked.definitions@[i]).definition <= (#[trigger] checked.definitions@[j]).definition
+                ==> {
+                    let first = #[trigger] checked.definitions@[i];
+                    let last = #[trigger] checked.definitions@[j];
+                    first.definition < last.definition
+                        || (first.definition == last.definition && first.result_index < last.result_index)
+                }
         }),
     {
         reveal(UseAliases::func_driver_evidence);
@@ -857,6 +928,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
             &&& checked_ports_and_output_bounds(circuits[file as int].syntax.forms@, checked)
             &&& expected_output_context(source, &circuits[file as int], entry as int, checked)
+            &&& self.typed_signature_evidence(file, entry, max_width, Ok(Some(checked.signature)))
             &&& forall|i: int| 0 <= i < checked.signature.inputs@.len()
                 ==> self.declared_port_type((#[trigger] checked.signature.inputs@[i]).ty)
             &&& forall|i: int| 0 <= i < checked.signature.outputs@.len()
@@ -864,12 +936,52 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& forall|i: int| 0 <= i < checked.definitions@.len()
                 ==> indexed_driver_site(source, &circuits[file as int], entry as int, #[trigger] checked.definitions@[i])
             &&& forall|i: int, j: int| 0 <= i < j < checked.definitions@.len()
-                ==> (#[trigger] checked.definitions@[i]).definition <= (#[trigger] checked.definitions@[j]).definition
+                ==> {
+                    let first = #[trigger] checked.definitions@[i];
+                    let last = #[trigger] checked.definitions@[j];
+                    first.definition < last.definition
+                        || (first.definition == last.definition && first.result_index < last.result_index)
+                }
         }),
     {
         self.reveal_checked_driver_result(file, entry, max_width, checked);
         self.typed_signature_sites(file, entry, max_width, checked.signature);
         self.typed_signature_types_declared(file, entry, max_width, checked.signature);
+    }
+
+    /// 一つの定義の左辺が、駆動元一覧で出力ポート順の連続区間を占めることを示す。
+    pub(super) proof fn checked_driver_output_group(
+        &self, file: usize, entry: usize, limit: u64, checked: FuncDrivers, first: int,
+    ) -> (count: nat)
+        requires
+            self.can_resolve(),
+            self.func_driver_evidence(file, entry, limit, Ok(FuncDriverResult::Checked(checked))),
+            0 <= first < checked.definitions@.len(), checked.definitions@[first].result_index == 0,
+        ensures ({
+            let parsed = self.targets.project_model().circuits_model()[file as int];
+            let definition = checked.definitions@[first].definition;
+            let (start, end) = definition_target_range(parsed.syntax.forms@, parsed.definitions@[definition as int]);
+            &&& count == end - start && count > 0 && first + count <= checked.definitions@.len()
+            &&& forall|j: int| 0 <= j < count ==> {
+                let driver = #[trigger] checked.definitions@[first + j];
+                &&& driver.definition == definition && driver.result_index == j
+            }
+        }),
+    {
+        self.reveal_checked_driver_result(file, entry, limit, checked);
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[file as int];
+        let source = project.sources_model()[file as int];
+        let frame = parsed.entry_ranges@[entry as int].definitions;
+        let definition = checked.definitions@[first].definition;
+        let (start, end) = definition_target_range(parsed.syntax.forms@, parsed.definitions@[definition as int]);
+        assert(driver_site(source.text, parsed.syntax.forms@, parsed.definitions@,
+            frame.start as int, frame.end as int, checked.definitions@[first]));
+        let count = (end - start) as nat;
+        driver_run_from_targets(source.text, parsed.syntax.forms@, parsed.definitions@,
+            frame.start as int, frame.end as int, checked.definitions@, first, definition, count);
+        reveal(driver_run);
+        count
     }
 
     /// 同じ関数では左辺の位置と順序、名前のバイト列、出力の駆動元が一致する。

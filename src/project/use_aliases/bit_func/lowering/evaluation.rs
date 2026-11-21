@@ -178,6 +178,11 @@ proof fn concat_wiring_preserves_values(
                         let at = definition_ranges[from as int].start + bit;
                         assert(prefix[at] == lowered.definition_wires@[at]);
                     }
+                    let generated = Seq::new(width as nat, |at: int| projected_wire(
+                        input_ranges, definition_ranges, prefix, concat_operand_projection(operand), at));
+                    assert(wires[j] == generated);
+                    assert(generated[bit] == projected_wire(
+                        input_ranges, definition_ranges, prefix, concat_operand_projection(operand), bit));
                     assert(wires[j][bit] == driver_wire(input_ranges, definition_ranges, prefix, driver, bit));
                 };
                 assert(part =~= values);
@@ -251,6 +256,7 @@ proof fn definition_values_match_wiring(
         BitFuncRhs::Nor { left, right } => {
             let wire = lowered.definition_wires@[range.start as int];
             let gate = wire->Gate_0;
+            assert(wire == Wire::Gate(gate) && gate < lowered.netlist.gates@.len());
             let operands = lowered.netlist.gates@[gate as int];
             operand_matches_wire(source, lowered, capacity, i, input, gates, left);
             operand_matches_wire(source, lowered, capacity, i, input, gates, right);
@@ -260,8 +266,9 @@ proof fn definition_values_match_wiring(
             assert(value[0] == expected[0]);
             assert(value =~= expected);
         },
-        _ => {
-            let (driver, offset, stride) = match definition.rhs {
+        BitFuncRhs::CallOutput { .. } => { assert(false); },
+        rhs @ (BitFuncRhs::Driver(_) | BitFuncRhs::Selection { .. }) => {
+            let (driver, offset, stride) = match rhs {
                 BitFuncRhs::Driver(driver) => (driver, 0int, 1int),
                 BitFuncRhs::Selection { input, selection } => (input, selection.start as int, selection.stride as int),
                 _ => arbitrary(),
@@ -275,8 +282,23 @@ proof fn definition_values_match_wiring(
             assert forall|bit: int| 0 <= bit < definition.width implies
                 (#[trigger] value[bit]) == (#[trigger] expected[bit]) by {
                 let selected = offset + bit * stride;
-                if let BitFuncRhs::Selection { selection, .. } = definition.rhs {
-                    selected_bit_in_range(driver_width, selection.start, selection.count, selection.stride, selection.last, bit);
+                match rhs {
+                    BitFuncRhs::Driver(plain) => {
+                        assert(plain == driver && offset == 0 && stride == 1);
+                        assert(bit_driver_width(source.input_widths@, source.definitions@.take(i as int), plain)
+                            == Some(definition.width));
+                        assert(selected == bit && driver_width == definition.width);
+                        assert(expected == driver_values(inputs, values, driver));
+                    },
+                    BitFuncRhs::Selection { input: selected_driver, selection } => {
+                        assert(driver == selected_driver && offset == selection.start && stride == selection.stride);
+                        selected_bit_in_range(driver_width, selection.start, selection.count, selection.stride, selection.last, bit);
+                        let selected_values = Seq::new(selection.count as nat,
+                            |at: int| driver_values(inputs, values, driver)[selection.start + at * selection.stride]);
+                        assert(expected == selected_values);
+                        assert(selected_values[bit] == driver_values(inputs, values, driver)[selected]);
+                    },
+                    _ => { assert(false); },
                 }
                 driver_bits_fit_layout(source, &lowered.layouts, capacity, i as int, range.start as int, driver, driver_width, selected);
                 driver_bit_value(source, lowered, capacity, i as int, input, gates, driver, driver_width, selected);

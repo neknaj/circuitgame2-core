@@ -230,6 +230,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(in crate::project::use_aliases) proof fn resolved_function_signature_evidence(
+        &self, at: (usize, usize, usize, usize), limit: u64, call: TypedFuncCall,
+    )
+        requires
+            self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(Some(call))),
+            call.call.target is Function,
+        ensures
+            call.signature matches FuncCallSignature::Function(signature)
+                && self.typed_signature_evidence(call.call.target->Function_file, call.call.target->Function_entry,
+                    limit, Ok(Some(signature))),
+    {
+    }
+
     /// 基底 NOR を解決できる参照では、成功した署名のどれからも同じ呼び出しを得る。
     pub(in crate::project::use_aliases) proof fn resolved_nor_call_agrees(
         &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
@@ -262,8 +275,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 同じ呼び出し位置で得た型付き署名は、宣言順の出力型と注釈まで一致する。
-    pub(in crate::project::use_aliases) proof fn successful_call_output_signatures_agree(
+    pub(in crate::project::use_aliases) proof fn resolved_signature_excludes_no_call(
+        &self, at: (usize, usize, usize, usize), limit: u64, call: TypedFuncCall,
+    )
+        requires self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(Some(call))),
+        ensures !self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(None)),
+    {
+        self.resolved_arity_excludes_no_call(at, call.call);
+    }
+
+    /// 同じ呼び出し位置で得た型付き署名は、宣言順の入出力型と注釈まで一致する。
+    pub(in crate::project::use_aliases) proof fn successful_call_signatures_agree(
         &self, file: usize, entry: usize, definition: usize, reference: usize, limit: u64,
         left: TypedFuncCall, right: TypedFuncCall,
     )
@@ -273,9 +295,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(right))),
         ensures
             left.call.call == right.call.call,
+            left.call.target matches FuncCallTarget::Function { file, entry, .. } ==>
+                (right.call.target matches FuncCallTarget::Function { file: other_file, entry: other_entry, .. }
+                    && file == other_file && entry == other_entry),
             match (left.signature, right.signature) {
                 (FuncCallSignature::Nor, FuncCallSignature::Nor) => true,
-                (FuncCallSignature::Function(a), FuncCallSignature::Function(b)) => a.outputs@ == b.outputs@,
+                (FuncCallSignature::Function(a), FuncCallSignature::Function(b)) =>
+                    a.inputs@ == b.inputs@ && a.outputs@ == b.outputs@,
                 _ => false,
             },
     {
@@ -315,7 +341,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires
             self.can_resolve(),
             self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(Some(typed))),
-        ensures ({
+        ensures self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(typed.call))), ({
             let project = self.targets.project_model();
             let parsed = project.circuits_model()[file as int];
             let forms = parsed.syntax.forms@;

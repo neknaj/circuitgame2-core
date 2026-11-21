@@ -1,6 +1,6 @@
 //! 通常呼び出しが返す型を、定義の左辺の名前順に対応付ける。
 
-use super::{FuncArityError, FuncCallArity, FuncCallSignatureError, UseAliases};
+use super::{FuncArityError, FuncCallArity, FuncCallSignatureError, FuncCallTarget, UseAliases};
 use super::typed::{cached_signature, signature_port};
 #[cfg(verus_only)]
 use super::typed::{cached_call_available, cached_call_model};
@@ -14,10 +14,10 @@ use super::super::function_drivers::{expected_output_context, indexed_driver_sit
 use super::super::function_literals::index_outputs;
 #[cfg(verus_only)]
 use super::super::function_literals::{output_indices, output_indices_agree};
-use crate::project::{FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
+use crate::project::{FuncWiring, FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
-use crate::project::{FuncDrivers, FuncWiring, TypedPort, location_in_source, port_types_equal, ResolvedPortType, circuits::{
+use crate::project::{FuncDrivers, TypedPort, location_in_source, port_types_equal, ResolvedPortType, circuits::{
     is_form_location, parsed_circuit_matches, parsed_index_evidence,
 }};
 use crate::syntax::circuit::{NamedBuildCircuit, definition_root_is_call, definition_target_atoms};
@@ -39,6 +39,16 @@ pub struct FuncCallOutputTypes<'p, 'a> {
     /// 右辺全体が通常呼び出しである定義には出力型を置き、それ以外には `None` を置く。
     /// 対象外や展開待ちでは空になる。
     pub types: Vec<Option<SignalType<'p, 'a>>>,
+}
+
+/// 右辺全体を占める関数呼び出しと、その出力を受け取る左辺の位置。
+#[derive(Debug)]
+pub(in crate::project::use_aliases) struct RootFunctionCall {
+    pub(in crate::project::use_aliases) definition: usize,
+    pub(in crate::project::use_aliases) first_output: usize,
+    pub(in crate::project::use_aliases) count: usize,
+    pub(in crate::project::use_aliases) target_file: usize,
+    pub(in crate::project::use_aliases) target_entry: usize,
 }
 
 /// 通常呼び出しの出力を左辺または出力ポートに対応付けられなかった理由。
@@ -96,6 +106,293 @@ spec fn output_transfer(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    #[verifier::opaque]
+    spec fn is_function_call_start(
+        &self, caller: (usize, usize, u64), drivers: &FuncDrivers, at: int,
+    ) -> bool {
+        let (file, entry, limit) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let driver = drivers.definitions@[at];
+        let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        &&& driver.result_index == 0
+        &&& exists|call: TypedFuncCall|
+            #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(call)))
+            && call.call.target is Function
+    }
+
+    #[verifier::opaque]
+    spec fn root_function_call_matches(
+        &self, caller: (usize, usize, u64), drivers: &FuncDrivers, row: RootFunctionCall,
+    ) -> bool {
+        let (file, entry, limit) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let local = (row.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        &&& 0 < row.count && row.first_output + row.count <= drivers.definitions@.len()
+        &&& forall|i: int| 0 <= i < row.count ==> {
+            let driver = #[trigger] drivers.definitions@[row.first_output + i];
+            driver.definition == row.definition && driver.result_index == i
+        }
+        &&& exists|call: TypedFuncCall|
+            #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(call)))
+            && (call.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, arity, .. }
+                && target_file == row.target_file && target_entry == row.target_entry && arity.outputs == row.count)
+    }
+
+    pub(in crate::project::use_aliases) closed spec fn root_function_calls_match(
+        &self, caller: (usize, usize, u64), drivers: &FuncDrivers, rows: Seq<RootFunctionCall>, processed: nat,
+    ) -> bool {
+        &&& processed <= drivers.definitions@.len()
+        &&& forall|j: int| 0 <= j < rows.len() ==> {
+            let row = #[trigger] rows[j];
+            &&& row.first_output < processed
+            &&& self.root_function_call_matches(caller, drivers, row)
+        }
+        &&& forall|a: int, b: int| 0 <= a < b < rows.len()
+            ==> (#[trigger] rows[a]).first_output < (#[trigger] rows[b]).first_output
+        &&& forall|i: int| 0 <= i < processed && #[trigger] self.is_function_call_start(caller, drivers, i)
+            ==> exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).first_output == i
+    }
+
+    pub(in crate::project::use_aliases) open spec fn root_call_definitions_in_order(
+        &self, file: usize, entry: usize, rows: Seq<RootFunctionCall>,
+    ) -> bool {
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let definitions = parsed.entry_ranges@[entry as int].definitions;
+        &&& forall|i: int| 0 <= i < rows.len() ==> {
+            let call = #[trigger] rows[i];
+            &&& definitions.start <= call.definition < definitions.end
+            &&& parsed.definitions@[call.definition as int].references.start
+                < parsed.definitions@[call.definition as int].references.end
+        }
+        &&& forall|i: int, j: int| 0 <= i < j < rows.len()
+            ==> (#[trigger] rows[i]).definition < (#[trigger] rows[j]).definition
+        &&& forall|i: int, j: int| 0 <= i < j < rows.len()
+            ==> (#[trigger] rows[i]).first_output + rows[i].count <= (#[trigger] rows[j]).first_output
+    }
+
+    /// 保持した呼び出しが、参照を持つ定義の順に一度ずつ並ぶことを示す。
+    pub(in crate::project::use_aliases) proof fn root_calls_follow_definition_order(
+        &self, caller: (usize, usize, u64), wiring: &FuncWiring, rows: Seq<RootFunctionCall>,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*wiring))),
+            self.root_function_calls_match(caller, &wiring.drivers, rows, wiring.drivers.definitions@.len()),
+        ensures self.root_call_definitions_in_order(caller.0, caller.1, rows),
+    {
+        let (file, entry, limit) = caller;
+        self.checked_wiring_is_func(file, entry, limit, *wiring);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let definitions = parsed.entry_ranges@[entry as int].definitions;
+        let drivers = wiring.drivers.definitions@;
+        reveal(UseAliases::root_function_call_matches);
+        reveal(UseAliases::root_output_signature);
+        assert forall|i: int| 0 <= i < rows.len() implies {
+            let row = #[trigger] rows[i];
+            &&& 0 <= row.first_output < drivers.len()
+            &&& drivers[row.first_output as int].definition == row.definition
+            &&& drivers[row.first_output as int].result_index == 0
+            &&& definitions.start <= row.definition < definitions.end
+            &&& parsed.definitions@[row.definition as int].references.start
+                < parsed.definitions@[row.definition as int].references.end
+        } by {
+            let row = rows[i];
+            assert(self.root_function_call_matches(caller, &wiring.drivers, row));
+            assert(row.count > 0);
+            let first = drivers[row.first_output as int];
+            assert(drivers[row.first_output as int + 0].definition == row.definition
+                && drivers[row.first_output as int + 0].result_index == 0);
+            assert(indexed_driver_site(source, parsed, entry as int, first));
+            let local = (row.definition - definitions.start) as usize;
+            assert(definitions.start + local == row.definition);
+            let call = choose|call: TypedFuncCall|
+                #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(call)))
+                && (call.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, arity, .. }
+                    && target_file == row.target_file && target_entry == row.target_entry && arity.outputs == row.count);
+            self.typed_call_arguments_ready(file, entry, local, 0, limit, call);
+        };
+        assert forall|i: int, j: int| 0 <= i < j < rows.len()
+            implies (#[trigger] rows[i]).definition < (#[trigger] rows[j]).definition by {
+            let left = drivers[rows[i].first_output as int];
+            let right = drivers[rows[j].first_output as int];
+            assert(left.result_index == 0 && right.result_index == 0);
+            assert(left.definition == rows[i].definition && right.definition == rows[j].definition);
+        };
+        assert forall|i: int, j: int| 0 <= i < j < rows.len()
+            implies (#[trigger] rows[i]).first_output + rows[i].count <= (#[trigger] rows[j]).first_output by {
+            let earlier = rows[i];
+            let later = rows[j];
+            if later.first_output < earlier.first_output + earlier.count {
+                assert(self.root_function_call_matches(caller, &wiring.drivers, earlier));
+                let offset = later.first_output - earlier.first_output;
+                assert(0 <= offset < earlier.count);
+                assert(drivers[earlier.first_output + offset].definition == earlier.definition);
+                assert(drivers[later.first_output as int].definition == later.definition);
+            }
+        };
+    }
+
+    proof fn update_root_function_calls(
+        &self, caller: (usize, usize, u64), drivers: &FuncDrivers, previous: Seq<RootFunctionCall>,
+        at: nat, added: Option<RootFunctionCall>,
+    )
+        requires
+            self.root_function_calls_match(caller, drivers, previous, at),
+            at < drivers.definitions@.len(),
+            added.is_some() <==> self.is_function_call_start(caller, drivers, at as int),
+            added matches Some(row) ==> row.first_output == at && self.root_function_call_matches(caller, drivers, row),
+        ensures self.root_function_calls_match(caller, drivers,
+            if let Some(row) = added { previous.push(row) } else { previous }, at + 1),
+    {
+        let next = if let Some(row) = added { previous.push(row) } else { previous };
+        assert forall|i: int| 0 <= i < at + 1 && #[trigger] self.is_function_call_start(caller, drivers, i)
+            implies exists|j: int| 0 <= j < next.len() && (#[trigger] next[j]).first_output == i by {
+            if i < at {
+                let j = choose|j: int| 0 <= j < previous.len() && (#[trigger] previous[j]).first_output == i;
+                assert(next[j] == previous[j]);
+            } else {
+                assert(next[previous.len() as int] == added->Some_0);
+            }
+        };
+        assert forall|a: int, b: int| 0 <= a < b < next.len()
+            implies (#[trigger] next[a]).first_output < (#[trigger] next[b]).first_output by {
+            assert(next[a] == previous[a]);
+            if b < previous.len() { assert(next[b] == previous[b]); }
+        };
+    }
+
+    proof fn function_call_start_matches_signature(
+        &self, caller: (usize, usize, u64), drivers: &FuncDrivers, at: int, call: Option<TypedFuncCall>,
+    )
+        requires
+            self.can_resolve(),
+            ({
+                let (file, entry, limit) = caller;
+                let parsed = &self.targets.project_model().circuits_model()[file as int];
+                let driver = drivers.definitions@[at];
+                let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+                self.root_output_signature(file, entry, local, limit, Ok(call))
+            }),
+        ensures self.is_function_call_start(caller, drivers, at)
+            <==> (drivers.definitions@[at].result_index == 0 && (call matches Some(typed) && typed.call.target is Function)),
+    {
+        reveal(UseAliases::is_function_call_start);
+        reveal(UseAliases::root_output_signature);
+        let (file, entry, limit) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let local = (drivers.definitions@[at].definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        if self.is_function_call_start(caller, drivers, at) {
+            let witness = choose|typed: TypedFuncCall|
+                #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(typed)))
+                && typed.call.target is Function;
+            if let Some(actual) = call {
+                if actual.call.target is Nor {
+                    self.resolved_nor_call_agrees(file, entry, local, 0, limit, actual, Some(witness));
+                }
+            }
+        }
+    }
+
+    fn record_root_function_call(
+        &self, caller: (usize, usize, u64), index: usize, definition: usize, first: bool,
+        signature: Option<&FuncCallArity<'p, 'a>>, cache: &SignatureCache<'p, 'a>,
+        rows: &mut Vec<RootFunctionCall>, retain: bool, Ghost(wiring): Ghost<FuncWiring<'p, 'a>>,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(wiring))),
+            index < wiring.drivers.definitions@.len(),
+            definition == wiring.drivers.definitions@[index as int].definition,
+            first <==> wiring.drivers.definitions@[index as int].result_index == 0,
+            ({
+                let (file, entry, limit) = caller;
+                let circuits = self.targets.project_model().circuits_model();
+                &&& file < circuits.len()
+                &&& {
+                    let parsed = &circuits[file as int];
+                    &&& entry < parsed.entry_ranges@.len()
+                    &&& {
+                        let start = parsed.entry_ranges@[entry as int].definitions.start;
+                        &&& start <= definition
+                        &&& {
+                            let local = (definition - start) as usize;
+                            match signature {
+                                Some(call) => cached_call_available(cache, *call) && self.root_output_signature(file, entry,
+                                    local, limit, Ok(Some(cached_call_model(cache, *call)))),
+                                None => self.root_output_signature(file, entry, local, limit, Ok(None)),
+                            }
+                        }
+                    }
+                }
+            }),
+            retain ==> self.root_function_calls_match(caller, &wiring.drivers, old(rows)@, index as nat),
+            !retain ==> old(rows)@.len() == 0,
+        ensures
+            retain ==> self.root_function_calls_match(caller, &wiring.drivers, final(rows)@, (index + 1) as nat),
+            !retain ==> final(rows)@.len() == 0,
+    {
+        if !retain { return; }
+        let ghost previous = rows@;
+        let ghost model = match signature { Some(call) => Some(cached_call_model(cache, *call)), None => None };
+        proof {
+            self.checked_wiring_is_func(caller.0, caller.1, caller.2, wiring);
+            self.function_call_start_matches_signature(caller, &wiring.drivers, index as int, model);
+        }
+        if first {
+            if let Some(call) = signature {
+                if let FuncCallTarget::Function { file, entry, arity, .. } = &call.target {
+                    let row = RootFunctionCall { definition, first_output: index, count: arity.outputs,
+                        target_file: *file, target_entry: *entry };
+                    proof {
+                        let (source_file, source_entry, limit) = caller;
+                        let project = self.targets.project_model();
+                        let parsed = &project.circuits_model()[source_file as int];
+                        let source = &project.sources_model()[source_file as int];
+                        let driver = wiring.drivers.definitions@[index as int];
+                        assert(indexed_driver_site(source, parsed, source_entry as int, driver));
+                        let start = parsed.entry_ranges@[source_entry as int].definitions.start;
+                        assert(start <= definition);
+                        let local = (definition - start) as usize;
+                        assert(start + local == definition);
+                        let count = self.checked_wiring_output_group(source_file, source_entry, limit, wiring, index as int);
+                        let typed = cached_call_model(cache, *call);
+                        assert(model == Some(typed) && typed.call == *call);
+                        assert(self.root_output_signature(source_file, source_entry, local, limit, Ok(Some(typed))));
+                        reveal(UseAliases::root_output_signature);
+                        assert(count == row.count);
+                        assert(0 < row.count && row.first_output + row.count <= wiring.drivers.definitions@.len());
+                        assert forall|i: int| 0 <= i < row.count implies {
+                            let driver = #[trigger] wiring.drivers.definitions@[row.first_output + i];
+                            driver.definition == row.definition && driver.result_index == i
+                        } by {
+                            assert(wiring.drivers.definitions@[row.first_output + i]
+                                == wiring.drivers.definitions@[index as int + i]);
+                        };
+                        assert(typed.call.target matches FuncCallTarget::Function { file, entry, arity, .. }
+                            && file == row.target_file && entry == row.target_entry && arity.outputs == row.count);
+                        assert(row.definition == definition);
+                        assert(self.root_function_call_matches(caller, &wiring.drivers, row)) by {
+                            reveal(UseAliases::root_function_call_matches);
+                            let definition = (row.definition - parsed.entry_ranges@[source_entry as int].definitions.start) as usize;
+                            assert(definition == local);
+                            assert(exists|candidate: TypedFuncCall|
+                                #[trigger] self.root_output_signature(source_file, source_entry, definition, limit, Ok(Some(candidate)))
+                                && (candidate.call.target matches FuncCallTarget::Function {
+                                    file: target_file, entry: target_entry, arity, ..
+                                } && target_file == row.target_file && target_entry == row.target_entry && arity.outputs == row.count));
+                        };
+                        self.update_root_function_calls(caller, &wiring.drivers, previous, index as nat, Some(row));
+                    }
+                    rows.push(row);
+                    return;
+                }
+            }
+        }
+        proof { self.update_root_function_calls(caller, &wiring.drivers, previous, index as nat, None); }
+    }
+
     #[verifier::opaque]
     spec fn root_output_signature(
         &self, file: usize, entry: usize, definition: usize, limit: u64,
@@ -301,15 +598,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(FuncCallOutputError::Caller(error)),
         };
         let mut signatures = SignatureCache::new();
-        self.check_call_outputs_with_arity(file, entry, max_width, wiring, &mut signatures)
+        let mut rows = Vec::new();
+        self.check_call_outputs_with_arity(file, entry, max_width, wiring, &mut signatures, &mut rows, false)
     }
 
     pub(in crate::project::use_aliases) fn check_call_outputs_with_arity(
         &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiringResult<'p, 'a>,
-        signatures: &mut SignatureCache<'p, 'a>,
+        signatures: &mut SignatureCache<'p, 'a>, rows: &mut Vec<RootFunctionCall>, retain: bool,
     ) -> (result: Result<FuncCallOutputTypes<'p, 'a>, FuncCallOutputError<'p, 'a>>)
         requires self.can_resolve(), self.func_arity_evidence(file, entry, max_width, Ok(wiring)),
             old(signatures).matches(self, max_width),
+            old(rows)@.len() == 0,
         ensures
             final(signatures).matches(self, max_width),
             self.func_call_outputs_evidence(file, entry, max_width, result),
@@ -317,6 +616,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result matches Err(error) ==> !(error is Caller),
             result matches Err(error) ==> wiring matches FuncWiringResult::Checked(scope)
                 && self.call_output_failure(file, entry, max_width, &scope.drivers, error),
+            result matches Ok(outputs) ==> {
+                &&& !retain ==> final(rows)@.len() == 0
+                &&& if let FuncWiringResult::Checked(scope) = outputs.wiring {
+                    retain ==> self.root_function_calls_match((file, entry, max_width), &scope.drivers,
+                        final(rows)@, outputs.types@.len())
+                } else { final(rows)@.len() == 0 }
+            },
     {
         let FuncWiringResult::Checked(ref scope) = wiring else {
             return Ok(FuncCallOutputTypes { wiring, types: Vec::new() });
@@ -351,6 +657,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> indexed_driver_site(source, parsed, entry as int, #[trigger] drivers.definitions@[i]),
                 output_indices(drivers, drivers.outputs@.len() as int, outlets@),
                 index == types@.len() <= drivers.definitions@.len(),
+                retain ==> self.root_function_calls_match((file, entry, max_width), drivers, rows@, index as nat),
+                !retain ==> rows@.len() == 0,
                 self.call_output_prefix(file, entry, max_width, drivers, outlets@, types@),
                 signatures.matches(self, max_width),
                 cached matches Some((definition, signature))
@@ -426,6 +734,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(self.call_output_step(file, entry, max_width, drivers, outlets@, index as int, Ok(None)));
                 None
             };
+            self.record_root_function_call((file, entry, max_width), index, driver.definition,
+                driver.result_index == 0, signature.as_ref(), signatures, rows, retain, Ghost(*scope));
             let ghost before = types@;
             types.push(result);
             proof {
@@ -499,6 +809,100 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && self.call_output_prefix(file, entry, limit, &wiring.drivers, outlets, outputs.types@)
     }
 
+    /// 保持した呼び出しの各出力を、同じ署名のポート型と注釈位置に対応付ける。
+    pub(in crate::project::use_aliases) proof fn checked_root_function_call(
+        &self, caller: (usize, usize, u64), outputs: &FuncCallOutputTypes, wiring: &FuncWiring,
+        rows: Seq<RootFunctionCall>, position: int,
+    ) -> (call: TypedFuncCall<'p, 'a>)
+        requires
+            self.can_resolve(),
+            self.func_call_outputs_evidence(caller.0, caller.1, caller.2, Ok(*outputs)),
+            outputs.wiring == FuncWiringResult::Checked(*wiring),
+            self.root_function_calls_match(caller, &wiring.drivers, rows, outputs.types@.len()),
+            0 <= position < rows.len(),
+        ensures ({
+            let row = rows[position];
+            let (file, entry, limit) = caller;
+            let parsed = self.targets.project_model().circuits_model()[file as int];
+            let start = parsed.entry_ranges@[entry as int].definitions.start;
+            let local = (row.definition - start) as usize;
+            let expression = parsed.definitions@[row.definition as int].expression;
+            let source = &self.targets.project_model().sources_model()[file as int];
+            &&& start <= row.definition < parsed.definitions@.len()
+            &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(call)))
+            &&& ordinary_call_at(source.text, parsed.syntax.forms@, expression.start as int, expression.end as int)
+            &&& call.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, .. }
+            &&& target_file == row.target_file && target_entry == row.target_entry
+            &&& call.signature matches FuncCallSignature::Function(signature)
+            &&& 0 < row.count == signature.outputs@.len()
+            &&& row.first_output + row.count <= outputs.types@.len()
+            &&& forall|offset: int| #![trigger outputs.types@[row.first_output + offset]]
+                0 <= offset < row.count ==> {
+                let index = row.first_output + offset;
+                let driver = wiring.drivers.definitions@[index];
+                let ty = signature.outputs@[offset].ty;
+                let origin = signature.outputs@[offset].annotation;
+                &&& driver.definition == row.definition && driver.result_index == offset
+                &&& outputs.types@[index] == Some(SignalType { ty, origin })
+            }
+        }),
+    {
+        let (file, entry, limit) = caller;
+        let drivers = &wiring.drivers;
+        let map = self.checked_call_output_map(file, entry, limit, outputs, wiring);
+        self.arity_preserves_wiring(file, entry, limit, outputs.wiring);
+        self.checked_wiring_is_func(file, entry, limit, *wiring);
+        reveal(UseAliases::root_function_call_matches);
+        reveal(UseAliases::root_output_signature);
+        reveal(UseAliases::call_output_prefix);
+        reveal(output_indices);
+        let row = rows[position];
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        parsed_index_evidence(*source, *parsed);
+        assert(self.root_function_call_matches(caller, drivers, row));
+        assert(row.count > 0);
+        assert(drivers.definitions@[row.first_output as int + 0].definition == row.definition);
+        assert(indexed_driver_site(source, parsed, entry as int, drivers.definitions@[row.first_output as int]));
+        let start = parsed.entry_ranges@[entry as int].definitions.start;
+        assert(start <= row.definition);
+        let local = (row.definition - start) as usize;
+        assert(start + local == row.definition);
+        let typed = choose|call: TypedFuncCall|
+            #[trigger] self.root_output_signature(file, entry, local, limit, Ok(Some(call)))
+            && (call.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, arity, .. }
+                && target_file == row.target_file && target_entry == row.target_entry && arity.outputs == row.count);
+        self.typed_call_arguments_ready(file, entry, local, 0, limit, typed);
+        let expression = parsed.definitions@[row.definition as int].expression;
+        assert(self.root_output_signature(file, entry, local, limit, Ok(Some(typed))));
+        assert(ordinary_call_at(source.text, parsed.syntax.forms@, expression.start as int, expression.end as int));
+        let ports = typed.signature->Function_0.outputs@;
+        assert forall|offset: int| 0 <= offset < row.count implies
+            #[trigger] outputs.types@[row.first_output + offset]
+                == Some(SignalType { ty: ports[offset].ty, origin: ports[offset].annotation }) by {
+            let index = row.first_output + offset;
+            let port = ports[offset];
+            let driver = drivers.definitions@[index];
+            assert(indexed_driver_site(source, parsed, entry as int, driver));
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, driver.definition as int);
+            assert(self.call_output_step(file, entry, limit, drivers, map, index, Ok(outputs.types@[index])));
+            let item = self.checked_root_output(file, entry, limit, drivers, map, index, outputs.types@[index]);
+            assert(item.is_some());
+            let (other, expression) = item->Some_0;
+            self.successful_call_signatures_agree(file, entry, local, 0, limit, typed, other);
+            assert(call_output_type(&other, &expression, offset) == SignalType { ty: port.ty, origin: port.annotation });
+        };
+        assert forall|offset: int| #![trigger outputs.types@[row.first_output + offset]] 0 <= offset < row.count
+            implies wiring.drivers.definitions@[row.first_output + offset].definition == row.definition
+                && wiring.drivers.definitions@[row.first_output + offset].result_index == offset by {
+            let at = row.first_output + offset;
+            assert(drivers.definitions@[at].definition == row.definition);
+        };
+        typed
+    }
+
     spec fn valid_call_output_step(
         &self, file: usize, entry: usize, drivers: &FuncDrivers, outlets: Seq<Option<usize>>, i: int,
     ) -> bool {
@@ -535,7 +939,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let driver = left.definitions@[i];
             let local = (driver.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
             assert(site_a == site_b);
-            self.successful_call_output_signatures_agree(file, entry, local, 0, limit, call_a, call_b);
+            self.successful_call_signatures_agree(file, entry, local, 0, limit, call_a, call_b);
         }
     }
 

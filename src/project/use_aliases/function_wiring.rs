@@ -16,7 +16,7 @@ use crate::project::location_in_source;
 use crate::syntax::circuit::{NameSite, NamedBuildCircuit};
 #[cfg(verus_only)]
 use crate::syntax::{
-    circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, build_signal_cursor_evidence, build_signal_evidence,
+    circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, build_signal_cursor_evidence, build_signal_evidence, definition_target_range,
         build_signal_owner_unique},
     form_span,
 };
@@ -487,6 +487,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& circuits[file as int].syntax.entries@[entry as int].head is Func
             &&& expected_output_context(&project.sources_model()[file as int], &circuits[file as int], entry as int, wiring.drivers)
             &&& super::function_drivers::checked_ports_and_output_bounds(circuits[file as int].syntax.forms@, wiring.drivers)
+            &&& self.typed_signature_evidence(file, entry, max_width, Ok(Some(wiring.drivers.signature)))
             &&& forall|i: int| 0 <= i < wiring.drivers.signature.inputs@.len()
                 ==> self.declared_port_type((#[trigger] wiring.drivers.signature.inputs@[i]).ty)
             &&& forall|i: int| 0 <= i < wiring.drivers.signature.outputs@.len()
@@ -495,10 +496,46 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ==> indexed_driver_site(&project.sources_model()[file as int], &circuits[file as int],
                     entry as int, #[trigger] wiring.drivers.definitions@[i])
             &&& forall|i: int, j: int| 0 <= i < j < wiring.drivers.definitions@.len()
-                ==> (#[trigger] wiring.drivers.definitions@[i]).definition <= (#[trigger] wiring.drivers.definitions@[j]).definition
+                ==> {
+                    let first = #[trigger] wiring.drivers.definitions@[i];
+                    let last = #[trigger] wiring.drivers.definitions@[j];
+                    first.definition < last.definition
+                        || (first.definition == last.definition && first.result_index < last.result_index)
+                }
         }),
     {
-        self.checked_driver_sources(file, entry, max_width, wiring.drivers);
+        let drivers = wiring.drivers;
+        self.checked_driver_sources(file, entry, max_width, drivers);
+        assert forall|i: int, j: int| 0 <= i < j < wiring.drivers.definitions@.len() implies {
+            let first = #[trigger] wiring.drivers.definitions@[i];
+            let last = #[trigger] wiring.drivers.definitions@[j];
+            first.definition < last.definition
+                || (first.definition == last.definition && first.result_index < last.result_index)
+        } by {
+            assert(wiring.drivers.definitions@[i] == drivers.definitions@[i]);
+            assert(wiring.drivers.definitions@[j] == drivers.definitions@[j]);
+        };
+    }
+
+    pub(super) proof fn checked_wiring_output_group(
+        &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring, first: int,
+    ) -> (count: nat)
+        requires
+            self.can_resolve(), self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+            0 <= first < wiring.drivers.definitions@.len(), wiring.drivers.definitions@[first].result_index == 0,
+        ensures ({
+            let parsed = self.targets.project_model().circuits_model()[file as int];
+            let drivers = wiring.drivers.definitions@;
+            let definition = drivers[first].definition;
+            let (start, end) = definition_target_range(parsed.syntax.forms@, parsed.definitions@[definition as int]);
+            &&& count == end - start && count > 0 && first + count <= drivers.len()
+            &&& forall|j: int| 0 <= j < count ==> {
+                let driver = #[trigger] drivers[first + j];
+                &&& driver.definition == definition && driver.result_index == j
+            }
+        }),
+    {
+        self.checked_driver_output_group(file, entry, limit, wiring.drivers, first)
     }
 
     /// 束縛の結果または最初の診断が、同じ関数の駆動元と右辺の参照順に対応することを表す。
