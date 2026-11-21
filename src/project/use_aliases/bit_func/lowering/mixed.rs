@@ -7,6 +7,7 @@ pub(super) use source_arguments::mixed_function_call_evaluation;
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_arguments::{
     EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluation, evaluated_flat_call_matches, evaluated_nested_call_matches,
+    evaluated_nor_call_matches, nor_children_have_single_output,
 };
 
 use super::super::expansion::{ExpansionSlot, expansion_call_at_slot};

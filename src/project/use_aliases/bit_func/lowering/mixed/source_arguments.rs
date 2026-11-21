@@ -488,39 +488,6 @@ proof fn nor_root_child_value(
     child
 }
 
-pub(super) open spec fn nor_child_source_argument_matches(
-    binding: &NorBinding, argument: ProjectedCallArgument, index: int, child_inputs: Seq<bool>, value: Seq<bool>,
-) -> bool {
-    let child = binding.selected.children@[index];
-    &&& 0 <= index < binding.selected.children@.len()
-    &&& child.child.reference == binding.references.start + argument.source->NestedCall_0
-    &&& child.child._signature@.call.call.form == argument.form
-    &&& child.child._signature@.call.target.port_counts().outputs == 1
-    &&& match child.template {
-        Some(template) => nor_evaluation(template.circuit_model().netlist_model(), child_inputs, value),
-        None => child_inputs.len() == 2 && value == seq![!(child_inputs[0] || child_inputs[1])],
-    }
-}
-
-pub(super) open spec fn nor_source_port_value_matches(
-    aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, binding: &NorBinding,
-    inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, ports: Seq<Seq<bool>>, port: int,
-) -> bool {
-    let project = aliases.targets.project_model();
-    let argument = binding.selected.arguments@[port];
-    let value = ports[port];
-    &&& value.len() == 1
-    &&& if argument.source.has_direct_wires() {
-        source_call_argument_value(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
-            &prepared.typed.literals.wiring->Checked_0, caller.1, binding.selected.prepared.definition,
-            argument.form, caller.2, inputs, prior, 1, value)
-    } else {
-        &&& argument.source is NestedCall
-        &&& exists|i: int, child_inputs: Seq<bool>|
-            #[trigger] nor_child_source_argument_matches(binding, argument, i, child_inputs, value)
-    }
-}
-
 /// 根 NOR の子の評価値を、同じ配線履歴と厳格構文木の引数に対応付ける。
 #[verifier::opaque]
 pub(super) open spec fn evaluated_nor_child(
@@ -696,6 +663,199 @@ proof fn nor_trace_child_values<'s, 'p, 'a>(
     evaluation
 }
 
+/// 後順で評価した子の呼び出しを、元の引数と先行する出力に対応付ける。
+pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_expression_child_matches(
+    aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, definition: usize,
+    reference_start: usize, selected: Seq<ResolvedExpressionCall>, incoming: Seq<Seq<bool>>, prior: Seq<Seq<bool>>,
+    children: Seq<EvaluatedCallBits>, child: int,
+) -> bool {
+    let project = aliases.targets.project_model();
+    let source = &project.sources_model()[caller.0 as int];
+    let parsed = &project.circuits_model()[caller.0 as int];
+    let wiring = &prepared.typed.literals.wiring->Checked_0;
+    let expression = selected[child];
+    let values = children[child];
+    &&& 0 <= child < children.len() == selected.len()
+    &&& values.ports.len() == expression.arguments@.len()
+    &&& match expression.template {
+        Some(template) => {
+            let circuit = template.circuit_model();
+            &&& nor_evaluation(circuit.netlist_model(), values.input, values.output)
+            &&& values.ports == port_values(circuit.input_layout_model(), values.input)
+        },
+        None => {
+            &&& values.input.len() == 2
+            &&& values.ports == seq![seq![values.input[0]], seq![values.input[1]]]
+            &&& values.output == seq![!(values.input[0] || values.input[1])]
+        },
+    }
+    &&& forall|port: int| 0 <= port < expression.arguments@.len() ==> {
+        let argument = #[trigger] expression.arguments@[port];
+        let width = expression_input_width(expression, port);
+        let value = values.ports[port];
+        &&& value.len() == width
+        &&& if argument.source.has_direct_wires() {
+            source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
+                incoming, prior, width, value)
+        } else {
+            &&& argument.source is NestedCall
+            &&& exists|producer: int| 0 <= producer < child
+                && (#[trigger] selected[producer]).child.reference == reference_start + argument.source->NestedCall_0
+                && selected[producer].child._signature@.call.call.form == argument.form
+                && value == children[producer].output
+        }
+    }
+}
+
+pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_nor_root_port_matches(
+    aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, binding: &NorBinding,
+    incoming: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, ports: Seq<Seq<bool>>, children: Seq<EvaluatedCallBits>, port: int,
+) -> bool {
+    let project = aliases.targets.project_model();
+    let source = &project.sources_model()[caller.0 as int];
+    let parsed = &project.circuits_model()[caller.0 as int];
+    let wiring = &prepared.typed.literals.wiring->Checked_0;
+    let selected = &binding.selected;
+    let argument = selected.arguments@[port];
+    let value = ports[port];
+    &&& value.len() == 1
+    &&& if argument.source.has_direct_wires() {
+        source_call_argument_value(source, parsed, wiring, caller.1, selected.prepared.definition, argument.form,
+            caller.2, incoming, prior, 1, value)
+    } else {
+        &&& argument.source is NestedCall
+        &&& exists|producer: int| 0 <= producer < children.len()
+            && (#[trigger] selected.children@[producer]).child.reference
+                == binding.references.start + argument.source->NestedCall_0
+            && selected.children@[producer].child._signature@.call.call.form == argument.form
+            && value == children[producer].output
+    }
+}
+
+/// 根 NOR の後順列にある各子が、型検査済みの出力を一つ持つことを表す。
+#[verifier::opaque]
+pub(in crate::project::use_aliases::bit_func) open spec fn nor_children_have_single_output(
+    selected: Seq<ResolvedExpressionCall>,
+) -> bool {
+    forall|i: int| 0 <= i < selected.len() ==> {
+        let child = (#[trigger] selected[i]).child;
+        &&& child._signature@.call.target.port_counts().outputs == 1
+        &&& (child._signature@.signature matches crate::project::FuncCallSignature::Function(ports)
+            ==> ports.outputs@.len() == 1)
+    }
+}
+
+/// 根 NOR の評価を、最終的な定義の値と後順の子の入出力に対応付ける。
+pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_nor_call_matches(
+    aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, binding: &NorBinding,
+    incoming: Seq<Seq<bool>>, assigned: Seq<Seq<bool>>, evaluation: EvaluatedNestedCall,
+) -> bool {
+    let selected = &binding.selected;
+    let first = selected.prepared.output_slot as int;
+    let prior = assigned.take(first);
+    let root = evaluation.root;
+    &&& 0 <= first < assigned.len() && assigned[first] == root.output
+    &&& root.input.len() == 2
+    &&& root.ports == seq![seq![root.input[0]], seq![root.input[1]]]
+    &&& root.output == seq![!(root.input[0] || root.input[1])]
+    &&& selected.arguments@.len() == 2
+    &&& evaluation.children.len() == selected.children@.len()
+    &&& nor_children_have_single_output(selected.children@)
+    &&& forall|port: int| 0 <= port < 2 ==>
+        #[trigger] evaluated_nor_root_port_matches(aliases, caller, prepared, binding, incoming, prior,
+            root.ports, evaluation.children, port)
+    &&& forall|i: int| #![trigger evaluation.children[i]] 0 <= i < evaluation.children.len() ==>
+        evaluated_expression_child_matches(aliases, caller, prepared, selected.prepared.definition,
+            binding.references.start, selected.children@, incoming, prior, evaluation.children, i)
+}
+
+/// 同じ末尾配線表を参照した値を照合し、各子の入力と先行する子の出力の等式を得る。
+#[verifier::spinoff_prover]
+proof fn nor_evaluated_child_sources(
+    aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, binding: &NorBinding,
+    layouts: &Layouts, forms: Seq<Form>, final_wiring: WiringView, traced: &RootedNorEvaluation,
+    inputs: Seq<bool>, values: Seq<bool>, children: Seq<EvaluatedCallBits>, child: int,
+)
+    requires
+        nor_call_group_evaluation_matches(&binding.selected, *binding.references, forms, layouts, &traced.builtin,
+            traced.step.before, traced.step.after, final_wiring.gates, inputs, values, traced.evaluation),
+        caller.0 < aliases.targets.project_model().sources_model().len(),
+        caller.0 < aliases.targets.project_model().circuits_model().len(),
+        prepared.typed.literals.wiring is Checked,
+        0 <= child < children.len() == binding.selected.children@.len() <= usize::MAX,
+        forall|i: int| 0 <= i < children.len() ==>
+            evaluated_nor_child(aliases, caller, prepared, binding, layouts, forms, final_wiring, traced,
+                inputs, values, i as usize, #[trigger] children[i]),
+    ensures evaluated_expression_child_matches(aliases, caller, prepared, binding.selected.prepared.definition,
+        binding.references.start, binding.selected.children@, port_values(&layouts.inputs, inputs),
+        definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values)
+            .take(binding.selected.prepared.output_slot as int), children, child),
+{
+    reveal(evaluated_nor_child);
+    reveal(nor_call_group_evaluation_matches);
+    reveal(nor_root_children_bound);
+    let selected = &binding.selected;
+    let expression = selected.children@[child];
+    let value = children[child];
+    let (calls, _, root) = traced.evaluation;
+    let call = calls[child];
+    let project = aliases.targets.project_model();
+    let source = &project.sources_model()[caller.0 as int];
+    let parsed = &project.circuits_model()[caller.0 as int];
+    let wiring = &prepared.typed.literals.wiring->Checked_0;
+    let incoming = port_values(&layouts.inputs, inputs);
+    let assigned = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values);
+    let prior = assigned.take(selected.prepared.output_slot as int);
+    assert(evaluated_nor_child(aliases, caller, prepared, binding, layouts, forms, final_wiring, traced,
+        inputs, values, child as usize, value));
+    assert(child_call_binding(expression, *binding.references, &traced.builtin, call));
+    vstd::slice::axiom_spec_len(expression.arguments);
+    assert(expression.arguments@.len() <= usize::MAX);
+    assert forall|port: int| 0 <= port < expression.arguments@.len() implies {
+        let argument = #[trigger] expression.arguments@[port];
+        let width = expression_input_width(expression, port);
+        let bits = value.ports[port];
+        &&& bits.len() == width
+        &&& if argument.source.has_direct_wires() {
+            source_call_argument_value(source, parsed, wiring, caller.1, selected.prepared.definition, argument.form,
+                caller.2, incoming, prior, width, bits)
+        } else {
+            &&& argument.source is NestedCall
+            &&& exists|producer: int| 0 <= producer < child
+                && (#[trigger] selected.children@[producer]).child.reference
+                    == binding.references.start + argument.source->NestedCall_0
+                && selected.children@[producer].child._signature@.call.call.form == argument.form
+                && bits == children[producer].output
+        }
+    } by {
+        let argument = expression.arguments@[port];
+        assert(argument == call.arguments@[port]);
+        if !argument.source.has_direct_wires() {
+            let input_port = port as usize;
+            assert(input_port as int == port);
+            let producer = choose|i: usize| #[trigger] child_port_reads_producer(calls, root.end, i, child as usize,
+                    input_port, value.input, inputs, values)
+                && selected.children@[i as int].child._signature@.call.call.form == argument.form;
+            let i = producer as int;
+            assert(child_port_reads_producer(calls, root.end, producer, child as usize,
+                input_port, value.input, inputs, values));
+            assert(i < child);
+            assert(evaluated_nor_child(aliases, caller, prepared, binding, layouts, forms, final_wiring, traced,
+                inputs, values, producer, children[i]));
+            assert(child_call_binding(selected.children@[i], *binding.references, &traced.builtin, calls[i]));
+            let reference = calls[i].reference as int;
+            let range = root.end.table.ranges@[reference]->Some_0;
+            let output = instance_wire_values(
+                root.end.table.wires@.subrange(range.start as int, range.end as int), inputs, values);
+            assert(children[i].output == output);
+            assert(port_values(call.inputs, value.input)[port] == output);
+            assert(value.ports == port_values(call.inputs, value.input));
+            assert(value.ports[port] == children[i].output);
+            assert(selected.children@[i].child.reference == binding.references.start + argument.source->NestedCall_0);
+        }
+    };
+}
+
 /// 最終配線から根 NOR と全ての子の値を取り出す。
 ///
 /// 根と子で同じ末尾の配線表を使い、入れ子の実引数を対応する子の出力に結び付ける。
@@ -706,7 +866,7 @@ pub(super) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
     bindings: Seq<CallBinding>, roots: Seq<NorBinding<'s, 'p, 'a>>, limit: usize, layout_limit: usize,
     steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
     index: int, inputs: Seq<bool>, values: Seq<bool>,
-) -> (result: (RootedNorEvaluation<'s, 'p, 'a>, Seq<EvaluatedCallBits>))
+) -> (evaluation: EvaluatedNestedCall)
     requires
         rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= index < roots.len(), roots[index].selected.prepared.output_slot < slot,
@@ -721,41 +881,8 @@ pub(super) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
         gate_values_match(inputs, final_wiring.gates, values), values.len() == final_wiring.gates.len() <= usize::MAX,
         wires_available(final_wiring.definitions, layouts.inputs.total_bits_model(), values.len()),
         inputs.len() == layouts.inputs.total_bits_model(),
-    ensures ({
-        let (traced, children) = result;
-        let binding = roots[index];
-        let selected = &binding.selected;
-        let root = traced.evaluation.2;
-        let ports = port_values(&traced.builtin.1, root.arguments);
-        let assigned = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values);
-        let first = selected.prepared.output_slot as int;
-        let prior = assigned.take(first);
-        let incoming = port_values(&layouts.inputs, inputs);
-        &&& nor_call_group_evaluation_matches(selected, *binding.references, forms, layouts, &traced.builtin,
-            traced.step.before, traced.step.after, final_wiring.gates, inputs, values, traced.evaluation)
-        &&& wiring_view_is_prefix(traced.step.before, final_wiring)
-        &&& wiring_view_is_prefix(traced.step.after, final_wiring)
-        &&& call_argument_positions(forms, selected.prepared.root._signature@.call.call,
-            Seq::new(selected.arguments@.len(), |i: int| selected.arguments@[i].form))
-        &&& ports.len() == selected.arguments@.len() == 2
-        &&& children.len() == selected.children@.len()
-        &&& forall|i: int| 0 <= i < children.len() ==>
-            evaluated_nor_child(aliases, caller, prepared, &binding, layouts, forms, final_wiring, &traced,
-                inputs, values, i as usize, #[trigger] children[i])
-        &&& forall|p: int| 0 <= p < 2 ==> {
-            &&& #[trigger] nor_source_port_value_matches(aliases, caller, prepared, &binding, incoming, prior, ports, p)
-            &&& selected.arguments@[p].source is NestedCall ==> {
-                &&& root_port_reads_child(&root, selected.arguments@, &traced.builtin.1, p as usize, inputs, values)
-                &&& exists|i: int| 0 <= i < children.len()
-                    && #[trigger] nor_child_source_argument_matches(&binding, selected.arguments@[p], i,
-                        children[i].input, children[i].output)
-                    && children[i].output == ports[p]
-            }
-        }
-        &&& 0 <= first < assigned.len()
-        &&& assigned[first] == root.outputs
-        &&& root.outputs == seq![!(root.arguments[0] || root.arguments[1])]
-    }),
+    ensures evaluated_nor_call_matches(aliases, caller, prepared, &roots[index], port_values(&layouts.inputs, inputs),
+        definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values), evaluation),
 {
     let binding = roots[index];
     let selected = &binding.selected;
@@ -778,23 +905,15 @@ pub(super) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
             inputs, values, i as usize, #[trigger] children[i]) by {
         let selected_child = selected.children@[i];
     };
-    let postorder = selected.prepared.postorder@;
-    aliases.prepared_nor_arguments_in_source_order(*plan, caller, prepared, binding.candidate as int, postorder.len() as int);
     let ports = port_values(&traced.builtin.1, traced.evaluation.2.arguments);
     assert(ports.len() == 2) by { reveal(nor_call_group_evaluation_matches); };
     let assigned = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values);
     let prior = assigned.take(selected.prepared.output_slot as int);
     let incoming = port_values(&layouts.inputs, inputs);
-    assert forall|p: int| 0 <= p < 2 implies {
-        &&& #[trigger] nor_source_port_value_matches(aliases, caller, prepared, &binding, incoming, prior, ports, p)
-        &&& selected.arguments@[p].source is NestedCall ==> {
-            &&& root_port_reads_child(&traced.evaluation.2, selected.arguments@, &traced.builtin.1, p as usize, inputs, values)
-            &&& exists|i: int| 0 <= i < children.len()
-                && #[trigger] nor_child_source_argument_matches(&binding, selected.arguments@[p], i,
-                    children[i].input, children[i].output)
-                && children[i].output == ports[p]
-        }
-    } by {
+    assert forall|p: int| 0 <= p < 2 implies
+        #[trigger] evaluated_nor_root_port_matches(aliases, caller, prepared, &binding, incoming, prior,
+            ports, children, p) by {
+        reveal(evaluated_nor_root_port_matches);
         let argument = selected.arguments@[p];
         if argument.source.has_direct_wires() {
             nor_root_atom_value(aliases, plan, table, caller, prepared, &binding, body, layouts, layout_limit, forms,
@@ -820,14 +939,50 @@ pub(super) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
             assert(child_call_binding(selected.children@[i], *binding.references, &traced.builtin, calls[i]));
             assert(calls[i].reference == argument.source->NestedCall_0);
             assert(children[i].output == ports[p]);
-            assert(nor_child_source_argument_matches(&binding, argument, i, children[i].input, children[i].output));
         }
         assert(ports[p].len() == 1) by {
             reveal(nor_call_group_evaluation_matches);
             assert(p == 0 || p == 1);
         };
     };
-    (traced, children)
+    assert forall|i: int| #![trigger children[i]] 0 <= i < children.len() implies
+        evaluated_expression_child_matches(aliases, caller, prepared, selected.prepared.definition,
+            binding.references.start, selected.children@, incoming, prior, children, i) by {
+        nor_evaluated_child_sources(aliases, caller, prepared, &binding, layouts, forms, final_wiring,
+            &traced, inputs, values, children, i);
+    };
+    assert(nor_children_have_single_output(selected.children@)) by {
+        reveal(nor_children_have_single_output);
+        assert forall|i: int| 0 <= i < selected.children@.len() implies {
+            let child = (#[trigger] selected.children@[i]).child;
+            &&& child._signature@.call.target.port_counts().outputs == 1
+            &&& (child._signature@.signature matches crate::project::FuncCallSignature::Function(ports)
+                ==> ports.outputs@.len() == 1)
+        } by {
+            reveal(evaluated_nor_child);
+            assert(evaluated_nor_child(aliases, caller, prepared, &binding, layouts, forms, final_wiring, &traced,
+                inputs, values, i as usize, children[i]));
+        };
+    };
+    let root = traced.evaluation.2;
+    assert(root.arguments.len() == 2 && ports == seq![seq![root.arguments[0]], seq![root.arguments[1]]]) by {
+        reveal(nor_call_group_evaluation_matches);
+    };
+    let evaluation = EvaluatedNestedCall { root: EvaluatedCallBits { input: root.arguments, ports, output: root.outputs }, children };
+    assert(selected.arguments@.len() == 2) by { reveal(nor_root_arguments_match_widths); };
+    assert(0 <= selected.prepared.output_slot < assigned.len());
+    assert(assigned[selected.prepared.output_slot as int] == root.outputs);
+    assert(root.outputs == seq![!(root.arguments[0] || root.arguments[1])]);
+    assert(evaluation.children.len() == selected.children@.len());
+    assert forall|port: int| 0 <= port < 2 implies
+        #[trigger] evaluated_nor_root_port_matches(aliases, caller, prepared, &binding, incoming,
+            assigned.take(selected.prepared.output_slot as int), evaluation.root.ports, evaluation.children, port) by {
+        assert(evaluated_nor_root_port_matches(aliases, caller, prepared, &binding, incoming, prior, ports, children, port));
+    };
+    assert(evaluated_nor_call_matches(aliases, caller, prepared, &binding, incoming, assigned, evaluation)) by {
+        reveal(evaluated_nor_call_matches);
+    };
+    evaluation
 }
 
 #[verifier::opaque]
@@ -1132,39 +1287,9 @@ pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_nested_call
                 && value == evaluation.children[producer].output
         }
     }
-    &&& forall|child: int| 0 <= child < evaluation.children.len() ==> {
-        let expression = selected.children@[child];
-        let values = #[trigger] evaluation.children[child];
-        &&& values.ports.len() == expression.arguments@.len()
-        &&& match expression.template {
-            Some(template) => {
-                let circuit = template.circuit_model();
-                &&& nor_evaluation(circuit.netlist_model(), values.input, values.output)
-                &&& values.ports == port_values(circuit.input_layout_model(), values.input)
-            },
-            None => {
-                &&& values.input.len() == 2
-                &&& values.ports == seq![seq![values.input[0]], seq![values.input[1]]]
-                &&& values.output == seq![!(values.input[0] || values.input[1])]
-            },
-        }
-        &&& forall|port: int| 0 <= port < expression.arguments@.len() ==> {
-            let argument = #[trigger] expression.arguments@[port];
-            let width = expression_input_width(expression, port);
-            let value = values.ports[port];
-            &&& value.len() == width
-            &&& if argument.source.has_direct_wires() {
-                source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
-                    incoming, prior, width, value)
-            } else {
-                &&& argument.source is NestedCall
-                &&& exists|producer: int| 0 <= producer < child
-                    && (#[trigger] selected.children@[producer]).child.reference
-                        == selected.group.references.start + argument.source->NestedCall_0
-                    && selected.children@[producer].child._signature@.call.call.form == argument.form
-                    && value == evaluation.children[producer].output
-            }
-        }
+    &&& forall|child: int| #![trigger evaluation.children[child]] 0 <= child < evaluation.children.len() ==> {
+        evaluated_expression_child_matches(aliases, caller, prepared, definition, selected.group.references.start,
+            selected.children@, incoming, prior, evaluation.children, child)
     }
 }
 
@@ -1328,33 +1453,9 @@ proof fn nested_trace_call_values(
             assert(ports[port] == children[producer].output);
         }
     };
-    assert forall|child: int| 0 <= child < children.len() implies {
-        let expression = selected.children@[child];
-        let values = #[trigger] children[child];
-        &&& values.ports.len() == expression.arguments@.len()
-        &&& match expression.template {
-            Some(template) => nor_evaluation(template.circuit_model().netlist_model(), values.input, values.output)
-                && values.ports == port_values(template.circuit_model().input_layout_model(), values.input),
-            None => values.input.len() == 2 && values.ports == seq![seq![values.input[0]], seq![values.input[1]]]
-                && values.output == seq![!(values.input[0] || values.input[1])],
-        }
-        &&& forall|port: int| 0 <= port < expression.arguments@.len() ==> {
-            let argument = #[trigger] expression.arguments@[port];
-            let width = expression_input_width(expression, port);
-            let value = values.ports[port];
-            &&& value.len() == width
-            &&& if argument.source.has_direct_wires() {
-                source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
-                    incoming, prior, width, value)
-            } else {
-                &&& argument.source is NestedCall
-                &&& exists|producer: int| 0 <= producer < child
-                    && (#[trigger] selected.children@[producer]).child.reference
-                        == selected.group.references.start + argument.source->NestedCall_0
-                    && selected.children@[producer].child._signature@.call.call.form == argument.form
-                    && value == children[producer].output
-            }
-        }
+    assert forall|child: int| #![trigger children[child]] 0 <= child < children.len() implies {
+        evaluated_expression_child_matches(aliases, caller, prepared, definition, selected.group.references.start,
+            selected.children@, incoming, prior, children, child)
     } by {
         let expression = selected.children@[child];
         let values = children[child];
