@@ -395,7 +395,29 @@ pub proof fn nested_call_postorder_position(
     second
 }
 
-/// 右辺全体が通常呼び出しなら、その参照は順序の最後に現れる。
+/// 右辺の根が呼び出しなら、定義の最初の参照がその呼び出し先を指す。
+pub proof fn root_call_reference(
+    source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,
+)
+    requires
+        definition_call_index(source, forms, row, references), forms.len() <= usize::MAX,
+        super::expression_forest::ordinary_call_at(source, forms, row.expression.start as int, row.expression.end as int),
+    ensures
+        row.references.start < row.references.end <= references.len(),
+        references[row.references.start as int].kind is Callee,
+        references[row.references.start as int].form == row.expression.start + 1,
+{
+    let first = row.references.start;
+    let a = row.expression.start as int;
+    let b = row.expression.end as int;
+    row_reference_bounds(source, forms, references, row);
+    assert(after_form(forms, a) == b);
+    expression_root_callee(source, forms, a, b);
+    let refs = expression_references(source, forms, a, b);
+    assert(refs[0] == references[first as int]);
+}
+
+/// 子を先に並べた後順の末尾から、右辺の根を取り出す。
 pub proof fn root_call_postorder_last(
     source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,
     order: Seq<usize>,
@@ -409,11 +431,9 @@ pub proof fn root_call_postorder_last(
     let first = row.references.start;
     let a = row.expression.start as int;
     let b = row.expression.end as int;
+    root_call_reference(source, forms, references, row);
     row_reference_bounds(source, forms, references, row);
     assert(after_form(forms, a) == b);
-    expression_root_callee(source, forms, a, b);
-    let refs = expression_references(source, forms, a, b);
-    assert(refs[0] == references[first as int]);
     reveal(reference_bounds);
     reveal(call_references_in_postorder);
     assert(order.contains(first));

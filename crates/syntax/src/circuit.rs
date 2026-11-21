@@ -50,7 +50,7 @@ pub use call_order::postorder_call_references;
 pub use call_order::{
     call_postorder_positions, call_postorder_reference, call_postorder_references_distinct,
     call_references_in_postorder, definition_reference_form_unique,
-    nested_call_postorder_position, root_call_postorder_last,
+    nested_call_postorder_position, root_call_postorder_last, root_call_reference,
 };
 pub use call_shapes::{
     CallShape, RoutineArity, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,

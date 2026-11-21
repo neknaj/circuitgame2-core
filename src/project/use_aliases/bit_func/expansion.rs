@@ -24,7 +24,7 @@ use crate::syntax::circuit::postorder_call_references;
 use crate::syntax::circuit::{
     call_postorder_positions, call_postorder_reference, call_postorder_references_distinct, call_references_in_postorder,
     definition_reference_form_unique,
-    nested_call_postorder_position, root_call_postorder_last,
+    nested_call_postorder_position, root_call_postorder_last, root_call_reference,
 };
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -1609,6 +1609,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 型検査で保持された呼び出し先と引数範囲を、元の参照から取り出す。
     fn prepare_expression_call(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, definition: usize,
         reference: usize, projections: &FuncProjections<'p, 'a>,
@@ -1641,6 +1642,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             item.reference == reference,
             self.prepared_expression_call_matches(*plan, (file, entry, context.0), definition, &projections.call_arguments,
                 context.1, context.2, context.3, item),
+            match item._signature@.signature {
+                crate::project::FuncCallSignature::Nor => item.arguments.end - item.arguments.start == 2,
+                crate::project::FuncCallSignature::Function(ports) =>
+                    item.arguments.end - item.arguments.start == ports.inputs@.len(),
+            },
+            ({
+                let parsed = &self.targets.project_model().circuits_model()[file as int];
+                let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                let row = parsed.definitions@[absolute];
+                reference == row.references.start ==> forall|i: int| 0 <= i < projections.calls@.len()
+                    && (#[trigger] projections.calls@[i]).definition == absolute
+                    ==> item.arguments == projections.call_arguments.ranges@[i]
+            }),
     {
         let ghost caller = (file, entry, context.0);
         let project = self.targets.project();
@@ -1666,6 +1680,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.typed_call_arguments_ready(file, entry, definition, local, context.0, signature);
             self.resolved_call_reference_form(file, entry, definition, local, signature.call);
             crate::syntax::circuit::call_form_bounds(parsed.syntax.forms@, signature.call.call);
+            self.checked_projected_input_count((file, entry, definition, local), context.0, context.1, context.2,
+                signature, projections.call_arguments.arguments@.subrange(arguments.start as int, arguments.end as int));
         }
         let form = parsed.references[reference].form - 1;
         let source = &project.sources()[file];
@@ -1905,6 +1921,95 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         children
     }
 
+    /// 右辺の根を準備し、内側の呼び出しを後順に並べる。
+    fn prepare_root_expression(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, definition: usize,
+        projections: &FuncProjections<'p, 'a>,
+        Ghost(context): Ghost<(u64, Seq<Option<SignalType<'p, 'a>>>, &FuncWiring<'p, 'a>, int)>,
+    ) -> (calls: (PreparedExpressionCall<'p, 'a>, Option<Vec<PreparedExpressionCall<'p, 'a>>>))
+        requires
+            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
+            self.projected_references_match((file, entry, context.0), context.1, context.2,
+                &projections.call_arguments, projections.calls@),
+            plan.position_model(context.3) == Some((file, entry)),
+            ({
+                let project = self.targets.project_model();
+                &&& file < project.circuits_model().len() && file < project.sources_model().len()
+                &&& {
+                    let parsed = &project.circuits_model()[file as int];
+                    let source = &project.sources_model()[file as int];
+                    &&& entry < parsed.entry_ranges@.len()
+                    &&& definition < super::super::definitions::definition_count(parsed, entry as int)
+                    &&& {
+                        let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                        &&& absolute < parsed.definitions@.len()
+                        &&& {
+                            let row = parsed.definitions@[absolute];
+                            crate::syntax::circuit::ordinary_call_at(source.text, parsed.syntax.forms@,
+                                row.expression.start as int, row.expression.end as int)
+                        }
+                    }
+                }
+            }),
+        ensures ({
+            let parsed = &self.targets.project_model().circuits_model()[file as int];
+            let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+            let row = parsed.definitions@[absolute];
+            &&& calls.0.reference == row.references.start
+            &&& calls.0._signature@.call.call.form == row.expression.start
+            &&& self.prepared_expression_call_matches(*plan, (file, entry, context.0), definition,
+                &projections.call_arguments, context.1, context.2, context.3, calls.0)
+            &&& match calls.0._signature@.signature {
+                crate::project::FuncCallSignature::Nor => calls.0.arguments.end - calls.0.arguments.start == 2,
+                crate::project::FuncCallSignature::Function(ports) =>
+                    calls.0.arguments.end - calls.0.arguments.start == ports.inputs@.len(),
+            }
+            &&& forall|i: int| 0 <= i < projections.calls@.len()
+                && (#[trigger] projections.calls@[i]).definition == absolute ==> calls.0.arguments == projections.call_arguments.ranges@[i]
+            &&& match calls.1 {
+                None => row.references.end == row.references.start + 1,
+                Some(children) => row.references.end > row.references.start + 1
+                    && self.prepared_expression_children_match(*plan, (file, entry, context.0), definition,
+                        &projections.call_arguments, context.1, context.2, context.3, children@),
+            }
+        }),
+    {
+        proof {
+            self.checked_wiring_is_func(file, entry, context.0, *context.2);
+            self.targets.parsed_project_model();
+        }
+        let project = self.targets.project();
+        let parsed = &project.circuits()[file];
+        let source = &project.sources()[file];
+        proof {
+            parsed_index_evidence(*source, *parsed);
+            build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        }
+        let absolute = parsed.entry_ranges[entry].definitions.start + definition;
+        let row = &parsed.definitions[absolute];
+        let forms = parsed.syntax.forms.as_slice();
+        proof {
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+            vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+            root_call_reference(source.text, forms@, parsed.references@, *row);
+        }
+        let root = self.prepare_expression_call(plan, file, entry, definition, row.references.start, projections, Ghost(context));
+        proof {
+            reveal(UseAliases::prepared_expression_call_matches);
+            self.typed_call_arguments_ready(file, entry, definition, 0, context.0, root._signature@);
+            self.resolved_call_reference_form(file, entry, definition, 0, root._signature@.call);
+        }
+        let children = if row.references.end - row.references.start == 1 {
+            None
+        } else {
+            let order = postorder_call_references(source.text, forms, row, parsed.references.as_slice());
+            proof { root_call_postorder_last(source.text, forms@, parsed.references@, *row, order@); }
+            Some(self.prepare_expression_children(plan, file, entry, definition, order.as_slice(), projections, Ghost(context)))
+        };
+        (root, children)
+    }
+
     fn check_expansion_call_groups(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
         typed: &FuncSignalTypes<'p, 'a>, wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
@@ -1934,8 +2039,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.root_calls_follow_definition_order(caller, wiring, projections.calls@);
         }
         let parsed = &project.circuits()[file];
-        let source = &project.sources()[file];
-        let forms = parsed.syntax.forms.as_slice();
+        let ghost source = &project.sources_model()[file as int];
         proof {
             parsed_index_evidence(*source, *parsed);
             build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
@@ -1962,9 +2066,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 *source == self.targets.project_model().sources_model()[file as int],
                 parsed_circuit_matches(*source, *parsed),
                 entry < parsed.syntax.entries@.len(), entry < parsed.entry_ranges@.len(),
-                forms@ == parsed.syntax.forms@,
                 parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len(),
-                crate::syntax::form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+                crate::syntax::form_spans_valid(source.text, parsed.syntax.forms@, source.text.spec_bytes().len() as int),
                 forall|j: int| 0 <= j < groups@.len() ==> self.checked_expansion_call_matches(*plan, caller, *typed,
                     wiring, projections.calls@[j], projections.call_arguments.ranges@[j], &projections.call_arguments,
                     #[trigger] groups@[j]),
@@ -1984,44 +2087,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(super::super::definitions::reference_count(parsed, entry as int, definition as int)
                     == refs.end - refs.start > 0);
             }
-            let postorder = if row.references.end - row.references.start == 1 {
-                None
-            } else {
-                let order = postorder_call_references(source.text, forms, row, parsed.references.as_slice());
-                proof {
-                    vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
-                    root_call_postorder_last(source.text, forms@, parsed.references@, *row, order@);
-                }
-                Some(self.prepare_expression_children(plan, file, entry, definition, order.as_slice(), projections,
-                    Ghost((limit, typed.types@, wiring, group_model.1.1))))
-            };
-            let reference = 0;
-            let (arguments, selected) = self.retained_call_reference(file, entry, definition, reference,
-                &projections.call_arguments, Ghost(limit), Ghost(typed.types@), Ghost(*wiring), Ghost(projections.calls@));
-            assert(arguments == projections.call_arguments.ranges@[index as int]);
-            proof { self.retained_target_agrees_with_call(file, entry, definition, reference, limit, selected, group_model.0); }
-            let Some(RetainedCallTarget::Function(target_file, target_entry)) = selected else {
-                proof { assert(false); }
-                unreachable!()
-            };
-            let target = (target_file, target_entry);
-            let vertex = plan.template_vertex(target);
-            proof { plan.template_vertex_at_position(target, group_model.1.0, vertex); }
-            let Some(vertex) = vertex else {
-                proof { assert(false); }
-                unreachable!()
-            };
+            let (root_call, postorder) = self.prepare_root_expression(plan, file, entry, definition, projections,
+                Ghost((limit, typed.types@, wiring, group_model.1.1)));
+            let arguments = root_call.arguments;
             proof {
+                reveal(UseAliases::prepared_expression_call_matches);
                 vstd::std_specs::vec::axiom_spec_len(&typed.types);
-                parsed_index_evidence(*source, *parsed);
-                build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
-                self.checked_projected_input_count((file, entry, definition, 0),
-                    limit, typed.types@, wiring, group_model.0,
-                    projections.call_arguments.arguments@.subrange(arguments.start as int, arguments.end as int));
+                self.successful_call_signatures_agree(file, entry, definition, 0, limit, group_model.0, root_call._signature@);
+                let rank = root_call._rank@->Some_0;
+                self.template_rank_from_position(*plan, (root.target_file, root.target_entry), rank, group_model.1.0);
+                assert(root_call.vertex == Some(plan.order_model()[group_model.1.0]));
+                assert(arguments == projections.call_arguments.ranges@[index as int]);
             }
-            let expression = form_location(source, forms, parsed.definitions[root.definition].expression.start);
+            let Some(vertex) = root_call.vertex else {
+                proof { assert(false); }
+                unreachable!()
+            };
             let group = CheckedExpansionCall {
-                expression,
+                expression: root_call.expression,
                 outputs: root.first_output..root.first_output + root.count,
                 arguments: arguments.start..arguments.end,
                 references: row.references.start..row.references.end,
@@ -2118,6 +2201,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let calls = self.check_expansion_call_groups(plan, file, entry, limit, &typed, wiring, &projections);
         Ok(PreparedExpansionBody { typed, projections, calls })
     }
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn prepares_a_nor_root_without_a_function_vertex() {
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let text = "(using nor) (func id (in a) (out a))
+                (func caller (in a) (out y) (def y (nor (id a) a)))";
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "root-nor.ncg2", revision: 1, text,
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    let (typed, projections) = aliases.check_func_signal_projections(0, 2, 1, false, true).unwrap();
+    let FuncWiringResult::Checked(_wiring) = &typed.literals.wiring else {
+        panic!("expected checked wiring");
+    };
+    let (root, children) = aliases.prepare_root_expression(&plan, 0, 2, 0, &projections,
+        Ghost((1u64, typed.types@, _wiring, 1int)));
+    assert_eq!(&text[root.expression.span], "(nor (id a) a)");
+    assert!(root.vertex.is_none());
+    assert_eq!(root.arguments, 0..2);
+    let [child] = children.as_deref().unwrap() else {
+        panic!("expected one child call");
+    };
+    assert_eq!(&text[child.expression.span.clone()], "(id a)");
+    assert_eq!(child.vertex, plan.template_vertex((0, 1)));
+    assert_eq!(child.arguments, 2..3);
 }
 
 } // verus!
