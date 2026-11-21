@@ -164,6 +164,12 @@ pub proof fn call_argument_positions_from_steps(forms: Seq<Form>, call: CallShap
     };
 }
 
+/// 呼び出し形状は構文木内のリストを指す。引数が空の呼び出しにも適用できる。
+pub proof fn call_form_bounds(forms: Seq<Form>, call: CallShape)
+    requires call_arguments_match(forms, call),
+    ensures call.form < forms.len(), forms[call.form as int] is List,
+{}
+
 /// 引数の先頭は、その呼び出しリストの内部にある。
 pub proof fn call_argument_position_bounds(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, port: int)
     requires call_argument_positions(forms, call, positions), 0 <= port < positions.len(),

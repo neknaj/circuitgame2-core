@@ -15,8 +15,10 @@ use crate::netlist::{gate_values_match, nor_evaluation, output_values_match};
 verus! {
 
 /// 後順の一項目。参照添字は、この定義の先頭の参照を起点とする。
-pub(in crate::project::use_aliases::bit_func::lowering) struct ChildCall<'s> {
+pub(in crate::project::use_aliases::bit_func::lowering) struct ChildCall<'s, 'p, 'a> {
     pub(in crate::project::use_aliases::bit_func::lowering) reference: usize,
+    /// 容量診断で示す元の呼び出し式全体の範囲。
+    pub(in crate::project::use_aliases::bit_func::lowering) expression: &'s LocatedName<'p, 'a>,
     pub(in crate::project::use_aliases::bit_func::lowering) arguments: &'s [ProjectedCallArgument],
     pub(in crate::project::use_aliases::bit_func::lowering) inputs: &'s PortBitLayout,
     pub(in crate::project::use_aliases::bit_func::lowering) circuit: &'s NorNetlist,
@@ -35,6 +37,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_
 ) -> bool {
     &&& references.start <= selected.child.reference < references.end
     &&& call.reference == selected.child.reference - references.start
+    &&& *call.expression == selected.child.expression
     &&& call.arguments@ == selected.arguments@
     &&& child_call_abi(call)
     &&& match selected.template {
@@ -54,7 +57,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
     selected: &'s ResolvedTemplateCall<'s, 'p, 'a>, builtin: &'s (NorNetlist, PortBitLayout),
     Ghost(aliases): Ghost<&UseAliases<'_, 'p, 'a>>,
     context: Ghost<(&FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, u64, Seq<ProjectedCallArgument>)>,
-) -> (bound: (usize, Vec<ChildCall<'s>>))
+) -> (bound: (usize, Vec<ChildCall<'s, 'p, 'a>>))
     requires
         aliases.expansion_child_scope(selected.group),
         aliases.resolved_expression_calls_match(context@.0, context@.1, context@.2, selected.group.postorder,
@@ -65,13 +68,15 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
         bound.1@.len() == selected.children@.len(),
         forall|i: int| 0 <= i < bound.1@.len() ==>
             (#[trigger] bound.1@[i]).reference < bound.0
+            && location_in_source(*bound.1@[i].expression)
+            && *bound.1@[i].expression.source == *selected.group.expression.source
             && child_call_binding(selected.children@[i], selected.group.references, builtin, bound.1@[i]),
         forall|i: int, j: int| 0 <= i < j < bound.1@.len() ==>
             (#[trigger] bound.1@[i]).reference != (#[trigger] bound.1@[j]).reference,
 {
     let references = &selected.group.references;
     let count = references.end - references.start;
-    let mut calls: Vec<ChildCall<'s>> = Vec::new();
+    let mut calls: Vec<ChildCall<'s, 'p, 'a>> = Vec::new();
     let mut index = 0;
     while index < selected.children.len()
         invariant
@@ -84,6 +89,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
             index == calls@.len() <= selected.children@.len(),
             forall|i: int| 0 <= i < calls@.len() ==>
                 (#[trigger] calls@[i]).reference < count
+                && location_in_source(*calls@[i].expression)
+                && *calls@[i].expression.source == *selected.group.expression.source
                 && child_call_binding(selected.children@[i], *references, builtin, calls@[i]),
         decreases selected.children@.len() - index,
     {
@@ -107,12 +114,14 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
                     template.circuit_model().input_layout_model());
             }
             let circuit = template.circuit();
-            ChildCall { reference, arguments: child.arguments, inputs: circuit.inputs(), circuit: circuit.netlist(),
+            ChildCall { reference, expression: &child.child.expression,
+                arguments: child.arguments, inputs: circuit.inputs(), circuit: circuit.netlist(),
                 _input_widths: Ghost(template.input_widths_model()), _layout_limit: Ghost(template.bit_limit_model()) }
         } else {
             let ghost widths = seq![1u64, 1u64];
             proof { port_bit_layout_size(widths, 2, &builtin.1); }
-            ChildCall { reference, arguments: child.arguments, inputs: &builtin.1, circuit: &builtin.0,
+            ChildCall { reference, expression: &child.child.expression,
+                arguments: child.arguments, inputs: &builtin.1, circuit: &builtin.0,
                 _input_widths: Ghost(widths), _layout_limit: Ghost(2usize) }
         };
         assert(child_call_binding(*child, *references, builtin, call));
@@ -120,6 +129,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn bind_child_calls<'s, 
         calls.push(call);
         assert forall|i: int| 0 <= i < calls@.len() implies
             (#[trigger] calls@[i]).reference < count
+                && location_in_source(*calls@[i].expression)
+                && *calls@[i].expression.source == *selected.group.expression.source
                 && child_call_binding(selected.children@[i], *references, builtin, calls@[i]) by {
             if i < index { assert(calls@[i] == before[i]); }
         };
@@ -728,7 +739,7 @@ proof fn extend_child_ranges(
 /// 最初に失敗した子の位置と診断を返す。その場合は、この処理を始める前のゲート列を保つ。
 /// 一時配線表の上限は、呼び出し元のポートや定義に割り当てるビット数とは独立に指定する。
 pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s, 'p, 'a>(
-    caller: &CallerArguments<'s, 'p, 'a>, calls: &[ChildCall<'s>], reference_count: usize,
+    caller: &CallerArguments<'s, 'p, 'a>, calls: &[ChildCall<'s, 'p, 'a>], reference_count: usize,
     gates: &mut Vec<NorGate>, capacity: usize, output_capacity: usize, Ghost(input_bits): Ghost<usize>,
 ) -> (result: Result<ChildOutputWires, (usize, ChildCallWiringError<'p, 'a>)>)
     requires
@@ -738,7 +749,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
         wires_available(caller.wires@, input_bits, old(gates)@.len()),
         forall|i: int| 0 <= i < caller.inputs@.len() ==> (#[trigger] caller.inputs@[i]).end <= input_bits,
         forall|i: int| 0 <= i < calls@.len() ==>
-            (#[trigger] calls@[i]).reference < reference_count && child_call_ready(caller, calls@, i),
+            (#[trigger] calls@[i]).reference < reference_count && child_call_ready(caller, calls@, i)
+            && location_in_source(*calls@[i].expression) && *calls@[i].expression.source == *caller.source,
         forall|i: int, j: int| 0 <= i < j < calls@.len() ==>
             (#[trigger] calls@[i]).reference != (#[trigger] calls@[j]).reference,
     ensures
@@ -764,16 +776,18 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
         result matches Err((i, _)) ==> child_sizes(calls@, i as nat).1 <= output_capacity,
         result matches Err((i, _)) ==> child_arguments_determined(calls@, i as nat),
         result matches Err((i, error)) ==> i < calls@.len() && match error {
-                ChildCallWiringError::Call(CallWiringError::DeferredArgument(site)) => {
+                ChildCallWiringError::DeferredArgument(site) => {
                     let projected = calls@[i as int].arguments@;
                     exists|port: int| 0 <= port < projected.len() && (#[trigger] projected[port]).source is Deferred
                         && is_form_location(caller.source, caller.forms@[projected[port].form as int], site)
                         && forall|j: int| 0 <= j < port ==> !((#[trigger] projected[j]).source is Deferred)
                 },
-                ChildCallWiringError::Call(CallWiringError::GateCapacity) =>
-                    old(gates)@.len() + child_sizes(calls@, (i + 1) as nat).0 > capacity
+                ChildCallWiringError::GateCapacity(site) =>
+                    site == *calls@[i as int].expression
+                    && old(gates)@.len() + child_sizes(calls@, (i + 1) as nat).0 > capacity
                     && child_arguments_determined(calls@, (i + 1) as nat),
-                ChildCallWiringError::OutputCapacity { used, width, capacity: available } => {
+                ChildCallWiringError::OutputCapacity { site, used, width, capacity: available } => {
+                    &&& site == *calls@[i as int].expression
                     &&& available == output_capacity
                     &&& used == child_sizes(calls@, i as nat).1
                     &&& width == calls@[i as int].circuit.outputs@.len()
@@ -815,7 +829,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
             form_spans_valid(caller.source.text, caller.forms@, caller.source.text.spec_bytes().len() as int),
             forall|i: int| 0 <= i < caller.inputs@.len() ==> (#[trigger] caller.inputs@[i]).end <= input_bits,
             forall|i: int| 0 <= i < calls@.len() ==>
-                (#[trigger] calls@[i]).reference < reference_count && child_call_ready(caller, calls@, i),
+                (#[trigger] calls@[i]).reference < reference_count && child_call_ready(caller, calls@, i)
+                && location_in_source(*calls@[i].expression) && *calls@[i].expression.source == *caller.source,
             forall|i: int, j: int| 0 <= i < j < calls@.len() ==>
                 (#[trigger] calls@[i]).reference != (#[trigger] calls@[j]).reference,
         decreases calls@.len() - index,
@@ -829,13 +844,13 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
             next_child_readiness(caller, calls@, index, ranges, table.wires@.len());
         }
         let error = lower_child_call(caller, call.arguments, call.inputs, call.circuit, &mut table,
-            call.reference, gates, capacity, output_capacity,
+            call.reference, gates, capacity, output_capacity, call.expression,
             Ghost(call._input_widths@), Ghost(call._layout_limit@), Ghost(input_bits));
         if let Err(error) = error {
             proof {
                 child_sizes_grow(calls@, (index + 1) as nat, calls@.len());
                 match &error {
-                    ChildCallWiringError::Call(CallWiringError::GateCapacity) => {
+                    ChildCallWiringError::GateCapacity(_) => {
                         extend_determined_children(calls@, index, ranges);
                         assert(checkpoint + child_sizes(calls@, (index + 1) as nat).0 > capacity);
                     },
@@ -844,7 +859,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
                         assert(checkpoint + child_sizes(calls@, (index + 1) as nat).0 <= capacity);
                         assert(child_sizes(calls@, (index + 1) as nat).1 > output_capacity);
                     },
-                    ChildCallWiringError::Call(CallWiringError::DeferredArgument(site)) => {
+                    ChildCallWiringError::DeferredArgument(site) => {
                         let arguments = call.arguments@;
                         let port = choose|port: int| 0 <= port < arguments.len()
                             && !projected_source_available(ranges, (#[trigger] arguments[port]).source)

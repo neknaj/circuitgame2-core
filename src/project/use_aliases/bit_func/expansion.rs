@@ -74,6 +74,8 @@ verus! {
 pub(super) struct PreparedExpressionCall<'p, 'a> {
     /// 厳格解析で作ったファイル全体の参照配列を指す添字。
     pub(super) reference: usize,
+    /// 呼び出し式全体の UTF-8 半開バイト範囲と、その文書版を持つソース。
+    pub(super) expression: LocatedName<'p, 'a>,
     /// 型検査済みの実引数配列で、この呼び出しの引数を指す半開範囲。
     pub(super) arguments: Range<usize>,
     /// 通常関数のテンプレート番号。組み込み NOR には番号がない。
@@ -859,7 +861,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let key = item.reference - frame.references.start;
         let args = projections;
         let range = item.arguments;
+        let form = item._signature@.call.call.form;
         &&& row.references.start <= item.reference < row.references.end
+        &&& form < parsed.syntax.forms@.len() && parsed.syntax.forms@[form as int] is List
+        &&& is_form_location(&self.targets.project_model().sources_model()[file as int],
+            parsed.syntax.forms@[form as int], item.expression)
         &&& 0 <= key < args.reference_argument_ends@.len()
         &&& range.start == if key == 0 { 0 } else { args.reference_argument_ends@[key - 1] }
         &&& range.end == args.reference_argument_ends@[key]
@@ -879,8 +885,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) open spec fn expansion_child_scope(&self, group: &CheckedExpansionCall) -> bool {
         &&& group.references.start <= group.references.end
         &&& group.postorder matches Some(children) ==> {
-            &&& forall|i: int| 0 <= i < children@.len() ==>
-                group.references.start <= (#[trigger] children@[i]).reference < group.references.end
+            &&& forall|i: int| 0 <= i < children@.len() ==> {
+                let child = #[trigger] children@[i];
+                &&& group.references.start <= child.reference < group.references.end
+                &&& *child.expression.source == *group.expression.source
+                &&& location_in_source(child.expression)
+            }
             &&& forall|i: int, j: int| 0 <= i < j < children@.len() ==>
                 (#[trigger] children@[i]).reference != (#[trigger] children@[j]).reference
         }
@@ -1108,16 +1118,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let (arguments, target) = self.retained_call_reference(file, entry, definition, local, &projections.call_arguments,
             Ghost(context.0), Ghost(context.1), Ghost(*context.2), Ghost(projections.calls@));
         let ghost signature = self.retained_callee_signature(file, entry, definition, local, context.0, target);
+        proof {
+            self.typed_call_arguments_ready(file, entry, definition, local, context.0, signature);
+            self.resolved_call_reference_form(file, entry, definition, local, signature.call);
+            crate::syntax::circuit::call_form_bounds(parsed.syntax.forms@, signature.call.call);
+        }
+        let form = parsed.references[reference].form - 1;
+        let source = &project.sources()[file];
+        let expression = form_location(source, parsed.syntax.forms.as_slice(), form);
         let Some(target) = target else {
             proof { assert(false); }
             unreachable!()
         };
         let item = match target {
             RetainedCallTarget::Nor => PreparedExpressionCall {
-                reference, arguments, vertex: None, _signature: Ghost(signature), _rank: Ghost(None),
+                reference, expression, arguments, vertex: None, _signature: Ghost(signature), _rank: Ghost(None),
             },
             RetainedCallTarget::Function(target_file, target_entry) => {
-                proof { self.typed_call_arguments_ready(file, entry, definition, local, context.0, signature); }
                 let ghost at = DefinitionPosition { file, entry, definition, reference: local };
                 let ghost site = self.expansion_site_for_call(at, signature.call);
                 let ghost order = self.function_expansion_callee_precedes(*plan, site);
@@ -1128,7 +1145,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     plan.template_vertex_at_position(target, order.0, vertex);
                 }
                 PreparedExpressionCall {
-                    reference, arguments, vertex, _signature: Ghost(signature), _rank: Ghost(Some(order.0)),
+                    reference, expression, arguments, vertex, _signature: Ghost(signature), _rank: Ghost(Some(order.0)),
                 }
             },
         };
