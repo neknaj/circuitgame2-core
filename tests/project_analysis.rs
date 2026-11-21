@@ -236,10 +236,12 @@ fn expands_a_cross_file_call_with_struct_ports_and_multiple_outputs() {
     let aliases = check_use_aliases(&targets).unwrap();
     let functions = aliases.expand_functions(8, 32, 0).unwrap();
     let circuit = functions.get(0, 1).unwrap();
-    let input = [true, false, false, true, true, false, true, true];
-    let output = circuit.netlist().evaluate(&input).unwrap();
+    for bit in 0..8 {
+        let input: [bool; 8] = core::array::from_fn(|index| index == bit);
+        let output = circuit.netlist().evaluate(&input).unwrap();
 
-    assert_eq!(output.len(), 10);
-    assert_eq!(output[..8], input);
-    assert_eq!(output[8..], [input[2], input[4]]);
+        assert_eq!(output.len(), 10);
+        assert_eq!(output[..8], input);
+        assert_eq!(output[8..], [input[2], input[4]]);
+    }
 }
