@@ -2182,6 +2182,49 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             rank, prepared.postorder@)
     }
 
+    /// 根で決めた引数範囲と、子の回路を選ぶための根拠を取り出す。
+    pub(super) proof fn nor_root_template_evidence(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+        ensures ({
+            let root = prepared.nor_roots@[index];
+            let args = prepared.projections.call_arguments.arguments@;
+            &&& plan.position_model(root._caller_rank@) == Some((caller.0, caller.1))
+            &&& root.root.arguments.start + 2 == root.root.arguments.end <= args.len()
+            &&& forall|i: int| 0 <= i < root.postorder@.len() ==> self.expression_template_ready(
+                &plan, caller.2, root._caller_rank@, args.len(), #[trigger] root.postorder@[i])
+        }),
+    {
+        let root = prepared.nor_roots@[index];
+        let (file, entry, limit) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let definition = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let row = parsed.definitions@[root.definition as int];
+        let args = &prepared.projections.call_arguments;
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        assert forall|i: int| 0 <= i < root.postorder@.len() implies self.expression_template_ready(
+            &plan, limit, root._caller_rank@, args.arguments@.len(), #[trigger] root.postorder@[i]) by {
+            let child = root.postorder@[i];
+            reveal(UseAliases::prepared_expression_call_matches);
+            let reference = (child.reference - row.references.start) as usize;
+            let span = child.arguments;
+            let projected = args.arguments@.subrange(span.start as int, span.end as int);
+            self.checked_projected_input_count((file, entry, definition, reference), limit,
+                prepared.typed.types@, &wiring, child._signature@, projected);
+            self.typed_call_arguments_ready(file, entry, definition, reference, limit, child._signature@);
+            if child._signature@.call.target is Function {
+                self.resolved_function_signature_evidence((file, entry, definition, reference), limit, child._signature@);
+            }
+        };
+    }
+
     fn prepare_nested_nor_roots(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, _limit: u64,
         _typed: &FuncSignalTypes<'p, 'a>, _wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
