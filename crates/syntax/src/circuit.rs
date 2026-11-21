@@ -51,7 +51,7 @@ pub use call_shapes::{
 #[cfg(verus_only)]
 pub use call_shapes::{
     call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index, indexed_call_shapes_agree,
-    direct_call_argument, exhausted_call_arguments, first_call_argument_evidence, following_call_argument,
+    call_argument_positions, call_argument_positions_agree, call_argument_positions_from_steps, direct_call_argument, exhausted_call_arguments, first_call_argument_evidence, following_call_argument,
     indexed_call_arguments, routine_arity_matches, routine_arity_port_counts,
 };
 pub use build::{

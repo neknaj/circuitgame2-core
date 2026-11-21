@@ -3,6 +3,12 @@
 use super::{append_bit_literal_wires, lower_driver_bit};
 use super::super::instances::append_instance;
 #[cfg(verus_only)]
+use super::super::expansion::call_literal_bit;
+#[cfg(verus_only)]
+use super::super::instances::instance_wire_values;
+#[cfg(verus_only)]
+use super::port_values;
+#[cfg(verus_only)]
 use super::super::instances::{instance_gates_match, instance_outputs_match};
 #[cfg(verus_only)]
 use super::{driver_bit_available, driver_wire, driver_wire_is_available, wires_available};
@@ -15,11 +21,11 @@ use crate::netlist::{NorGate, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
 use crate::netlist::{
     gates_available, nor_evaluation_ready, output_ports_available, port_bit_layout_port, port_bit_layout_result,
-    port_bit_layout_size, preceding_port_bits, wire_available,
+    port_bit_layout_size, preceding_port_bits, wire_available, wire_value,
 };
 use crate::syntax::{Form, read_bit_literal};
 #[cfg(verus_only)]
-use crate::syntax::{AtomKind, bare_atom_kind, bit_literal_kind_has_digits, bit_literal_value_at, form_span, form_spans_valid};
+use crate::syntax::{AtomKind, bare_atom_kind, bit_literal_kind_has_digits, form_span, form_spans_valid};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
@@ -78,8 +84,8 @@ pub(super) closed spec fn argument_wire(caller: &CallerArguments, argument: Proj
             driver_wire(caller.inputs@, caller.definitions@, caller.wires@, driver, bit),
         CallArgumentSource::Literal(_) => {
             let bytes = literal_word(caller, argument.form);
-            if bytes.len() == 1 { Wire::Constant(bytes[0] == b'1') }
-            else { Wire::Constant(bit_literal_value_at(bytes, bit as nat)) }
+            Wire::Constant(call_literal_bit(bytes, bit as nat))
+
         },
         CallArgumentSource::Deferred => arbitrary(),
     }
@@ -132,6 +138,109 @@ pub(super) open spec fn argument_prefix_wires(
         &&& forall|bit: int| 0 <= bit < range.end - range.start
             ==> (#[trigger] wires[range.start + bit]) == argument_wire(caller, arguments[i], bit)
     }
+}
+
+/// 呼び出し元の一つの駆動元から、宣言幅のビット列を読み取る。
+pub(super) open spec fn argument_driver_value(
+    caller: &CallerArguments, inputs: Seq<bool>, gates: Seq<bool>, driver: crate::project::OutputDriver,
+) -> Seq<bool> {
+    match driver {
+        crate::project::OutputDriver::Input(port) => {
+            let range = caller.inputs@[port as int];
+            inputs.subrange(range.start as int, range.end as int)
+        },
+        crate::project::OutputDriver::Definition(index) => {
+            let range = caller.definitions@[index as int];
+            Seq::new((range.end - range.start) as nat,
+                |bit: int| wire_value(caller.wires@[range.start + bit], inputs, gates))
+        },
+    }
+}
+
+/// 実引数から作った配線を読むと、その駆動元またはリテラルの値が一つの入力ポートに入る。
+pub(super) proof fn lowered_argument_port_value(
+    caller: &CallerArguments, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
+    widths: Seq<u64>, limit: usize, mapped: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>, port: usize,
+)
+    requires
+        port_bit_layout_result(widths, limit, Ok(*layout)),
+        argument_prefix_wires(caller, arguments, layout.ranges_model(), arguments.len() as int, mapped),
+        mapped.len() == layout.total_bits_model(),
+        port < widths.len(),
+        ({
+            let argument = arguments[port as int];
+            match argument.source {
+                CallArgumentSource::Driver(crate::project::OutputDriver::Input(i)) => {
+                    let range = caller.inputs@[i as int];
+                    &&& i < caller.inputs@.len() && range.end <= inputs.len()
+                    &&& range.end - range.start == widths[port as int]
+                },
+                CallArgumentSource::Driver(crate::project::OutputDriver::Definition(i)) => {
+                    let range = caller.definitions@[i as int];
+                    &&& i < caller.definitions@.len() && range.end <= caller.wires@.len()
+                    &&& range.end - range.start == widths[port as int]
+                    &&& forall|at: int| range.start <= at < range.end ==>
+                        wire_available(#[trigger] caller.wires@[at], inputs.len(), gates.len())
+                },
+                CallArgumentSource::Literal(bits) => {
+                    let form = argument.form;
+                    let span = form_span(caller.forms@[form as int]);
+                    &&& form < caller.forms@.len()
+                    &&& span.start < span.end <= caller.source.text.spec_bytes().len()
+                    &&& bits == widths[port as int]
+                    &&& literal_argument_matches_width(caller.source, caller.forms@, form, bits as int)
+                },
+                CallArgumentSource::Deferred => true,
+            }
+        }),
+    ensures ({
+        let value = port_values(layout, instance_wire_values(mapped, inputs, gates))[port as int];
+        let argument = arguments[port as int];
+        &&& value.len() == widths[port as int]
+        &&& match argument.source {
+            CallArgumentSource::Driver(driver) => value == argument_driver_value(caller, inputs, gates, driver),
+            CallArgumentSource::Literal(bits) =>
+                bits == widths[port as int]
+                && value == Seq::new(bits as nat, |bit: int| call_literal_bit(literal_word(caller, argument.form), bit as nat)),
+            CallArgumentSource::Deferred => false,
+        }
+    }),
+{
+    port_bit_layout_port(widths, limit, *layout, port);
+    reveal(port_values);
+    reveal(argument_prefix_wires);
+    reveal(argument_wire);
+    let range = layout.ranges_model()[port as int];
+    let value = port_values(layout, instance_wire_values(mapped, inputs, gates))[port as int];
+    let argument = arguments[port as int];
+    let expected = match argument.source {
+        CallArgumentSource::Driver(driver) => argument_driver_value(caller, inputs, gates, driver),
+        CallArgumentSource::Literal(bits) =>
+            Seq::new(bits as nat, |bit: int| call_literal_bit(literal_word(caller, argument.form), bit as nat)),
+        CallArgumentSource::Deferred => arbitrary(),
+    };
+    assert(!(argument.source is Deferred));
+    assert forall|bit: int| 0 <= bit < value.len() implies #[trigger] value[bit] == expected[bit] by {
+        assert(mapped[range.start + bit] == argument_wire(caller, argument, bit));
+        let wire = mapped[range.start + bit];
+        match argument.source {
+            CallArgumentSource::Driver(crate::project::OutputDriver::Input(i)) => {
+                let caller_range = caller.inputs@[i as int];
+                assert(wire == Wire::Input((caller_range.start + bit) as usize));
+                assert(caller_range.start + bit < inputs.len());
+            },
+            CallArgumentSource::Driver(crate::project::OutputDriver::Definition(i)) => {
+                let caller_range = caller.definitions@[i as int];
+                assert(wire == caller.wires@[caller_range.start + bit]);
+            },
+            CallArgumentSource::Literal(_) => {
+                assert(wire == Wire::Constant(call_literal_bit(literal_word(caller, argument.form), bit as nat)));
+            },
+            CallArgumentSource::Deferred => {},
+        }
+        assert(value[bit] == wire_value(wire, inputs, gates));
+    };
+    assert(value =~= expected);
 }
 
 fn append_argument_driver(

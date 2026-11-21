@@ -46,6 +46,54 @@ pub(super) struct PreparedExpansionBody<'p, 'a> {
     pub(super) calls: Vec<CheckedExpansionCall<'p, 'a>>,
 }
 
+/// 元の字句を低位ビットから読む。自然定数の 0 と 1 は一ビットで表す。
+pub(super) open spec fn call_literal_bit(bytes: Seq<u8>, bit: nat) -> bool {
+    if bytes.len() == 1 { bytes[0] == b'1' } else { crate::syntax::bit_literal_value_at(bytes, bit) }
+}
+
+pub(super) open spec fn source_argument_bytes(source: &crate::project::ProjectSource, forms: Seq<crate::syntax::Form>, form: usize)
+    -> Seq<u8> {
+    let span = crate::syntax::form_span(forms[form as int]);
+    source.text.spec_bytes()[span.start as int..span.end as int]
+}
+
+/// 引数フォームの値を、呼び出し直前の信号値または元の字句から定める。
+pub(super) open spec fn source_call_argument_value(
+    source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
+    wiring: &FuncWiring, entry: usize, definition: usize, form: usize, limit: u64,
+    inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, width: u64, value: Seq<bool>,
+) -> bool {
+    let forms = parsed.syntax.forms@;
+    let frame = parsed.entry_ranges@[entry as int];
+    let row = parsed.definitions@[definition as int];
+    let span = crate::syntax::form_span(forms[form as int]);
+    let bytes = source_argument_bytes(source, forms, form);
+    &&& entry < parsed.entry_ranges@.len()
+    &&& frame.definitions.start <= definition < frame.definitions.end <= parsed.definitions@.len()
+    &&& form < forms.len() && forms[form as int] is Atom
+    &&& value.len() == width
+    &&& if forms[form as int]->Atom_kind is Name {
+        exists|position: int| row.signals.start <= position < row.signals.end <= parsed.signals@.len()
+            && (#[trigger] parsed.signals@[position]) == form
+            && 0 <= position - frame.signals.start < wiring.signals@.len()
+            && {
+                let driver = wiring.signals@[position - frame.signals.start].driver;
+                &&& (match driver {
+                    super::super::OutputDriver::Input(port) => port < inputs.len(),
+                    super::super::OutputDriver::Definition(slot) => slot < prior.len(),
+                })
+                &&& value == super::semantics::driver_values(inputs, prior, driver)
+            }
+    } else {
+        &&& span.start < span.end <= source.text.spec_bytes().len()
+        &&& crate::project::circuit_literal_width_matches(bytes, Some(width), limit, Ok(width))
+        &&& ((width == 1 && bytes.len() == 1 && (bytes[0] == b'0' || bytes[0] == b'1'))
+            || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Binary)
+            || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Hexadecimal))
+        &&& value == Seq::new(width as nat, |bit: int| call_literal_bit(bytes, bit as nat))
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     #[verifier::opaque]
     pub(super) closed spec fn checked_expansion_call_matches(
@@ -129,6 +177,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    /// 平坦な引数区間が、呼び出し直下のフォームを元の順序で指すことを示す。
+    pub(super) proof fn expansion_arguments_in_source_order(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), typed: FuncSignalTypes,
+        wiring: &FuncWiring, root: RootFunctionCall, range: Range<usize>, arguments: &CallArgumentProjections,
+        group: CheckedExpansionCall,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*wiring))),
+            self.checked_expansion_call_matches(plan, caller, typed, wiring, root, range, arguments, group),
+        ensures ({
+            let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+            let projected = arguments.arguments@.subrange(range.start as int, range.end as int);
+            crate::syntax::circuit::call_argument_positions(forms, group._signature@.call.call,
+                Seq::new(projected.len(), |i: int| projected[i].form))
+        }),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        let (file, entry, limit) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let projected = arguments.arguments@.subrange(range.start as int, range.end as int);
+        self.projected_arguments_in_source_order((file, entry, local, 0), limit, typed.types@, wiring, group._signature@, projected);
+    }
+
     /// 展開に渡す引数の型と、呼び出し前に参照できる駆動元を取り出す。
     pub(super) proof fn expansion_argument_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), typed: FuncSignalTypes,
@@ -152,8 +225,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& argument.form < parsed.syntax.forms@.len()
             &&& crate::syntax::circuit::direct_call_argument(
                 parsed.syntax.forms@, group._signature@.call.call, argument.form as int)
+            &&& form is Atom || argument.source is Deferred
             &&& match argument.source {
                 CallArgumentSource::Driver(driver) => {
+                    &&& form is Atom && form->Atom_kind is Name
                     &&& signal_type_at(wiring, typed.types@, driver) matches Some(known)
                     &&& crate::project::port_types_equal(known.ty, expected)
                     &&& exists|position: int| row.signals.start <= position < row.signals.end
@@ -170,6 +245,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
                     &&& expected == super::super::ResolvedPortType::Bits(width)
                     &&& form is Atom
+                    &&& span.start < span.end <= source.text.spec_bytes().len()
+                    &&& (form->Atom_kind is Natural || form->Atom_kind is Binary || form->Atom_kind is Hexadecimal)
                     &&& crate::project::circuit_literal_width_matches(bytes, Some(width), caller.2, Ok(width))
                     &&& ((width == 1 && bytes.len() == 1 && (bytes[0] == b'0' || bytes[0] == b'1'))
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Binary)
@@ -199,6 +276,53 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             assert(i < first);
         }
+    }
+
+    /// 展開前に保持した実引数の値が、元フォームから定めた値であることを示す。
+    pub(super) proof fn expansion_argument_value_from_source(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), typed: FuncSignalTypes,
+        wiring: &FuncWiring, root: RootFunctionCall, range: Range<usize>, arguments: &CallArgumentProjections,
+        group: CheckedExpansionCall, port: int, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>,
+        width: u64, value: Seq<bool>,
+    )
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*wiring))),
+            self.checked_expansion_call_matches(plan, caller, typed, wiring, root, range, arguments, group),
+            0 <= port < range.end - range.start,
+            inputs.len() == wiring.drivers.signature.inputs@.len(),
+            prior.len() == group.outputs.start,
+            value.len() == width,
+            ({
+                let argument = arguments.arguments@[range.start + port];
+                match argument.source {
+                    CallArgumentSource::Driver(driver) => value == super::semantics::driver_values(inputs, prior, driver),
+                    CallArgumentSource::Literal(bits) => {
+                        let project = self.targets.project_model();
+                        let bytes = source_argument_bytes(&project.sources_model()[caller.0 as int],
+                            project.circuits_model()[caller.0 as int].syntax.forms@, argument.form);
+                        width == bits && value == Seq::new(width as nat, |bit: int| call_literal_bit(bytes, bit as nat))
+                    },
+                    CallArgumentSource::Deferred => false,
+                }
+            }),
+        ensures ({
+            let project = self.targets.project_model();
+            source_call_argument_value(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
+                wiring, caller.1, root.definition, arguments.arguments@[range.start + port].form, caller.2,
+                inputs, prior, width, value)
+        }),
+    {
+        self.expansion_argument_evidence(plan, caller, typed, wiring, root, range, arguments, group, port);
+        self.checked_wiring_is_func(caller.0, caller.1, caller.2, *wiring);
+        reveal(UseAliases::checked_expansion_call_matches);
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[caller.0 as int];
+        let source = &project.sources_model()[caller.0 as int];
+        parsed_index_evidence(*source, *parsed);
+        build_entry_ranges_evidence(source.text, &parsed.build_model(), caller.1 as int);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), caller.1 as int, root.definition as int);
     }
 
     /// 確定した呼び出し先の順位と、その宣言から得た署名を示す。

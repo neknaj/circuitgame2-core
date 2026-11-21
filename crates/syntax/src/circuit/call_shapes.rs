@@ -98,6 +98,77 @@ pub closed spec fn call_arguments_match(forms: Seq<Form>, call: CallShape) -> bo
     &&& call.arguments == argument_count(forms, form + 2, forms[form]->List_end as int)
 }
 
+/// 呼び出し直下の引数式を、元の出現順にすべて列挙した添字列を表す。
+pub closed spec fn call_argument_positions(forms: Seq<Form>, call: CallShape, positions: Seq<usize>) -> bool {
+    let first = call.form + 2;
+    let end = forms[call.form as int]->List_end;
+    &&& call_arguments_match(forms, call)
+    &&& positions.len() == call.arguments
+    &&& if positions.len() == 0 { first == end }
+        else { after_form(forms, positions.last() as int) == end }
+    &&& forall|i: int| 0 <= i < positions.len() ==> {
+        let at = (#[trigger] positions[i]) as int;
+        &&& first <= at < end
+        &&& at < after_form(forms, at) <= end
+        &&& at == if i == 0 { first } else { after_form(forms, positions[i - 1] as int) }
+    }
+}
+
+/// 組み立てた引数列が、各部分木の終端をたどって呼び出しの末尾に達することを示す。
+pub proof fn call_argument_positions_from_steps(forms: Seq<Form>, call: CallShape, positions: Seq<usize>)
+    requires
+        call_arguments_match(forms, call), complete_list_indices(forms), nested_list_indices(forms),
+        positions.len() == call.arguments,
+        if positions.len() == 0 { call.form + 2 == forms[call.form as int]->List_end }
+            else {
+                let last = positions.last() as int;
+                forms[call.form as int]->List_end as int
+                    == if forms[last] is List { forms[last]->List_end as int } else { last + 1 }
+            },
+        forall|i: int| 0 <= i < positions.len() ==> {
+            let at = (#[trigger] positions[i]) as int;
+            &&& direct_call_argument(forms, call, at)
+            &&& at == if i == 0 { call.form + 2 } else {
+                let previous = positions[i - 1] as int;
+                if forms[previous] is List { forms[previous]->List_end as int } else { previous + 1 }
+            }
+        },
+    ensures call_argument_positions(forms, call, positions),
+{
+    reveal(direct_form_in_range);
+    reveal(complete_list_indices);
+    assert forall|i: int| 0 <= i < positions.len() implies {
+        let at = (#[trigger] positions[i]) as int;
+        &&& call.form + 2 <= at < forms[call.form as int]->List_end
+        &&& at < after_form(forms, at) <= forms[call.form as int]->List_end
+    } by {
+        let at = positions[i] as int;
+        assert(direct_call_argument(forms, call, at));
+    };
+}
+
+/// 二つの列が同じ呼び出しの引数を列挙するなら、対応する引数の位置は等しい。
+pub proof fn call_argument_positions_agree(forms: Seq<Form>, call: CallShape, a: Seq<usize>, b: Seq<usize>)
+    requires call_argument_positions(forms, call, a), call_argument_positions(forms, call, b),
+    ensures a == b,
+{
+    assert forall|i: int| 0 <= i < a.len() implies #[trigger] a[i] == #[trigger] b[i] by {
+        call_argument_position_agrees(forms, call, a, b, i);
+    };
+    assert(a =~= b);
+}
+
+proof fn call_argument_position_agrees(forms: Seq<Form>, call: CallShape, a: Seq<usize>, b: Seq<usize>, i: int)
+    requires call_argument_positions(forms, call, a), call_argument_positions(forms, call, b), 0 <= i < a.len(),
+    ensures a[i] == b[i],
+    decreases i,
+{
+    if i > 0 {
+        call_argument_position_agrees(forms, call, a, b, i - 1);
+        assert(a[i - 1] == b[i - 1]);
+    }
+}
+
 /// 参照索引から得た呼び出しの形を、直接の引数列に結び付ける。
 pub proof fn indexed_call_arguments(
     source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference, call: CallShape,
@@ -129,6 +200,7 @@ pub closed spec fn direct_call_argument(forms: Seq<Form>, call: CallShape, index
     call_arguments_match(forms, call)
         && direct_form_in_range(forms, call.form + 2, forms[call.form as int]->List_end as int, index)
 }
+
 
 /// 呼び出しの引数列が空でなければ、先頭を直接の引数として扱えることを示す。
 pub proof fn first_call_argument_evidence(forms: Seq<Form>, call: CallShape, range: Range<usize>)

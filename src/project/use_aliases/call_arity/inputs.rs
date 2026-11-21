@@ -38,6 +38,8 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
 mod batch;
+#[cfg(verus_only)]
+mod source_order;
 pub use batch::FuncCallInputsError;
 pub(in crate::project::use_aliases) use batch::CallArgumentProjections;
 
@@ -279,6 +281,52 @@ spec fn argument_projections_match(
         argument_projection_matches(#[trigger] projected[i], visited[i], forms, wiring, types, slots, start, values[i])
 }
 
+proof fn extend_argument_prefix(
+    call: &TypedFuncCall, forms: Seq<Form>, wiring: &FuncWiring, types: Seq<Option<SignalType>>,
+    slots: Seq<usize>, start: int, limit: u64, visited: Seq<usize>, values: Seq<Option<SignalType>>,
+    root: usize, next: usize, value: Option<SignalType>,
+)
+    requires
+        argument_prefix(call, forms, wiring, types, slots, start, limit, visited, values, root),
+        argument_result(call, forms, wiring, types, slots, start, root, visited.len() as usize, limit, Ok(value)),
+        visited.len() <= usize::MAX,
+        next == after_argument(forms, root as int),
+    ensures argument_prefix(call, forms, wiring, types, slots, start, limit, visited.push(root), values.push(value), next),
+{
+    reveal(argument_prefix);
+    let appended = visited.push(root);
+    let results = values.push(value);
+    assert forall|i: int| 0 <= i < appended.len() implies {
+        let form = (#[trigger] appended[i]) as int;
+        &&& form == if i == 0 { call.call.call.form + 2 } else { after_argument(forms, appended[i - 1] as int) }
+        &&& argument_result(call, forms, wiring, types, slots, start, form as usize, i as usize, limit, Ok(results[i]))
+    } by {
+        if i < visited.len() { assert(appended[i] == visited[i] && results[i] == values[i]); }
+    };
+}
+
+proof fn extend_argument_projections(
+    forms: Seq<Form>, wiring: &FuncWiring, types: Seq<Option<SignalType>>, slots: Seq<usize>, start: int,
+    visited: Seq<usize>, values: Seq<Option<SignalType>>, projected: Seq<ProjectedCallArgument>,
+    root: usize, value: Option<SignalType>, argument: ProjectedCallArgument,
+)
+    requires
+        argument_projections_match(forms, wiring, types, slots, start, visited, values, projected),
+        argument_projection_matches(argument, root, forms, wiring, types, slots, start, value),
+    ensures argument_projections_match(forms, wiring, types, slots, start,
+        visited.push(root), values.push(value), projected.push(argument)),
+{
+    reveal(argument_projections_match);
+    let collected = projected.push(argument);
+    let appended = visited.push(root);
+    let results = values.push(value);
+    assert forall|i: int| 0 <= i < collected.len() implies
+        argument_projection_matches(#[trigger] collected[i], appended[i], forms, wiring, types, slots, start, results[i])
+        by {
+            if i < projected.len() { assert(collected[i] == projected[i] && appended[i] == visited[i] && results[i] == values[i]); }
+        };
+}
+
 spec fn arguments_match(
     parsed: &NamedBuildCircuit, entry: usize, definition: usize, scope: &FuncWiring,
     types: Seq<Option<SignalType>>, call: &TypedFuncCall, limit: u64, collect: bool,
@@ -371,7 +419,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let start = row.signals.start - frame.signals.start;
             let (call, visited, values) = witness;
             &&& self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
-            &&& values.len() == call.call.target.port_counts().inputs
+            &&& values.len() == call.call.call.arguments == call.call.target.port_counts().inputs
             &&& argument_prefix(&call, forms, wiring, types, slots, start, limit,
                 visited, values, forms[call.call.call.form as int]->List_end)
             &&& argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
@@ -459,6 +507,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& match projected[index].source {
                 CallArgumentSource::Driver(driver) => {
                     let ty = signal_type_at(wiring, types, driver);
+                    &&& parsed.syntax.forms@[form as int] is Atom && parsed.syntax.forms@[form as int]->Atom_kind is Name
                     &&& ty matches Some(known)
                     &&& port_types_equal(known.ty, expected)
                     &&& exists|position: int| parsed.definitions@[absolute].signals.start <= position
@@ -476,6 +525,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let span = form_span(parsed.syntax.forms@[form as int]);
                     let source = &self.targets.project_model().sources_model()[at.0 as int];
                     &&& parsed.syntax.forms@[form as int] is Atom
+                    &&& (parsed.syntax.forms@[form as int]->Atom_kind is Natural
+                        || parsed.syntax.forms@[form as int]->Atom_kind is Binary
+                        || parsed.syntax.forms@[form as int]->Atom_kind is Hexadecimal)
                     &&& expected == ResolvedPortType::Bits(width)
                     &&& span.start < span.end <= source.text.spec_bytes().len()
                     &&& {
@@ -616,6 +668,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 呼び出し元の配線と型を再利用し、必要な場合だけ引数の型を実行時の配列に残す。
+
     fn check_call_inputs_with_types(
         &self, file: usize, entry: usize, definition: usize, reference: usize, max_width: u64,
         types: &[Option<SignalType<'p, 'a>>], wiring: &FuncWiring<'p, 'a>, collect: bool,
@@ -699,8 +752,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let ghost values: Seq<Option<SignalType>> = Seq::empty();
         proof {
             first_call_argument_evidence(forms@, call.call.call, remaining);
-            reveal(argument_prefix);
-            if retain { reveal(argument_projections_match); }
+            assert(argument_prefix(&call, forms@, wiring, types@, slots, start,
+                max_width, visited, values, remaining.start)) by { reveal(argument_prefix); };
+            if retain {
+                assert(argument_projections_match(forms@, wiring, types@, slots, start,
+                    visited, values, projections@.skip(begin))) by { reveal(argument_projections_match); };
+            }
         }
         while remaining.start < remaining.end
             invariant
@@ -728,7 +785,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.func_wiring_evidence(file, entry, max_width, Ok(FuncWiringResult::Checked(*wiring))),
                 self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(Some(call))),
                 types@.len() == wiring.drivers.definitions@.len(),
-                ordinal == values.len() <= count == call.call.call.arguments,
+                ordinal == visited.len() == values.len(),
+                ordinal <= count == call.call.call.arguments,
                 if collect { values == inputs@ } else { inputs@.len() == 0 },
                 initial == old(projections)@, begin == initial.len(), begin <= projections@.len(),
                 projections@.take(begin) == initial,
@@ -748,7 +806,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 parsed_index_evidence(*source, *parsed);
                 self.typed_call_arguments_ready(file, entry, definition, reference, max_width, call);
                 build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
-                reveal(argument_result);
             }
             let Some(argument) = next_call_argument(forms, remaining.start..remaining.end) else {
                 proof { assert(false); }
@@ -802,8 +859,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self::record_argument(&call, forms@, wiring, types@, slots, start,
                     root, ordinal, max_width, port, input, checked, Ok(value));
             }
-            let ghost before = values;
-            let ghost prior = visited;
             let ghost previous_projections = projections@;
             if retain {
                 let source = if let Some(typed) = &value {
@@ -822,37 +877,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 };
                 projections.push(projection);
                 assert(projections@.take(begin) =~= initial);
+                proof {
+                    assert(projections@.skip(begin) =~= previous_projections.skip(begin).push(projection));
+                    extend_argument_projections(forms@, wiring, types@, slots, start,
+                        visited, values, previous_projections.skip(begin), root, value, projection);
+                }
             }
             proof {
-                reveal(argument_prefix);
                 following_call_argument(forms@, call.call.call, root as int, argument.end as int);
+                extend_argument_prefix(&call, forms@, wiring, types@, slots, start, max_width,
+                    visited, values, root, argument.end, value);
                 visited = visited.push(root);
                 values = values.push(value);
             }
             if collect {
                 inputs.push(value);
-            }
-            proof {
-                assert forall|i: int| 0 <= i < visited.len() implies {
-                    let this = #[trigger] visited[i] as int;
-                    &&& this == if i == 0 { call.call.call.form + 2 } else { after_argument(forms@, visited[i - 1] as int) }
-                    &&& argument_result(&call, forms@, wiring, types@, slots, start, this as usize,
-                        i as usize, max_width, Ok(values[i]))
-                } by {
-                    if i < ordinal { assert(visited[i] == prior[i] && values[i] == before[i]); }
-                };
-                if retain {
-                    reveal(argument_projections_match);
-                    let collected = projections@.skip(begin);
-                    assert forall|i: int| 0 <= i < collected.len() implies
-                        argument_projection_matches(#[trigger] collected[i], visited[i], forms@, wiring, types@, slots, start, values[i])
-                    by {
-                        if i < ordinal {
-                            assert(collected[i] == previous_projections.skip(begin)[i]);
-                            assert(visited[i] == prior[i] && values[i] == before[i]);
-                        }
-                    };
-                }
             }
             remaining.start = argument.end;
             ordinal += 1;
