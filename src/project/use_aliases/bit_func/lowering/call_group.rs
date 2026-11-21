@@ -16,8 +16,8 @@ use vstd::prelude::*;
 use super::call_arguments::{argument_prefix_wires, argument_wires_ready, layout_argument_ready};
 #[cfg(verus_only)]
 use super::call_arguments::child_calls::{
-    ChildCall, NestedRootEvaluation, child_call_binding, child_call_ready, nested_root_values,
-    nested_root_wiring_result, root_arguments_fit_children,
+    ChildCall, NestedRootEvaluation, child_call_abi, child_call_binding, child_call_ready, child_value_flows_to_root,
+    nested_root_values, nested_root_wiring_result, root_arguments_fit_children, root_port_reads_child,
 };
 #[cfg(verus_only)]
 use super::mixed::resolved_call_fits_body;
@@ -378,6 +378,9 @@ pub(super) proof fn nested_call_group_values<'s, 'p, 'a>(
         gate_values_match(inputs, combined, values), values.len() == combined.len() <= usize::MAX,
         inputs.len() == caller.inputs.total_bits_model(),
         port_bit_layout_result(destination_widths, destination_limit, Ok(caller.definitions)),
+        port_bit_layout_result(selected.template.input_widths_model(), selected.template.bit_limit_model(),
+            Ok(*selected.template.circuit_model().input_layout_model())),
+        selected.arguments@.len() == selected.template.input_widths_model().len(),
         port_bit_layout_result(selected.template.output_widths_model(), selected.template.bit_limit_model(),
             Ok(*selected.template.circuit_model().output_layout_model())),
         selected.template.circuit_model().netlist_model().outputs@.len()
@@ -412,6 +415,9 @@ pub(super) proof fn nested_call_group_values<'s, 'p, 'a>(
             &&& root.mapped.len() == callee.input_layout_model().total_bits_model()
             &&& root.arguments == instance_wire_values(root.mapped, inputs, values)
             &&& nor_evaluation(callee.netlist_model(), root.arguments, root.outputs)
+            &&& forall|port: usize| port < selected.arguments@.len()
+                && selected.arguments@[port as int].source is NestedCall ==>
+                #[trigger] root_port_reads_child(&root, selected.arguments@, callee.input_layout_model(), port, inputs, values)
             &&& forall|port: int, bit: int| 0 <= port < selected.template.output_widths_model().len()
                 && 0 <= bit < selected.template.output_widths_model()[port] ==>
                 #[trigger] call_output_bit_has_value(caller, callee, after.definitions, group.outputs.start, port, bit,
@@ -432,6 +438,8 @@ pub(super) proof fn nested_call_group_values<'s, 'p, 'a>(
             callee.netlist_model(), before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(produced));
     let root = nested_root_values(&invocation, calls, count, selected.arguments@, callee.input_layout_model(),
         callee.netlist_model(), before.gates, after.gates, produced, combined, inputs, values, input_bits);
+    vstd::std_specs::vec::axiom_spec_len(&root.end.table.wires);
+    vstd::std_specs::vec::axiom_spec_len(&selected.children);
     let output_widths = template.output_widths_model();
     let output_layout = callee.output_layout_model();
     let limit = template.bit_limit_model();
@@ -448,6 +456,16 @@ pub(super) proof fn nested_call_group_values<'s, 'p, 'a>(
         assert(0 <= src < produced.len());
         assert(after.definitions[dst] == produced[src]);
         assert(wire_available(produced[src], inputs.len(), values.len()));
+    };
+    assert forall|port: usize| port < selected.arguments@.len()
+        && selected.arguments@[port as int].source is NestedCall implies
+        #[trigger] root_port_reads_child(&root, selected.arguments@, callee.input_layout_model(), port, inputs, values) by {
+        reveal(nested_group_invocation_matches);
+        assert forall|index: int| 0 <= index < calls.len() implies child_call_abi(#[trigger] calls[index]) by {
+            assert(child_call_binding(selected.children@[index], group.references, builtin, calls[index]));
+        };
+        child_value_flows_to_root(&invocation, calls, count, before.gates, &root, selected.arguments@,
+            callee.input_layout_model(), template.input_widths_model(), limit, port, combined, inputs, values, input_bits);
     };
     (calls, invocation, root)
 }

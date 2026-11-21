@@ -1124,6 +1124,71 @@ pub(in crate::project::use_aliases::bit_func::lowering) struct NestedRootEvaluat
     pub(in crate::project::use_aliases::bit_func::lowering) outputs: Seq<bool>,
 }
 
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn root_port_reads_child(
+    root: &NestedRootEvaluation, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
+    port: usize, inputs: Seq<bool>, values: Seq<bool>,
+) -> bool {
+    &&& port < arguments.len() && port < layout.ranges_model().len()
+    &&& arguments[port as int].source matches CallArgumentSource::NestedCall(reference)
+    &&& reference < root.end.table.ranges@.len()
+    &&& root.end.table.ranges@[reference as int] matches Some(range)
+    &&& range.start <= range.end <= root.end.table.wires@.len()
+    &&& port_values(layout, root.arguments)[port as int]
+        == instance_wire_values(root.end.table.wires@.subrange(range.start as int, range.end as int), inputs, values)
+}
+
+/// 子の出力配線を読んだ値が、根の実引数に渡ることを示す。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_value_flows_to_root(
+    caller: &CallerArguments, calls: Seq<ChildCall>, count: usize, initial: Seq<NorGate>, root: &NestedRootEvaluation,
+    arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout, widths: Seq<u64>, limit: usize, port: usize,
+    combined: Seq<NorGate>, inputs: Seq<bool>, values: Seq<bool>, input_bits: usize,
+) -> (child: (usize, Seq<bool>, Seq<bool>))
+    requires
+        child_wiring_trace_matches(caller, calls, calls.len(), count, initial, root.trace, root.end, input_bits),
+        calls.len() <= usize::MAX,
+        child_ranges_match(calls, calls.len(), root.end.table.ranges@),
+        root.end.table.wires@.len() == child_sizes(calls, calls.len()).1 <= usize::MAX,
+        root.end.gates.len() <= combined.len() && root.end.gates == combined.take(root.end.gates.len() as int),
+        gate_values_match(inputs, combined, values), values.len() == combined.len() <= usize::MAX, inputs.len() == input_bits,
+        forall|i: int| 0 <= i < calls.len() ==> child_call_abi(#[trigger] calls[i]),
+        port_bit_layout_result(widths, limit, Ok(*layout)), port < widths.len(), port < arguments.len(),
+        arguments[port as int].source is NestedCall,
+        root_arguments_fit_children(caller, calls, arguments, layout),
+        root.invocation.child_ranges@ == root.end.table.ranges@ && root.invocation.child_wires@ == root.end.table.wires@,
+        argument_prefix_wires(&root.invocation, arguments, layout.ranges_model(), arguments.len() as int, root.mapped),
+        root.mapped.len() == layout.total_bits_model(),
+        root.arguments == instance_wire_values(root.mapped, inputs, values),
+    ensures
+        child.0 < calls.len(),
+        arguments[port as int].source == CallArgumentSource::NestedCall(calls[child.0 as int].reference),
+        nor_evaluation(calls[child.0 as int].circuit, child.1, child.2),
+        port_values(layout, root.arguments)[port as int] == child.2,
+        root_port_reads_child(root, arguments, layout, port, inputs, values),
+{
+    let projected = arguments[port as int];
+    let reference = projected.source->NestedCall_0;
+    port_bit_layout_port(widths, limit, *layout, port);
+    let span = layout.ranges_model()[port as int];
+    let width = (span.end - span.start) as usize;
+    reveal(root_arguments_fit_children);
+    assert(exists|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).reference == reference
+        && calls[i].circuit.outputs@.len() == width);
+    let index = choose|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).reference == reference
+        && calls[i].circuit.outputs@.len() == width;
+    let child_index = index as usize;
+    assert(child_index as int == index);
+    produced_child_argument_ready(calls, calls.len(), root.end.table.ranges@, root.end.table.wires@.len(),
+        index, reference, width);
+    let (argument_values, output_values) = child_output_evaluates(caller, calls, calls.len(), count, initial,
+        root.trace, root.end, child_index, combined, inputs, values, input_bits);
+    lowered_nested_argument_port_value(&root.invocation, arguments, layout, widths, limit, root.mapped, inputs, values,
+        port, reference);
+    let range = root.end.table.ranges@[reference as int]->Some_0;
+    assert(output_values == instance_wire_values(
+        root.end.table.wires@.subrange(range.start as int, range.end as int), inputs, values));
+    (child_index, argument_values, output_values)
+}
+
 /// 根のゲートに対応する区間は、全子を配線した直後から始まる。
 pub(in crate::project::use_aliases::bit_func::lowering) proof fn nested_root_values<'s, 'p, 'a>(
     caller: &CallerArguments<'s, 'p, 'a>, calls: Seq<ChildCall>, count: usize, arguments: Seq<ProjectedCallArgument>,
