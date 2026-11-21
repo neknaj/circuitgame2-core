@@ -197,22 +197,67 @@ pub(super) fn append_instance(
             &&& output_ports_available(mapped@, inputs, final(caller)@.len(), mapped@.len() as int)
         },
 {
+    let mut mapped = Vec::new();
+    proof { vstd::std_specs::vec::axiom_spec_len(&callee.outputs); }
+    if !append_instance_to(caller, callee, arguments, &mut mapped, capacity, Ghost(inputs)) {
+        return None;
+    }
+    assert(mapped@.subrange(0, mapped@.len() as int) =~= mapped@);
+    Some(mapped)
+}
+
+/// ゲートを追加し、既存の配線列の末尾に呼び出し先の出力を並べる。
+/// ゲートの上限を超える場合は、ゲート列と配線列を保つ。
+pub(super) fn append_instance_to(
+    caller: &mut Vec<NorGate>, callee: &NorNetlist, arguments: &[Wire], mapped: &mut Vec<Wire>,
+    capacity: usize, Ghost(inputs): Ghost<nat>,
+) -> (added: bool)
+    requires
+        old(caller)@.len() <= capacity,
+        gates_available(old(caller)@, inputs, old(caller)@.len() as int),
+        nor_evaluation_ready(callee, arguments@.len()),
+        old(mapped)@.len() + callee.outputs@.len() <= usize::MAX,
+        output_ports_available(old(mapped)@, inputs, old(caller)@.len(), old(mapped)@.len() as int),
+        forall|i: int| 0 <= i < arguments@.len() ==>
+            wire_available(#[trigger] arguments@[i], inputs, old(caller)@.len()),
+    ensures
+        added <==> old(caller)@.len() + callee.gates@.len() <= capacity,
+        !added ==> final(caller)@ == old(caller)@ && final(mapped)@ == old(mapped)@,
+        added ==> {
+            let start = old(mapped)@.len() as int;
+            &&& final(mapped)@.len() == start + callee.outputs@.len()
+            &&& final(mapped)@.take(start) == old(mapped)@
+            &&& instance_gates_match(old(caller)@, callee.gates@, arguments@, final(caller)@)
+            &&& gates_available(final(caller)@, inputs, final(caller)@.len() as int)
+            &&& instance_outputs_match(callee.outputs@, arguments@, old(caller)@.len() as usize,
+                final(mapped)@.subrange(start, final(mapped)@.len() as int))
+            &&& output_ports_available(final(mapped)@, inputs, final(caller)@.len(), final(mapped)@.len() as int)
+        },
+{
     let base = caller.len();
     let ghost before = caller@;
     if !append_instance_gates(caller, callee.gates.as_slice(), arguments, capacity, Ghost(inputs)) {
-        return None;
+        return false;
     }
-    let mut mapped: Vec<Wire> = Vec::new();
+    let start = mapped.len();
+    let ghost prior = mapped@;
+    assert(mapped@.take(start as int) =~= prior);
+    assert(mapped@.subrange(start as int, start as int) =~= Seq::<Wire>::empty());
+    assert forall|i: int| 0 <= i < mapped@.len()
+        implies wire_available(#[trigger] mapped@[i], inputs, caller@.len()) by {};
     let mut i = 0;
     while i < callee.outputs.len()
         invariant
             base == before.len(), caller@.len() == base + callee.gates@.len() <= capacity,
-            i == mapped@.len() <= callee.outputs@.len(),
+            i <= callee.outputs@.len(), mapped@.len() == start + i,
+            start == prior.len(), start + callee.outputs@.len() <= usize::MAX,
+            mapped@.take(start as int) == prior,
             nor_evaluation_ready(callee, arguments@.len()),
             instance_gates_match(before, callee.gates@, arguments@, caller@),
             gates_available(caller@, inputs, caller@.len() as int),
-            instance_outputs_match(callee.outputs@.take(i as int), arguments@, base, mapped@),
-            output_ports_available(mapped@, inputs, caller@.len(), i as int),
+            instance_outputs_match(callee.outputs@.take(i as int), arguments@, base,
+                mapped@.subrange(start as int, mapped@.len() as int)),
+            output_ports_available(mapped@, inputs, caller@.len(), mapped@.len() as int),
             forall|j: int| 0 <= j < arguments@.len() ==> wire_available(#[trigger] arguments@[j], inputs, base as nat),
         decreases callee.outputs@.len() - i,
     {
@@ -222,20 +267,27 @@ pub(super) fn append_instance(
         let ghost previous = mapped@;
         mapped.push(wire);
         proof {
-            assert forall|j: int| 0 <= j < mapped@.len() implies {
-                &&& (#[trigger] mapped@[j]) == instance_wire(callee.outputs@[j], arguments@, base)
-                &&& wire_available(mapped@[j], inputs, caller@.len())
-            } by {
+            assert(mapped@.take(start as int) =~= prior);
+            assert forall|j: int| 0 <= j < mapped@.len()
+                implies wire_available(#[trigger] mapped@[j], inputs, caller@.len()) by {
+                if j < previous.len() { assert(mapped@[j] == previous[j]); }
+            };
+            let suffix = mapped@.subrange(start as int, mapped@.len() as int);
+            assert forall|j: int| 0 <= j < suffix.len()
+                implies (#[trigger] suffix[j]) == instance_wire(callee.outputs@[j], arguments@, base) by {
+                assert(suffix[j] == mapped@[start + j]);
                 if j < i {
-                    assert(mapped@[j] == previous[j]);
+                    assert(mapped@[start + j] == previous[start + j]);
+                    assert(previous.subrange(start as int, previous.len() as int)[j] == previous[start + j]);
                     assert(callee.outputs@.take(i as int)[j] == callee.outputs@[j]);
                 }
             };
+            assert forall|j: int| 0 <= j < i + 1 implies callee.outputs@.take(i + 1)[j] == callee.outputs@[j] by {};
         }
         i += 1;
     }
     assert(callee.outputs@.take(i as int) =~= callee.outputs@);
-    Some(mapped)
+    true
 }
 
 pub(super) open spec fn instance_arguments_match(

@@ -1,7 +1,7 @@
 //! 展開に渡す実引数を、呼び出し先の入力ポート順で配線に変換する。
 
 use super::{append_bit_literal_wires, lower_driver_bit};
-use super::super::instances::append_instance;
+use super::super::instances::{append_instance, append_instance_to};
 #[cfg(verus_only)]
 use super::super::expansion::call_literal_bit;
 #[cfg(verus_only)]
@@ -44,6 +44,78 @@ pub(super) struct CallerArguments<'s, 'p, 'a> {
     /// 定義内の参照添字ごとに、展開済みの子の出力配線範囲を保持する。
     pub(super) child_ranges: &'s [Option<Range<usize>>],
     pub(super) child_wires: &'s [Wire],
+}
+
+/// 一つの定義内で展開した子の出力を、参照添字で引くための表。
+pub(super) struct ChildOutputWires {
+    pub(super) ranges: Vec<Option<Range<usize>>>,
+    pub(super) wires: Vec<Wire>,
+}
+
+impl ChildOutputWires {
+    /// 定義に属する参照数に合わせて、空の枠を用意する。
+    pub(super) fn new(references: usize) -> (table: Self)
+        ensures
+            table.ranges@.len() == references,
+            forall|i: int| 0 <= i < references ==> (#[trigger] table.ranges@[i]).is_none(),
+            table.wires@.len() == 0,
+    {
+        let mut ranges: Vec<Option<Range<usize>>> = Vec::new();
+        while ranges.len() < references
+            invariant
+                ranges@.len() <= references,
+                forall|i: int| 0 <= i < ranges@.len() ==> (#[trigger] ranges@[i]).is_none(),
+            decreases references - ranges@.len(),
+        {
+            let ghost previous = ranges@;
+            ranges.push(None);
+            assert forall|i: int| 0 <= i < ranges@.len() implies (#[trigger] ranges@[i]).is_none() by {
+                if i < previous.len() { assert(ranges@[i] == previous[i]); }
+            };
+        }
+        Self { ranges, wires: Vec::new() }
+    }
+
+    /// 子のゲートを展開し、出力の半開範囲を対応する空の枠に記録する。
+    /// ゲート上限を超える場合は、ゲート列と一時配線表を保つ。
+    pub(super) fn append(
+        &mut self, reference: usize, gates: &mut Vec<NorGate>, callee: &NorNetlist, arguments: &[Wire],
+        capacity: usize, Ghost(input_bits): Ghost<usize>,
+    ) -> (added: bool)
+        requires
+            reference < old(self).ranges@.len(), old(self).ranges@[reference as int].is_none(),
+            old(self).wires@.len() + callee.outputs@.len() <= usize::MAX,
+            old(gates)@.len() <= capacity,
+            gates_available(old(gates)@, input_bits as nat, old(gates)@.len() as int),
+            nor_evaluation_ready(callee, arguments@.len()),
+            wires_available(old(self).wires@, input_bits, old(gates)@.len()),
+            wires_available(arguments@, input_bits, old(gates)@.len()),
+        ensures
+            added <==> old(gates)@.len() + callee.gates@.len() <= capacity,
+            !added ==> final(self).ranges@ == old(self).ranges@ && final(self).wires@ == old(self).wires@
+                && final(gates)@ == old(gates)@,
+            added ==> {
+                let start = old(self).wires@.len() as usize;
+                let end = final(self).wires@.len() as usize;
+                &&& end == start + callee.outputs@.len()
+                &&& final(self).ranges@ == old(self).ranges@.update(reference as int, Some(start..end))
+                &&& final(self).wires@.take(start as int) == old(self).wires@
+                &&& instance_outputs_match(callee.outputs@, arguments@, old(gates)@.len() as usize,
+                    final(self).wires@.subrange(start as int, end as int))
+                &&& instance_gates_match(old(gates)@, callee.gates@, arguments@, final(gates)@)
+                &&& gates_available(final(gates)@, input_bits as nat, final(gates)@.len() as int)
+                &&& wires_available(final(self).wires@, input_bits, final(gates)@.len())
+            },
+    {
+        let start = self.wires.len();
+        proof { reveal(wires_available); }
+        if !append_instance_to(gates, callee, arguments, &mut self.wires, capacity, Ghost(input_bits as nat)) {
+            return false;
+        }
+        let end = self.wires.len();
+        self.ranges.set(reference, Some(start..end));
+        true
+    }
 }
 
 pub(super) open spec fn argument_source_available(caller: &CallerArguments, source: CallArgumentSource) -> bool {
@@ -634,19 +706,37 @@ fn nested_argument_uses_the_saved_child_output_range() {
     let aliases = check_use_aliases(&targets).unwrap();
     let plan = aliases.prepare_function_expansion().unwrap();
     let prepared = aliases.prepare_expansion_body(&plan, 0, 2, 8).unwrap();
+    let arguments = &prepared.projections.call_arguments.arguments[prepared.calls[0].arguments.clone()];
+    let CallArgumentSource::NestedCall(reference) = arguments[0].source else { panic!("expected a child call"); };
+    let mut children = ChildOutputWires::new(2);
+    let mut gates = Vec::new();
+    let instance = NorNetlist {
+        input_count: 2,
+        gates: alloc::vec![NorGate { left: Wire::Input(0), right: Wire::Input(0) }],
+        outputs: alloc::vec![Wire::Input(1), Wire::Gate(0)],
+    };
+    let child_arguments = [Wire::Input(0), Wire::Input(1)];
+    let added = children.append(reference, &mut gates, &instance, &child_arguments, 0, Ghost(2usize));
+    assert!(!added);
+    assert!(children.ranges[reference].is_none() && children.wires.is_empty() && gates.is_empty());
+    let added = children.append(reference, &mut gates, &instance, &child_arguments, 1, Ghost(2usize));
+    assert!(added);
+    assert_eq!(children.ranges[reference], Some(0..2));
+
     let mut caller = CallerArguments {
         source: &project.sources()[0], forms: &project.circuits()[0].syntax.forms,
-        inputs: &[], definitions: &[], wires: &[], child_ranges: &[None, Some(1..3)],
-        child_wires: &[Wire::Constant(false), Wire::Input(1), Wire::Input(0)],
+        inputs: &[], definitions: &[], wires: &[], child_ranges: &children.ranges,
+        child_wires: &children.wires,
     };
-    let arguments = &prepared.projections.call_arguments.arguments[prepared.calls[0].arguments.clone()];
     let layout = PortBitLayout::from_widths(&[2], 8).unwrap();
     let wires = lower_call_arguments(&caller, arguments, &layout,
-        Ghost(seq![2u64]), Ghost(8usize), Ghost(2usize), Ghost(0nat)).unwrap();
-    assert!(matches!(wires.as_slice(), [Wire::Input(1), Wire::Input(0)]));
+        Ghost(seq![2u64]), Ghost(8usize), Ghost(2usize), Ghost(1nat)).unwrap();
+    assert!(matches!(wires.as_slice(), [Wire::Input(1), Wire::Gate(0)]));
+    let parent_wiring = NorNetlist { input_count: 2, gates, outputs: wires };
+    assert_eq!(parent_wiring.evaluate(&[true, true]).unwrap(), [true, false]);
     caller.child_ranges = &[None, None];
     let site = lower_call_arguments(&caller, arguments, &layout,
-        Ghost(seq![2u64]), Ghost(8usize), Ghost(2usize), Ghost(0nat)).unwrap_err();
+        Ghost(seq![2u64]), Ghost(8usize), Ghost(2usize), Ghost(1nat)).unwrap_err();
     assert_eq!(&site.source.text[site.span], "(id a)");
 }
 
