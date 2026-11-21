@@ -465,6 +465,65 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             caller, calls[i], #[trigger] projections.ranges@[i], ends)
     }
 
+    /// 候補の定義範囲と、根の参照が保持する2引数を取り出す。
+    pub(in crate::project::use_aliases) proof fn retained_nested_nor_root(
+        &self, caller: (usize, usize, u64), types: Seq<Option<SignalType>>, wiring: &FuncWiring,
+        projections: &CallArgumentProjections, calls: Seq<RootFunctionCall>, index: int,
+    ) -> (arguments: Range<usize>)
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*wiring))),
+            self.projected_references_match(caller, types, wiring, projections, calls),
+            0 <= index < projections.nested_nor_roots@.len(),
+        ensures ({
+            let (file, entry, limit) = caller;
+            let parsed = &self.targets.project_model().circuits_model()[file as int];
+            let frame = parsed.entry_ranges@[entry as int];
+            let absolute = projections.nested_nor_roots@[index];
+            let row = parsed.definitions@[absolute as int];
+            let definition = (absolute - frame.definitions.start) as usize;
+            let key = row.references.start - frame.references.start;
+            &&& frame.definitions.start <= absolute < frame.definitions.end <= parsed.definitions@.len()
+            &&& row.references.start < row.references.end <= parsed.references@.len()
+            &&& parsed.references@[row.references.start as int].kind is Callee
+            &&& parsed.references@[row.references.start as int].form == row.expression.start + 1
+            &&& 0 <= key < projections.reference_argument_ends@.len()
+            &&& arguments.start == if key == 0 { 0 } else { projections.reference_argument_ends@[key - 1] }
+            &&& arguments.end == projections.reference_argument_ends@[key]
+            &&& arguments.start + 2 == arguments.end <= projections.arguments@.len()
+            &&& (projections.arguments@[arguments.start as int].source is NestedCall
+                || projections.arguments@[arguments.start + 1].source is NestedCall)
+            &&& self.retained_call_target_matches(file, entry, definition, 0, limit, Some(RetainedCallTarget::Nor))
+        }),
+    {
+        reveal(UseAliases::projected_references_match);
+        reveal(UseAliases::nested_nor_roots_match);
+        let (file, entry, limit) = caller;
+        self.targets.parsed_project_model();
+        self.checked_wiring_is_func(file, entry, limit, *wiring);
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        parsed_index_evidence(*source, *parsed);
+        build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        let frame = parsed.entry_ranges@[entry as int];
+        let roots = projections.nested_nor_roots@;
+        let absolute = roots[index];
+        assert(roots.contains(absolute));
+        assert(Self::is_nested_nor_root(parsed, frame.references.start, absolute,
+            projections.reference_argument_ends@, projections.arguments@, projections.reference_targets@));
+        reveal(UseAliases::is_nested_nor_root);
+        let row = parsed.definitions@[absolute as int];
+        let definition = (absolute - frame.definitions.start) as usize;
+        let count = reference_count(parsed, entry as int, definition as int);
+        reveal(UseAliases::projected_definitions_before);
+        self.projected_reference_range_evidence(caller, types, wiring, definition, count, 0,
+            projections.reference_argument_ends@, projections.arguments@, projections.reference_targets@);
+        let key = row.references.start - frame.references.start;
+        let start = Self::argument_boundary(projections.reference_argument_ends@, key) as usize;
+        start..projections.reference_argument_ends@[key]
+    }
+
     #[verifier::opaque]
     spec fn projected_definitions_before(
         &self, caller: (usize, usize, u64), types: Seq<Option<SignalType>>, wiring: &FuncWiring,
@@ -835,6 +894,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    #[verifier::spinoff_prover]
     #[verifier::rlimit(96)]
     pub(in crate::project::use_aliases) fn check_all_inputs_with_types(
         &self, file: usize, entry: usize, max_width: u64,
@@ -986,10 +1046,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         projections.reference_targets@);
                 }
             }
-            if retain {
-                self.record_nested_nor_root(source.text, parsed, absolute, reference_start, start, projections,
-                    Ghost(caller), Ghost(types@), Ghost(wiring), Ghost(&old_projections));
-            }
             if retain_root {
                 let span = start..projections.reference_argument_ends[reference_start];
                 proof {
@@ -1021,6 +1077,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     }
                 };
                 self.extend_input_definitions(file, entry, definition, max_width, types@, wiring);
+            }
+            if retain {
+                self.record_nested_nor_root(source.text, parsed, absolute, reference_start, start, projections,
+                    Ghost(caller), Ghost(types@), Ghost(wiring), Ghost(&old_projections));
             }
             definition += 1;
         }

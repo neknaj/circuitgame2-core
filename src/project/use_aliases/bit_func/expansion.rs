@@ -19,7 +19,7 @@ use crate::project::circuits::form_location;
 use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
-use crate::syntax::circuit::postorder_call_references;
+use crate::syntax::circuit::{definition_root_is_call, postorder_call_references};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     call_postorder_positions, call_postorder_reference, call_postorder_references_distinct, call_references_in_postorder,
@@ -121,11 +121,22 @@ pub(super) struct CheckedExpansionCall<'p, 'a> {
     pub(super) _order: Ghost<(int, int)>,
 }
 
+/// 入れ子の引数を持つ基底 NOR の根と、その定義に属する子呼び出し。
+pub(super) struct PreparedNorRoot<'p, 'a> {
+    /// ファイルの定義配列を参照する添字。
+    pub(super) definition: usize,
+    pub(super) root: PreparedExpressionCall<'p, 'a>,
+    pub(super) postorder: Vec<PreparedExpressionCall<'p, 'a>>,
+    pub(super) _caller_rank: Ghost<int>,
+}
+
 /// 通常呼び出しを展開する前の関数本体と、型検査から得た各呼び出しの位置。
 pub(super) struct PreparedExpansionBody<'p, 'a> {
     pub(super) typed: FuncSignalTypes<'p, 'a>,
     pub(super) projections: FuncProjections<'p, 'a>,
     pub(super) calls: Vec<CheckedExpansionCall<'p, 'a>>,
+    /// 根 NOR の候補索引と同じ定義順に並ぶ。
+    pub(super) nor_roots: Vec<PreparedNorRoot<'p, 'a>>,
 }
 
 pub(super) open spec fn expansion_parent_range(group: &CheckedExpansionCall, children: Seq<PreparedExpressionCall>, parent: int)
@@ -2139,6 +2150,143 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         groups
     }
 
+    /// 根と子が、同じ厳格構文木と型検査済み引数を参照することを表す。
+    pub(super) closed spec fn prepared_nor_root_matches(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), types: Seq<Option<SignalType>>,
+        wiring: &FuncWiring, projections: &CallArgumentProjections, absolute: usize, prepared: PreparedNorRoot,
+    ) -> bool {
+        let (file, entry, _) = caller;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let frame = parsed.entry_ranges@[entry as int];
+        let row = parsed.definitions@[absolute as int];
+        let definition = (absolute - frame.definitions.start) as usize;
+        let range = prepared.root.arguments;
+        let rank = prepared._caller_rank@;
+        &&& frame.definitions.start <= absolute < frame.definitions.end <= parsed.definitions@.len()
+        &&& prepared.definition == absolute
+        &&& 0 <= rank < plan.order_model().len() && plan.position_model(rank) == Some((file, entry))
+        &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text, parsed.syntax.forms@,
+            row.expression.start as int, row.expression.end as int)
+        &&& prepared.root.reference == row.references.start
+        &&& prepared.root._signature@.call.call.form == row.expression.start
+        &&& prepared.root._signature@.call.target is Nor
+        &&& prepared.root._signature@.signature is Nor
+        &&& prepared.root.vertex.is_none() && prepared.root._rank@.is_none()
+        &&& self.prepared_expression_call_matches(plan, caller, definition, projections, types, wiring, rank, prepared.root)
+        &&& range.start + 2 == range.end <= projections.arguments@.len()
+        &&& (projections.arguments@[range.start as int].source is NestedCall
+            || projections.arguments@[range.start + 1].source is NestedCall)
+        &&& prepared.postorder@.len() > 0
+        &&& self.prepared_expression_children_match(plan, caller, definition, projections, types, wiring,
+            rank, prepared.postorder@)
+    }
+
+    fn prepare_nested_nor_roots(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, _limit: u64,
+        _typed: &FuncSignalTypes<'p, 'a>, _wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
+    ) -> (roots: Vec<PreparedNorRoot<'p, 'a>>)
+        requires
+            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*_wiring))),
+            self.projected_references_match((file, entry, _limit), _typed.types@, _wiring,
+                &projections.call_arguments, projections.calls@),
+        ensures
+            roots@.len() == projections.call_arguments.nested_nor_roots@.len(),
+            forall|i: int| 0 <= i < roots@.len() ==> self.prepared_nor_root_matches(*plan, (file, entry, _limit),
+                _typed.types@, _wiring, &projections.call_arguments, projections.call_arguments.nested_nor_roots@[i],
+                #[trigger] roots@[i]),
+    {
+        let ghost caller = (file, entry, _limit);
+        let ghost rank = self.checked_function_rank(*plan, caller, *_wiring);
+        proof { self.checked_wiring_is_func(file, entry, _limit, *_wiring); }
+        let project = self.targets.project();
+        let parsed = &project.circuits()[file];
+        let source = &project.sources()[file];
+        proof {
+            parsed_index_evidence(*source, *parsed);
+            build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        }
+        let first = parsed.entry_ranges[entry].definitions.start;
+        let indices = &projections.call_arguments.nested_nor_roots;
+        let mut roots = Vec::new();
+        let mut index = 0;
+        while index < indices.len()
+            invariant
+                self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.func_wiring_evidence(file, entry, _limit, Ok(FuncWiringResult::Checked(*_wiring))),
+                caller == (file, entry, _limit),
+                0 <= rank < plan.order_model().len(), plan.position_model(rank) == Some((file, entry)),
+                file < self.targets.project_model().circuits_model().len(),
+                file < self.targets.project_model().sources_model().len(),
+                *parsed == self.targets.project_model().circuits_model()[file as int],
+                *source == self.targets.project_model().sources_model()[file as int],
+                crate::syntax::circuit::build_index_matches(source.text, parsed.build_model()),
+                parsed_circuit_matches(*source, *parsed), entry < parsed.syntax.entries@.len(),
+                entry < parsed.entry_ranges@.len(), first == parsed.entry_ranges@[entry as int].definitions.start,
+                indices@ == projections.call_arguments.nested_nor_roots@,
+                self.projected_references_match(caller, _typed.types@, _wiring, &projections.call_arguments, projections.calls@),
+                roots@.len() == index <= indices@.len(),
+                forall|i: int| 0 <= i < roots@.len() ==> self.prepared_nor_root_matches(*plan, caller, _typed.types@,
+                    _wiring, &projections.call_arguments, indices@[i], #[trigger] roots@[i]),
+            decreases indices@.len() - index,
+        {
+            let absolute = indices[index];
+            let ghost arguments = self.retained_nested_nor_root(caller, _typed.types@, _wiring,
+                &projections.call_arguments, projections.calls@, index as int);
+            proof {
+                build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+            }
+            let row = &parsed.definitions[absolute];
+            if !definition_root_is_call(source.text, parsed.syntax.forms.as_slice(), row, parsed.references.as_slice()) {
+                proof { assert(false); }
+                unreachable!();
+            }
+            let definition = absolute - first;
+            let (root, postorder) = self.prepare_root_expression(plan, file, entry, definition, projections,
+                Ghost((_limit, _typed.types@, _wiring, rank)));
+            let ghost projected = projections.call_arguments.arguments@.subrange(arguments.start as int, arguments.end as int);
+            let ghost port = if projected[0].source is NestedCall { 0int } else { 1int };
+            proof {
+                reveal(UseAliases::prepared_expression_call_matches);
+                self.retained_target_agrees_with_call(file, entry, definition, 0, _limit, Some(RetainedCallTarget::Nor),
+                    root._signature@);
+                self.typed_call_arguments_ready(file, entry, definition, 0, _limit, root._signature@);
+                assert(root.arguments == arguments);
+                assert(projected[port] == projections.call_arguments.arguments@[arguments.start + port]);
+                self.checked_projected_argument((file, entry, definition, 0), _limit, _typed.types@, _wiring,
+                    root._signature@, projected, port);
+                let child_form = projected[port].form;
+                let reference = projected[port].source->NestedCall_0;
+                crate::syntax::circuit::direct_call_argument_bounds(parsed.syntax.forms@,
+                    root._signature@.call.call, child_form as int);
+                assert(self.func_call_form_reference(file, entry, definition, child_form, reference));
+                assert(reference > 0);
+                assert(row.references.start + 1 < row.references.end);
+            }
+            let Some(postorder) = postorder else {
+                proof { assert(false); }
+                unreachable!();
+            };
+            proof {
+                self.prepared_nested_argument(*plan, caller, definition, &projections.call_arguments, _typed.types@,
+                    _wiring, rank, postorder@, postorder@.len() as int, 0, root._signature@, projected, port);
+                assert(postorder@.len() > 0);
+            }
+            let prepared = PreparedNorRoot { definition: absolute, root, postorder, _caller_rank: Ghost(rank) };
+            assert(self.prepared_nor_root_matches(*plan, caller, _typed.types@, _wiring, &projections.call_arguments,
+                absolute, prepared)) by { reveal(UseAliases::prepared_nor_root_matches); };
+            let ghost before = roots@;
+            roots.push(prepared);
+            assert forall|i: int| 0 <= i < roots@.len() implies self.prepared_nor_root_matches(*plan, caller, _typed.types@,
+                _wiring, &projections.call_arguments, indices@[i], #[trigger] roots@[i]) by {
+                if i < index { assert(roots@[i] == before[i]); }
+            };
+            index += 1;
+        }
+        roots
+    }
+
     pub(super) open spec fn prepared_expansion_body_matches(
         &self, plan: FunctionExpansionOrder, file: usize, entry: usize, limit: u64, body: &PreparedExpansionBody,
     ) -> bool {
@@ -2166,6 +2314,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& body.projections.call_arguments.ranges@.len() == body.calls@.len()
         &&& self.projected_references_match((file, entry, limit), body.typed.types@, &wiring,
             &body.projections.call_arguments, body.projections.calls@)
+        &&& body.nor_roots@.len() == body.projections.call_arguments.nested_nor_roots@.len()
+        &&& forall|i: int| 0 <= i < body.nor_roots@.len() ==> self.prepared_nor_root_matches(plan, (file, entry, limit),
+            body.typed.types@, &wiring, &body.projections.call_arguments,
+            body.projections.call_arguments.nested_nor_roots@[i], #[trigger] body.nor_roots@[i])
         &&& forall|i: int| 0 <= i < body.calls@.len() ==> self.checked_expansion_call_matches(plan, (file, entry, limit),
             body.typed, &wiring, body.projections.calls@[i], body.projections.call_arguments.ranges@[i],
             &body.projections.call_arguments, #[trigger] body.calls@[i])
@@ -2187,7 +2339,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 構文と型を検査し、通常呼び出しを一回ずつ展開できる形で保持する。
+    /// 構文と型を検査し、通常呼び出しと入れ子の引数を持つ根 NOR を展開用に保持する。
     pub(super) fn prepare_expansion_body(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
     ) -> (result: Result<PreparedExpansionBody<'p, 'a>, BitFuncError<'p, 'a>>)
@@ -2207,7 +2359,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 super::super::function_atoms::copy_location(site))),
         };
         let calls = self.check_expansion_call_groups(plan, file, entry, limit, &typed, wiring, &projections);
-        Ok(PreparedExpansionBody { typed, projections, calls })
+        proof { self.checked_types_keep_wiring(file, entry, limit, typed, *wiring); }
+        let nor_roots = self.prepare_nested_nor_roots(plan, file, entry, limit, &typed, wiring, &projections);
+        Ok(PreparedExpansionBody { typed, projections, calls, nor_roots })
     }
 }
 
@@ -2217,28 +2371,40 @@ fn prepares_a_nor_root_without_a_function_vertex() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
 
     let text = "(using nor) (func id (in a) (out a))
-                (func caller (in a) (out y) (def y (nor (id a) a)))";
+                (func caller (in a) (out y) (def y (nor (id a) a)))
+                (func only-nor (in a) (out y) (def y (nor (nor a a) a)))";
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "root-nor.ncg2", revision: 1, text,
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
     let plan = aliases.prepare_function_expansion().unwrap();
-    let (typed, projections) = aliases.check_func_signal_projections(0, 2, 1, false, true).unwrap();
-    let FuncWiringResult::Checked(_wiring) = &typed.literals.wiring else {
-        panic!("expected checked wiring");
+    let prepared = aliases.prepare_expansion_body(&plan, 0, 2, 1).unwrap();
+    let [group] = prepared.nor_roots.as_slice() else {
+        panic!("expected one NOR root");
     };
-    let (root, children) = aliases.prepare_root_expression(&plan, 0, 2, 0, &projections,
-        Ghost((1u64, typed.types@, _wiring, 1int)));
-    assert_eq!(&text[root.expression.span], "(nor (id a) a)");
+    assert_eq!(group.definition, project.circuits()[0].entry_ranges[2].definitions.start);
+    let root = &group.root;
+    let children = &group.postorder;
+    assert_eq!(&text[root.expression.span.clone()], "(nor (id a) a)");
     assert!(root.vertex.is_none());
     assert_eq!(root.arguments, 0..2);
-    let [child] = children.as_deref().unwrap() else {
+    let [child] = children.as_slice() else {
         panic!("expected one child call");
     };
     assert_eq!(&text[child.expression.span.clone()], "(id a)");
     assert_eq!(child.vertex, plan.template_vertex((0, 1)));
     assert_eq!(child.arguments, 2..3);
+    let only_nor = aliases.prepare_expansion_body(&plan, 0, 3, 1).unwrap();
+    let [group] = only_nor.nor_roots.as_slice() else {
+        panic!("expected one NOR root without function dependencies");
+    };
+    assert!(group.root.vertex.is_none());
+    let [child] = group.postorder.as_slice() else {
+        panic!("expected one NOR child");
+    };
+    assert_eq!(&text[child.expression.span.clone()], "(nor a a)");
+    assert!(child.vertex.is_none());
 }
 
 } // verus!
