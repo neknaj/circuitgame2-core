@@ -4,7 +4,7 @@
 mod source_evaluation;
 mod body;
 #[cfg(verus_only)]
-pub(super) use body::argument_matches_width;
+pub(super) use body::{argument_matches_width, call_covers};
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -750,6 +750,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& self.structure_layout_for_ports(limit, table)
         &&& self.port_widths_match(signature.inputs@, inputs, table)
         &&& self.port_widths_match(signature.outputs@, outputs, table)
+    }
+
+    pub(super) proof fn template_port_counts(
+        &self, signature: TypedRoutineSignature, limit: u64, inputs: Seq<u64>, outputs: Seq<u64>,
+        layouts: Option<StructureLayouts>,
+    )
+        requires self.template_port_widths_match(signature, limit, inputs, outputs, layouts),
+        ensures inputs.len() == signature.inputs@.len(), outputs.len() == signature.outputs@.len(),
+    {
+        reveal(UseAliases::template_port_widths_match);
     }
 
     /// 呼び出し先のポート幅を、呼び出し元で使う検査済みの配置表へ引き継ぐ。

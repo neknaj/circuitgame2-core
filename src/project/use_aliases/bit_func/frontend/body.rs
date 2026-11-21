@@ -36,7 +36,7 @@ pub(in crate::project::use_aliases::bit_func) open spec fn argument_matches_widt
     }
 }
 
-pub(super) open spec fn call_covers(calls: Seq<CheckedExpansionCall>, at: int) -> bool {
+pub(in crate::project::use_aliases::bit_func) open spec fn call_covers(calls: Seq<CheckedExpansionCall>, at: int) -> bool {
     exists|group: int| 0 <= group < calls.len()
         && (#[trigger] calls[group]).outputs.start <= at < calls[group].outputs.end
 }

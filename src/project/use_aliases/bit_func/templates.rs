@@ -274,6 +274,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& selected.arguments@ == prepared.projections.call_arguments.arguments@.subrange(
             group.arguments.start as int, group.arguments.end as int)
         &&& selected.arguments@.len() == selected.template.signature_model().inputs@.len()
+        &&& selected.arguments@.len() == selected.template.input_widths_model().len()
         &&& 0 <= group._order@.0 < group._order@.1 < plan.order_model().len()
         &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
         &&& group.vertex == plan.order_model()[group._order@.0]
@@ -328,6 +329,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let template = self.template_for_expansion_call(plan, table, group, Ghost(caller), Ghost(&prepared), Ghost(index as int));
             let inputs = slice_subrange(arguments, group.arguments.start, group.arguments.end);
             let call = ResolvedTemplateCall { group, arguments: inputs, template };
+            proof {
+                let target = plan.position_model(group._order@.0)->Some_0;
+                self.template_port_evidence(target, caller.2, template);
+                self.template_port_counts(template.signature_model(), caller.2, template.input_widths_model(),
+                    template.output_widths_model(), template.structure_layouts_model());
+            }
             assert(self.resolved_template_call_matches(plan, caller, &prepared, index as int, call));
             let ghost previous = selected@;
             selected.push(call);

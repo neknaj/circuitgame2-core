@@ -5,7 +5,7 @@ use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 use super::super::templates::ResolvedTemplateCall;
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
-use super::super::frontend::argument_matches_width;
+use super::super::frontend::{argument_matches_width, call_covers};
 #[cfg(verus_only)]
 use super::super::super::call_arity::CallArgumentSource;
 use super::super::super::call_arity::ProjectedCallArgument;
@@ -123,6 +123,31 @@ proof fn call_argument_bits_available(
     }
 }
 
+pub(super) open spec fn resolved_call_fits_body(
+    call: ResolvedTemplateCall, body: &LoweringBody, forms: Seq<Form>, limit: u64,
+) -> bool {
+    let first = call.group.outputs.start;
+    let end = call.group.outputs.end;
+    let outputs = call.template.output_widths_model();
+    let inputs = call.template.input_widths_model();
+    &&& form_spans_valid(call.group.expression.source.text, forms, call.group.expression.source.text.spec_bytes().len() as int)
+    &&& first < end <= body.definitions@.len()
+    &&& first + outputs.len() == end
+    &&& forall|i: int| 0 <= i < outputs.len() ==> body.definitions@[first + i].width == #[trigger] outputs[i]
+    &&& forall|port: int| 0 <= port < call.arguments@.len() ==>
+        argument_matches_width(call.group.expression.source, forms, body.input_widths@, body.definitions@.take(first as int),
+            #[trigger] call.arguments@[port], inputs[port], limit)
+}
+
+pub(super) open spec fn binding_matches_selection(binding: CallBinding, call: ResolvedTemplateCall) -> bool {
+    &&& binding.group == call.group
+    &&& binding.arguments == call.arguments
+    &&& binding.callee == call.template.circuit_model()
+    &&& binding._input_widths@ == call.template.input_widths_model()
+    &&& binding._output_widths@ == call.template.output_widths_model()
+    &&& binding._layout_limit@ == call.template.bit_limit_model()
+}
+
 /// 選択した呼び出し先と元の実引数を借り、配線生成に渡す。
 pub(super) fn bind_resolved_call<'s, 'p, 'a>(
     _aliases: &UseAliases<'_, 'p, 'a>, selected: &ResolvedTemplateCall<'s, 'p, 'a>, _body: &LoweringBody,
@@ -132,24 +157,9 @@ pub(super) fn bind_resolved_call<'s, 'p, 'a>(
     requires
         _aliases.resolved_template_call_matches(context.0, context.1, context.2, context.3, *selected),
         body_definition_layouts(_body.input_widths@, _body.definitions@, capacity, _layouts),
-        form_spans_valid(selected.group.expression.source.text, forms,
-            selected.group.expression.source.text.spec_bytes().len() as int),
-        selected.group.outputs.start < selected.group.outputs.end <= _body.definitions@.len(),
-        selected.group.outputs.start + selected.template.output_widths_model().len() == selected.group.outputs.end,
-        selected.arguments@.len() == selected.template.input_widths_model().len(),
-        forall|i: int| 0 <= i < selected.template.output_widths_model().len() ==>
-            _body.definitions@[selected.group.outputs.start + i].width == #[trigger] selected.template.output_widths_model()[i],
-        forall|port: int| 0 <= port < selected.arguments@.len() ==>
-            argument_matches_width(selected.group.expression.source, forms, _body.input_widths@,
-                _body.definitions@.take(selected.group.outputs.start as int), #[trigger] selected.arguments@[port],
-                selected.template.input_widths_model()[port], context.1.2),
+        resolved_call_fits_body(*selected, _body, forms, context.1.2),
     ensures
-        binding.group == selected.group,
-        binding.arguments == selected.arguments,
-        binding.callee == selected.template.circuit_model(),
-        binding._input_widths@ == selected.template.input_widths_model(),
-        binding._output_widths@ == selected.template.output_widths_model(),
-        binding._layout_limit@ == selected.template.bit_limit_model(),
+        binding_matches_selection(binding, *selected),
         binding_ready(binding, _layouts, forms, definition_widths(_body.definitions@)),
 {
     let template = selected.template;
@@ -177,6 +187,53 @@ pub(super) fn bind_resolved_call<'s, 'p, 'a>(
         };
     }
     binding
+}
+
+/// 元の定義順を保ち、選択済みの各呼び出しを配線生成用の参照に変換する。
+fn bind_resolved_calls<'s, 'p, 'a>(
+    aliases: &UseAliases<'_, 'p, 'a>, selected: &[ResolvedTemplateCall<'s, 'p, 'a>], body: &LoweringBody,
+    layouts: &Layouts, Ghost(forms): Ghost<Seq<Form>>, Ghost(capacity): Ghost<usize>,
+    Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>)>,
+) -> (bindings: Vec<CallBinding<'s, 'p, 'a>>)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        forall|index: int| 0 <= index < selected@.len() ==> {
+            let call = #[trigger] selected@[index];
+            &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, index, call)
+            &&& resolved_call_fits_body(call, body, forms, context.1.2)
+        },
+    ensures
+        bindings@.len() == selected@.len(),
+        forall|index: int| 0 <= index < bindings@.len() ==> {
+            let binding = #[trigger] bindings@[index];
+            &&& binding_matches_selection(binding, selected@[index])
+            &&& binding_ready(binding, layouts, forms, definition_widths(body.definitions@))
+        },
+{
+    let mut bindings = Vec::new();
+    let mut index = 0;
+    while index < selected.len()
+        invariant
+            index == bindings@.len() <= selected@.len(),
+            body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+            forall|i: int| 0 <= i < selected@.len() ==> {
+                let call = #[trigger] selected@[i];
+                &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, i, call)
+                &&& resolved_call_fits_body(call, body, forms, context.1.2)
+            },
+            forall|i: int| 0 <= i < bindings@.len() ==> {
+                let binding = #[trigger] bindings@[i];
+                &&& binding_matches_selection(binding, selected@[i])
+                &&& binding_ready(binding, layouts, forms, definition_widths(body.definitions@))
+            },
+        decreases selected@.len() - index,
+    {
+        let binding = bind_resolved_call(aliases, &selected[index], body, layouts, Ghost(forms), Ghost(capacity),
+            Ghost((context.0, context.1, context.2, index as int)));
+        bindings.push(binding);
+        index += 1;
+    }
+    bindings
 }
 
 pub(super) open spec fn ordered_bindings(bindings: Seq<CallBinding>) -> bool {
@@ -450,6 +507,31 @@ pub(super) fn lower_mixed_body<'s, 'p, 'a>(
     Ok((state, Ghost(steps)))
 }
 
+pub(super) open spec fn mixed_function_result(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    output_widths: Seq<u64>, output_drivers: Seq<OutputDriver>, gate_limit: usize,
+    result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError>,
+) -> bool {
+    match result {
+        Ok((value, steps)) => {
+            &&& value.layouts == *layouts
+            &&& value.netlist.input_count == layouts.inputs.total_bits_model()
+            &&& value.netlist.outputs@.len() == layouts.outputs.total_bits_model()
+            &&& value.definition_wires@.len() == layouts.definitions.total_bits_model()
+            &&& value.netlist.gates@.len() == value.gate_definitions@.len() <= gate_limit
+            &&& nor_evaluation_ready(&value.netlist, layouts.inputs.total_bits_model() as nat)
+            &&& body_output_wiring_matches(output_drivers, layouts, value.definition_wires@, value.netlist.outputs@,
+                output_widths.len() as int)
+            &&& mixed_trace(body, layouts, forms, bindings, gate_limit, steps@, body.definitions@.len() as usize,
+                bindings.len() as usize, WiringView { definitions: value.definition_wires@,
+                    gates: value.netlist.gates@, origins: value.gate_definitions@ })
+        },
+        Err(error) => exists|steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView|
+            #[trigger] mixed_trace(body, layouts, forms, bindings, gate_limit, steps, slot, group, wiring)
+            && mixed_error_at(body, layouts, forms, bindings, gate_limit, wiring, slot, group, error),
+    }
+}
+
 /// 変換済みの定義から宣言順に出力を結線し、評価できるネットリストを返す。
 ///
 /// # Errors
@@ -471,24 +553,7 @@ pub(super) fn lower_mixed_function<'s, 'p, 'a>(
             #[trigger] bindings@[g], &layouts, forms@, definition_widths(body.definitions@)),
         forall|slot: int| 0 <= slot < body.definitions@.len() && !binding_covers(bindings@, slot) ==>
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
-    ensures match result {
-        Ok((value, steps)) => {
-            &&& value.layouts == layouts
-            &&& value.netlist.input_count == layouts.inputs.total_bits_model()
-            &&& value.netlist.outputs@.len() == layouts.outputs.total_bits_model()
-            &&& value.definition_wires@.len() == layouts.definitions.total_bits_model()
-            &&& value.netlist.gates@.len() == value.gate_definitions@.len() <= gate_limit
-            &&& nor_evaluation_ready(&value.netlist, layouts.inputs.total_bits_model() as nat)
-            &&& body_output_wiring_matches(output_drivers@, &layouts, value.definition_wires@, value.netlist.outputs@,
-                output_widths@.len() as int)
-            &&& mixed_trace(body, &layouts, forms@, bindings@, gate_limit, steps@, body.definitions@.len() as usize,
-                bindings@.len() as usize, WiringView { definitions: value.definition_wires@,
-                    gates: value.netlist.gates@, origins: value.gate_definitions@ })
-        },
-        Err(error) => exists|steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView|
-            #[trigger] mixed_trace(body, &layouts, forms@, bindings@, gate_limit, steps, slot, group, wiring)
-            && mixed_error_at(body, &layouts, forms@, bindings@, gate_limit, wiring, slot, group, error),
-    },
+    ensures mixed_function_result(body, &layouts, forms@, bindings@, output_widths@, output_drivers@, gate_limit, result),
 {
     let (state, Ghost(steps)) = match lower_mixed_body(body, &layouts, forms, bindings, layout_limit, gate_limit) {
         Ok(lowered) => lowered,
@@ -505,9 +570,99 @@ pub(super) fn lower_mixed_function<'s, 'p, 'a>(
     let lowered = LoweredBitFunc { netlist, layouts, definition_wires: state.definitions, gate_definitions: state.origins };
     Ok((lowered, Ghost(steps)))
 }
+pub(super) open spec fn bindings_match_calls(
+    bindings: Seq<CallBinding>, selected: Seq<ResolvedTemplateCall>,
+) -> bool {
+    &&& bindings.len() == selected.len()
+    &&& forall|i: int| 0 <= i < bindings.len() ==> binding_matches_selection(#[trigger] bindings[i], selected[i])
+}
+
+/// 呼び出しを借用する前後で、各定義が属する呼び出しとその順序が等しいことを示す。
+proof fn bindings_preserve_definition_order(
+    bindings: Seq<CallBinding>, calls: Seq<CheckedExpansionCall>,
+)
+    requires
+        bindings.len() == calls.len(),
+        forall|i: int| 0 <= i < bindings.len() ==> *(#[trigger] bindings[i]).group == calls[i],
+        forall|a: int, b: int| 0 <= a < b < calls.len() ==>
+            (#[trigger] calls[a]).outputs.end <= (#[trigger] calls[b]).outputs.start,
+    ensures
+        ordered_bindings(bindings),
+        forall|slot: int| #[trigger] binding_covers(bindings, slot) <==> call_covers(calls, slot),
+{
+    assert forall|a: int, b: int| 0 <= a < b < bindings.len() implies
+        (#[trigger] bindings[a]).group.outputs.end <= (#[trigger] bindings[b]).group.outputs.start by {
+        assert(calls[a].outputs.end <= calls[b].outputs.start);
+    };
+    assert forall|slot: int| #[trigger] binding_covers(bindings, slot) <==> call_covers(calls, slot) by {
+        if binding_covers(bindings, slot) {
+            let g = choose|g: int| 0 <= g < bindings.len()
+                && (#[trigger] bindings[g]).group.outputs.start <= slot < bindings[g].group.outputs.end;
+            assert(calls[g].outputs.start <= slot < calls[g].outputs.end);
+        }
+        if call_covers(calls, slot) {
+            let g = choose|g: int| 0 <= g < calls.len()
+                && (#[trigger] calls[g]).outputs.start <= slot < calls[g].outputs.end;
+            assert(bindings[g].group.outputs.start <= slot < bindings[g].group.outputs.end);
+        }
+    };
+}
+
+/// 解決済みの呼び出しと通常の定義を合わせ、同じ定義順で配線へ変換する。
+///
+/// # Errors
+///
+/// 最初に配線へ変換できなかった定義または呼び出しの診断を返す。
+pub(super) fn lower_resolved_function<'s, 'p, 'a>(
+    aliases: &UseAliases<'_, 'p, 'a>, body: &LoweringBody<'s, 'p, 'a>, layouts: Layouts, forms: &[Form],
+    selected: &[ResolvedTemplateCall<'s, 'p, 'a>], output_widths: &[u64], output_drivers: &[OutputDriver],
+    layout_limit: usize, gate_limit: usize,
+    Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>)>,
+) -> (result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError<'p, 'a>>)
+    requires
+        aliases.prepared_expansion_body_matches(*context.0, context.1.0, context.1.1, context.1.2, context.2),
+        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, &layouts),
+        widths_layout(output_widths@, layout_limit, &layouts.outputs),
+        output_widths@.len() == output_drivers@.len(),
+        forall|p: int| 0 <= p < output_widths@.len() ==>
+            bit_driver_width(body.input_widths@, body.definitions@, #[trigger] output_drivers@[p]) == Some(output_widths@[p]),
+        selected@.len() == context.2.calls@.len(),
+        forall|g: int| 0 <= g < selected@.len() ==> {
+            let call = #[trigger] selected@[g];
+            &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, g, call)
+            &&& resolved_call_fits_body(call, body, forms@, context.1.2)
+        },
+        forall|slot: int| 0 <= slot < body.definitions@.len() && !call_covers(context.2.calls@, slot) ==>
+            bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
+    ensures exists|bindings: Seq<CallBinding>|
+        #[trigger] bindings_match_calls(bindings, selected@)
+            && mixed_function_result(body, &layouts, forms@, bindings, output_widths@, output_drivers@, gate_limit, result),
+{
+    let bindings = bind_resolved_calls(aliases, selected, body, &layouts, Ghost(forms@), Ghost(layout_limit), Ghost(context));
+    proof {
+        assert(bindings_match_calls(bindings@, selected@));
+        assert forall|i: int| 0 <= i < bindings@.len() implies
+            *(#[trigger] bindings@[i]).group == context.2.calls@[i] by {
+            assert(bindings@[i].group == selected@[i].group);
+        };
+        bindings_preserve_definition_order(bindings@, context.2.calls@);
+        assert forall|slot: int| 0 <= slot < body.definitions@.len() && !binding_covers(bindings@, slot) implies
+            bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]) by {
+            assert(!call_covers(context.2.calls@, slot));
+        };
+    }
+    let result = lower_mixed_function(body, layouts, forms, bindings.as_slice(),
+        output_widths, output_drivers, layout_limit, gate_limit);
+    assert(exists|rows: Seq<CallBinding>| #[trigger] bindings_match_calls(rows, selected@)
+        && mixed_function_result(body, &layouts, forms@, rows, output_widths@, output_drivers@, gate_limit, result)) by {
+        assert(bindings_match_calls(bindings@, selected@));
+    };
+    result
+}
+
 #[cfg(all(test, not(verus_only)))]
 #[test]
-fn mixed_body_uses_a_call_output_in_the_next_nor() {
+fn mixed_body_passes_outputs_through_successive_calls() {
     use alloc::vec;
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
     use crate::project::circuits::form_location;
@@ -519,7 +674,8 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
         text: "(using nor)
                (func caller (in (a (bits 4)) b) (out y)
                    (def (word bit) (pair a b))
-                   (def y (nor bit bit)))
+                   (def (again final) (pair word bit))
+                   (def y (nor final final)))
                (func pair (in (a (bits 4)) b) (out (a (bits 4)) inverted)
                    (def inverted (nor b b)))",
     }]).unwrap();
@@ -528,6 +684,7 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
     let plan = aliases.prepare_function_expansion().unwrap();
     let prepared = aliases.prepare_expansion_body(&plan, 0, 1, 8).unwrap();
     let group = &prepared.calls[0];
+    let following = &prepared.calls[1];
     let source = &project.sources()[0];
     let parsed = &project.circuits()[0];
     let forms = parsed.syntax.forms.as_slice();
@@ -541,14 +698,18 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
     aliases.insert_function_template(&plan, &mut templates, callee, Ghost(8u64));
     let selected = aliases.resolve_template_calls(&plan, &templates, prepared.calls.as_slice(),
         prepared.projections.call_arguments.arguments.as_slice(), Ghost(prepared), Ghost((0usize, 1usize, 8u64)));
-    let call = &selected[0];
-    let bit = SingleBitOperand::Driver(OutputDriver::Definition(1));
+
+    let bit = SingleBitOperand::Driver(OutputDriver::Definition(3));
     let slots = vec![
         CheckedBitDefinition { expression: copy_location(&group.expression), width: 4,
             rhs: BitFuncRhs::CallOutput { group: 0, port: 0 }, operands: Vec::new() },
         CheckedBitDefinition { expression: copy_location(&group.expression), width: 1,
             rhs: BitFuncRhs::CallOutput { group: 0, port: 1 }, operands: Vec::new() },
-        CheckedBitDefinition { expression: form_location(source, forms, parsed.definitions[1].expression.start), width: 1,
+        CheckedBitDefinition { expression: copy_location(&following.expression), width: 4,
+            rhs: BitFuncRhs::CallOutput { group: 1, port: 0 }, operands: Vec::new() },
+        CheckedBitDefinition { expression: copy_location(&following.expression), width: 1,
+            rhs: BitFuncRhs::CallOutput { group: 1, port: 1 }, operands: Vec::new() },
+        CheckedBitDefinition { expression: form_location(source, forms, parsed.definitions[2].expression.start), width: 1,
             rhs: BitFuncRhs::Nor { left: bit, right: bit }, operands: Vec::new() },
     ];
     let FuncWiringResult::Checked(wiring) = &prepared.typed.literals.wiring else {
@@ -558,20 +719,23 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
     let body = LoweringBody { input_widths: ports.inputs.as_slice(), definitions: slots.as_slice() };
     let output_widths = ports.outputs.as_slice();
     let output_drivers = wiring.drivers.outputs.as_slice();
-    let limited = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 8).unwrap();
-    let bindings = [bind_resolved_call(&aliases, call, &body, &limited,
-        Ghost(forms@), Ghost(8usize), Ghost((&plan, (0usize, 1usize, 8u64), &prepared, 0int)))];
-    let Err(MixedWiringError::LocalGateCapacity(site)) = lower_mixed_function(&body, limited, forms, &bindings,
-        output_widths, output_drivers, 8, 1) else {
-        panic!("expected the second NOR to exceed the gate limit");
+    let limited = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 16).unwrap();
+    let Err(MixedWiringError::LocalGateCapacity(site)) = lower_resolved_function(
+        &aliases, &body, limited, forms, selected.as_slice(), output_widths, output_drivers, 16, 2,
+        Ghost((&plan, (0usize, 1usize, 8u64), &prepared)),
+    ) else {
+        panic!("expected the caller NOR to exceed the gate limit");
     };
-    assert_eq!(&source.text[site.span], "(nor bit bit)");
+    assert_eq!(&source.text[site.span], "(nor final final)");
 
-    let layout = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 8).unwrap();
-    let (lowered, _) = lower_mixed_function(&body, layout, forms, &bindings, output_widths, output_drivers, 8, 2).unwrap();
-    assert_eq!(lowered.gate_definitions(), [0, 2]);
-    assert_eq!(lowered.netlist().evaluate(&[true, false, true, false, true]).unwrap(), [true]);
-    assert_eq!(lowered.netlist().evaluate(&[true, false, true, false, false]).unwrap(), [false]);
+    let layout = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 16).unwrap();
+    let (lowered, _) = lower_resolved_function(
+        &aliases, &body, layout, forms, selected.as_slice(), output_widths, output_drivers, 16, 3,
+        Ghost((&plan, (0usize, 1usize, 8u64), &prepared)),
+    ).unwrap();
+    assert_eq!(lowered.gate_definitions(), [0, 2, 4]);
+    assert_eq!(lowered.netlist().evaluate(&[true, false, true, false, true]).unwrap(), [false]);
+    assert_eq!(lowered.netlist().evaluate(&[true, false, true, false, false]).unwrap(), [true]);
 }
 
 } // verus!
