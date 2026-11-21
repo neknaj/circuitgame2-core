@@ -5,7 +5,10 @@ mod source_evaluation;
 mod body;
 pub(super) use body::{ExpandedBody, ExpandedBodyError};
 #[cfg(verus_only)]
-pub(super) use body::{argument_matches_width, call_covers, expression_argument_matches_width, expression_input_width, expression_output_bits};
+pub(super) use body::{
+    argument_matches_width, call_covers, expression_argument_matches_width, expression_input_width, expression_output_bits,
+    nested_argument_output_matches, root_argument_matches_width,
+};
 
 use alloc::vec::Vec;
 use vstd::prelude::*;

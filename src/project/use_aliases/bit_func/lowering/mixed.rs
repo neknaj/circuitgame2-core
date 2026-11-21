@@ -14,7 +14,7 @@ use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 use super::super::templates::ResolvedTemplateCall;
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
-use super::super::frontend::{argument_matches_width, call_covers, expression_argument_matches_width};
+use super::super::frontend::{argument_matches_width, call_covers, expression_argument_matches_width, root_argument_matches_width};
 use super::super::super::call_arity::ProjectedCallArgument;
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group};
 use crate::syntax::Form;
@@ -131,14 +131,12 @@ pub(in crate::project::use_aliases::bit_func) open spec fn resolved_call_fits_bo
     let first = call.group.outputs.start;
     let end = call.group.outputs.end;
     let outputs = call.template.output_widths_model();
-    let callee_inputs = call.template.input_widths_model();
     &&& form_spans_valid(call.group.expression.source.text, forms, call.group.expression.source.text.spec_bytes().len() as int)
     &&& first < end <= definitions.len()
     &&& first + outputs.len() == end
     &&& forall|i: int| 0 <= i < outputs.len() ==> definitions[first + i].width == #[trigger] outputs[i]
     &&& forall|port: int| 0 <= port < call.arguments@.len() ==>
-        argument_matches_width(call.group.expression.source, forms, inputs, definitions.take(first as int),
-            #[trigger] call.arguments@[port], callee_inputs[port], limit)
+        #[trigger] root_argument_matches_width(call.group.expression.source, forms, inputs, definitions, call, port, limit)
     &&& forall|child: int, port: int| 0 <= child < call.children@.len()
         && 0 <= port < call.children@[child].arguments@.len() ==>
         #[trigger] expression_argument_matches_width(call.group.expression.source, forms, inputs, definitions,
@@ -189,6 +187,8 @@ pub(super) fn bind_resolved_call<'s, 'p, 'a>(
                     binding.group.outputs.start as nat) as int, #[trigger] binding.arguments@[i],
                 (range.end - range.start) as usize)
         } by {
+            assert(root_argument_matches_width(selected.group.expression.source, forms, _body.input_widths@,
+                _body.definitions@, *selected, i, width_limit));
             call_argument_bits_available(binding, _body, _layouts, forms, capacity, width_limit, i);
         };
     }

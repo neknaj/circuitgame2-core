@@ -18,6 +18,8 @@ use crate::netlist::{
     port_bit_layout_result, preceding_port_bits,
 };
 use super::super::expansion::PreparedExpansionBody;
+#[cfg(verus_only)]
+use super::super::expansion::prepared_nested_output_matches;
 use super::super::super::FunctionExpansionOrder;
 #[cfg(verus_only)]
 use super::super::super::function_atoms::{
@@ -65,6 +67,30 @@ pub(in crate::project::use_aliases::bit_func) open spec fn expression_output_bit
     }
 }
 
+#[verifier::opaque]
+pub(in crate::project::use_aliases::bit_func) open spec fn nested_argument_output_matches(
+    selected: ResolvedTemplateCall, before: int, argument: ProjectedCallArgument, width: u64,
+) -> bool {
+    &&& 0 <= before <= selected.children@.len()
+    &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
+        exists|earlier: int| 0 <= earlier < before
+            && (#[trigger] selected.children@[earlier]).child.reference == selected.group.references.start + reference
+            && expression_output_bits(selected.children@[earlier]) == width
+    } else { true }
+}
+
+pub(in crate::project::use_aliases::bit_func) open spec fn root_argument_matches_width(
+    source: &ProjectSource, forms: Seq<Form>, inputs: Seq<u64>, slots: Seq<CheckedBitDefinition>,
+    selected: ResolvedTemplateCall, port: int, limit: u64,
+) -> bool {
+    let argument = selected.arguments@[port];
+    let width = selected.template.input_widths_model()[port];
+    &&& selected.group.outputs.start <= slots.len()
+    &&& 0 <= port < selected.arguments@.len() == selected.template.input_widths_model().len()
+    &&& argument_matches_width(source, forms, inputs, slots.take(selected.group.outputs.start as int), argument, width, limit)
+    &&& nested_argument_output_matches(selected, selected.children@.len() as int, argument, width)
+}
+
 pub(in crate::project::use_aliases::bit_func) open spec fn expression_argument_matches_width(
     source: &ProjectSource, forms: Seq<Form>, inputs: Seq<u64>, slots: Seq<CheckedBitDefinition>,
     selected: ResolvedTemplateCall, child_index: int, port: int, limit: u64,
@@ -72,15 +98,12 @@ pub(in crate::project::use_aliases::bit_func) open spec fn expression_argument_m
     let child = selected.children@[child_index];
     let argument = child.arguments@[port];
     let width = expression_input_width(child, port);
+    &&& selected.group.outputs.start <= slots.len()
     &&& 0 <= child_index < selected.children@.len()
     &&& 0 <= port < child.arguments@.len()
     &&& child.template matches Some(template) ==> port < template.input_widths_model().len()
     &&& argument_matches_width(source, forms, inputs, slots.take(selected.group.outputs.start as int), argument, width, limit)
-    &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
-        exists|earlier: int| 0 <= earlier < child_index
-            && (#[trigger] selected.children@[earlier]).child.reference == selected.group.references.start + reference
-            && expression_output_bits(selected.children@[earlier]) == width
-    } else { true }
+    &&& nested_argument_output_matches(selected, child_index, argument, width)
 }
 
 pub(in crate::project::use_aliases::bit_func) open spec fn call_covers(calls: Seq<CheckedExpansionCall>, at: int) -> bool {
@@ -227,26 +250,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// 呼び出し先のポート幅と、呼び出し元の駆動元またはリテラルの幅を照合する。
     proof fn prepared_argument_matches_width(
-        &self, scope: &FuncProjection, plan: FunctionExpansionOrder, prepared: &PreparedExpansionBody,
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates, prepared: &PreparedExpansionBody,
         selected: ResolvedTemplateCall, group: int, port: int, slots: Seq<CheckedBitDefinition>,
     )
         requires
             self.projection_context(scope), self.projection_port_widths_match(scope),
             self.structure_layout_for_ports(scope.limit, scope.layouts),
-            self.prepared_expansion_body_matches(plan, scope.file, scope.entry, scope.limit, prepared),
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
             prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
             prepared.typed.types@ == scope.types@,
-            self.resolved_template_call_matches(&plan, (scope.file, scope.entry, scope.limit), prepared, group, selected),
+            self.resolved_template_call_matches(plan, (scope.file, scope.entry, scope.limit), prepared, group, selected),
+            self.resolved_expression_calls_match(plan, table, scope.limit, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@),
             selected.group.outputs.start <= slots.len(),
             self.definition_widths_match(scope, slots),
             0 <= port < selected.arguments@.len(),
             scope.layouts.is_none() ==>
                 !has_structure_port(selected.template.signature_model().inputs@)
                     && !has_structure_port(selected.template.signature_model().outputs@),
-        ensures argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
-            slots.take(selected.group.outputs.start as int), selected.arguments@[port],
-            selected.template.input_widths_model()[port], scope.limit),
+        ensures root_argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+            slots, selected, port, scope.limit),
     {
+        reveal(nested_argument_output_matches);
         let call = *selected.group;
         let template = selected.template;
         let signature = template.signature_model();
@@ -256,21 +281,81 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.template_widths_in_caller_layout(signature, scope.limit, inputs,
             template.output_widths_model(), template.structure_layouts_model(), scope.layouts);
 
-        self.expansion_callee_template_evidence(plan, (scope.file, scope.entry, scope.limit), prepared, group);
+        self.expansion_callee_template_evidence(*plan, (scope.file, scope.entry, scope.limit), prepared, group);
         let root = prepared.projections.calls@[group];
         assert(call == prepared.calls@[group]);
-        self.expansion_argument_evidence(plan, (scope.file, scope.entry, scope.limit), prepared.typed,
+        self.expansion_argument_evidence(*plan, (scope.file, scope.entry, scope.limit), prepared.typed,
             scope.wiring, root, call.arguments, &prepared.projections.call_arguments, call, port);
         let arg = selected.arguments@[port];
         assert(arg == prepared.projections.call_arguments.arguments@[call.arguments.start + port]);
         let expected = signature.inputs@[port].ty;
         let width = inputs[port];
         assert(self.port_width_matches(expected, width, scope.layouts));
-        if let CallArgumentSource::Driver(driver) = arg.source {
-            let actual = self.preceding_argument_driver_width(scope, slots, call.outputs.start as int, driver);
-            let known = signal_type_at(scope.wiring, scope.types@, driver)->Some_0;
-            self.equivalent_port_widths(scope.layouts, known.ty, actual, expected, width);
+        match arg.source {
+            CallArgumentSource::Driver(driver) => {
+                let actual = self.preceding_argument_driver_width(scope, slots, call.outputs.start as int, driver);
+                let known = signal_type_at(scope.wiring, scope.types@, driver)->Some_0;
+                self.equivalent_port_widths(scope.layouts, known.ty, actual, expected, width);
+            },
+            CallArgumentSource::NestedCall(_) => {
+                self.resolved_nested_output_width(plan, table, scope.limit, prepared.projections.call_arguments.arguments@,
+                    selected, selected.children@.len() as int, arg, (expected, width, scope.layouts));
+            },
+            _ => {},
         }
+    }
+
+    /// 同じ引数フォームを指す子の出力型から、実際に返す配線数を導く。
+    proof fn resolved_nested_output_width(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, limit: u64,
+        arguments: Seq<ProjectedCallArgument>, selected: ResolvedTemplateCall, before: int,
+        argument: ProjectedCallArgument, expected: (ResolvedPortType, u64, Option<&StructureLayouts>),
+    )
+        requires
+            self.can_resolve(),
+            self.structure_layout_for_ports(limit, expected.2),
+            self.port_width_matches(expected.0, expected.1, expected.2),
+            self.resolved_expression_calls_match(plan, table, limit, selected.group.postorder, arguments, selected.children@),
+            selected.group.postorder matches Some(children) && prepared_nested_output_matches(children@,
+                selected.group.references.start, before, argument, expected.0),
+        ensures nested_argument_output_matches(selected, before, argument, expected.1),
+    {
+        reveal(nested_argument_output_matches);
+        reveal(UseAliases::resolved_expression_call_matches);
+        reveal(UseAliases::template_port_widths_match);
+        let children = selected.group.postorder->Some_0@;
+        let earlier = choose|i: int| 0 <= i < before
+            && (#[trigger] children[i]).reference == selected.group.references.start + argument.source->NestedCall_0
+            && children[i]._signature@.call.call.form == argument.form
+            && children[i]._signature@.call.target.port_counts().outputs == 1
+            && match children[i]._signature@.signature {
+                crate::project::FuncCallSignature::Nor =>
+                    crate::project::port_types_equal(ResolvedPortType::Bits(1), expected.0),
+                crate::project::FuncCallSignature::Function(ports) =>
+                    ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected.0),
+            };
+        let producer = selected.children@[earlier];
+        let row = children[earlier];
+        assert(self.resolved_expression_call_matches(plan, table, limit, arguments, row, producer));
+        let (ty, bits, layout) = match producer.template {
+            Some(template) => {
+                let target = plan.position_model(row._rank@->Some_0)->Some_0;
+                self.template_port_evidence(target, limit, template);
+                self.template_circuit_evidence(target, limit, template);
+                let outputs = template.output_widths_model();
+                let output_layout = template.circuit_model().output_layout_model();
+                assert(outputs.len() == 1);
+                port_bit_layout_port(outputs, template.bit_limit_model(), *output_layout, 0);
+                assert(preceding_port_bits(outputs, 0) == 0) by { reveal(preceding_port_bits); };
+                assert(expression_output_bits(producer) == outputs[0]);
+                (template.signature_model().outputs@[0].ty, outputs[0], template.structure_layouts_model())
+            },
+            None => (ResolvedPortType::Bits(1), 1u64, None),
+        };
+        let table_for_output = match &layout { Some(table) => Some(table), None => None };
+        assert(self.port_width_matches(ty, bits, table_for_output));
+        self.argument_widths_agree(limit, (ty, bits, table_for_output), expected);
+        assert(expression_output_bits(producer) == expected.1);
     }
 
     /// 左辺の手前までで利用できる駆動元の幅が、検査済みの型に対応することを示す。
@@ -343,6 +428,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures expression_argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
             slots, selected, child_index, port, scope.limit),
     {
+        reveal(nested_argument_output_matches);
         reveal(UseAliases::resolved_expression_call_matches);
         reveal(UseAliases::template_port_widths_match);
         let group = *selected.group;
@@ -377,40 +463,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let known = signal_type_at(scope.wiring, scope.types@, driver)->Some_0;
                 self.argument_widths_agree(scope.limit, (known.ty, actual, scope.layouts), (expected, width, table_for_input));
             },
-            CallArgumentSource::NestedCall(reference) => {
-                let earlier = choose|i: int| 0 <= i < child_index
-                    && (#[trigger] children[i]).reference == group.references.start + reference
-                    && children[i]._signature@.call.call.form == arg.form
-                    && children[i]._signature@.call.target.port_counts().outputs == 1
-                    && match children[i]._signature@.signature {
-                        crate::project::FuncCallSignature::Nor =>
-                            crate::project::port_types_equal(ResolvedPortType::Bits(1), expected),
-                        crate::project::FuncCallSignature::Function(ports) =>
-                            ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected),
-                    };
-                let producer = selected.children@[earlier];
-                let row = children[earlier];
-                assert(self.resolved_expression_call_matches(plan, table, scope.limit, arguments, row, producer));
-                let (ty, bits, layout) = match producer.template {
-                    Some(template) => {
-                        let target = plan.position_model(row._rank@->Some_0)->Some_0;
-                        self.template_port_evidence(target, scope.limit, template);
-                        self.template_circuit_evidence(target, scope.limit, template);
-                        let outputs = template.output_widths_model();
-                        let output_layout = template.circuit_model().output_layout_model();
-                        assert(outputs.len() == 1);
-                        port_bit_layout_port(outputs, template.bit_limit_model(), *output_layout, 0);
-                        assert(preceding_port_bits(outputs, 0) == 0) by { reveal(preceding_port_bits); };
-                        assert(expression_output_bits(producer) == outputs[0]);
-                        (template.signature_model().outputs@[0].ty, outputs[0], template.structure_layouts_model())
-                    },
-                    None => (ResolvedPortType::Bits(1), 1u64, None),
-                };
-                let table_for_output = match &layout { Some(table) => Some(table), None => None };
-                assert(self.port_width_matches(ty, bits, table_for_output));
-                self.argument_widths_agree(scope.limit, (ty, bits, table_for_output), (expected, width, table_for_input));
-                assert(expression_output_bits(producer) == width);
-            },
+            CallArgumentSource::NestedCall(_) => self.resolved_nested_output_width(
+                plan, table, scope.limit, arguments, selected, child_index, arg, (expected, width, table_for_input)),
             _ => {},
         }
     }
@@ -509,9 +563,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> *(#[trigger] selected[group]).group.expression.source == *scope.source)
                 && (forall|group: int, port: int| 0 <= group < selected.len()
                     && 0 <= port < selected[group].arguments@.len() ==>
-                    argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
-                        slots@.take(selected[group].group.outputs.start as int), #[trigger] selected[group].arguments@[port],
-                        selected[group].template.input_widths_model()[port], scope.limit))
+                    #[trigger] root_argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+                        slots@, selected[group], port, scope.limit))
                 && forall|group: int, child: int, port: int| 0 <= group < selected.len()
                     && 0 <= child < selected[group].children@.len()
                     && 0 <= port < selected[group].children@[child].arguments@.len() ==>
@@ -636,13 +689,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 };
                 assert forall|group: int, port: int| 0 <= group < selected@.len()
                     && 0 <= port < selected@[group].arguments@.len() implies
-                    argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
-                        slots@.take(selected@[group].group.outputs.start as int), #[trigger] selected@[group].arguments@[port],
-                        selected@[group].template.input_widths_model()[port], scope.limit) by {
+                    #[trigger] root_argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+                        slots@, selected@[group], port, scope.limit) by {
                     reveal(UseAliases::body_calls_match);
                     let group_call = calls@[group];
                     assert(selected@[group].group.outputs.start == group_call.outputs.start);
-                    self.prepared_argument_matches_width(scope, plan, &prepared, selected@[group], group, port, slots@);
+                    self.prepared_argument_matches_width(scope, &plan, templates, &prepared, selected@[group], group, port, slots@);
                 };
                 assert forall|group: int, child: int, port: int| 0 <= group < selected@.len()
                     && 0 <= child < selected@[group].children@.len()
@@ -700,9 +752,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if j < before.len() {
                 assert(after[j] == before[j]);
                 assert(after.take(j) =~= before.take(j));
+                if call_covers(calls, j) {
+                    let g = choose|g: int| 0 <= g < calls.len() && #[trigger] projected_call_slot(calls, g, j, before[j]);
+                    assert(projected_call_slot(calls, g, j, after[j]));
+                } else {
+                    assert(self.bit_definition_from_source(scope, before.take(j), j, before[j]));
+                }
             } else if let Some(g) = active {
                 assert(projected_call_slot(calls, g as int, j, after[j]));
                 assert(call_covers(calls, j));
+            } else {
+                assert(j == before.len());
+                assert(after.take(j) == before);
             }
         };
     }

@@ -84,6 +84,24 @@ pub(super) struct PreparedExpressionCall<'p, 'a> {
     pub(super) _rank: Ghost<Option<int>>,
 }
 
+pub(super) open spec fn prepared_nested_output_matches(
+    children: Seq<PreparedExpressionCall>, first: usize, before: int, argument: ProjectedCallArgument,
+    expected: crate::project::ResolvedPortType,
+) -> bool {
+    &&& argument.source is NestedCall
+    &&& 0 <= before <= children.len()
+    &&& exists|i: int| 0 <= i < before
+        && (#[trigger] children[i]).reference == first + argument.source->NestedCall_0
+        && children[i]._signature@.call.call.form == argument.form
+        && children[i]._signature@.call.target.port_counts().outputs == 1
+        && match children[i]._signature@.signature {
+            crate::project::FuncCallSignature::Nor =>
+                crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
+            crate::project::FuncCallSignature::Function(ports) =>
+                ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected),
+        }
+}
+
 /// 一回の呼び出しで割り当てる左辺、引数範囲、展開済みの呼び出し先。
 pub(super) struct CheckedExpansionCall<'p, 'a> {
     /// 呼び出し全体の元ソース範囲。
@@ -682,16 +700,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Binary)
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Hexadecimal))
                 },
-                CallArgumentSource::NestedCall(retained) => {
+                CallArgumentSource::NestedCall(_) => {
                     let local = (root.definition - frame.definitions.start) as usize;
                     &&& form is List
                     &&& group._signature@.call.call.form + 2 <= argument.form < form->List_end
                         <= parsed.syntax.forms@[group._signature@.call.call.form as int]->List_end
-                    &&& group.postorder matches Some(children) && exists|position: int|
-                        0 <= position < children@.len()
-                        && (#[trigger] children@[position])._signature@.call.call.form == argument.form
-                        && children@[position].reference == row.references.start + retained
-                        && children@[position]._signature@.call.target.port_counts().outputs == 1
+                    &&& group.postorder matches Some(children) && prepared_nested_output_matches(
+                        children@, group.references.start, children@.len() as int, argument, expected)
                     &&& exists|reference: usize, child: TypedFuncCall|
                         #[trigger] self.func_call_form_reference(caller.0, caller.1, local, argument.form, reference)
                         && #[trigger] self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child)))
@@ -964,16 +979,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& crate::project::circuit_literal_width_matches(bytes, Some(width), caller.2, Ok(width))
                     &&& super::lowering::literal_argument_matches_width(source, parsed.syntax.forms@, arg.form, width as int)
                 },
-                CallArgumentSource::NestedCall(reference) =>
-                    exists|i: int| 0 <= i < parent_index && (#[trigger] children[i]).reference == group.references.start + reference
-                        && children[i]._signature@.call.call.form == arg.form
-                        && children[i]._signature@.call.target.port_counts().outputs == 1
-                        && match children[i]._signature@.signature {
-                            crate::project::FuncCallSignature::Nor =>
-                                crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
-                            crate::project::FuncCallSignature::Function(ports) =>
-                                ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected),
-                        },
+                CallArgumentSource::NestedCall(_) =>
+                    prepared_nested_output_matches(children, group.references.start, parent_index, arg, expected),
                 CallArgumentSource::Deferred => true,
             }
         }),

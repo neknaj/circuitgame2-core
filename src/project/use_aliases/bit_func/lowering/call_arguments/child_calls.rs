@@ -8,7 +8,9 @@ use super::super::{existing_wires_keep_availability, port_values};
 #[cfg(verus_only)]
 use super::super::super::instances::instance_evaluates_from_caller;
 #[cfg(verus_only)]
-use super::super::super::frontend::{expression_argument_matches_width, expression_input_width, expression_output_bits};
+use super::super::super::frontend::{
+    expression_argument_matches_width, expression_input_width, expression_output_bits, nested_argument_output_matches,
+};
 #[cfg(verus_only)]
 use crate::netlist::{gate_values_match, nor_evaluation, output_values_match};
 
@@ -570,6 +572,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn bound_child_cal
     let call = calls[index];
     let child = selected.children@[index];
     reveal(child_call_ready);
+    reveal(nested_argument_output_matches);
     assert(child_call_binding(child, selected.group.references, builtin, call));
     port_bit_layout_size(call._input_widths@, call._layout_limit@, call.inputs);
     assert forall|port: int| 0 <= port < call.arguments@.len() implies {

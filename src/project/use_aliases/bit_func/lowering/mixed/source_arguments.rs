@@ -332,6 +332,8 @@ proof fn mixed_trace_source_call_values(
             caller.2, incoming, prior, widths[port], ports[port]) by {
         let argument = binding.arguments@[port];
         assert(argument == projections.arguments@[range.start + port]);
+        assert(root_argument_matches_width(selected.group.expression.source, forms, body.input_widths@,
+            body.definitions@, selected, port, caller.2));
         assert(argument_matches_width(source, forms, body.input_widths@, body.definitions@.take(step.from as int),
             argument, widths[port], caller.2));
         expanded_port_value(body, layouts, layout_limit, binding, step, forms, invocation, mapped, wires,
