@@ -68,16 +68,23 @@ pub(in crate::project::use_aliases::bit_func) open spec fn expression_output_bit
     }
 }
 
+/// 入れ子の引数が、指定した位置より前にある子の同じ幅の出力を参照することを表す。
+pub(in crate::project::use_aliases::bit_func) open spec fn selected_child_output_matches(
+    children: Seq<ResolvedExpressionCall>, reference_start: usize, before: int, argument: ProjectedCallArgument, width: u64,
+) -> bool {
+    &&& 0 <= before <= children.len()
+    &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
+        exists|earlier: int| 0 <= earlier < before
+            && (#[trigger] children[earlier]).child.reference == reference_start + reference
+            && expression_output_bits(children[earlier]) == width
+    } else { true }
+}
+
 #[verifier::opaque]
 pub(in crate::project::use_aliases::bit_func) open spec fn nested_argument_output_matches(
     selected: ResolvedTemplateCall, before: int, argument: ProjectedCallArgument, width: u64,
 ) -> bool {
-    &&& 0 <= before <= selected.children@.len()
-    &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
-        exists|earlier: int| 0 <= earlier < before
-            && (#[trigger] selected.children@[earlier]).child.reference == selected.group.references.start + reference
-            && expression_output_bits(selected.children@[earlier]) == width
-    } else { true }
+    selected_child_output_matches(selected.children@, selected.group.references.start, before, argument, width)
 }
 
 pub(in crate::project::use_aliases::bit_func) open spec fn root_argument_matches_width(

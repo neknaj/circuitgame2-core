@@ -10,8 +10,9 @@ use super::super::{existing_wires_keep_availability, port_values};
 use super::super::super::instances::{instance_evaluates_from_caller, instance_wire_values};
 #[cfg(verus_only)]
 use super::super::super::frontend::{
-    expression_argument_matches_width, expression_input_width, expression_output_bits, nested_argument_output_matches,
-    root_argument_matches_width,
+    argument_matches_width, expression_argument_matches_width, expression_input_width, expression_output_bits,
+    nested_argument_output_matches,
+    root_argument_matches_width, selected_child_output_matches,
 };
 #[cfg(verus_only)]
 use super::super::mixed::resolved_call_fits_body;
@@ -573,17 +574,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_
     &&& ({
         let call = calls[index];
         &&& child_call_abi(call)
-        &&& forall|port: int| 0 <= port < call.arguments@.len() ==> {
-            let argument = #[trigger] call.arguments@[port];
-            let span = call.inputs.ranges_model()[port];
-            let width = (span.end - span.start) as usize;
-            &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
-                caller.wires@.len() as int, argument, width)
-            &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
-                exists|earlier: int| 0 <= earlier < index && (#[trigger] calls[earlier]).reference == reference
-                    && calls[earlier].circuit.outputs@.len() == width
-            } else { true }
-        }
+        &&& arguments_fit_preceding_children(caller, calls, index, call.arguments@, call.inputs)
     })
 }
 
@@ -614,61 +605,47 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn bound_child_cal
     let child = selected.children@[index];
     reveal(child_call_ready);
     assert(child_call_binding(child, selected.group.references, builtin, call));
-    port_bit_layout_size(call._input_widths@, call._layout_limit@, call.inputs);
     assert forall|port: int| 0 <= port < call.arguments@.len() implies {
         let argument = #[trigger] call.arguments@[port];
-        let span = call.inputs.ranges_model()[port];
-        let width = (span.end - span.start) as usize;
-        &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
-            caller.wires@.len() as int, argument, width)
-        &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
-            exists|earlier: int| 0 <= earlier < index && (#[trigger] calls[earlier]).reference == reference
-                && calls[earlier].circuit.outputs@.len() == width
-        } else { true }
+        let width = call._input_widths@[port];
+        &&& argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+            body.definitions@.take(selected.group.outputs.start as int), argument, width, width_limit)
+        &&& selected_child_output_matches(selected.children@, selected.group.references.start, index, argument, width)
     } by {
+        reveal(nested_argument_output_matches);
         let argument = call.arguments@[port];
         assert(argument == child.arguments@[port]);
-        let bits = expression_input_width(child, port);
-        assert(call._input_widths@[port] == bits);
+        assert(call._input_widths@[port] == expression_input_width(child, port));
         assert(expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
             body.definitions@, selected, index, port, width_limit));
-        port_bit_layout_port(call._input_widths@, call._layout_limit@, *call.inputs, port as usize);
-        let span = call.inputs.ranges_model()[port];
-        assert(0 < span.end - span.start == bits <= usize::MAX);
-        let width = (span.end - span.start) as usize;
-        layout_argument_from_width(body, layouts, capacity, selected.group.outputs.start, caller.source,
-            caller.forms@, argument, bits, width_limit);
-        assert(layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
-            caller.wires@.len() as int, argument, width));
-        if argument.source is NestedCall {
-            bound_argument_output_width(selected, builtin, calls, index, argument, bits);
-        }
     };
+    bound_arguments_ready(body, layouts, capacity, width_limit, caller, selected.group.outputs.start,
+        selected.group.references, selected.children@, builtin, calls, index,
+        call.arguments@, call.inputs, call._input_widths@, call._layout_limit@);
 }
 
 /// 選択時に確定した子の出力幅を、同じ位置にある配線用の回路へ引き継ぐ。
 proof fn bound_argument_output_width(
-    selected: ResolvedTemplateCall, builtin: &(NorNetlist, PortBitLayout), calls: Seq<ChildCall>,
+    children: Seq<ResolvedExpressionCall>, references: Range<usize>, builtin: &(NorNetlist, PortBitLayout), calls: Seq<ChildCall>,
     before: int, argument: ProjectedCallArgument, width: u64,
 )
     requires
-        calls.len() == selected.children@.len(),
+        calls.len() == children.len(),
         forall|i: int| 0 <= i < calls.len() ==>
-            child_call_binding(selected.children@[i], selected.group.references, builtin, #[trigger] calls[i]),
+            child_call_binding(children[i], references, builtin, #[trigger] calls[i]),
         argument.source is NestedCall,
-        nested_argument_output_matches(selected, before, argument, width),
+        selected_child_output_matches(children, references.start, before, argument, width),
     ensures exists|i: int| 0 <= i < before <= calls.len()
         && (#[trigger] calls[i]).reference == argument.source->NestedCall_0
         && calls[i].circuit.outputs@.len() == width,
 {
-    reveal(nested_argument_output_matches);
     let reference = argument.source->NestedCall_0;
     let earlier = choose|i: int| 0 <= i < before
-        && (#[trigger] selected.children@[i]).child.reference == selected.group.references.start + reference
-        && expression_output_bits(selected.children@[i]) == width;
+        && (#[trigger] children[i]).child.reference == references.start + reference
+        && expression_output_bits(children[i]) == width;
     let call = calls[earlier];
-    let producer = selected.children@[earlier];
-    assert(child_call_binding(producer, selected.group.references, builtin, call));
+    let producer = children[earlier];
+    assert(child_call_binding(producer, references, builtin, call));
     assert(call.reference == reference);
     assert(call.circuit.outputs@.len() == expression_output_bits(producer));
 }
@@ -994,6 +971,15 @@ pub(in crate::project::use_aliases::bit_func::lowering) enum NestedCallWiringErr
 pub(in crate::project::use_aliases::bit_func::lowering) open spec fn root_arguments_fit_children(
     caller: &CallerArguments, calls: Seq<ChildCall>, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
 ) -> bool {
+    arguments_fit_preceding_children(caller, calls, calls.len() as int, arguments, layout)
+}
+
+/// 配線を読む時点より前に展開した子だけを、入れ子の引数から参照できる。
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn arguments_fit_preceding_children(
+    caller: &CallerArguments, calls: Seq<ChildCall>, before: int,
+    arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
+) -> bool {
+    &&& 0 <= before <= calls.len()
     &&& arguments.len() == layout.ranges_model().len()
     &&& forall|port: int| 0 <= port < arguments.len() ==> {
         let argument = #[trigger] arguments[port];
@@ -1002,7 +988,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn root_argume
         &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
             caller.wires@.len() as int, argument, width)
         &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
-            exists|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).reference == reference
+            exists|i: int| 0 <= i < before && (#[trigger] calls[i]).reference == reference
                 && calls[i].circuit.outputs@.len() == width
         } else { true }
     }
@@ -1031,30 +1017,71 @@ proof fn bound_root_arguments_ready(
 {
     let layout = selected.template.circuit_model().input_layout_model();
     let widths = selected.template.input_widths_model();
-    let limit = selected.template.bit_limit_model();
-    port_bit_layout_size(widths, limit, layout);
     assert forall|port: int| 0 <= port < selected.arguments@.len() implies {
         let argument = #[trigger] selected.arguments@[port];
+        let width = widths[port];
+        &&& argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+            body.definitions@.take(selected.group.outputs.start as int), argument, width, width_limit)
+        &&& selected_child_output_matches(selected.children@, selected.group.references.start,
+            calls.len() as int, argument, width)
+    } by {
+        reveal(nested_argument_output_matches);
+        assert(root_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+            body.definitions@, selected, port, width_limit));
+    };
+    bound_arguments_ready(body, layouts, capacity, width_limit, caller, selected.group.outputs.start,
+        selected.group.references, selected.children@, builtin, calls, calls.len() as int,
+        selected.arguments@, layout, widths, selected.template.bit_limit_model());
+}
+
+/// 型検査済みの入力幅とポート配置から、先行配線と展開済みの子の出力を読めることを示す。
+proof fn bound_arguments_ready(
+    body: &LoweringBody, layouts: &Layouts, capacity: usize, width_limit: u64,
+    caller: &CallerArguments, first_output: usize, references: Range<usize>, children: Seq<ResolvedExpressionCall>,
+    builtin: &(NorNetlist, PortBitLayout), calls: Seq<ChildCall>, before: int,
+    arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout, widths: Seq<u64>, layout_limit: usize,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        first_output <= body.definitions@.len(),
+        caller.inputs@ == layouts.inputs.ranges_model(),
+        caller.definitions@ == layouts.definitions.ranges_model(),
+        caller.wires@.len() == preceding_port_bits(definition_widths(body.definitions@), first_output as nat),
+        port_bit_layout_result(widths, layout_limit, Ok(*layout)),
+        arguments.len() == widths.len(),
+        0 <= before <= calls.len() == children.len(),
+        forall|i: int| 0 <= i < calls.len() ==>
+            child_call_binding(children[i], references, builtin, #[trigger] calls[i]),
+        forall|port: int| 0 <= port < arguments.len() ==> {
+            let argument = #[trigger] arguments[port];
+            let width = widths[port];
+            &&& argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+                body.definitions@.take(first_output as int), argument, width, width_limit)
+            &&& selected_child_output_matches(children, references.start, before, argument, width)
+        },
+    ensures arguments_fit_preceding_children(caller, calls, before, arguments, layout),
+{
+    port_bit_layout_size(widths, layout_limit, layout);
+    assert forall|port: int| 0 <= port < arguments.len() implies {
+        let argument = #[trigger] arguments[port];
         let span = layout.ranges_model()[port];
         let width = (span.end - span.start) as usize;
         &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
             caller.wires@.len() as int, argument, width)
         &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
-            exists|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).reference == reference
+            exists|i: int| 0 <= i < before && (#[trigger] calls[i]).reference == reference
                 && calls[i].circuit.outputs@.len() == width
         } else { true }
     } by {
-        let argument = selected.arguments@[port];
+        let argument = arguments[port];
         let bits = widths[port];
-        assert(root_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
-            body.definitions@, selected, port, width_limit));
-        port_bit_layout_port(widths, limit, *layout, port as usize);
+        port_bit_layout_port(widths, layout_limit, *layout, port as usize);
         let span = layout.ranges_model()[port];
         assert(0 < span.end - span.start == bits <= usize::MAX);
-        layout_argument_from_width(body, layouts, capacity, selected.group.outputs.start, caller.source,
+        layout_argument_from_width(body, layouts, capacity, first_output, caller.source,
             caller.forms@, argument, bits, width_limit);
         if argument.source is NestedCall {
-            bound_argument_output_width(selected, builtin, calls, calls.len() as int, argument, bits);
+            bound_argument_output_width(children, references, builtin, calls, before, argument, bits);
         }
     };
 }
