@@ -665,6 +665,15 @@ pub(super) enum CallWiringError<'p, 'a> {
     GateCapacity,
 }
 
+/// 後順の子を展開する途中で発生した診断。
+#[derive(Debug)]
+pub(super) enum ChildCallWiringError<'p, 'a> {
+    /// 子の引数またはゲート上限の診断。
+    Call(CallWiringError<'p, 'a>),
+    /// 子の出力を一時配線表に追加すると上限を超える。値の単位は配線の本数。
+    OutputCapacity { used: usize, width: usize, capacity: usize },
+}
+
 pub(super) open spec fn builtin_nor_call_matches(builtin: &(NorNetlist, PortBitLayout)) -> bool {
     &&& nor_evaluation_ready(&builtin.0, 2)
     &&& builtin.0.gates@ == seq![NorGate { left: Wire::Input(0), right: Wire::Input(1) }]
@@ -719,19 +728,20 @@ pub(super) open spec fn child_instance_matches(
 ///
 /// # Errors
 ///
-/// 最初に配線を取得できない引数の範囲を返す。すべての引数を取得できた場合はゲート上限を検査する。
-/// どちらの失敗でも既存のゲート列と一時配線表を保つ。
+/// 引数順に配線を確定してから、ゲート上限、一時配線表の上限の順で検査する。
+/// 失敗時は既存のゲート列と一時配線表を保つ。
 pub(super) fn lower_child_call<'s, 'p, 'a>(
     caller: &CallerArguments<'s, 'p, 'a>, arguments: &[ProjectedCallArgument], layout: &PortBitLayout,
     callee: &NorNetlist, children: &mut ChildOutputWires, reference: usize, gates: &mut Vec<NorGate>, capacity: usize,
+    output_capacity: usize,
     Ghost(widths): Ghost<Seq<u64>>, Ghost(limit): Ghost<usize>, Ghost(input_bits): Ghost<usize>,
-) -> (result: Result<(), CallWiringError<'p, 'a>>)
+) -> (result: Result<(), ChildCallWiringError<'p, 'a>>)
     requires
         form_spans_valid(caller.source.text, caller.forms@, caller.source.text.spec_bytes().len() as int),
         port_bit_layout_result(widths, limit, Ok(*layout)), arguments@.len() == widths.len() == layout.ranges_model().len(),
         nor_evaluation_ready(callee, layout.total_bits_model() as nat),
         reference < old(children).ranges@.len(), old(children).ranges@[reference as int].is_none(),
-        old(children).wires@.len() + callee.outputs@.len() <= usize::MAX,
+        old(children).wires@.len() <= output_capacity,
         old(gates)@.len() <= capacity,
         gates_available(old(gates)@, input_bits as nat, old(gates)@.len() as int),
         wires_available(caller.wires@, input_bits, old(gates)@.len()),
@@ -750,7 +760,7 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
         result.is_ok() ==> final(gates)@.len() == old(gates)@.len() + callee.gates@.len(),
         result.is_ok() ==> final(gates)@.take(old(gates)@.len() as int) == old(gates)@,
         result.is_ok() ==> gates_available(final(gates)@, input_bits as nat, final(gates)@.len() as int),
-        result.is_ok() ==> final(children).wires@.len() == old(children).wires@.len() + callee.outputs@.len(),
+        result.is_ok() ==> final(children).wires@.len() == old(children).wires@.len() + callee.outputs@.len() <= output_capacity,
         result.is_ok() ==> wires_available(final(children).wires@, input_bits, final(gates)@.len()),
         result.is_ok() ==> final(children).ranges@ == old(children).ranges@.update(reference as int,
             Some((old(children).wires@.len() as usize)..(final(children).wires@.len() as usize))),
@@ -763,13 +773,20 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
             &&& final(children).ranges@ == ranges && final(children).wires@ == old(children).wires@
             &&& final(gates)@ == old(gates)@
             &&& match error {
-                CallWiringError::DeferredArgument(site) => exists|i: int| 0 <= i < arguments@.len()
+                ChildCallWiringError::Call(CallWiringError::DeferredArgument(site)) => exists|i: int| 0 <= i < arguments@.len()
                     && !projected_source_available(ranges, (#[trigger] arguments@[i]).source)
                     && is_form_location(caller.source, caller.forms@[arguments@[i].form as int], site)
                     && forall|j: int| 0 <= j < i ==> projected_source_available(ranges, (#[trigger] arguments@[j]).source),
-                CallWiringError::GateCapacity => old(gates)@.len() + callee.gates@.len() > capacity
+                ChildCallWiringError::Call(CallWiringError::GateCapacity) => old(gates)@.len() + callee.gates@.len() > capacity
                     && forall|i: int| 0 <= i < arguments@.len() ==>
                         projected_source_available(ranges, (#[trigger] arguments@[i]).source),
+                ChildCallWiringError::OutputCapacity { used, width, capacity: available } => {
+                    &&& used == old(children).wires@.len() && width == callee.outputs@.len()
+                    &&& available == output_capacity && used + width > available
+                    &&& old(gates)@.len() + callee.gates@.len() <= capacity
+                    &&& forall|i: int| 0 <= i < arguments@.len() ==>
+                        projected_source_available(ranges, (#[trigger] arguments@[i]).source)
+                },
             }
         },
 {
@@ -783,18 +800,26 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
     let mapped = match lower_call_arguments(&invocation, arguments, layout, Ghost(widths), Ghost(limit),
         Ghost(input_bits), Ghost(old_gates.len())) {
         Ok(mapped) => mapped,
-        Err(site) => return Err(CallWiringError::DeferredArgument(site)),
+        Err(site) => return Err(ChildCallWiringError::Call(CallWiringError::DeferredArgument(site))),
     };
-    if !children.append(reference, gates, callee, mapped.as_slice(), capacity, Ghost(input_bits)) {
-        proof { reveal(argument_prefix_wires); }
-        return Err(CallWiringError::GateCapacity);
-    }
     proof {
         reveal(argument_prefix_wires);
         assert forall|i: int| 0 <= i < arguments@.len()
             implies projected_source_available(before.ranges@, (#[trigger] arguments@[i]).source) by {
             assert(argument_source_available(&invoked, arguments@[i].source));
         };
+    }
+    if callee.gates.len() > capacity - gates.len() {
+        return Err(ChildCallWiringError::Call(CallWiringError::GateCapacity));
+    }
+    let used = children.wires.len();
+    let width = callee.outputs.len();
+    if width > output_capacity - used {
+        return Err(ChildCallWiringError::OutputCapacity { used, width, capacity: output_capacity });
+    }
+    let _added = children.append(reference, gates, callee, mapped.as_slice(), capacity, Ghost(input_bits));
+    proof {
+        assert(_added);
         assert(child_outputs_appended(&before, children, reference, callee, mapped@, old_gates, gates@, input_bits));
     }
     assert(child_instance_matches(caller, arguments@, layout, callee, &before, children, reference,
@@ -1008,10 +1033,13 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     assert_eq!(calls.iter().map(|call| call.reference).collect::<Vec<_>>(), [3, 2, 1]);
     let prefix = NorGate { left: Wire::Constant(false), right: Wire::Constant(false) };
     let mut gates = alloc::vec![prefix];
-    let at_limit = lower_child_calls(&base, &calls, count, &mut gates, 2, Ghost(1usize));
-    assert!(matches!(at_limit, Err((1, CallWiringError::GateCapacity))));
+    let at_limit = lower_child_calls(&base, &calls, count, &mut gates, 2, 1, Ghost(1usize));
+    assert!(matches!(at_limit, Err((1, ChildCallWiringError::Call(CallWiringError::GateCapacity)))));
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
-    let children = lower_child_calls(&base, &calls, count, &mut gates, 3, Ghost(1usize)).unwrap();
+    let output_limit = lower_child_calls(&base, &calls, count, &mut gates, 3, 1, Ghost(1usize));
+    assert!(matches!(output_limit, Err((1, ChildCallWiringError::OutputCapacity { used: 1, width: 1, capacity: 1 }))));
+    assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
+    let children = lower_child_calls(&base, &calls, count, &mut gates, 3, 3, Ghost(1usize)).unwrap();
     let invocation = CallerArguments { child_ranges: &children.ranges, child_wires: &children.wires, ..base };
     let parent_circuit = parent.template.circuit();
     let outputs = lower_projected_call(&invocation, parent.arguments, parent_circuit.inputs(), parent_circuit.netlist(),
