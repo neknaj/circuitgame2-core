@@ -14,6 +14,10 @@ use super::port_values;
 use super::super::instances::{instance_gates_match, instance_outputs_match};
 #[cfg(verus_only)]
 use super::{driver_bit_available, driver_wire, driver_wire_is_available, wires_available};
+#[cfg(verus_only)]
+use super::{Layouts, LoweringBody, body_definition_layouts, body_driver_bits_fit_layout, definition_widths};
+#[cfg(verus_only)]
+use super::super::frontend::argument_matches_width;
 use crate::project::use_aliases::call_arity::{CallArgumentSource, ProjectedCallArgument};
 use crate::project::circuits::{form_location, read_indexed_atom};
 use crate::project::{LocatedName, ProjectSource};
@@ -184,6 +188,28 @@ pub(super) open spec fn layout_argument_ready(
         CallArgumentSource::Literal(bits) => width == bits
             && literal_argument_matches_width(source, forms, argument.form, width as int),
         CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => true,
+    }
+}
+
+/// 型検査で得た実引数の幅を、割り当て済みのポート範囲と先行配線に対応付ける。
+pub(super) proof fn layout_argument_from_width(
+    body: &LoweringBody, layouts: &Layouts, capacity: usize, first: usize, source: &ProjectSource,
+    forms: Seq<Form>, argument: ProjectedCallArgument, width: u64, width_limit: u64,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        first <= body.definitions@.len(), width <= usize::MAX,
+        argument_matches_width(source, forms, body.input_widths@, body.definitions@.take(first as int),
+            argument, width, width_limit),
+    ensures layout_argument_ready(source, forms, layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
+        preceding_port_bits(definition_widths(body.definitions@), first as nat) as int, argument, width as usize),
+{
+    if let CallArgumentSource::Driver(driver) = argument.source {
+        let used = preceding_port_bits(definition_widths(body.definitions@), first as nat) as int;
+        assert forall|bit: int| 0 <= bit < width implies
+            #[trigger] driver_bit_available(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), used, driver, bit) by {
+            body_driver_bits_fit_layout(body.input_widths@, body.definitions@, layouts, capacity, first as int, used, driver, width, bit);
+        };
     }
 }
 

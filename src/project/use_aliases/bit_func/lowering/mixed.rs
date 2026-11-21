@@ -14,9 +14,7 @@ use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 use super::super::templates::ResolvedTemplateCall;
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
-use super::super::frontend::{argument_matches_width, call_covers};
-#[cfg(verus_only)]
-use super::super::super::call_arity::CallArgumentSource;
+use super::super::frontend::{argument_matches_width, call_covers, expression_argument_matches_width};
 use super::super::super::call_arity::ProjectedCallArgument;
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group};
 use crate::syntax::Form;
@@ -27,7 +25,7 @@ use super::super::instances::{instance_gates_match, instance_wire_values};
 #[cfg(verus_only)]
 use crate::netlist::{gate_values_match, nor_evaluation};
 #[cfg(verus_only)]
-use super::call_arguments::{CallerArguments, layout_argument_ready};
+use super::call_arguments::{CallerArguments, layout_argument_from_width, layout_argument_ready};
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
 
@@ -123,17 +121,8 @@ proof fn call_argument_bits_available(
     let layout = binding.callee.input_layout_model();
     port_bit_layout_size(inputs, binding._layout_limit@, layout);
     port_bit_layout_port(inputs, binding._layout_limit@, *layout, port as usize);
-    let range = layout.ranges_model()[port];
-    let width = (range.end - range.start) as usize;
-    assert(width == inputs[port]);
-    if let CallArgumentSource::Driver(driver) = binding.arguments@[port].source {
-        let first = binding.group.outputs.start;
-        let used = preceding_port_bits(definition_widths(body.definitions@), first as nat) as int;
-        assert forall|bit: int| 0 <= bit < width implies
-            #[trigger] driver_bit_available(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), used, driver, bit) by {
-            body_driver_bits_fit_layout(body.input_widths@, body.definitions@, layouts, capacity, first as int, used, driver, inputs[port], bit);
-        };
-    }
+    layout_argument_from_width(body, layouts, capacity, binding.group.outputs.start,
+        binding.group.expression.source, forms, binding.arguments@[port], inputs[port], width_limit);
 }
 
 pub(in crate::project::use_aliases::bit_func) open spec fn resolved_call_fits_body(
@@ -150,6 +139,10 @@ pub(in crate::project::use_aliases::bit_func) open spec fn resolved_call_fits_bo
     &&& forall|port: int| 0 <= port < call.arguments@.len() ==>
         argument_matches_width(call.group.expression.source, forms, inputs, definitions.take(first as int),
             #[trigger] call.arguments@[port], callee_inputs[port], limit)
+    &&& forall|child: int, port: int| 0 <= child < call.children@.len()
+        && 0 <= port < call.children@[child].arguments@.len() ==>
+        #[trigger] expression_argument_matches_width(call.group.expression.source, forms, inputs, definitions,
+            call, child, port, limit)
 }
 
 pub(super) open spec fn binding_matches_selection(binding: CallBinding, call: ResolvedTemplateCall) -> bool {

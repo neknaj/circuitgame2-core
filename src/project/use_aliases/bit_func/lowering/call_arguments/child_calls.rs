@@ -8,6 +8,8 @@ use super::super::{existing_wires_keep_availability, port_values};
 #[cfg(verus_only)]
 use super::super::super::instances::instance_evaluates_from_caller;
 #[cfg(verus_only)]
+use super::super::super::frontend::{expression_argument_matches_width, expression_input_width, expression_output_bits};
+#[cfg(verus_only)]
 use crate::netlist::{gate_values_match, nor_evaluation, output_values_match};
 
 verus! {
@@ -528,6 +530,74 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_call_
             } else { true }
         }
     })
+}
+
+/// 型検査済みの実引数と割り当て済みの範囲から、後順の一項目を展開できることを示す。
+///
+/// 定義を読む引数は左辺より先行する配線を参照し、入れ子の引数は後順で先行する子の出力を参照する。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn bound_child_call_ready(
+    body: &LoweringBody, layouts: &Layouts, capacity: usize, width_limit: u64,
+    caller: &CallerArguments, selected: ResolvedTemplateCall, builtin: &(NorNetlist, PortBitLayout),
+    calls: Seq<ChildCall>, index: int,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        selected.group.outputs.start <= body.definitions@.len(),
+        caller.source == selected.group.expression.source,
+        caller.inputs@ == layouts.inputs.ranges_model(),
+        caller.definitions@ == layouts.definitions.ranges_model(),
+        caller.wires@.len() == preceding_port_bits(definition_widths(body.definitions@), selected.group.outputs.start as nat),
+        0 <= index < calls.len() == selected.children@.len(),
+        forall|i: int| 0 <= i < calls.len() ==>
+            child_call_binding(selected.children@[i], selected.group.references, builtin, #[trigger] calls[i]),
+        forall|port: int| 0 <= port < selected.children@[index].arguments@.len() ==>
+            #[trigger] expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+                body.definitions@, selected, index, port, width_limit),
+    ensures child_call_ready(caller, calls, index),
+{
+    let call = calls[index];
+    let child = selected.children@[index];
+    reveal(child_call_ready);
+    assert(child_call_binding(child, selected.group.references, builtin, call));
+    port_bit_layout_size(call._input_widths@, call._layout_limit@, call.inputs);
+    assert forall|port: int| 0 <= port < call.arguments@.len() implies {
+        let argument = #[trigger] call.arguments@[port];
+        let span = call.inputs.ranges_model()[port];
+        let width = (span.end - span.start) as usize;
+        &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
+            caller.wires@.len() as int, argument, width)
+        &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
+            exists|earlier: int| 0 <= earlier < index && (#[trigger] calls[earlier]).reference == reference
+                && calls[earlier].circuit.outputs@.len() == width
+        } else { true }
+    } by {
+        let argument = call.arguments@[port];
+        assert(argument == child.arguments@[port]);
+        let bits = expression_input_width(child, port);
+        assert(call._input_widths@[port] == bits);
+        assert(expression_argument_matches_width(caller.source, caller.forms@, body.input_widths@,
+            body.definitions@, selected, index, port, width_limit));
+        port_bit_layout_port(call._input_widths@, call._layout_limit@, *call.inputs, port as usize);
+        let span = call.inputs.ranges_model()[port];
+        assert(0 < span.end - span.start == bits <= usize::MAX);
+        let width = (span.end - span.start) as usize;
+        layout_argument_from_width(body, layouts, capacity, selected.group.outputs.start, caller.source,
+            caller.forms@, argument, bits, width_limit);
+        assert(layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
+            caller.wires@.len() as int, argument, width));
+        if let CallArgumentSource::NestedCall(reference) = argument.source {
+            let earlier = choose|i: int| 0 <= i < index
+                && (#[trigger] selected.children@[i]).child.reference == selected.group.references.start + reference
+                && expression_output_bits(selected.children@[i]) == bits;
+            let wire_source = calls[earlier];
+            let producer = selected.children@[earlier];
+            assert(child_call_binding(producer, selected.group.references, builtin, wire_source));
+            assert(wire_source.reference == reference);
+            assert(wire_source.circuit.outputs@.len() == expression_output_bits(producer));
+            assert(exists|i: int| 0 <= i < index && (#[trigger] calls[i]).reference == reference
+                && calls[i].circuit.outputs@.len() == width);
+        }
+    };
 }
 
 #[verifier::opaque]

@@ -7,6 +7,7 @@ use super::super::super::expansion::{
     call_literal_bit, source_argument_bytes, source_call_argument_value, source_call_arguments_match,
 };
 use super::super::super::semantics::driver_values;
+use super::super::super::super::call_arity::CallArgumentSource;
 use crate::netlist::wire_value;
 use crate::project::FuncWiringResult;
 use crate::syntax::{form_span, circuit::call_argument_positions};
