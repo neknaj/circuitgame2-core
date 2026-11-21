@@ -2,12 +2,12 @@
 
 use super::frontend::BitFuncError;
 use super::super::{FuncSignalTypes, FuncWiring, FuncWiringResult, FunctionExpansionOrder, TypedFuncCall, UseAliases};
-use super::super::call_arity::{CallArgumentProjections, RetainedCallTarget, RootFunctionCall};
+use super::super::call_arity::RetainedCallTarget;
 #[cfg(verus_only)]
-use super::super::call_arity::CallArgumentSource;
-use super::super::function_atoms::FuncProjections;
+use super::super::call_arity::{CallArgumentProjections, CallArgumentSource, RootFunctionCall};
+use super::super::function_atoms::{FuncProjections, SignalType};
 #[cfg(verus_only)]
-use super::super::function_atoms::{SignalType, concat_projections_match, signal_type_at, structure_projection_matches,
+use super::super::function_atoms::{concat_projections_match, signal_type_at, structure_projection_matches,
     structure_projections_in_order};
 use crate::project::LocatedName;
 #[cfg(verus_only)]
@@ -21,7 +21,7 @@ use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
 use crate::syntax::circuit::postorder_call_references;
 #[cfg(verus_only)]
-use crate::syntax::circuit::{call_references_in_postorder, root_call_postorder_last};
+use crate::syntax::circuit::{call_postorder_reference, call_references_in_postorder, root_call_postorder_last};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
@@ -48,17 +48,32 @@ mod tests {
         assert!(prepared.calls[0].postorder.is_none());
         let order = prepared.calls[1].postorder.as_deref().unwrap();
         let refs = &project.circuits()[0].references;
-        let locations: Vec<_> = order.iter().map(|&r| refs[r].span.start).collect();
+        let locations: Vec<_> = order.iter().map(|call| refs[call.reference].span.start).collect();
         assert_eq!(locations, [
             text.find("nor earlier").unwrap(),
             text.find("id (nor").unwrap(),
-            text.find("id (id").unwrap(),
         ]);
+        assert!(order[0].vertex.is_none());
+        assert_eq!(order[0].arguments, 3..5);
+        assert_eq!(order[1].vertex, Some(prepared.calls[1].vertex));
+        assert_eq!(order[1].arguments, 2..3);
         assert_eq!(prepared.calls[1].arguments, 1..2);
     }
 }
 
 verus! {
+
+/// 元の参照に対応する実引数と、既に展開順が決まった呼び出し先。
+pub(super) struct PreparedExpressionCall<'p, 'a> {
+    /// 厳格解析で作ったファイル全体の参照配列を指す添字。
+    pub(super) reference: usize,
+    /// 型検査済みの実引数配列で、この呼び出しの引数を指す半開範囲。
+    pub(super) arguments: Range<usize>,
+    /// 通常関数のテンプレート番号。組み込み NOR には番号がない。
+    pub(super) vertex: Option<usize>,
+    pub(super) _signature: Ghost<TypedFuncCall<'p, 'a>>,
+    pub(super) _rank: Ghost<Option<int>>,
+}
 
 /// 一回の呼び出しで割り当てる左辺、引数範囲、展開済みの呼び出し先。
 pub(super) struct CheckedExpansionCall<'p, 'a> {
@@ -68,8 +83,8 @@ pub(super) struct CheckedExpansionCall<'p, 'a> {
     pub(super) outputs: Range<usize>,
     /// 関数の平坦な実引数列における区間。
     pub(super) arguments: Range<usize>,
-    /// 右辺に複数の参照がある場合の、子から親へ並べた呼び出し参照。
-    pub(super) postorder: Option<Vec<usize>>,
+    /// 入れ子の呼び出しを、内側から外側へ処理する順に保持する。
+    pub(super) postorder: Option<Vec<PreparedExpressionCall<'p, 'a>>>,
     /// 展開済み回路を保持する配列における呼び出し先の番号。
     pub(super) vertex: usize,
     pub(super) _signature: Ghost<TypedFuncCall<'p, 'a>>,
@@ -494,9 +509,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& group.arguments == inputs && inputs.start <= inputs.end <= arguments.arguments@.len()
         &&& match group.postorder {
             None => row.references.end == row.references.start + 1,
-            Some(order) => row.references.end > row.references.start + 1
-                && call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, order@)
-                && order@.len() > 0 && order@.last() == row.references.start,
+            Some(children) => row.references.end > row.references.start + 1
+                && self.prepared_expression_children_match(plan, caller, (root.definition - definitions.start) as usize,
+                    arguments, typed.types@, wiring, caller_at, children@),
         }
         &&& 0 <= callee_at < caller_at < plan.order_model().len()
         &&& plan.position_model(callee_at) == Some((root.target_file, root.target_entry))
@@ -793,6 +808,222 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.resolved_function_signature_evidence((caller.0, caller.1, local, 0), caller.2, group._signature@);
     }
 
+    #[verifier::opaque]
+    pub(super) closed spec fn prepared_expression_call_matches(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), definition: usize,
+        projections: &CallArgumentProjections, types: Seq<Option<SignalType>>, wiring: &FuncWiring,
+        caller_rank: int, item: PreparedExpressionCall,
+    ) -> bool {
+        let (file, entry, limit) = caller;
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        let frame = parsed.entry_ranges@[entry as int];
+        let row = parsed.definitions@[frame.definitions.start + definition];
+        let local = (item.reference - row.references.start) as usize;
+        let key = item.reference - frame.references.start;
+        let args = projections;
+        let range = item.arguments;
+        &&& row.references.start <= item.reference < row.references.end
+        &&& 0 <= key < args.reference_argument_ends@.len()
+        &&& range.start == if key == 0 { 0 } else { args.reference_argument_ends@[key - 1] }
+        &&& range.end == args.reference_argument_ends@[key]
+        &&& range.start <= range.end <= args.arguments@.len()
+        &&& self.projected_input_arguments((file, entry, definition, local), limit, types, wiring,
+            args.arguments@.subrange(range.start as int, range.end as int))
+        &&& self.func_call_signature_evidence(file, entry, definition, local, limit, Ok(Some(item._signature@)))
+        &&& match item._signature@.call.target {
+            FuncCallTarget::Nor => item.vertex.is_none() && item._rank@.is_none(),
+            FuncCallTarget::Function { file, entry, .. } =>
+                item._rank@ matches Some(rank) && 0 <= rank < caller_rank < plan.order_model().len()
+                    && plan.position_model(rank) == Some((file, entry))
+                    && item.vertex == Some(plan.order_model()[rank]),
+        }
+    }
+
+    fn prepare_expression_call(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, definition: usize,
+        reference: usize, projections: &FuncProjections<'p, 'a>,
+        Ghost(context): Ghost<(u64, Seq<Option<SignalType<'p, 'a>>>, &FuncWiring<'p, 'a>, int)>,
+    ) -> (item: PreparedExpressionCall<'p, 'a>)
+        requires
+            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
+            self.projected_references_match((file, entry, context.0), context.1, context.2,
+                &projections.call_arguments, projections.calls@),
+            plan.position_model(context.3) == Some((file, entry)),
+            ({
+                let circuits = self.targets.project_model().circuits_model();
+                &&& file < circuits.len()
+                &&& ({
+                    let parsed = &circuits[file as int];
+                    &&& entry < parsed.entry_ranges@.len()
+                    &&& definition < super::super::definitions::definition_count(parsed, entry as int)
+                    &&& ({
+                        let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                        &&& absolute < parsed.definitions@.len()
+                        &&& parsed.definitions@[absolute].references.start <= reference
+                            < parsed.definitions@[absolute].references.end
+                        &&& reference < parsed.references@.len()
+                        &&& parsed.references@[reference as int].kind is Callee
+                    })
+                })
+            }),
+        ensures
+            item.reference == reference,
+            self.prepared_expression_call_matches(*plan, (file, entry, context.0), definition, &projections.call_arguments,
+                context.1, context.2, context.3, item),
+    {
+        let ghost caller = (file, entry, context.0);
+        let project = self.targets.project();
+        proof { self.checked_wiring_is_func(file, entry, context.0, *context.2); }
+        let parsed = &project.circuits()[file];
+        proof {
+            let source = project.sources_model()[file as int];
+            parsed_index_evidence(source, *parsed);
+            build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        }
+        let frame = &parsed.entry_ranges[entry];
+        let absolute = frame.definitions.start + definition;
+        proof {
+            let source = project.sources_model()[file as int];
+            build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+        }
+        let row = &parsed.definitions[absolute];
+        let local = reference - row.references.start;
+        let (arguments, target) = self.retained_call_reference(file, entry, definition, local, &projections.call_arguments,
+            Ghost(context.0), Ghost(context.1), Ghost(*context.2), Ghost(projections.calls@));
+        let ghost signature = self.retained_callee_signature(file, entry, definition, local, context.0, target);
+        let Some(target) = target else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        let item = match target {
+            RetainedCallTarget::Nor => PreparedExpressionCall {
+                reference, arguments, vertex: None, _signature: Ghost(signature), _rank: Ghost(None),
+            },
+            RetainedCallTarget::Function(target_file, target_entry) => {
+                proof { self.typed_call_arguments_ready(file, entry, definition, local, context.0, signature); }
+                let ghost at = DefinitionPosition { file, entry, definition, reference: local };
+                let ghost site = self.expansion_site_for_call(at, signature.call);
+                let ghost order = self.function_expansion_callee_precedes(*plan, site);
+                let target = (target_file, target_entry);
+                let vertex = plan.template_vertex(target);
+                proof {
+                    self.template_rank_from_position(*plan, (file, entry), order.1, context.3);
+                    plan.template_vertex_at_position(target, order.0, vertex);
+                }
+                PreparedExpressionCall {
+                    reference, arguments, vertex, _signature: Ghost(signature), _rank: Ghost(Some(order.0)),
+                }
+            },
+        };
+        assert(self.prepared_expression_call_matches(*plan, caller, definition, &projections.call_arguments,
+            context.1, context.2, context.3, item)) by { reveal(UseAliases::prepared_expression_call_matches); };
+        item
+    }
+
+    #[verifier::opaque]
+    pub(super) closed spec fn prepared_expression_children_match(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), definition: usize,
+        projections: &CallArgumentProjections, types: Seq<Option<SignalType>>, wiring: &FuncWiring,
+        caller_rank: int, children: Seq<PreparedExpressionCall>,
+    ) -> bool {
+        let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+        let frame = parsed.entry_ranges@[caller.1 as int];
+        let row = parsed.definitions@[frame.definitions.start + definition];
+        let source_order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
+        &&& call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, source_order)
+        &&& forall|i: int| 0 <= i < children.len() ==> self.prepared_expression_call_matches(
+            plan, caller, definition, projections, types, wiring, caller_rank, #[trigger] children[i])
+    }
+
+    /// 入れ子の呼び出しごとに、型検査済みの引数範囲と展開先を処理順に集める。
+    fn prepare_expression_children(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, definition: usize,
+        order: &[usize], projections: &FuncProjections<'p, 'a>,
+        Ghost(context): Ghost<(u64, Seq<Option<SignalType<'p, 'a>>>, &FuncWiring<'p, 'a>, int)>,
+    ) -> (children: Vec<PreparedExpressionCall<'p, 'a>>)
+        requires
+            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
+            self.projected_references_match((file, entry, context.0), context.1, context.2,
+                &projections.call_arguments, projections.calls@),
+            plan.position_model(context.3) == Some((file, entry)),
+            ({
+                let circuits = self.targets.project_model().circuits_model();
+                &&& file < circuits.len()
+                &&& ({
+                    let parsed = &circuits[file as int];
+                    &&& entry < parsed.entry_ranges@.len()
+                    &&& definition < super::super::definitions::definition_count(parsed, entry as int)
+                    &&& ({
+                        let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                        &&& absolute < parsed.definitions@.len()
+                        &&& ({
+                            let row = parsed.definitions@[absolute];
+                            &&& row.references.end <= parsed.references@.len()
+                            &&& order@.len() > 0 && order@.last() == row.references.start
+                            &&& call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, order@)
+                        })
+                    })
+                })
+            }),
+        ensures self.prepared_expression_children_match(*plan, (file, entry, context.0), definition, &projections.call_arguments,
+            context.1, context.2, context.3, children@),
+    {
+        let ghost caller = (file, entry, context.0);
+        let ghost parsed = &self.targets.project_model().circuits_model()[file as int];
+        let ghost row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+        let stop = order.len() - 1;
+        let mut children: Vec<PreparedExpressionCall<'p, 'a>> = Vec::new();
+        let mut index = 0;
+        while index < stop
+            invariant
+                self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                caller == (file, entry, context.0),
+                self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
+                self.projected_references_match(caller, context.1, context.2, &projections.call_arguments, projections.calls@),
+                plan.position_model(context.3) == Some((file, entry)),
+                *parsed == self.targets.project_model().circuits_model()[file as int],
+                row == parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition],
+                definition < super::super::definitions::definition_count(parsed, entry as int),
+                stop + 1 == order@.len(), order@.last() == row.references.start,
+                call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, order@),
+                file < self.targets.project_model().circuits_model().len(),
+                entry < parsed.entry_ranges@.len(),
+                parsed.entry_ranges@[entry as int].definitions.start + definition < parsed.definitions@.len(),
+                row.references.end <= parsed.references@.len(),
+                index == children@.len() <= stop,
+                forall|i: int| 0 <= i < children@.len() ==> {
+                    let child = #[trigger] children@[i];
+                    &&& child.reference == order@[i]
+                    &&& self.prepared_expression_call_matches(*plan, caller, definition, &projections.call_arguments,
+                        context.1, context.2, context.3, child)
+                },
+            decreases stop - index,
+        {
+            let reference = order[index];
+            proof { call_postorder_reference(parsed.syntax.forms@, parsed.references@, row.references, order@, index as int); }
+            let child = self.prepare_expression_call(plan, file, entry, definition, reference, projections, Ghost(context));
+            let ghost before = children@;
+            children.push(child);
+            assert forall|i: int| 0 <= i < children@.len() implies {
+                let item = #[trigger] children@[i];
+                &&& item.reference == order@[i]
+                &&& self.prepared_expression_call_matches(*plan, caller, definition, &projections.call_arguments,
+                    context.1, context.2, context.3, item)
+            } by {
+                if i < index { assert(children@[i] == before[i]); }
+            };
+            index += 1;
+        }
+        proof {
+            reveal(UseAliases::prepared_expression_children_match);
+            let references = Seq::new(children@.len(), |i: int| children@[i].reference);
+            assert(references.push(row.references.start) =~= order@);
+        }
+        children
+    }
+
     fn check_expansion_call_groups(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
         typed: &FuncSignalTypes<'p, 'a>, wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
@@ -880,13 +1111,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
                     root_call_postorder_last(source.text, forms@, parsed.references@, *row, order@);
                 }
-                Some(order)
+                Some(self.prepare_expression_children(plan, file, entry, definition, order.as_slice(), projections,
+                    Ghost((limit, typed.types@, wiring, group_model.1.1))))
             };
-            let reference = match &postorder {
-                None => 0,
-                Some(order) => order[order.len() - 1] - row.references.start,
-            };
-            assert(reference == 0);
+            let reference = 0;
             let (arguments, selected) = self.retained_call_reference(file, entry, definition, reference,
                 &projections.call_arguments, Ghost(limit), Ghost(typed.types@), Ghost(*wiring), Ghost(projections.calls@));
             assert(arguments == projections.call_arguments.ranges@[index as int]);

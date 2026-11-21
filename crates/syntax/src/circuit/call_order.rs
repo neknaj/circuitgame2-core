@@ -268,6 +268,21 @@ proof fn walk_close_call(
     }
 }
 
+/// 順序内の一項目が、指定した定義の呼び出し参照を指すことを示す。
+pub proof fn call_postorder_reference(
+    forms: Seq<Form>, references: Seq<ExpressionReference>, range: Range<usize>, order: Seq<usize>, index: int,
+)
+    requires
+        call_references_in_postorder(forms, references, range, order),
+        range.end <= references.len(),
+        0 <= index < order.len(),
+    ensures range.start <= order[index] < range.end, references[order[index] as int].kind is Callee,
+{
+    reveal(call_references_in_postorder);
+    order.lemma_index_contains(index);
+    assert(order.contains(order[index]));
+}
+
 /// 元ソースで先に始まる呼び出しと、後から始まる呼び出しの処理順を取り出す。
 ///
 /// 後の呼び出しが前の呼び出しの内側なら子を先に処理する。区間が離れていれば元ソース順になる。
