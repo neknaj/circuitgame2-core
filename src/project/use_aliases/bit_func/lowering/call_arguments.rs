@@ -1128,4 +1128,62 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     assert_eq!(result.evaluate(&[true]).unwrap(), [true]);
 }
 
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn lowers_the_resolved_nor_root_and_rolls_back_at_its_gate_limit() {
+    use super::{LoweringBody, prepare_body_layouts};
+    use super::super::{BitFuncRhs, CheckedBitDefinition};
+    use child_calls::{NestedCallWiringError, lower_resolved_nor_root};
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "nor-root.ncg2",
+        revision: 1,
+        text: "(using nor) (func id (in a) (out a))
+               (func caller (in a) (out y) (def y (nor (id (nor a a)) 0)))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    let mut templates = aliases.new_function_templates(&plan, Ghost(1u64));
+    let position = plan.get(0).unwrap();
+    let checked = aliases.check_bit_func(position.0, position.1, 1).unwrap();
+    let circuit = checked.lower_bit_func(1).unwrap();
+    let template = aliases.standalone_function_template(position, 1, checked, circuit, 1);
+    aliases.insert_function_template(&plan, &mut templates, template, Ghost(1u64));
+
+    let position = plan.get(1).unwrap();
+    let prepared = aliases.prepare_expansion_body(&plan, position.0, position.1, 1).unwrap();
+    let root = &prepared.nor_roots[0];
+    let arguments = prepared.projections.call_arguments.arguments.as_slice();
+    let selected = aliases.resolve_nor_root(&plan, &templates, root, arguments,
+        Ghost((position.0, position.1, 1u64)), Ghost(&prepared), Ghost(0int));
+    let parsed = &project.circuits()[position.0];
+    let refs = &parsed.definitions[root.definition].references;
+    let definitions = [CheckedBitDefinition {
+        expression: copy_location(&root.root.expression), width: 1, rhs: BitFuncRhs::CallOutput { group: 0, port: 0 },
+        operands: Vec::new(),
+    }];
+    let layouts = prepare_body_layouts(&[1], &definitions, &[1], 1).unwrap();
+    let _body = LoweringBody { input_widths: &[1], definitions: &definitions };
+    let caller = CallerArguments {
+        source: &project.sources()[position.0], forms: &parsed.syntax.forms,
+        inputs: layouts.inputs.ranges(), definitions: layouts.definitions.ranges(),
+        wires: &[], child_ranges: &[], child_wires: &[],
+    };
+    let builtin = builtin_nor_call();
+    let prefix = NorGate { left: Wire::Constant(false), right: Wire::Constant(false) };
+    let mut gates = alloc::vec![prefix];
+    let limited = lower_resolved_nor_root(&selected, refs, &caller, &builtin, &mut gates, 2, 2, Ghost(&aliases),
+        Ghost((&plan, &templates, 1u64, arguments@)), Ghost((&_body, &layouts, 1usize, 0usize)));
+    assert!(matches!(limited, Err(NestedCallWiringError::Root(CallWiringError::GateCapacity))));
+    assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
+    let output = lower_resolved_nor_root(&selected, refs, &caller, &builtin, &mut gates, 3, 2, Ghost(&aliases),
+        Ghost((&plan, &templates, 1u64, arguments@)), Ghost((&_body, &layouts, 1usize, 0usize))).unwrap();
+    assert!(matches!(output, Wire::Gate(2)));
+    let circuit = NorNetlist { input_count: 1, gates, outputs: alloc::vec![output] };
+    assert_eq!(circuit.evaluate(&[false]).unwrap(), [false]);
+    assert_eq!(circuit.evaluate(&[true]).unwrap(), [true]);
+}
+
 } // verus!
