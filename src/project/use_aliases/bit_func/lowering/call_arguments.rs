@@ -627,6 +627,24 @@ pub(super) fn builtin_nor_call() -> (builtin: (NorNetlist, PortBitLayout))
     (NorNetlist { input_count: 2, gates, outputs }, layout)
 }
 
+/// 更新前の配線表から得た実引数で、同じ呼び出しのゲートと出力範囲を作ったことを表す。
+#[verifier::opaque]
+pub(super) open spec fn child_instance_matches(
+    caller: &CallerArguments, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
+    callee: &NorNetlist, before: &ChildOutputWires, after: &ChildOutputWires, reference: usize,
+    old_gates: Seq<NorGate>, new_gates: Seq<NorGate>, input_bits: usize,
+) -> bool {
+    exists|invocation: CallerArguments, mapped: Seq<Wire>|
+        #[trigger] argument_prefix_wires(&invocation, arguments, layout.ranges_model(), arguments.len() as int, mapped)
+        && invocation.source == caller.source && invocation.forms@ == caller.forms@
+        && invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
+        && invocation.wires@ == caller.wires@
+        && invocation.child_ranges@ == before.ranges@ && invocation.child_wires@ == before.wires@
+        && mapped.len() == layout.total_bits_model()
+        && wires_available(mapped, input_bits, old_gates.len())
+        && child_outputs_appended(before, after, reference, callee, mapped, old_gates, new_gates, input_bits)
+}
+
 /// 先に展開した子の配線を実引数から参照し、この呼び出しの出力を一時配線表へ登録する。
 ///
 /// # Errors
@@ -668,16 +686,8 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
             Some((old(children).wires@.len() as usize)..(final(children).wires@.len() as usize))),
         result.is_ok() ==> forall|i: int| 0 <= i < arguments@.len() ==>
             projected_source_available(old(children).ranges@, (#[trigger] arguments@[i]).source),
-        result.is_ok() ==> exists|invocation: CallerArguments, mapped: Seq<Wire>|
-                #[trigger] argument_prefix_wires(&invocation, arguments@, layout.ranges_model(), arguments@.len() as int, mapped)
-                && invocation.source == caller.source && invocation.forms@ == caller.forms@
-                && invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
-                && invocation.wires@ == caller.wires@
-                && invocation.child_ranges@ == old(children).ranges@ && invocation.child_wires@ == old(children).wires@
-                && mapped.len() == layout.total_bits_model()
-                && wires_available(mapped, input_bits, old(gates)@.len())
-                && child_outputs_appended(old(children), final(children), reference, callee, mapped,
-                    old(gates)@, final(gates)@, input_bits),
+        result.is_ok() ==> child_instance_matches(caller, arguments@, layout, callee, old(children), final(children),
+            reference, old(gates)@, final(gates)@, input_bits),
         result matches Err(error) ==> {
             let ranges = old(children).ranges@;
             &&& final(children).ranges@ == ranges && final(children).wires@ == old(children).wires@
@@ -717,14 +727,9 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
         };
         assert(child_outputs_appended(&before, children, reference, callee, mapped@, old_gates, gates@, input_bits));
     }
-    assert(exists|invocation: CallerArguments, wires: Seq<Wire>|
-        #[trigger] argument_prefix_wires(&invocation, arguments@, layout.ranges_model(), arguments@.len() as int, wires)
-        && invocation.source == caller.source && invocation.forms@ == caller.forms@
-        && invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
-        && invocation.wires@ == caller.wires@
-        && invocation.child_ranges@ == before.ranges@ && invocation.child_wires@ == before.wires@
-        && wires.len() == layout.total_bits_model() && wires_available(wires, input_bits, old_gates.len())
-        && child_outputs_appended(&before, children, reference, callee, wires, old_gates, gates@, input_bits)) by {
+    assert(child_instance_matches(caller, arguments@, layout, callee, &before, children, reference,
+        old_gates, gates@, input_bits)) by {
+        reveal(child_instance_matches);
         assert(argument_prefix_wires(&invoked, arguments@, layout.ranges_model(), arguments@.len() as int, mapped@));
     };
     Ok(())

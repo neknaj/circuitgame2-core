@@ -16,6 +16,105 @@ pub(in crate::project::use_aliases::bit_func::lowering) struct ChildCall<'s> {
     pub(in crate::project::use_aliases::bit_func::lowering) _layout_limit: Ghost<usize>,
 }
 
+/// 子を一件ずつ処理した境界の、検証に使う配線表とゲート列。
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func::lowering) struct ChildWiringSnapshot {
+    pub(in crate::project::use_aliases::bit_func::lowering) table: ChildOutputWires,
+    pub(in crate::project::use_aliases::bit_func::lowering) gates: Seq<NorGate>,
+}
+
+/// 各子の入力配線と出力の変換を、同じ配線表とゲート列で順につなぐ。
+#[verifier::opaque]
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_wiring_trace_matches(
+    caller: &CallerArguments, calls: Seq<ChildCall>, stop: nat, reference_count: usize,
+    initial: Seq<NorGate>, trace: Seq<ChildWiringSnapshot>, end: ChildWiringSnapshot, input_bits: usize,
+) -> bool {
+    &&& stop <= calls.len()
+    &&& trace.len() == stop + 1
+    &&& trace[0].table.ranges@.len() == reference_count
+    &&& forall|r: int| 0 <= r < reference_count ==> (#[trigger] trace[0].table.ranges@[r]).is_none()
+    &&& trace[0].table.wires@.len() == 0
+    &&& trace[0].gates == initial
+    &&& trace[stop as int] == end
+    &&& forall|i: int| 0 <= i < stop ==> {
+        let call = calls[i];
+        let before = #[trigger] trace[i];
+        let after = trace[i + 1];
+        child_instance_matches(caller, call.arguments@, call.inputs, call.circuit, &before.table, &after.table,
+            call.reference, before.gates, after.gates, input_bits)
+    }
+}
+
+proof fn extend_child_wiring_trace(
+    caller: &CallerArguments, calls: Seq<ChildCall>, index: usize, reference_count: usize,
+    initial: Seq<NorGate>, trace: Seq<ChildWiringSnapshot>,
+    before: ChildWiringSnapshot, after: ChildWiringSnapshot, input_bits: usize,
+)
+    requires
+        index < calls.len(),
+        child_wiring_trace_matches(caller, calls, index as nat, reference_count, initial, trace, before, input_bits),
+        ({
+            let call = calls[index as int];
+            child_instance_matches(caller, call.arguments@, call.inputs, call.circuit, &before.table, &after.table,
+                call.reference, before.gates, after.gates, input_bits)
+        }),
+    ensures child_wiring_trace_matches(
+        caller, calls, (index + 1) as nat, reference_count, initial, trace.push(after), after, input_bits),
+{
+    reveal(child_wiring_trace_matches);
+    let extended = trace.push(after);
+    assert(extended[0] == trace[0]);
+    assert forall|i: int| 0 <= i <= index implies {
+        let call = calls[i];
+        let prior = #[trigger] extended[i];
+        let next = extended[i + 1];
+        child_instance_matches(caller, call.arguments@, call.inputs, call.circuit, &prior.table, &next.table,
+            call.reference, prior.gates, next.gates, input_bits)
+    } by {
+        if i < index {
+            assert(extended[i] == trace[i] && extended[i + 1] == trace[i + 1]);
+        }
+    };
+}
+
+/// 後から処理した子が、先行する子の出力配線やゲート番号を変えないことを示す。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_wiring_prefix_preserved(
+    caller: &CallerArguments, calls: Seq<ChildCall>, stop: nat, reference_count: usize,
+    initial: Seq<NorGate>, trace: Seq<ChildWiringSnapshot>, end: ChildWiringSnapshot,
+    earlier: nat, later: nat, input_bits: usize,
+)
+    requires
+        child_wiring_trace_matches(caller, calls, stop, reference_count, initial, trace, end, input_bits),
+        earlier <= later <= stop,
+    ensures ({
+        let first = trace[earlier as int];
+        let last = trace[later as int];
+        &&& first.gates.len() <= last.gates.len()
+        &&& first.table.wires@.len() <= last.table.wires@.len()
+        &&& last.gates.take(first.gates.len() as int) == first.gates
+        &&& last.table.wires@.take(first.table.wires@.len() as int) == first.table.wires@
+    }),
+    decreases later - earlier,
+{
+    reveal(child_wiring_trace_matches);
+    let first = trace[earlier as int];
+    let last = trace[later as int];
+    if earlier < later {
+        let index = later - 1;
+        let previous = trace[index];
+        let call = calls[index];
+        child_wiring_prefix_preserved(caller, calls, stop, reference_count, initial, trace, end,
+            earlier, index as nat, input_bits);
+        assert(child_instance_matches(caller, call.arguments@, call.inputs, call.circuit,
+            &previous.table, &last.table, call.reference, previous.gates, last.gates, input_bits));
+        reveal(child_instance_matches);
+        assert(last.gates.take(previous.gates.len() as int) == previous.gates);
+        assert(last.table.wires@.take(previous.table.wires@.len() as int) == previous.table.wires@);
+    }
+    assert(last.gates.take(first.gates.len() as int) =~= first.gates);
+    assert(last.table.wires@.take(first.table.wires@.len() as int) =~= first.table.wires@);
+}
+
 #[verifier::opaque]
 pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_sizes(calls: Seq<ChildCall>, end: nat) -> (nat, nat)
     decreases end,
@@ -226,6 +325,9 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
             &&& gates_available(final(gates)@, input_bits as nat, final(gates)@.len() as int)
             &&& wires_available(table.wires@, input_bits, final(gates)@.len())
             &&& child_arguments_determined(calls@, calls@.len())
+            &&& exists|trace: Seq<ChildWiringSnapshot>| #[trigger] child_wiring_trace_matches(
+                caller, calls@, calls@.len(), reference_count, old(gates)@, trace,
+                ChildWiringSnapshot { table, gates: final(gates)@ }, input_bits)
         },
         result matches Err((i, _)) ==> i < calls@.len(),
         result.is_err() ==> final(gates)@ == old(gates)@,
@@ -246,12 +348,17 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
     let mut table = ChildOutputWires::new(reference_count);
     let checkpoint = gates.len();
     let ghost initial = gates@;
+    let ghost first = ChildWiringSnapshot { table, gates: initial };
+    let ghost mut trace = seq![first];
     let mut index = 0;
     proof {
         assert(child_sizes(calls@, 0) == (0nat, 0nat)) by { reveal(child_sizes); };
         reveal(wires_available);
         assert(child_ranges_match(calls@, 0, table.ranges@)) by { reveal(child_ranges_match); };
         assert(gates@.take(checkpoint as int) =~= initial);
+        assert(child_wiring_trace_matches(caller, calls@, 0, reference_count, initial, trace, first, input_bits)) by {
+            reveal(child_wiring_trace_matches);
+        };
     }
     while index < calls.len()
         invariant
@@ -259,6 +366,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
             table.ranges@.len() == reference_count,
             child_ranges_match(calls@, index as nat, table.ranges@),
             child_arguments_determined(calls@, index as nat),
+            child_wiring_trace_matches(caller, calls@, index as nat, reference_count, initial,
+                trace, ChildWiringSnapshot { table, gates: gates@ }, input_bits),
             table.wires@.len() == child_sizes(calls@, index as nat).1,
             gates@.len() == checkpoint + child_sizes(calls@, index as nat).0 <= capacity,
             gates@.take(checkpoint as int) == initial,
@@ -277,6 +386,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
         let call = &calls[index];
         let ghost ranges = table.ranges@;
         let ghost before = gates@;
+        let ghost previous = ChildWiringSnapshot { table, gates: before };
         proof {
             child_sizes_step(calls@, index as int);
             next_child_readiness(caller, calls@, index, ranges, table.wires@.len());
@@ -315,6 +425,9 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_child_calls<'s,
             existing_wires_keep_availability(caller.wires@, input_bits, before.len(), gates@.len());
             extend_child_ranges(calls@, index, ranges, table.ranges@);
             extend_determined_children(calls@, index, ranges);
+            let next = ChildWiringSnapshot { table, gates: gates@ };
+            extend_child_wiring_trace(caller, calls@, index, reference_count, initial, trace, previous, next, input_bits);
+            trace = trace.push(next);
         }
         index += 1;
     }
