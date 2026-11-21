@@ -16,7 +16,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_wiring_evidence(at.0, at.1, limit, Ok(FuncWiringResult::Checked(*wiring))),
             self.projected_input_arguments(at, limit, types, wiring, projected),
             self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(Some(call))),
-            call.signature is Function,
         ensures call_argument_positions(self.targets.project_model().circuits_model()[at.0 as int].syntax.forms@,
             call.call.call, Seq::new(projected.len(), |i: int| projected[i].form)),
     {
