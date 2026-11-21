@@ -14,7 +14,7 @@ use super::super::evaluation::definition_values_from_wires;
 use super::super::super::expansion::{
     call_literal_bit, prepared_nested_output_matches, source_argument_bytes, source_call_argument_value, source_call_arguments_match,
 };
-use super::super::super::frontend::{expression_input_width, nor_root_arguments_match_widths};
+use super::super::super::frontend::{expression_input_width, nor_definition_determined, nor_root_arguments_match_widths};
 use super::super::super::semantics::driver_values;
 use super::super::super::templates::ResolvedExpressionCall;
 use super::super::super::super::call_arity::CallArgumentSource;
@@ -539,6 +539,9 @@ pub(super) open spec fn evaluated_nor_child(
     let prior = assigned.take(binding.selected.prepared.output_slot as int);
     let reference = call.reference as int;
     &&& child < calls.len() == binding.selected.children@.len()
+    &&& selected.child._signature@.call.target.port_counts().outputs == 1
+    &&& (selected.child._signature@.signature matches crate::project::FuncCallSignature::Function(ports)
+        ==> ports.outputs@.len() == 1)
     &&& arguments_are_determined(call.arguments@)
     &&& evaluation.ports == port_values(call.inputs, evaluation.input)
     &&& evaluation.ports.len() == call.arguments@.len()
@@ -582,6 +585,7 @@ proof fn nor_trace_child_values<'s, 'p, 'a>(
 ) -> (evaluation: EvaluatedCallBits)
     requires
         nor_source_binding_matches(aliases, plan, table, caller, prepared, binding, forms),
+        nor_definition_determined(binding.selected.prepared, prepared.projections.call_arguments.arguments@),
         nor_binding_fits_body(*binding, binding.selected.prepared.root.expression.source, forms,
             body.input_widths@, body.definitions@, caller.2),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
@@ -622,6 +626,7 @@ proof fn nor_trace_child_values<'s, 'p, 'a>(
 
     aliases.prepared_nor_output_evidence(*plan, caller, prepared, binding.candidate as int);
     aliases.prepared_nor_arguments_in_source_order(*plan, caller, prepared, binding.candidate as int, child);
+    aliases.prepared_nor_child_single_output(*plan, caller, prepared, binding.candidate as int, child);
     assert(*selected_child.child == postorder[child]);
     let range = selected_child.child.arguments;
     let projected = prepared.projections.call_arguments.arguments@.subrange(range.start as int, range.end as int);
@@ -708,6 +713,7 @@ pub(super) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
         forall|i: int, j: int| 0 <= i < j < roots.len() ==>
             (#[trigger] roots[i]).selected.prepared.output_slot < (#[trigger] roots[j]).selected.prepared.output_slot,
         nor_source_binding_matches(aliases, plan, table, caller, prepared, &roots[index], forms),
+        nor_definition_determined(roots[index].selected.prepared, prepared.projections.call_arguments.arguments@),
         nor_binding_fits_body(roots[index], roots[index].selected.prepared.root.expression.source, forms,
             body.input_widths@, body.definitions@, caller.2),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),

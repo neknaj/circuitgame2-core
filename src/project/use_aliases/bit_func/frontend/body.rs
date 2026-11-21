@@ -196,13 +196,17 @@ pub(in crate::project::use_aliases::bit_func) open spec fn nor_binding_covers(bi
     exists|index: int| 0 <= index < bindings.len() && (#[trigger] bindings[index]).selected.prepared.output_slot == at
 }
 
-pub(super) open spec fn retained_range_determined(arguments: Seq<ProjectedCallArgument>, range: core::ops::Range<usize>) -> bool {
+pub(in crate::project::use_aliases::bit_func) open spec fn retained_range_determined(
+    arguments: Seq<ProjectedCallArgument>, range: core::ops::Range<usize>,
+) -> bool {
     &&& range.start <= range.end <= arguments.len()
     &&& arguments_are_determined(arguments.subrange(range.start as int, range.end as int))
 }
 
 #[verifier::opaque]
-pub(super) open spec fn nor_definition_determined(root: &PreparedNorRoot, arguments: Seq<ProjectedCallArgument>) -> bool {
+pub(in crate::project::use_aliases::bit_func) open spec fn nor_definition_determined(
+    root: &PreparedNorRoot, arguments: Seq<ProjectedCallArgument>,
+) -> bool {
     &&& retained_range_determined(arguments, root.root.arguments)
     &&& forall|i: int| 0 <= i < root.postorder@.len() ==>
         retained_range_determined(arguments, (#[trigger] root.postorder@[i]).arguments)

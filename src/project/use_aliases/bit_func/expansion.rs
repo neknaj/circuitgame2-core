@@ -1,6 +1,8 @@
 //! 型検査済みの通常呼び出しを、展開順と出力の左辺に結び付ける。
 
 use super::frontend::BitFuncError;
+#[cfg(verus_only)]
+use super::frontend::nor_definition_determined;
 use super::super::{FuncSignalTypes, FuncWiring, FuncWiringResult, FunctionExpansionOrder, TypedFuncCall, UseAliases};
 use super::super::call_arity::RetainedCallTarget;
 #[cfg(verus_only)]
@@ -2474,6 +2476,206 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.resolved_function_signature_evidence((file, entry, definition, reference), limit, child._signature@);
             }
         };
+    }
+
+    /// 同じ厳格構文木のフォームを指す二つの後順項目を同定する。
+    pub(super) proof fn prepared_nor_children_at_same_form(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        index: int, left: int, right: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+            ({
+                let children = prepared.nor_roots@[index].postorder@;
+                &&& 0 <= left < children.len() && 0 <= right < children.len()
+                &&& children[left]._signature@.call.call.form == children[right]._signature@.call.call.form
+            }),
+        ensures left == right,
+    {
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        self.targets.parsed_project_model();
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let root = prepared.nor_roots@[index];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let row = parsed.definitions@[root.definition as int];
+        let children = root.postorder@;
+        let a = children[left];
+        let b = children[right];
+        let a_ref = (a.reference - row.references.start) as usize;
+        let b_ref = (b.reference - row.references.start) as usize;
+        self.typed_call_arguments_ready(file, entry, local, a_ref, limit, a._signature@);
+        self.typed_call_arguments_ready(file, entry, local, b_ref, limit, b._signature@);
+        self.resolved_call_reference_form(file, entry, local, a_ref, a._signature@.call);
+        self.resolved_call_reference_form(file, entry, local, b_ref, b._signature@.call);
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        definition_reference_form_unique(source.text, parsed.syntax.forms@, parsed.references@, row, a.reference, b.reference);
+        if left < right {
+            assert(children[left].reference != children[right].reference);
+        } else if right < left {
+            assert(children[right].reference != children[left].reference);
+        }
+    }
+
+    /// 対象フォームを含む引数をたどり、その子を直接使う親と入力ポートを求める。
+    #[verifier::spinoff_prover]
+    proof fn prepared_nor_child_input(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        index: int, parent_index: int, target: int,
+    ) -> (edge: (int, int))
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+            ({
+                let root = prepared.nor_roots@[index];
+                let children = root.postorder@;
+                let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+                let parent = if parent_index == children.len() { root.root } else { children[parent_index] };
+                let first = parent._signature@.call.call.form as int;
+                let descendant = children[target]._signature@.call.call.form as int;
+                &&& nor_definition_determined(&root, prepared.projections.call_arguments.arguments@)
+                &&& 0 <= parent_index <= children.len() && 0 <= target < children.len()
+                &&& 0 <= first < descendant < forms.len()
+                &&& forms[first] is List && forms[descendant] is List
+                &&& descendant < forms[first]->List_end <= forms.len()
+            }),
+        ensures ({
+            let root = prepared.nor_roots@[index];
+            let children = root.postorder@;
+            let (i, port) = edge;
+            let parent = if i == children.len() { root.root } else { children[i] };
+            let argument = prepared.projections.call_arguments.arguments@[parent.arguments.start + port];
+            let child = children[target];
+            let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+            let start = parsed.definitions@[root.definition as int].references.start;
+            &&& 0 <= target < i <= parent_index
+            &&& 0 <= port < parent.arguments.end - parent.arguments.start
+            &&& parent.arguments.end <= prepared.projections.call_arguments.arguments@.len()
+            &&& argument.form == child._signature@.call.call.form
+            &&& argument.source is NestedCall && child.reference == start + argument.source->NestedCall_0
+            &&& child._signature@.call.target.port_counts().outputs == 1
+            &&& child._signature@.signature matches crate::project::FuncCallSignature::Function(ports) ==>
+                ports.outputs@.len() == 1
+        }),
+        decreases parent_index,
+    {
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        reveal(nor_definition_determined);
+        let (file, entry, limit) = caller;
+        let root = prepared.nor_roots@[index];
+        let children = root.postorder@;
+        let parent = if parent_index == children.len() { root.root } else { children[parent_index] };
+        let args = prepared.projections.call_arguments.arguments@;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let row = parsed.definitions@[root.definition as int];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let reference = (parent.reference - row.references.start) as usize;
+        let typed = parent._signature@;
+        self.prepared_nor_arguments_in_source_order(plan, caller, prepared, index, parent_index);
+        self.typed_call_arguments_ready(file, entry, local, reference, limit, typed);
+        crate::syntax::circuit::indexed_call_arguments(source.text, forms, row,
+            parsed.references@[row.references.start + reference], typed.call.call);
+        let range = parent.arguments;
+        let projected = args.subrange(range.start as int, range.end as int);
+        let positions = Seq::new(projected.len(), |p: int| projected[p].form);
+        let descendant = children[target]._signature@.call.call.form as int;
+        let port = crate::syntax::circuit::call_argument_containing_list(source.text, forms, typed.call.call,
+            positions, row.expression.end as int, descendant);
+        self.prepared_nor_argument_evidence(plan, caller, prepared, index, root.output_slot, parent_index, port);
+        let argument = projected[port];
+        assert(argument == args[range.start + port]);
+        assert(argument.source is NestedCall);
+        let next = choose|i: int| 0 <= i < parent_index
+            && (#[trigger] children[i]).reference == row.references.start + argument.source->NestedCall_0
+            && children[i]._signature@.call.call.form == argument.form
+            && children[i]._signature@.call.target.port_counts().outputs == 1
+            && (children[i]._signature@.signature matches crate::project::FuncCallSignature::Function(ports)
+                ==> ports.outputs@.len() == 1);
+        if argument.form == descendant {
+            self.prepared_nor_children_at_same_form(plan, caller, prepared, index, next, target);
+            (parent_index, port)
+        } else {
+            self.prepared_nor_child_input(plan, caller, prepared, index, next, target)
+        }
+    }
+
+    /// 根 NOR の後順列にある各子は、いずれかの親の実引数として評価できる単一出力の呼び出しである。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn prepared_nor_child_single_output(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        index: int, target: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.nor_roots@.len(),
+            ({
+                let root = prepared.nor_roots@[index];
+                &&& 0 <= target < root.postorder@.len()
+                &&& nor_definition_determined(&root, prepared.projections.call_arguments.arguments@)
+            }),
+        ensures ({
+            let child = prepared.nor_roots@[index].postorder@[target];
+            &&& child._signature@.call.target.port_counts().outputs == 1
+            &&& child._signature@.signature matches crate::project::FuncCallSignature::Function(ports) ==>
+                ports.outputs@.len() == 1
+        }),
+    {
+        reveal(UseAliases::prepared_nor_root_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let (file, entry, limit) = caller;
+        let root = prepared.nor_roots@[index];
+        let children = root.postorder@;
+        let child = children[target];
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let row = parsed.definitions@[root.definition as int];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        let reference = (child.reference - row.references.start) as usize;
+        let last = children.len() as int;
+        let order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
+        self.targets.parsed_project_model();
+        self.typed_call_arguments_ready(file, entry, local, 0, limit, root.root._signature@);
+        self.resolved_call_reference_form(file, entry, local, 0, root.root._signature@.call);
+        self.typed_call_arguments_ready(file, entry, local, reference, limit, child._signature@);
+        self.resolved_call_reference_form(file, entry, local, reference, child._signature@.call);
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        call_postorder_reference(forms, parsed.references@, row.references, order, target);
+        call_postorder_reference(forms, parsed.references@, row.references, order, last);
+        call_postorder_references_distinct(forms, parsed.references@, row.references, order, target, last);
+        let (parent_position, child_position) = call_postorder_positions(source.text, forms, parsed.references@,
+            row, order, row.references.start, child.reference);
+        if parent_position < last {
+            call_postorder_references_distinct(forms, parsed.references@, row.references, order, parent_position, last);
+        }
+        if child_position < target {
+            call_postorder_references_distinct(forms, parsed.references@, row.references, order, child_position, target);
+        } else if target < child_position {
+            call_postorder_references_distinct(forms, parsed.references@, row.references, order, target, child_position);
+        }
+        assert(parent_position == last && child_position == target);
+        crate::syntax::circuit::call_form_bounds(forms, root.root._signature@.call.call);
+        reveal(crate::syntax::complete_list_indices);
+        self.prepared_nor_child_input(plan, caller, prepared, index, last, target);
     }
 
     /// ソース順のカーソルを進め、次の根 NOR に対応する出力スロットを得る。

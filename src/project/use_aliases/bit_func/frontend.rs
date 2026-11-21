@@ -7,7 +7,8 @@ pub(super) use body::{ExpandedBody, ExpandedBodyError};
 #[cfg(verus_only)]
 pub(super) use body::{
     argument_matches_width, call_covers, expression_argument_matches_width, expression_input_width, expression_output_bits,
-    nested_argument_output_matches, nor_binding_covers, nor_binding_fits_body, nor_root_arguments_match_widths, root_argument_matches_width,
+    nested_argument_output_matches, nor_binding_covers, nor_binding_fits_body, nor_definition_determined,
+    nor_root_arguments_match_widths, root_argument_matches_width,
     selected_child_output_matches,
 };
 
