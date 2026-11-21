@@ -11,6 +11,8 @@ use super::super::function_atoms::{SignalType, concat_projections_match, signal_
     structure_projections_in_order};
 use crate::project::LocatedName;
 #[cfg(verus_only)]
+use crate::project::{DefinitionPosition, FuncCallTarget};
+#[cfg(verus_only)]
 use crate::project::location_in_source;
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
@@ -444,6 +446,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let expression = parsed.definitions@[root.definition as int].expression;
         let signature = group._signature@;
         let (callee_at, caller_at) = group._order@;
+        &&& self.function_expansion_evidence(Ok(plan))
         &&& definitions.start <= root.definition < definitions.end <= parsed.definitions@.len()
         &&& crate::syntax::circuit::ordinary_call_at(source.text, parsed.syntax.forms@, expression.start as int, expression.end as int)
         &&& group.outputs.start == root.first_output
@@ -551,6 +554,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 展開に渡す引数の型と、呼び出し前に参照できる駆動元を取り出す。
+    ///
+    /// 入れ子の関数呼び出しでは、呼び出し先が呼び出し元より先に展開されることも示す。
     pub(super) proof fn expansion_argument_evidence(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), typed: FuncSignalTypes,
         wiring: &FuncWiring, root: RootFunctionCall, range: Range<usize>, arguments: &CallArgumentProjections,
@@ -607,6 +612,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         #[trigger] self.func_call_form_reference(caller.0, caller.1, local, argument.form, reference)
                         && #[trigger] self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child)))
                         && child.call.target.port_counts().outputs == 1
+                        && (child.call.target matches FuncCallTarget::Function { file, entry, .. } ==>
+                            exists|rank: int| 0 <= rank < group._order@.1
+                                && #[trigger] plan.position_model(rank) == Some((file, entry)))
                         && match child.signature {
                             crate::project::FuncCallSignature::Nor =>
                                 crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
@@ -633,6 +641,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let (reference, child) = self.projected_nested_call_signature((file, entry, local), limit, form, expected);
             assert(self.func_call_form_reference(file, entry, local, form, reference));
             assert(self.func_call_signature_evidence(file, entry, local, reference, limit, Ok(Some(child))));
+            if let FuncCallTarget::Function { file: target_file, entry: target_entry, .. } = child.call.target {
+                self.typed_call_arguments_ready(file, entry, local, reference, limit, child);
+                let source = DefinitionPosition { file, entry, definition: local, reference };
+                let site = self.expansion_site_for_call(source, child.call);
+                let (callee, caller_rank) = self.function_expansion_callee_precedes(plan, site);
+                self.template_rank_from_position(plan, (file, entry), caller_rank, group._order@.1);
+                assert(callee < group._order@.1);
+                assert(plan.position_model(callee) == Some((target_file, target_entry)));
+            }
         }
         if let CallArgumentSource::Driver(super::super::OutputDriver::Definition(i)) = projected[port].source {
             self.checked_wiring_is_func(file, entry, limit, *wiring);
