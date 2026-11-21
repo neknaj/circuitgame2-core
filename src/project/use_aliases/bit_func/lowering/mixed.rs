@@ -356,6 +356,30 @@ pub(super) closed spec fn mixed_trace(
     }
 }
 
+/// 変換履歴の途中までに生成した定義について、その定義を追加した段階を得る。
+proof fn mixed_trace_definition_step(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
+    steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView, end: int, definition: int,
+) -> (at: int)
+    requires
+        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, wiring),
+        0 <= end < steps.len(),
+        0 <= definition < steps[end].to,
+    ensures
+        0 <= at <= end,
+        steps[at].from <= definition < steps[at].to,
+        wiring_step_valid(body, layouts, forms, bindings, limit, steps[at]),
+    decreases end,
+{
+    reveal(mixed_trace);
+    if steps[end].from <= definition {
+        end
+    } else {
+        assert(end > 0 && steps[end - 1].to == steps[end].from);
+        mixed_trace_definition_step(body, layouts, forms, bindings, limit, steps, slot, group, wiring, end - 1, definition)
+    }
+}
+
 spec fn wiring_view_is_prefix(before: WiringView, after: WiringView) -> bool {
     &&& before.gates.len() <= after.gates.len()
     &&& before.definitions.len() <= after.definitions.len()
@@ -489,6 +513,51 @@ proof fn mixed_trace_local_value(
         step.after.gates, final_wiring.gates, step.after.origins, final_wiring.origins);
     slot_values_match_wiring(body.input_widths@, body.definitions@, layouts, final_wiring, layout_limit,
         step.from, inputs, gates);
+}
+
+/// 変換に成功した関数で、通常の定義の値を最終配線から求める。
+pub(super) proof fn mixed_function_local_value(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
+    function: &LoweredBitFunc, steps: Ghost<Seq<WiringStep>>, i: int, inputs: Seq<bool>, gates: Seq<bool>,
+)
+    requires
+        mixed_function_result(body, layouts, forms, bindings, widths, drivers, gate_limit, Ok((*function, steps))),
+        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
+        0 <= i < body.definitions@.len(),
+        !binding_covers(bindings, i),
+        forall|j: int| 0 <= j < body.definitions@.len() && !binding_covers(bindings, j) ==>
+            bit_definition_matches(body.input_widths@, body.definitions@.take(j), #[trigger] body.definitions@[j]),
+        inputs.len() == layouts.inputs.total_bits_model(),
+        gate_values_match(inputs, function.netlist.gates@, gates),
+        gates.len() == function.netlist.gates@.len(),
+    ensures ({
+        let definitions = definition_values_from_wires(&layouts.definitions, function.definition_wires@, inputs, gates);
+        &&& definitions[i].len() == body.definitions@[i].width
+        &&& definitions[i] == checked_definition_values(body.definitions@[i], port_values(&layouts.inputs, inputs),
+            definitions.take(i))
+    }),
+{
+    let wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    let end = steps@.len() as int - 1;
+    vstd::slice::axiom_spec_len(body.definitions);
+    let slot = body.definitions@.len() as usize;
+    let group = bindings.len() as usize;
+    assert(0 <= end && steps@[end].to == slot) by { reveal(mixed_trace); };
+    let at = mixed_trace_definition_step(body, layouts, forms, bindings, gate_limit, steps@, slot, group, wiring, end, i);
+    assert(steps@[at].from == i && steps@[at].group_before == steps@[at].group_after) by {
+        reveal(wiring_step_valid);
+        reveal(binding_covers);
+        let step = steps@[at];
+        if step.group_before != step.group_after {
+            assert(bindings[step.group_before as int].group.outputs.start <= i
+                < bindings[step.group_before as int].group.outputs.end);
+            assert(binding_covers(bindings, i));
+        }
+    };
+    mixed_trace_local_value(body, layouts, forms, bindings, gate_limit, layout_limit, steps@, slot, group,
+        wiring, at, inputs, gates);
 }
 
 /// 評価済みの最終配線から、指定した呼び出しの入力と出力を得る。
@@ -709,6 +778,7 @@ pub(super) open spec fn mixed_function_result(
     match result {
         Ok((value, steps)) => {
             &&& value.layouts == *layouts
+            &&& bindings.len() <= usize::MAX
             &&& value.netlist.input_count == layouts.inputs.total_bits_model()
             &&& value.netlist.outputs@.len() == layouts.outputs.total_bits_model()
             &&& value.definition_wires@.len() == layouts.definitions.total_bits_model()
@@ -750,6 +820,7 @@ pub(super) fn lower_mixed_function<'s, 'p, 'a>(
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
     ensures mixed_function_result(body, &layouts, forms@, bindings@, output_widths@, output_drivers@, gate_limit, result),
 {
+    proof { vstd::slice::axiom_spec_len(bindings); }
     let (state, Ghost(steps)) = match lower_mixed_body(body, &layouts, forms, bindings, layout_limit, gate_limit) {
         Ok(lowered) => lowered,
         Err(error) => return Err(error),
@@ -773,7 +844,7 @@ pub(super) open spec fn bindings_match_calls(
 }
 
 /// 呼び出しを借用する前後で、各定義が属する呼び出しとその順序が等しいことを示す。
-proof fn bindings_preserve_definition_order(
+pub(super) proof fn bindings_preserve_definition_order(
     bindings: Seq<CallBinding>, calls: Seq<CheckedExpansionCall>,
 )
     requires

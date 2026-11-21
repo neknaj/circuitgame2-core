@@ -353,6 +353,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 展開準備が成功したとき、通常の定義が元の右辺と型に対応することを取り出す。
+    pub(super) proof fn prepared_ordinary_definition_evidence(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        definitions: Vec<CheckedBitDefinition>, i: int,
+    )
+        requires
+            self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+            0 <= i < definitions@.len(),
+            !call_covers(calls, i),
+        ensures
+            definitions@.len() == scope.wiring.drivers.definitions@.len(),
+            self.bit_definition_from_source(scope, definitions@.take(i), i, definitions@[i]),
+            self.definition_widths_match(scope, definitions@),
+    {
+        reveal(UseAliases::expansion_definition_prefix);
+    }
+
     /// 展開準備で確定した呼び出しと実際の出力幅から、関数本体を定義順に取り出す。
     ///
     /// # Errors

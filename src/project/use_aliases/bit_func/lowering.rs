@@ -19,7 +19,14 @@ use crate::syntax::Form;
 #[cfg(verus_only)]
 use super::frontend::call_covers;
 #[cfg(verus_only)]
-use mixed::{CallBinding, WiringStep, bindings_match_calls, mixed_function_result};
+use mixed::{CallBinding, WiringStep, binding_covers, bindings_match_calls, bindings_preserve_definition_order,
+    mixed_function_local_value, mixed_function_result};
+#[cfg(verus_only)]
+use super::expansion::CheckedExpansionCall;
+#[cfg(verus_only)]
+use super::semantics::checked_definition_values;
+#[cfg(verus_only)]
+use crate::netlist::gate_values_match;
 #[cfg(verus_only)]
 pub use evaluation::{bit_func_lowering_preserves_evaluation, port_values};
 
@@ -228,6 +235,76 @@ pub(super) proof fn projected_lowering_ports(
             Err(error) => Err(ProjectedLoweringError::Wiring(error)),
         };
     assert(lowered matches Ok((circuit, _)) && circuit == *value);
+}
+
+/// 展開した関数の定義値を、最終配線と評価済みのゲート値から得る。
+pub(super) closed spec fn expanded_definition_values(
+    function: &LoweredBitFunc, inputs: Seq<bool>, gates: Seq<bool>,
+) -> Seq<Seq<bool>> {
+    evaluation::definition_values_from_wires(&function.layouts.definitions, function.definition_wires@, inputs, gates)
+}
+
+/// 展開した関数の通常の定義が、最終配線を評価したときに右辺の値を保つことを示す。
+pub(super) proof fn projected_lowering_local_values(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, calls: Seq<CheckedExpansionCall>,
+    layout_limit: usize, gate_limit: usize, value: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>,
+)
+    requires
+        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+        calls.len() == selected.len(),
+        forall|g: int| 0 <= g < selected.len() ==> *(#[trigger] selected[g]).group == calls[g],
+        forall|a: int, b: int| 0 <= a < b < calls.len()
+            ==> (#[trigger] calls[a]).outputs.end <= (#[trigger] calls[b]).outputs.start,
+        forall|i: int| 0 <= i < definitions.len() && !call_covers(calls, i) ==>
+            bit_definition_matches(inputs, definitions.take(i), #[trigger] definitions[i]),
+        input.len() == value.input_layout_model().total_bits_model(),
+        gate_values_match(input, value.netlist_model().gates@, gates),
+        gates.len() == value.netlist_model().gates@.len(),
+    ensures ({
+        let values = expanded_definition_values(value, input, gates);
+        let incoming = port_values(value.input_layout_model(), input);
+        &&& incoming.len() == inputs.len()
+        &&& forall|i: int| 0 <= i < incoming.len() ==> (#[trigger] incoming[i]).len() == inputs[i]
+        &&& values.len() == definitions.len()
+        &&& forall|i: int| 0 <= i < values.len() ==> (#[trigger] values[i]).len() == definitions[i].width
+        &&& forall|i: int| 0 <= i < values.len() && !call_covers(calls, i) ==>
+            (#[trigger] values[i]) == checked_definition_values(definitions[i], incoming, values.take(i))
+    }),
+{
+    let (a, b, c, d) = choose|a: &[u64], b: &[CheckedBitDefinition], c: &[u64], d: &[OutputDriver]|
+        a@ == inputs && b@ == definitions && c@ == outputs && d@ == drivers
+        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, layout_limit, gate_limit, Ok(*value));
+    let body = LoweringBody { input_widths: a, definitions: b };
+    let (layouts, bindings) = choose|layouts: Layouts, bindings: Seq<CallBinding>| {
+        &&& #[trigger] body_layouts_result(inputs, definitions, outputs, layout_limit, Ok(layouts))
+        &&& #[trigger] bindings_match_calls(bindings, selected)
+        &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs, drivers, gate_limit, Ok(*value))
+    };
+    let steps = choose|steps: Ghost<Seq<WiringStep>>|
+        #[trigger] mixed_function_result(&body, &layouts, forms, bindings, outputs, drivers, gate_limit, Ok((*value, steps)));
+    assert forall|g: int| 0 <= g < bindings.len() implies *(#[trigger] bindings[g]).group == calls[g] by {
+        assert(*bindings[g].group == *selected[g].group);
+    };
+    bindings_preserve_definition_order(bindings, calls);
+
+    reveal(port_values);
+    let incoming = port_values(value.input_layout_model(), input);
+    let values = expanded_definition_values(value, input, gates);
+    let widths = definition_widths(definitions);
+    port_bit_layout_size(inputs, layout_limit, &layouts.inputs);
+    port_bit_layout_size(widths, layout_limit, &layouts.definitions);
+    assert forall|i: int| 0 <= i < incoming.len() implies (#[trigger] incoming[i]).len() == inputs[i] by {
+        port_bit_layout_port(inputs, layout_limit, layouts.inputs, i as usize);
+    };
+    assert forall|i: int| 0 <= i < values.len() implies (#[trigger] values[i]).len() == definitions[i].width by {
+        port_bit_layout_port(widths, layout_limit, layouts.definitions, i as usize);
+    };
+    assert forall|i: int| 0 <= i < values.len() && !call_covers(calls, i) implies
+        (#[trigger] values[i]) == checked_definition_values(definitions[i], incoming, values.take(i)) by {
+        mixed_function_local_value(&body, &layouts, forms, bindings, outputs, drivers, layout_limit, gate_limit,
+            value, steps, i, input, gates);
+    };
 }
 
 /// 検査済みの本体にビット範囲を割り当て、呼び出しと通常の定義を配線へ変換する。
