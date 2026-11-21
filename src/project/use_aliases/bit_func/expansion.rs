@@ -303,6 +303,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let parsed = &project.circuits_model()[file as int];
             let row = parsed.definitions@[definition as int];
             let local = (definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+            &&& self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring)))
             &&& slot < wiring.drivers.definitions@.len()
             &&& wiring.drivers.definitions@[slot].definition == definition
             &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text,
@@ -375,6 +376,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             0 <= outputs.start < outputs.end <= values.len(),
             arguments.len() == widths.len(),
             forall|i: int| 0 <= i < arguments.len() ==> (#[trigger] arguments[i]).len() == widths[i],
+            ({
+                let project = self.targets.project_model();
+                source_call_arguments_match(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
+                    wiring, caller.1, definition, signature.call.call, caller.2, inputs, values.take(outputs.start as int),
+                    widths, arguments)
+            }),
             results == values.subrange(outputs.start as int, outputs.end as int),
     {
         reveal(UseAliases::source_function_call_site);

@@ -189,11 +189,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(UseAliases::source_call_slot_evaluates);
         let site = choose|site: SourceCallEvaluation|
-            #[trigger] self.source_call_matches_slot(plan, caller, rank, call.wiring, inputs, b, slot, site)
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, call.wiring, inputs, b, slot, site, derivation)
             && derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
         let target = plan.position_model(site.rank)->Some_0;
-        self.source_function_call_values_evidence(caller, call.wiring, site.definition, site.signature, site.outputs,
-            target, inputs, b, site.widths, site.arguments, site.results);
+        self.source_project_call_values_evidence(plan, caller, rank, call.wiring, inputs, b, slot, site, derivation);
         self.source_rhs_excludes_function_call(ordinary, call, layouts, types, inputs, a, slot,
             site.definition, site.signature, site.outputs, target);
     }

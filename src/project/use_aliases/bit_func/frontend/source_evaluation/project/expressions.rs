@@ -13,7 +13,7 @@ use crate::syntax::circuit::{
 verus! {
 
 /// 一つの定義の右辺を評価するときに読めるソース上の値と、先行する関数の評価。
-struct SourceExpressionScope<'s, 'w, 'p, 'a> {
+pub(super) struct SourceExpressionScope<'s, 'w, 'p, 'a> {
     context: &'s SourceFunc<'w, 'p, 'a>,
     definition: usize,
     plan: &'s FunctionExpansionOrder<'p, 'a>,
@@ -26,13 +26,30 @@ struct SourceExpressionScope<'s, 'w, 'p, 'a> {
 }
 
 /// 一つの入れ子呼び出しが使う相対参照と、宣言順の引数値および単一の出力値。
-struct SourceExpressionCall<'p, 'a> {
+pub(super) struct SourceExpressionCall<'p, 'a> {
     reference: usize,
     signature: TypedFuncCall<'p, 'a>,
     callee_rank: Option<int>,
     widths: Seq<u64>,
     arguments: Seq<Seq<bool>>,
     result: Seq<bool>,
+}
+
+/// 型検査の結果と、同じ定義の内側にある呼び出しの値を保持する。
+pub(super) struct NestedSourceArguments<'p, 'a> {
+    pub(super) typed: FuncSignalTypes<'p, 'a>,
+    pub(super) layouts: Option<StructureLayouts<'p, 'a>>,
+    pub(super) children: Map<usize, SourceExpressionCall<'p, 'a>>,
+}
+
+pub(super) closed spec fn source_expression_scope<'s, 'w, 'p, 'a>(
+    context: &'s SourceFunc<'w, 'p, 'a>, plan: &'s FunctionExpansionOrder<'p, 'a>, rank: int,
+    derivation: ISet<SourceInvocation>, site: SourceCallEvaluation<'p, 'a>,
+    nested: &'s NestedSourceArguments<'p, 'a>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>,
+) -> SourceExpressionScope<'s, 'w, 'p, 'a> {
+    SourceExpressionScope { context, plan, rank, derivation, definition: site.definition,
+        typed: nested.typed, layouts: match &nested.layouts { Some(table) => Some(table), None => None },
+        inputs, prior: values.take(site.outputs.start as int) }
 }
 
 spec fn source_expression_output_type<'p, 'a>(call: TypedFuncCall<'p, 'a>) -> Option<ResolvedPortType<'p, 'a>> {
@@ -182,7 +199,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 元の右辺の根から引数をたどり、各リストの呼び出しをソースの規則で評価する。
     ///
     /// 引数のフォーム添字は呼び出しの添字より大きいため、値を得るために同じ呼び出しへ戻ることはない。
-    spec fn source_nested_arguments_match(
+    pub(super) closed spec fn source_nested_arguments_match(
         &self, scope: &SourceExpressionScope, root: TypedFuncCall, widths: Seq<u64>,
         values: Seq<Seq<bool>>, children: Map<usize, SourceExpressionCall>,
     ) -> bool {
@@ -197,6 +214,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& forall|form: usize| #[trigger] children.contains_key(form) ==>
             root.call.call.form < form < row.expression.end
             && self.source_expression_call_evaluates(scope, form, children[form], children)
+    }
+
+    /// 各引数のビット列は、呼び出し先の対応するポート幅を持つ。
+    pub(super) proof fn source_nested_argument_lengths(
+        &self, scope: &SourceExpressionScope, root: TypedFuncCall, widths: Seq<u64>,
+        values: Seq<Seq<bool>>, children: Map<usize, SourceExpressionCall>,
+    )
+        requires self.source_nested_arguments_match(scope, root, widths, values, children),
+        ensures values.len() == widths.len(),
+            forall|i: int| 0 <= i < values.len() ==> (#[trigger] values[i]).len() == widths[i],
+    {
+        let positions = self.source_expression_argument_positions(scope, root, widths, values, children);
+        assert forall|i: int| 0 <= i < values.len() implies (#[trigger] values[i]).len() == widths[i] by {
+            assert(self.source_expression_argument_matches(scope, root, i, positions[i], widths[i], values[i], children));
+        };
     }
 
     /// 型検査済みの原子だけを渡す場合、従来の引数評価を子が空の評価として使える。
@@ -336,6 +368,103 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
         };
         assert(a.1 =~= b.1);
+    }
+
+    /// 同じ式を原子の規則で評価できるとき、入れ子を許す規則でも同じ値を得る。
+    proof fn source_nested_arguments_agree_with_atomic(
+        &self, scope: &SourceExpressionScope, other: &FuncWiring, root: TypedFuncCall,
+        widths: Seq<u64>, nested: Seq<Seq<bool>>, atomic: Seq<Seq<bool>>, children: Map<usize, SourceExpressionCall>,
+    )
+        requires
+            self.source_nested_arguments_match(scope, root, widths, nested, children),
+            self.func_wiring_evidence(scope.context.file, scope.context.entry, scope.context.limit,
+                Ok(FuncWiringResult::Checked(*other))),
+            source_call_arguments_match(scope.context.source, scope.context.parsed, other,
+                scope.context.entry, scope.definition, root.call.call, scope.context.limit, scope.inputs, scope.prior, widths, atomic),
+        ensures nested == atomic,
+    {
+        let context = scope.context;
+        let forms = context.parsed.syntax.forms@;
+        let call = root.call.call;
+        self.checked_func_wiring_agrees(context.file, context.entry, context.limit, *context.wiring, *other);
+        self.checked_wiring_is_func(context.file, context.entry, context.limit, *context.wiring);
+        self.targets.parsed_project_model();
+        let a = self.source_expression_argument_positions(scope, root, widths, nested, children);
+        let b = choose|positions: Seq<usize>| #[trigger] call_argument_positions(forms, call, positions)
+            && positions.len() == atomic.len() == widths.len()
+            && forall|i: int| 0 <= i < positions.len() ==>
+                source_call_argument_value(context.source, context.parsed, other, context.entry, scope.definition,
+                    #[trigger] positions[i], context.limit, scope.inputs, scope.prior, widths[i], atomic[i]);
+        call_argument_positions_agree(forms, call, a, b);
+        reveal(source_call_argument_value);
+        assert forall|i: int| 0 <= i < nested.len() implies #[trigger] nested[i] == atomic[i] by {
+            let form = a[i];
+            assert(form == b[i]);
+            assert(forms[form as int] is Atom);
+            assert(self.source_expression_argument_matches(scope, root, i, form, widths[i], nested[i], children));
+            source_call_argument_values_agree(context.source, context.parsed, context.wiring, other, context.entry,
+                scope.definition, form, context.limit, scope.inputs, scope.prior, widths[i], nested[i], atomic[i]);
+        };
+        assert(nested =~= atomic);
+    }
+
+    /// 同じ左辺の評価で選んだ二つの引数規則を、元の出現順で比較する。
+    pub(super) proof fn source_project_call_arguments_agree(
+        &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), rank: int, slot: int,
+        left_derivation: ISet<SourceInvocation>, right_derivation: ISet<SourceInvocation>,
+        left_wiring: &FuncWiring, right_wiring: &FuncWiring,
+        inputs: Seq<Seq<bool>>, left: Seq<Seq<bool>>, right: Seq<Seq<bool>>,
+        a: SourceCallEvaluation, b: SourceCallEvaluation,
+    )
+        requires
+            self.can_resolve(),
+            self.source_call_matches_slot(plan, caller, rank, left_wiring, inputs, left, slot, a, left_derivation),
+            self.source_call_matches_slot(plan, caller, rank, right_wiring, inputs, right, slot, b, right_derivation),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*left_wiring))),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*right_wiring))),
+            a.definition == b.definition, a.outputs == b.outputs, a.rank == b.rank,
+            a.signature.call.call == b.signature.call.call, a.widths == b.widths,
+            left.take(a.outputs.start as int) == right.take(a.outputs.start as int),
+            forall|x: SourceInvocation, y: SourceInvocation|
+                (#[trigger] left_derivation.contains(x)) && (#[trigger] right_derivation.contains(y))
+                    && 0 <= x.rank == y.rank < rank && x.inputs == y.inputs ==> x.outputs == y.outputs,
+        ensures a.arguments == b.arguments,
+    {
+        let target = plan.position_model(a.rank)->Some_0;
+        let project = self.targets.project_model();
+        let (file, entry, limit) = caller;
+        self.checked_wiring_is_func(file, entry, limit, *left_wiring);
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let ac = SourceFunc { file, entry, limit, source, parsed, wiring: left_wiring };
+        let bc = SourceFunc { file, entry, limit, source, parsed, wiring: right_wiring };
+        match (&a.nested, &b.nested) {
+            (None, None) => self.source_function_call_arguments_agree(caller, left_wiring, right_wiring, a.definition,
+                a.signature, b.signature, a.outputs, target, inputs, left, right, a.widths,
+                a.arguments, b.arguments, a.results, b.results),
+            (Some(x), None) => {
+                let scope = source_expression_scope(&ac, plan, rank, left_derivation, a, x, inputs, left);
+                self.source_function_call_values_evidence(caller, right_wiring, b.definition, b.signature, b.outputs,
+                    target, inputs, right, b.widths, b.arguments, b.results);
+                self.source_nested_arguments_agree_with_atomic(&scope, right_wiring,
+                    a.signature, a.widths, a.arguments, b.arguments, x.children);
+            },
+            (None, Some(y)) => {
+                let scope = source_expression_scope(&bc, plan, rank, right_derivation, b, y, inputs, right);
+                self.source_function_call_values_evidence(caller, left_wiring, a.definition, a.signature, a.outputs,
+                    target, inputs, left, a.widths, a.arguments, a.results);
+                self.source_nested_arguments_agree_with_atomic(&scope, left_wiring,
+                    b.signature, b.widths, b.arguments, a.arguments, y.children);
+            },
+            (Some(x), Some(y)) => {
+                let u = source_expression_scope(&ac, plan, rank, left_derivation, a, x, inputs, left);
+                let v = source_expression_scope(&bc, plan, rank, right_derivation, b, y, inputs, right);
+                self.checked_func_wiring_agrees(file, entry, limit, *left_wiring, *right_wiring);
+                assert(same_source_bindings(&ac, &bc));
+                self.source_expression_arguments_agree(&u, &v, (a.signature, a.arguments, x.children),
+                    (b.signature, b.arguments, y.children), a.widths);
+            },
+        }
     }
 }
 

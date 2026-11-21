@@ -4,6 +4,7 @@ mod determinism;
 mod expressions;
 
 use super::*;
+use self::expressions::{NestedSourceArguments, source_expression_scope};
 use crate::project::FunctionExpansionOrder;
 use crate::netlist::nor_evaluation;
 use crate::project::use_aliases::bit_func::templates::FunctionTemplates;
@@ -20,6 +21,7 @@ struct SourceCallEvaluation<'p, 'a> {
     widths: Seq<u64>,
     arguments: Seq<Seq<bool>>,
     results: Seq<Seq<bool>>,
+    nested: Option<NestedSourceArguments<'p, 'a>>,
 }
 
 struct SourceInvocation {
@@ -121,12 +123,57 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn source_call_matches_slot(
         &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), rank: int, wiring: &FuncWiring,
         inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int, site: SourceCallEvaluation,
+        derivation: ISet<SourceInvocation>,
     ) -> bool {
         &&& site.outputs.start <= slot < site.outputs.end
         &&& 0 <= site.rank < rank
         &&& plan.position_model(site.rank).is_some()
-        &&& self.source_function_call_values(caller, wiring, site.definition, site.signature, site.outputs,
-            plan.position_model(site.rank)->Some_0, inputs, values, site.widths, site.arguments, site.results)
+        &&& match &site.nested {
+            None => self.source_function_call_values(caller, wiring, site.definition, site.signature, site.outputs,
+                plan.position_model(site.rank)->Some_0, inputs, values, site.widths, site.arguments, site.results),
+            Some(nested) => {
+                let project = self.targets.project_model();
+                let context = SourceFunc { file: caller.0, entry: caller.1, limit: caller.2,
+                    source: &project.sources_model()[caller.0 as int], parsed: &project.circuits_model()[caller.0 as int], wiring };
+                let scope = source_expression_scope(&context, plan, rank, derivation, site, nested, inputs, values);
+                &&& self.source_function_call_site(caller, wiring, site.definition, site.signature, site.outputs,
+                    plan.position_model(site.rank)->Some_0)
+                &&& site.outputs.end <= values.len()
+                &&& site.results == values.subrange(site.outputs.start as int, site.outputs.end as int)
+                &&& self.source_nested_arguments_match(&scope, site.signature, site.widths, site.arguments, nested.children)
+            },
+        }
+    }
+
+    /// 左辺との対応と入力幅は、どちらの引数評価でも同じ形で取り出せる。
+    proof fn source_project_call_values_evidence(
+        &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), rank: int, wiring: &FuncWiring,
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int, site: SourceCallEvaluation,
+        derivation: ISet<SourceInvocation>,
+    )
+        requires self.source_call_matches_slot(plan, caller, rank, wiring, inputs, values, slot, site, derivation),
+        ensures
+            self.source_function_call_site(caller, wiring, site.definition, site.signature, site.outputs,
+                plan.position_model(site.rank)->Some_0),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*wiring))),
+            site.outputs.start <= slot < site.outputs.end <= values.len(),
+            site.results == values.subrange(site.outputs.start as int, site.outputs.end as int),
+            site.arguments.len() == site.widths.len(),
+            forall|i: int| 0 <= i < site.arguments.len() ==> (#[trigger] site.arguments[i]).len() == site.widths[i],
+    {
+        match &site.nested {
+            None => self.source_function_call_values_evidence(caller, wiring, site.definition, site.signature, site.outputs,
+                plan.position_model(site.rank)->Some_0, inputs, values, site.widths, site.arguments, site.results),
+            Some(nested) => {
+                let project = self.targets.project_model();
+                let context = SourceFunc { file: caller.0, entry: caller.1, limit: caller.2,
+                    source: &project.sources_model()[caller.0 as int], parsed: &project.circuits_model()[caller.0 as int], wiring };
+                let scope = source_expression_scope(&context, plan, rank, derivation, site, nested, inputs, values);
+                self.source_nested_argument_lengths(&scope, site.signature, site.widths, site.arguments, nested.children);
+            },
+        }
+        self.source_function_call_site_evidence(caller, wiring, slot, site.definition, site.signature, site.outputs,
+            plan.position_model(site.rank)->Some_0);
     }
 
     #[verifier::opaque]
@@ -135,7 +182,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int,
     ) -> bool {
         exists|site: SourceCallEvaluation|
-            #[trigger] self.source_call_matches_slot(plan, caller, rank, wiring, inputs, values, slot, site)
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, wiring, inputs, values, slot, site, derivation)
             && derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results })
     }
 
@@ -144,7 +191,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int, site: SourceCallEvaluation,
     )
         requires
-            self.source_call_matches_slot(plan, caller, rank, wiring, inputs, values, slot, site),
+            self.source_call_matches_slot(plan, caller, rank, wiring, inputs, values, slot, site, derivation),
             derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results }),
         ensures self.source_call_slot_evaluates(plan, caller, rank, derivation, wiring, inputs, values, slot),
     {
@@ -207,6 +254,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.source_call_slot_evaluates(plan, caller, rank, left_derivation, left_wiring, inputs, left, slot),
             self.source_call_slot_evaluates(plan, caller, rank, right_derivation, right_wiring, inputs, right, slot),
             left.take(slot) == right.take(slot),
+            forall|x: SourceInvocation, y: SourceInvocation|
+                (#[trigger] left_derivation.contains(x)) && (#[trigger] right_derivation.contains(y))
+                    && 0 <= x.rank == y.rank < rank && x.inputs == y.inputs ==> x.outputs == y.outputs,
         ensures
             left_derivation.contains(children.0),
             right_derivation.contains(children.1),
@@ -216,16 +266,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(UseAliases::source_call_slot_evaluates);
         let a = choose|site: SourceCallEvaluation|
-            #[trigger] self.source_call_matches_slot(plan, caller, rank, left_wiring, inputs, left, slot, site)
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, left_wiring, inputs, left, slot, site, left_derivation)
             && left_derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
         let b = choose|site: SourceCallEvaluation|
-            #[trigger] self.source_call_matches_slot(plan, caller, rank, right_wiring, inputs, right, slot, site)
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, right_wiring, inputs, right, slot, site, right_derivation)
             && right_derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
         let (at, bt) = (plan.position_model(a.rank)->Some_0, plan.position_model(b.rank)->Some_0);
-        self.source_function_call_values_evidence(caller, left_wiring, a.definition, a.signature, a.outputs, at,
-            inputs, left, a.widths, a.arguments, a.results);
-        self.source_function_call_values_evidence(caller, right_wiring, b.definition, b.signature, b.outputs, bt,
-            inputs, right, b.widths, b.arguments, b.results);
+        self.source_project_call_values_evidence(plan, caller, rank, left_wiring, inputs, left, slot, a, left_derivation);
+        self.source_project_call_values_evidence(plan, caller, rank, right_wiring, inputs, right, slot, b, right_derivation);
         self.source_call_sites_agree(caller, left_wiring, right_wiring, slot,
             (a.definition, a.signature, a.outputs, at), (b.definition, b.signature, b.outputs, bt));
         self.template_rank_from_position(*plan, at, a.rank, b.rank);
@@ -241,8 +289,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         assert(a.widths =~= b.widths);
         assert(left.take(a.outputs.start as int) =~= right.take(b.outputs.start as int));
-        self.source_function_call_arguments_agree(caller, left_wiring, right_wiring, a.definition, a.signature, b.signature,
-            a.outputs, at, inputs, left, right, a.widths, a.arguments, b.arguments, a.results, b.results);
+        self.source_project_call_arguments_agree(plan, caller, rank, slot, left_derivation, right_derivation,
+            left_wiring, right_wiring, inputs, left, right, a, b);
         if ca.outputs == cb.outputs {
             let i = slot - a.outputs.start;
             assert(a.results[i] == left[slot] && b.results[i] == right[slot]);
@@ -330,7 +378,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let site = SourceCallEvaluation { definition: root.definition, signature: group._signature@,
                     outputs: group.outputs, rank: callee_rank, widths: callee.input_widths_model(),
                     arguments: port_values(callee_circuit.input_layout_model(), arguments),
-                    results: port_values(callee_circuit.output_layout_model(), results) };
+                    results: port_values(callee_circuit.output_layout_model(), results), nested: None };
                 assert(site.outputs.start <= i < site.outputs.end && 0 <= site.rank < rank);
                 assert(plan.position_model(site.rank) == Some((root.target_file, root.target_entry)));
                 assert(self.source_function_call_values(caller, scope.wiring, site.definition, site.signature, site.outputs,
