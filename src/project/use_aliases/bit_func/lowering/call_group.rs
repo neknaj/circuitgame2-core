@@ -38,7 +38,7 @@ pub(super) struct BodyWiring {
 
 /// 呼び出しの展開で検出した、元ソース位置付きの失敗。
 #[derive(Debug)]
-pub(super) enum CallGroupError<'p, 'a> {
+pub(in crate::project::use_aliases::bit_func) enum CallGroupError<'p, 'a> {
     /// 配線を確定できなかった引数の範囲。
     DeferredArgument(LocatedName<'p, 'a>),
     /// ゲート数の上限を超えた呼び出し式の範囲。

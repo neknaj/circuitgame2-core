@@ -1,7 +1,10 @@
 //! 通常の右辺と関数呼び出しの出力を、定義順に取り出す。
 
 use super::*;
-use super::super::templates::ResolvedTemplateCall;
+use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
+use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
+#[cfg(verus_only)]
+use super::super::lowering::{projected_lowering_view, projected_lowering_result, resolved_call_fits_body};
 use super::super::expansion::PreparedExpansionBody;
 use super::super::super::FunctionExpansionOrder;
 #[cfg(verus_only)]
@@ -312,6 +315,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         widths
     }
 
+    pub(super) closed spec fn prepared_definition_result(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        result: Result<Vec<CheckedBitDefinition>, BitFuncError>,
+    ) -> bool {
+        match result {
+            Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
+                && self.expansion_definition_prefix(scope, calls, slots@)
+                && self.definition_widths_match(scope, slots@)
+                && (forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls, slot) ==>
+                    bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]))
+                && (forall|group: int| 0 <= group < selected.len() ==> {
+                    let call = #[trigger] selected[group];
+                    let range = call.group.outputs;
+                    let outputs = call.template.output_widths_model();
+                    &&& range.start < range.end <= slots@.len()
+                    &&& range.start + outputs.len() == range.end
+                    &&& forall|port: int| 0 <= port < outputs.len() ==>
+                        slots@[range.start + port].width == #[trigger] outputs[port]
+                })
+                && form_spans_valid(scope.source.text, scope.parsed.syntax.forms@, scope.source.text.spec_bytes().len() as int)
+                && (forall|group: int| 0 <= group < selected.len()
+                    ==> *(#[trigger] selected[group]).group.expression.source == *scope.source)
+                && forall|group: int, port: int| 0 <= group < selected.len()
+                    && 0 <= port < selected[group].arguments@.len() ==>
+                    argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+                        slots@.take(selected[group].group.outputs.start as int), #[trigger] selected[group].arguments@[port],
+                        selected[group].template.input_widths_model()[port], scope.limit),
+            Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
+                #[trigger] self.expansion_definition_prefix(scope, calls, prefix)
+                && self.definition_widths_match(scope, prefix)
+                && prefix.len() < scope.wiring.drivers.definitions@.len()
+                && !call_covers(calls, prefix.len() as int)
+                && self.definition_error(scope, prefix, error),
+        }
+    }
+
     /// 展開準備で確定した呼び出しと実際の出力幅から、関数本体を定義順に取り出す。
     ///
     /// # Errors
@@ -339,36 +378,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     !has_structure_port(call.template.signature_model().inputs@)
                         && !has_structure_port(call.template.signature_model().outputs@)
             },
-        ensures match result {
-            Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
-                && self.expansion_definition_prefix(scope, calls@, slots@)
-                && self.definition_widths_match(scope, slots@)
-                && (forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls@, slot) ==>
-                    bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]))
-                && (forall|group: int| 0 <= group < selected@.len() ==> {
-                    let call = #[trigger] selected@[group];
-                    let range = call.group.outputs;
-                    let outputs = call.template.output_widths_model();
-                    &&& range.start < range.end <= slots@.len()
-                    &&& range.start + outputs.len() == range.end
-                    &&& forall|port: int| 0 <= port < outputs.len() ==>
-                        slots@[range.start + port].width == #[trigger] outputs[port]
-                })
-                && form_spans_valid(scope.source.text, scope.parsed.syntax.forms@, scope.source.text.spec_bytes().len() as int)
-                && (forall|group: int| 0 <= group < selected@.len()
-                    ==> *(#[trigger] selected@[group]).group.expression.source == *scope.source)
-                && forall|group: int, port: int| 0 <= group < selected@.len()
-                    && 0 <= port < selected@[group].arguments@.len() ==>
-                    argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
-                        slots@.take(selected@[group].group.outputs.start as int), #[trigger] selected@[group].arguments@[port],
-                        selected@[group].template.input_widths_model()[port], scope.limit),
-            Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
-                #[trigger] self.expansion_definition_prefix(scope, calls@, prefix)
-                && self.definition_widths_match(scope, prefix)
-                && prefix.len() < scope.wiring.drivers.definitions@.len()
-                && !call_covers(calls@, prefix.len() as int)
-                && self.definition_error(scope, prefix, error),
-        },
+        ensures self.prepared_definition_result(scope, calls@, selected@, result),
     {
         let call_widths = self.resolved_call_output_widths(scope, selected, Ghost(plan), Ghost(prepared));
         proof {
@@ -710,6 +720,181 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             i += 1;
         }
         Ok(slots)
+    }
+}
+
+/// 呼び出しを含む関数の本体をネットリストに変換するときの診断。
+#[derive(Debug)]
+pub(in crate::project::use_aliases::bit_func) enum ExpandedBodyError<'p, 'a> {
+    /// 宣言したポートまたは構造体配置に関する診断。
+    Ports(BitFuncError<'p, 'a>),
+    /// 定義の右辺を変換するときの診断。
+    Definition(BitFuncError<'p, 'a>),
+    /// 宣言と実際の出力幅が一致しない箇所。
+    Output(BitFuncError<'p, 'a>),
+    /// ビット範囲の割り当てまたは配線に関する診断。
+    Lowering(ProjectedLoweringError<'p, 'a>),
+}
+
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(in crate::project::use_aliases::bit_func) closed spec fn expanded_body_lowering_result(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        layout_limit: usize, gate_limit: usize, result: Result<LoweredBitFunc, ExpandedBodyError>,
+    ) -> bool {
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let wiring = &prepared.typed.literals.wiring->Checked_0;
+        exists|selected: Seq<ResolvedTemplateCall>|
+        {
+            &&& #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, selected)
+            &&& match result {
+                Err(ExpandedBodyError::Ports(error)) => self.expanded_routine_ports_result(
+                    file, entry, limit, wiring, prepared.projections.layouts, selected, Err(error)),
+                _ => exists|ports: PreparedBitFuncPorts|
+                    #[trigger] self.expanded_routine_ports_result(
+                        file, entry, limit, wiring, prepared.projections.layouts, selected, Ok(ports))
+                    && {
+                        let scope = FuncProjection {
+                            file, entry, limit, source, parsed, wiring,
+                            inputs: &ports.inputs, outputs: &ports.outputs,
+                            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
+                            types: &prepared.typed.types, structures: &prepared.projections.entries,
+                        };
+                        self.expanded_definition_lowering_result(&scope, prepared.calls@, selected, layout_limit, gate_limit, result)
+                    },
+            }
+        }
+    }
+
+    spec fn expanded_definition_lowering_result(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        layout_limit: usize, gate_limit: usize, result: Result<LoweredBitFunc, ExpandedBodyError>,
+    ) -> bool {
+        let drivers = scope.wiring.drivers.outputs@;
+        &&& self.projection_context(scope)
+        &&& match result {
+            Err(ExpandedBodyError::Definition(error)) => self.prepared_definition_result(scope, calls, selected, Err(error)),
+            _ => exists|slots: Vec<CheckedBitDefinition>|
+                #[trigger] self.prepared_definition_result(scope, calls, selected, Ok(slots))
+                && match result {
+                    Err(ExpandedBodyError::Output(error)) => output_width_failure(
+                        &scope.wiring.drivers.signature, scope.inputs@, scope.outputs@, slots@, drivers, error),
+                    Ok(value) => output_widths_before(scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
+                        && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
+                            drivers, scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(value)),
+                    Err(ExpandedBodyError::Lowering(error)) => output_widths_before(
+                        scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
+                        && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
+                            drivers, scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Err(error)),
+                    _ => false,
+                },
+        }
+    }
+
+    /// 厳格解析と型検査を終えた本体を、先行する関数のネットリストを使って配線へ変換する。
+    ///
+    /// # Errors
+    ///
+    /// ポート、定義の右辺、出力幅、ビット範囲と配線の順に検査し、失敗した段階の診断を返す。
+    pub(in crate::project::use_aliases::bit_func) fn lower_expanded_body(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, templates: &FunctionTemplates<'p, 'a>,
+        caller: (usize, usize, u64), prepared: PreparedExpansionBody<'p, 'a>, layout_limit: usize, gate_limit: usize,
+    ) -> (result: Result<LoweredBitFunc, ExpandedBodyError<'p, 'a>>)
+        requires
+            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.function_templates_match(plan, caller.2, templates),
+            plan.position_model(templates.next_rank() as int) == Some((caller.0, caller.1)),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
+        ensures self.expanded_body_lowering_result(plan, templates, caller, &prepared, layout_limit, gate_limit, result),
+    {
+        let (file, entry, limit) = caller;
+        let ghost original = prepared;
+        let FuncWiringResult::Checked(wiring) = &prepared.typed.literals.wiring else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        proof {
+            self.checked_types_keep_wiring(file, entry, limit, prepared.typed, *wiring);
+            self.literal_widths_fit_wiring(file, entry, limit, &prepared.typed.literals, wiring);
+            self.checked_wiring_is_func(file, entry, limit, *wiring);
+            self.targets.parsed_project_model();
+        }
+        let project = self.targets.project();
+        let source = &project.sources()[file];
+        let parsed = &project.circuits()[file];
+        let selected = self.resolve_template_calls(plan, templates, prepared.calls.as_slice(),
+            prepared.projections.call_arguments.arguments.as_slice(), Ghost(original), Ghost(caller));
+        let port_result = self.prepare_expanded_routine_ports(file, entry, limit, wiring,
+            prepared.projections.layouts, selected.as_slice());
+        let ports = match port_result {
+            Ok(ports) => ports,
+            Err(error) => return Err(ExpandedBodyError::Ports(error)),
+        };
+        let _layout_ref = ports.layouts.as_ref();
+        let scope = FuncProjection { file, entry, limit, source, parsed, wiring,
+            inputs: &ports.inputs, outputs: &ports.outputs,
+            #[cfg(verus_only)]
+            layouts: _layout_ref,
+            #[cfg(verus_only)]
+            types: &prepared.typed.types,
+            structures: &prepared.projections.entries,
+        };
+        proof {
+            reveal(UseAliases::routine_ports_result);
+            assert(self.projection_port_widths_match(&scope));
+            assert(self.projection_structures_match(&scope)) by {
+                if original.projections.layouts.is_none() {
+                    assert(prepared.projections.entries@.len() == 0);
+                }
+            };
+            assert forall|i: int| 0 <= i < selected@.len() implies {
+                let call = #[trigger] selected@[i];
+                &&& self.resolved_template_call_matches(plan, caller, &original, i, call)
+                &&& scope.layouts.is_none() ==> !has_structure_port(call.template.signature_model().inputs@)
+                    && !has_structure_port(call.template.signature_model().outputs@)
+            } by {
+                if scope.layouts.is_none() {
+                    assert(!call_ports_need_structure_layout(selected@));
+                    assert(!selected@[i].template.has_structure_ports_model());
+                }
+            };
+        }
+        let definitions = match self.project_prepared_definition_body(&scope, prepared.calls.as_slice(),
+            selected.as_slice(), prepared.typed.literals.widths.as_slice(), prepared.projections.concats,
+            Ghost(*plan), Ghost(original)) {
+            Ok(definitions) => definitions,
+            Err(error) => {
+                let result = Err(ExpandedBodyError::Definition(error));
+                assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
+                return result;
+            },
+        };
+        if let Err(error) = check_output_widths(wiring, ports.inputs.as_slice(), ports.outputs.as_slice(), definitions.as_slice()) {
+            let result = Err(ExpandedBodyError::Output(error));
+            assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
+            return result;
+        }
+        let forms = parsed.syntax.forms.as_slice();
+        proof {
+            assert forall|g: int| 0 <= g < selected@.len() implies {
+                let call = #[trigger] selected@[g];
+                &&& self.resolved_template_call_matches(plan, caller, &original, g, call)
+                &&& resolved_call_fits_body(call, ports.inputs@, definitions@, forms@, limit)
+            } by {
+                assert(*selected@[g].group.expression.source == *source);
+            };
+        }
+        let lowered = lower_projected_expansion(self, ports.inputs.as_slice(), definitions.as_slice(),
+            ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected.as_slice(),
+            layout_limit, gate_limit, Ghost((plan, caller, &original)));
+        let result = match lowered {
+            Ok(value) => Ok(value),
+            Err(error) => Err(ExpandedBodyError::Lowering(error)),
+        };
+        assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@, layout_limit, gate_limit, result));
+        result
     }
 }
 

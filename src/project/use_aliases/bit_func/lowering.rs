@@ -8,6 +8,17 @@ pub(super) use call_arguments::literal_argument_matches_width;
 mod call_group;
 mod mixed;
 #[cfg(verus_only)]
+pub(super) use mixed::resolved_call_fits_body;
+use mixed::{MixedWiringError, lower_resolved_function};
+use super::templates::ResolvedTemplateCall;
+use super::expansion::PreparedExpansionBody;
+use super::super::{FunctionExpansionOrder, UseAliases};
+use crate::syntax::Form;
+#[cfg(verus_only)]
+use super::frontend::call_covers;
+#[cfg(verus_only)]
+use mixed::{CallBinding, WiringStep, bindings_match_calls, mixed_function_result};
+#[cfg(verus_only)]
 pub use evaluation::{bit_func_lowering_preserves_evaluation, port_values};
 
 use alloc::vec::Vec;
@@ -136,6 +147,108 @@ spec fn body_layouts_result(
             && (exists|layout: PortBitLayout| #[trigger] port_bit_layout_result(definitions, capacity, Ok(layout)))
             && port_bit_layout_result(outputs, capacity, Err(error)),
     }
+}
+
+/// ビット範囲の割り当てと、定義順の配線変換の診断。
+#[derive(Debug)]
+pub(super) enum ProjectedLoweringError<'p, 'a> {
+    Layout(BitFuncLowerError),
+    Wiring(MixedWiringError<'p, 'a>),
+}
+
+pub(super) closed spec fn projected_lowering_result(
+    inputs: &[u64], definitions: &[CheckedBitDefinition], outputs: &[u64], drivers: &[OutputDriver],
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize,
+    result: Result<LoweredBitFunc, ProjectedLoweringError>,
+) -> bool {
+    let body = LoweringBody { input_widths: inputs, definitions };
+    match result {
+        Err(ProjectedLoweringError::Layout(error)) =>
+            body_layouts_result(inputs@, definitions@, outputs@, layout_limit, Err(error)),
+        _ => exists|layouts: Layouts, bindings: Seq<CallBinding>|
+            #![trigger body_layouts_result(inputs@, definitions@, outputs@, layout_limit, Ok(layouts)), bindings_match_calls(bindings, selected)]
+        {
+            &&& body_layouts_result(inputs@, definitions@, outputs@, layout_limit, Ok(layouts))
+            &&& bindings_match_calls(bindings, selected)
+            &&& projected_wiring_result(&body, &layouts, forms, bindings, outputs@, drivers@, gate_limit, result)
+        },
+    }
+}
+
+spec fn projected_wiring_result(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    outputs: Seq<u64>, drivers: Seq<OutputDriver>, gate_limit: usize,
+    result: Result<LoweredBitFunc, ProjectedLoweringError>,
+) -> bool {
+    exists|lowered: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError>|
+        #[trigger] mixed_function_result(body, layouts, forms, bindings, outputs, drivers, gate_limit, lowered)
+        && result == match lowered {
+            Ok((value, _)) => Ok(value),
+            Err(error) => Err(ProjectedLoweringError::Wiring(error)),
+        }
+}
+
+pub(super) open spec fn projected_lowering_view(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize,
+    result: Result<LoweredBitFunc, ProjectedLoweringError>,
+) -> bool {
+    exists|a: &[u64], b: &[CheckedBitDefinition], c: &[u64], d: &[OutputDriver]|
+        a@ == inputs && b@ == definitions && c@ == outputs && d@ == drivers
+        && #[trigger] projected_lowering_result(a, b, c, d, forms, selected, layout_limit, gate_limit, result)
+}
+
+/// 検査済みの本体にビット範囲を割り当て、呼び出しと通常の定義を配線へ変換する。
+///
+/// # Errors
+///
+/// 範囲を割り当てられない場合はその診断を返す。割り当てが成功した場合は定義順に配線を変換する。
+pub(super) fn lower_projected_expansion<'s, 'p, 'a>(
+    aliases: &UseAliases<'_, 'p, 'a>, inputs: &'s [u64], definitions: &'s [CheckedBitDefinition<'p, 'a>],
+    outputs: &[u64], drivers: &[OutputDriver], forms: &[Form], selected: &[ResolvedTemplateCall<'s, 'p, 'a>],
+    layout_limit: usize, gate_limit: usize,
+    Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>)>,
+) -> (result: Result<LoweredBitFunc, ProjectedLoweringError<'p, 'a>>)
+    requires
+        aliases.prepared_expansion_body_matches(*context.0, context.1.0, context.1.1, context.1.2, context.2),
+        outputs@.len() == drivers@.len(),
+        forall|p: int| 0 <= p < outputs@.len() ==>
+            bit_driver_width(inputs@, definitions@, #[trigger] drivers@[p]) == Some(outputs@[p]),
+        selected@.len() == context.2.calls@.len(),
+        forall|g: int| 0 <= g < selected@.len() ==> {
+            let call = #[trigger] selected@[g];
+            &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, g, call)
+            &&& resolved_call_fits_body(call, inputs@, definitions@, forms@, context.1.2)
+        },
+        forall|slot: int| 0 <= slot < definitions@.len() && !call_covers(context.2.calls@, slot) ==>
+            bit_definition_matches(inputs@, definitions@.take(slot), #[trigger] definitions@[slot]),
+    ensures projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@, layout_limit, gate_limit, result),
+{
+    reveal(projected_lowering_result);
+    let layouts = match prepare_body_layouts(inputs, definitions, outputs, layout_limit) {
+        Ok(layouts) => layouts,
+        Err(error) => return Err(ProjectedLoweringError::Layout(error)),
+    };
+    let body = LoweringBody { input_widths: inputs, definitions };
+    let lowered = lower_resolved_function(aliases, &body, layouts, forms, selected, outputs, drivers,
+        layout_limit, gate_limit, Ghost(context));
+    let result = match lowered {
+        Ok((value, _)) => Ok(value),
+        Err(error) => Err(ProjectedLoweringError::Wiring(error)),
+    };
+    assert(projected_lowering_result(inputs, definitions, outputs, drivers, forms@, selected@, layout_limit, gate_limit, result)) by {
+        let bindings = choose|bindings: Seq<CallBinding>| #[trigger] bindings_match_calls(bindings, selected@)
+            && mixed_function_result(&body, &layouts, forms@, bindings, outputs@, drivers@, gate_limit, lowered);
+        assert(body_layouts_result(inputs@, definitions@, outputs@, layout_limit, Ok(layouts)));
+        assert(projected_wiring_result(&body, &layouts, forms@, bindings, outputs@, drivers@, gate_limit, result)) by {
+            assert(result == match lowered {
+                Ok((value, _)) => Ok(value),
+                Err(error) => Err(ProjectedLoweringError::Wiring(error)),
+            });
+            assert(mixed_function_result(&body, &layouts, forms@, bindings, outputs@, drivers@, gate_limit, lowered));
+        };
+    };
+    result
 }
 
 fn collect_definition_widths(definitions: &[CheckedBitDefinition]) -> (widths: Vec<u64>)

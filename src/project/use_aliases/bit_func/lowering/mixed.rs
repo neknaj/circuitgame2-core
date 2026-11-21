@@ -32,7 +32,7 @@ pub(super) struct CallBinding<'s, 'p, 'a> {
 
 /// 定義順に配線へ変換するときの診断。
 #[derive(Debug)]
-pub(super) enum MixedWiringError<'p, 'a> {
+pub(in crate::project::use_aliases::bit_func) enum MixedWiringError<'p, 'a> {
     /// 基底 NOR を追加できなかった右辺の範囲。
     LocalGateCapacity(LocatedName<'p, 'a>),
     /// 呼び出し式または実引数の診断。
@@ -123,20 +123,20 @@ proof fn call_argument_bits_available(
     }
 }
 
-pub(super) open spec fn resolved_call_fits_body(
-    call: ResolvedTemplateCall, body: &LoweringBody, forms: Seq<Form>, limit: u64,
+pub(in crate::project::use_aliases::bit_func) open spec fn resolved_call_fits_body(
+    call: ResolvedTemplateCall, inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, forms: Seq<Form>, limit: u64,
 ) -> bool {
     let first = call.group.outputs.start;
     let end = call.group.outputs.end;
     let outputs = call.template.output_widths_model();
-    let inputs = call.template.input_widths_model();
+    let callee_inputs = call.template.input_widths_model();
     &&& form_spans_valid(call.group.expression.source.text, forms, call.group.expression.source.text.spec_bytes().len() as int)
-    &&& first < end <= body.definitions@.len()
+    &&& first < end <= definitions.len()
     &&& first + outputs.len() == end
-    &&& forall|i: int| 0 <= i < outputs.len() ==> body.definitions@[first + i].width == #[trigger] outputs[i]
+    &&& forall|i: int| 0 <= i < outputs.len() ==> definitions[first + i].width == #[trigger] outputs[i]
     &&& forall|port: int| 0 <= port < call.arguments@.len() ==>
-        argument_matches_width(call.group.expression.source, forms, body.input_widths@, body.definitions@.take(first as int),
-            #[trigger] call.arguments@[port], inputs[port], limit)
+        argument_matches_width(call.group.expression.source, forms, inputs, definitions.take(first as int),
+            #[trigger] call.arguments@[port], callee_inputs[port], limit)
 }
 
 pub(super) open spec fn binding_matches_selection(binding: CallBinding, call: ResolvedTemplateCall) -> bool {
@@ -157,7 +157,7 @@ pub(super) fn bind_resolved_call<'s, 'p, 'a>(
     requires
         _aliases.resolved_template_call_matches(context.0, context.1, context.2, context.3, *selected),
         body_definition_layouts(_body.input_widths@, _body.definitions@, capacity, _layouts),
-        resolved_call_fits_body(*selected, _body, forms, context.1.2),
+        resolved_call_fits_body(*selected, _body.input_widths@, _body.definitions@, forms, context.1.2),
     ensures
         binding_matches_selection(binding, *selected),
         binding_ready(binding, _layouts, forms, definition_widths(_body.definitions@)),
@@ -200,7 +200,7 @@ fn bind_resolved_calls<'s, 'p, 'a>(
         forall|index: int| 0 <= index < selected@.len() ==> {
             let call = #[trigger] selected@[index];
             &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, index, call)
-            &&& resolved_call_fits_body(call, body, forms, context.1.2)
+            &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, forms, context.1.2)
         },
     ensures
         bindings@.len() == selected@.len(),
@@ -219,7 +219,7 @@ fn bind_resolved_calls<'s, 'p, 'a>(
             forall|i: int| 0 <= i < selected@.len() ==> {
                 let call = #[trigger] selected@[i];
                 &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, i, call)
-                &&& resolved_call_fits_body(call, body, forms, context.1.2)
+                &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, forms, context.1.2)
             },
             forall|i: int| 0 <= i < bindings@.len() ==> {
                 let binding = #[trigger] bindings@[i];
@@ -630,7 +630,7 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
         forall|g: int| 0 <= g < selected@.len() ==> {
             let call = #[trigger] selected@[g];
             &&& aliases.resolved_template_call_matches(context.0, context.1, context.2, g, call)
-            &&& resolved_call_fits_body(call, body, forms@, context.1.2)
+            &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, forms@, context.1.2)
         },
         forall|slot: int| 0 <= slot < body.definitions@.len() && !call_covers(context.2.calls@, slot) ==>
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),

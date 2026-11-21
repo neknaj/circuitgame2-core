@@ -296,6 +296,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::function_templates_match);
         proof { self.template_index_evidence(*plan); }
         let next = table.next;
+        assert(next < table.slots@.len() <= usize::MAX) by {
+            vstd::std_specs::vec::axiom_spec_len(&table.slots);
+        };
         let Some(vertex) = plan.template_at(next) else {
             proof { assert(false); }
             unreachable!()
@@ -366,6 +369,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& signature.output_inputs@ == selected.template.signature_model().output_inputs@
     }
 
+    pub(super) open spec fn expansion_selection_matches(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>,
+    ) -> bool {
+        &&& selected.len() == prepared.calls@.len()
+        &&& forall|i: int| 0 <= i < selected.len() ==> {
+            let call = #[trigger] selected[i];
+            &&& self.resolved_template_call_matches(plan, caller, prepared, i, call)
+            &&& table.slots_model()[call.group.vertex as int] == Some(*call.template)
+        }
+    }
+
     /// 呼び出し順に、元の実引数区間と展開済みの関数を組にする。
     pub(super) fn resolve_template_calls<'s>(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, table: &'s FunctionTemplates<'p, 'a>,
@@ -380,10 +395,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
             groups@ == prepared.calls@,
             arguments@ == prepared.projections.call_arguments.arguments@,
-        ensures
-            selected@.len() == prepared.calls@.len(),
-            forall|i: int| 0 <= i < selected@.len() ==>
-                self.resolved_template_call_matches(plan, caller, &prepared, i, #[trigger] selected@[i]),
+        ensures self.expansion_selection_matches(plan, table, caller, &prepared, selected@),
     {
         let mut selected: Vec<ResolvedTemplateCall<'s, 'p, 'a>> = Vec::new();
         let mut index = 0;
@@ -397,8 +409,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 groups@ == prepared.calls@,
                 arguments@ == prepared.projections.call_arguments.arguments@,
                 index == selected@.len() <= prepared.calls@.len(),
-                forall|i: int| 0 <= i < selected@.len() ==>
-                    self.resolved_template_call_matches(plan, caller, &prepared, i, #[trigger] selected@[i]),
+                forall|i: int| 0 <= i < selected@.len() ==> {
+                    let call = #[trigger] selected@[i];
+                    &&& self.resolved_template_call_matches(plan, caller, &prepared, i, call)
+                    &&& table.slots_model()[call.group.vertex as int] == Some(*call.template)
+                },
             decreases prepared.calls@.len() - index,
         {
             let group = &groups[index];
@@ -418,8 +433,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(self.resolved_template_call_matches(plan, caller, &prepared, index as int, call));
             let ghost previous = selected@;
             selected.push(call);
-            assert forall|i: int| 0 <= i < selected@.len() implies
-                self.resolved_template_call_matches(plan, caller, &prepared, i, #[trigger] selected@[i]) by {
+            assert forall|i: int| 0 <= i < selected@.len() implies {
+                let row = #[trigger] selected@[i];
+                &&& self.resolved_template_call_matches(plan, caller, &prepared, i, row)
+                &&& table.slots_model()[row.group.vertex as int] == Some(*row.template)
+            } by {
                 if i < index { assert(selected@[i] == previous[i]); }
             };
             index += 1;
@@ -440,6 +458,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             0 <= index < prepared.calls@.len() && prepared.calls@[index] == *group,
             group._order@.1 == table.next_rank(),
         ensures
+            table.slots_model()[group.vertex as int] == Some(*template),
             template.has_structure_ports_model() <==> has_structure_port(template.signature_model().inputs@)
                 || has_structure_port(template.signature_model().outputs@),
             plan.position_model(group._order@.0) matches Some(target)
