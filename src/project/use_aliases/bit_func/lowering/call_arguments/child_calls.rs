@@ -15,7 +15,7 @@ use super::super::super::instances::{instance_evaluates_from_caller, instance_wi
 use super::super::super::frontend::{
     argument_matches_width, expression_argument_matches_width, expression_input_width, expression_output_bits,
     nested_argument_output_matches,
-    root_argument_matches_width, selected_child_output_matches,
+    nor_root_arguments_match_widths, root_argument_matches_width, selected_child_output_matches,
 };
 #[cfg(verus_only)]
 use super::super::mixed::resolved_call_fits_body;
@@ -1381,30 +1381,6 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_root_with_child
     }
 }
 
-/// 根と子の型検査済み引数が、先行する定義または子の出力と同じ幅を持つ。
-pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nor_root_arguments_match_widths(
-    selected: &ResolvedNorRoot, references: Range<usize>, caller: &CallerArguments,
-    body: &LoweringBody, first: usize, limit: u64,
-) -> bool {
-    let children = selected.children@;
-    let prior = body.definitions@.take(first as int);
-    &&& first <= body.definitions@.len()
-    &&& selected.arguments@.len() == 2
-    &&& forall|port: int| 0 <= port < 2 ==> {
-        let arg = #[trigger] selected.arguments@[port];
-        &&& argument_matches_width(caller.source, caller.forms@, body.input_widths@, prior, arg, 1, limit)
-        &&& selected_child_output_matches(children, references.start, children.len() as int, arg, 1)
-    }
-    &&& forall|i: int, port: int| 0 <= i < children.len() && 0 <= port < children[i].arguments@.len() ==> {
-        let child = children[i];
-        let arg = #[trigger] children[i].arguments@[port];
-        let width = expression_input_width(child, port);
-        &&& child.template matches Some(template) ==> port < template.input_widths_model().len()
-        &&& argument_matches_width(caller.source, caller.forms@, body.input_widths@, prior, arg, width, limit)
-        &&& selected_child_output_matches(children, references.start, i, arg, width)
-    }
-}
-
 /// 後順の子ごとに、入力を読めることと、定義内で参照添字が重複しないことを表す。
 #[verifier::opaque]
 pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nor_root_children_bound(
@@ -1469,7 +1445,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_resolved_nor_ro
         caller.definitions@ == scope.1.definitions.ranges_model(),
         scope.3 <= scope.0.definitions@.len(),
         caller.wires@.len() == preceding_port_bits(definition_widths(scope.0.definitions@), scope.3 as nat),
-        nor_root_arguments_match_widths(selected, *references, caller, scope.0, scope.3, context.2),
+        nor_root_arguments_match_widths(selected, *references, caller.source, caller.forms@,
+            scope.0.input_widths@, scope.0.definitions@, scope.3, context.2),
         form_spans_valid(caller.source.text, caller.forms@, caller.source.text.spec_bytes().len() as int),
         old(gates)@.len() <= gate_limit,
         gates_available(old(gates)@, scope.1.inputs.total_bits_model() as nat, old(gates)@.len() as int),

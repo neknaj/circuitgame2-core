@@ -3,7 +3,7 @@
 use super::*;
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 #[cfg(verus_only)]
-use super::super::templates::ResolvedExpressionCall;
+use super::super::templates::{ResolvedExpressionCall, ResolvedNorRoot};
 use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
 #[cfg(verus_only)]
 use super::super::lowering::{
@@ -20,7 +20,7 @@ use crate::netlist::{
 };
 use super::super::expansion::PreparedExpansionBody;
 #[cfg(verus_only)]
-use super::super::expansion::prepared_nested_output_matches;
+use super::super::expansion::{PreparedExpressionCall, prepared_nested_output_matches};
 use super::super::super::FunctionExpansionOrder;
 #[cfg(verus_only)]
 use super::super::super::function_atoms::{
@@ -85,6 +85,30 @@ pub(in crate::project::use_aliases::bit_func) open spec fn nested_argument_outpu
     selected: ResolvedTemplateCall, before: int, argument: ProjectedCallArgument, width: u64,
 ) -> bool {
     selected_child_output_matches(selected.children@, selected.group.references.start, before, argument, width)
+}
+
+/// 根と子の型検査済み引数が、先行する定義または子の出力と同じ幅を持つ。
+pub(in crate::project::use_aliases::bit_func) open spec fn nor_root_arguments_match_widths(
+    selected: &ResolvedNorRoot, references: core::ops::Range<usize>, source: &ProjectSource, forms: Seq<Form>,
+    inputs: Seq<u64>, slots: Seq<CheckedBitDefinition>, first: usize, limit: u64,
+) -> bool {
+    let children = selected.children@;
+    let prior = slots.take(first as int);
+    &&& first <= slots.len()
+    &&& selected.arguments@.len() == 2
+    &&& forall|port: int| 0 <= port < 2 ==> {
+        let arg = #[trigger] selected.arguments@[port];
+        &&& argument_matches_width(source, forms, inputs, prior, arg, 1, limit)
+        &&& selected_child_output_matches(children, references.start, children.len() as int, arg, 1)
+    }
+    &&& forall|i: int, port: int| 0 <= i < children.len() && 0 <= port < children[i].arguments@.len() ==> {
+        let child = children[i];
+        let arg = #[trigger] children[i].arguments@[port];
+        let width = expression_input_width(child, port);
+        &&& child.template matches Some(template) ==> port < template.input_widths_model().len()
+        &&& argument_matches_width(source, forms, inputs, prior, arg, width, limit)
+        &&& selected_child_output_matches(children, references.start, i, arg, width)
+    }
 }
 
 pub(in crate::project::use_aliases::bit_func) open spec fn root_argument_matches_width(
@@ -307,7 +331,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
             CallArgumentSource::NestedCall(_) => {
                 self.resolved_nested_output_width(plan, table, scope.limit, prepared.projections.call_arguments.arguments@,
-                    selected, selected.children@.len() as int, arg, (expected, width, scope.layouts));
+                    selected.group.postorder, selected.children@, selected.group.references.start,
+                    selected.children@.len() as int, arg, (expected, width, scope.layouts));
             },
             _ => {},
         }
@@ -316,34 +341,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 同じ引数フォームを指す子の出力型から、実際に返す配線数を導く。
     proof fn resolved_nested_output_width(
         &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, limit: u64,
-        arguments: Seq<ProjectedCallArgument>, selected: ResolvedTemplateCall, before: int,
+        arguments: Seq<ProjectedCallArgument>, postorder: Option<Vec<PreparedExpressionCall>>, children: Seq<ResolvedExpressionCall>,
+        reference_start: usize, before: int,
         argument: ProjectedCallArgument, expected: (ResolvedPortType, u64, Option<&StructureLayouts>),
     )
         requires
             self.can_resolve(),
             self.structure_layout_for_ports(limit, expected.2),
             self.port_width_matches(expected.0, expected.1, expected.2),
-            self.resolved_expression_calls_match(plan, table, limit, selected.group.postorder, arguments, selected.children@),
-            selected.group.postorder matches Some(children) && prepared_nested_output_matches(children@,
-                selected.group.references.start, before, argument, expected.0),
-        ensures nested_argument_output_matches(selected, before, argument, expected.1),
+            self.resolved_expression_calls_match(plan, table, limit, postorder, arguments, children),
+            postorder matches Some(children) && prepared_nested_output_matches(children@,
+                reference_start, before, argument, expected.0),
+        ensures selected_child_output_matches(children, reference_start, before, argument, expected.1),
     {
-        reveal(nested_argument_output_matches);
         reveal(UseAliases::resolved_expression_call_matches);
         reveal(UseAliases::template_port_widths_match);
-        let children = selected.group.postorder->Some_0@;
+        let rows = postorder->Some_0@;
         let earlier = choose|i: int| 0 <= i < before
-            && (#[trigger] children[i]).reference == selected.group.references.start + argument.source->NestedCall_0
-            && children[i]._signature@.call.call.form == argument.form
-            && children[i]._signature@.call.target.port_counts().outputs == 1
-            && match children[i]._signature@.signature {
+            && (#[trigger] rows[i]).reference == reference_start + argument.source->NestedCall_0
+            && rows[i]._signature@.call.call.form == argument.form
+            && rows[i]._signature@.call.target.port_counts().outputs == 1
+            && match rows[i]._signature@.signature {
                 crate::project::FuncCallSignature::Nor =>
                     crate::project::port_types_equal(ResolvedPortType::Bits(1), expected.0),
                 crate::project::FuncCallSignature::Function(ports) =>
                     ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected.0),
             };
-        let producer = selected.children@[earlier];
-        let row = children[earlier];
+        let producer = children[earlier];
+        let row = rows[earlier];
         assert(self.resolved_expression_call_matches(plan, table, limit, arguments, row, producer));
         let (ty, bits, layout) = match producer.template {
             Some(template) => {
@@ -472,7 +497,155 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.argument_widths_agree(scope.limit, (known.ty, actual, scope.layouts), (expected, width, table_for_input));
             },
             CallArgumentSource::NestedCall(_) => self.resolved_nested_output_width(
-                plan, table, scope.limit, arguments, selected, child_index, arg, (expected, width, table_for_input)),
+                plan, table, scope.limit, arguments, selected.group.postorder, selected.children@,
+                selected.group.references.start, child_index, arg, (expected, width, table_for_input)),
+            _ => {},
+        }
+    }
+
+    /// 根とすべての子に渡す幅を、同じ定義の型検査結果から得る。
+    pub(super) proof fn resolved_nor_arguments_fit_body(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: &ResolvedNorRoot, index: int, first: usize, slots: Seq<CheckedBitDefinition>,
+    )
+        requires
+            self.projection_context(scope), self.projection_port_widths_match(scope),
+            self.structure_layout_for_ports(scope.limit, scope.layouts),
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            0 <= index < prepared.nor_roots@.len(), *selected.prepared == prepared.nor_roots@[index],
+            first < scope.wiring.drivers.definitions@.len(),
+            scope.wiring.drivers.definitions@[first as int].definition == selected.prepared.definition,
+            scope.wiring.drivers.definitions@[first as int].result_index == 0,
+            first <= slots.len(), self.definition_widths_match(scope, slots),
+            selected.prepared.root.arguments.start <= selected.prepared.root.arguments.end
+                <= prepared.projections.call_arguments.arguments@.len(),
+            selected.arguments@ == prepared.projections.call_arguments.arguments@.subrange(
+                selected.prepared.root.arguments.start as int, selected.prepared.root.arguments.end as int),
+            self.resolved_expression_calls_match(plan, table, scope.limit, Some(selected.prepared.postorder),
+                prepared.projections.call_arguments.arguments@, selected.children@),
+        ensures nor_root_arguments_match_widths(selected, scope.parsed.definitions@[selected.prepared.definition as int].references,
+            scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots, first, scope.limit),
+    {
+        let caller = (scope.file, scope.entry, scope.limit);
+        self.nor_root_template_evidence(*plan, caller, prepared, index);
+        let root = selected.prepared;
+        let args = prepared.projections.call_arguments.arguments@;
+        let references = scope.parsed.definitions@[root.definition as int].references;
+        let forms = scope.parsed.syntax.forms@;
+        let prior = slots.take(first as int);
+        let count = selected.children@.len() as int;
+        assert(count == root.postorder@.len());
+        assert(selected.arguments@.len() == 2);
+        assert forall|port: int| 0 <= port < 2 implies {
+            let arg = #[trigger] selected.arguments@[port];
+            &&& argument_matches_width(scope.source, forms, scope.inputs@, prior, arg, 1, scope.limit)
+            &&& selected_child_output_matches(selected.children@, references.start, count, arg, 1)
+        } by {
+            self.resolved_nor_argument_width(scope, plan, table, prepared, selected, index, first, slots, count, port,
+                (ResolvedPortType::Bits(1), 1u64, None));
+        };
+        assert forall|i: int, port: int| 0 <= i < count && 0 <= port < selected.children@[i].arguments@.len() implies {
+            let child = selected.children@[i];
+            let arg = #[trigger] selected.children@[i].arguments@[port];
+            let width = expression_input_width(child, port);
+            &&& child.template matches Some(template) ==> port < template.input_widths_model().len()
+            &&& argument_matches_width(scope.source, forms, scope.inputs@, prior, arg, width, scope.limit)
+            &&& selected_child_output_matches(selected.children@, references.start, i, arg, width)
+        } by {
+            reveal(UseAliases::resolved_expression_call_matches);
+            reveal(UseAliases::template_port_widths_match);
+            let row = root.postorder@[i];
+            let child = selected.children@[i];
+            assert(self.resolved_expression_call_matches(plan, table, scope.limit, args, row, child));
+            let expected = match row._signature@.signature {
+                crate::project::FuncCallSignature::Nor => ResolvedPortType::Bits(1),
+                crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+            };
+            let width = expression_input_width(child, port);
+            let layout = match child.template {
+                Some(template) => {
+                    let rank = row._rank@->Some_0;
+                    self.template_port_evidence(plan.position_model(rank)->Some_0, scope.limit, template);
+                    template.structure_layouts_model()
+                },
+                None => None,
+            };
+            let input_layout = match &layout { Some(layout) => Some(layout), None => None };
+            self.resolved_nor_argument_width(scope, plan, table, prepared, selected, index, first, slots, i, port,
+                (expected, width, input_layout));
+        };
+    }
+
+    proof fn resolved_nor_argument_width(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: &ResolvedNorRoot, index: int, first: usize, slots: Seq<CheckedBitDefinition>,
+        parent: int, port: int, expected: (ResolvedPortType, u64, Option<&StructureLayouts>),
+    )
+        requires
+            self.projection_context(scope), self.projection_port_widths_match(scope),
+            self.structure_layout_for_ports(scope.limit, scope.layouts),
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            0 <= index < prepared.nor_roots@.len(), *selected.prepared == prepared.nor_roots@[index],
+            first < scope.wiring.drivers.definitions@.len(),
+            scope.wiring.drivers.definitions@[first as int].definition == selected.prepared.definition,
+            scope.wiring.drivers.definitions@[first as int].result_index == 0,
+            first <= slots.len(), self.definition_widths_match(scope, slots),
+            selected.prepared.root.arguments.start <= selected.prepared.root.arguments.end
+                <= prepared.projections.call_arguments.arguments@.len(),
+            selected.arguments@ == prepared.projections.call_arguments.arguments@.subrange(
+                selected.prepared.root.arguments.start as int, selected.prepared.root.arguments.end as int),
+            self.resolved_expression_calls_match(plan, table, scope.limit, Some(selected.prepared.postorder),
+                prepared.projections.call_arguments.arguments@, selected.children@),
+            self.structure_layout_for_ports(scope.limit, expected.2),
+            self.port_width_matches(expected.0, expected.1, expected.2),
+            ({
+                let children = selected.prepared.postorder@;
+                let row = if parent == children.len() { selected.prepared.root } else { children[parent] };
+                &&& 0 <= parent <= children.len()
+                &&& 0 <= port < row.arguments.end - row.arguments.start
+                &&& expected.0 == match row._signature@.signature {
+                    crate::project::FuncCallSignature::Nor => ResolvedPortType::Bits(1),
+                    crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+                }
+            }),
+        ensures ({
+            let args = if parent == selected.children@.len() { selected.arguments@ }
+                else { selected.children@[parent].arguments@ };
+            let arg = args[port];
+            let references = scope.parsed.definitions@[selected.prepared.definition as int].references;
+            &&& argument_matches_width(scope.source, scope.parsed.syntax.forms@, scope.inputs@,
+                slots.take(first as int), arg, expected.1, scope.limit)
+            &&& selected_child_output_matches(selected.children@, references.start, parent, arg, expected.1)
+        }),
+    {
+        reveal(UseAliases::resolved_expression_call_matches);
+        let caller = (scope.file, scope.entry, scope.limit);
+        let root = selected.prepared;
+        let args = prepared.projections.call_arguments.arguments@;
+        let refs = scope.parsed.definitions@[root.definition as int].references;
+        let children = root.postorder@;
+        let row = if parent == children.len() { root.root } else { children[parent] };
+        let argument = args[row.arguments.start + port];
+        self.prepared_nor_argument_evidence(*plan, caller, prepared, index, first, parent, port);
+        if parent < children.len() {
+            let child = selected.children@[parent];
+            assert(self.resolved_expression_call_matches(plan, table, scope.limit, args, row, child));
+            assert(argument == child.arguments@[port]);
+        } else {
+            assert(argument == selected.arguments@[port]);
+        }
+        match argument.source {
+            CallArgumentSource::Driver(driver) => {
+                let actual = self.preceding_argument_driver_width(scope, slots, first as int, driver);
+                let known = signal_type_at(scope.wiring, scope.types@, driver)->Some_0;
+                self.argument_widths_agree(scope.limit, (known.ty, actual, scope.layouts), expected);
+            },
+            CallArgumentSource::NestedCall(_) => self.resolved_nested_output_width(
+                plan, table, scope.limit, args, Some(root.postorder), selected.children@, refs.start, parent, argument, expected),
             _ => {},
         }
     }
