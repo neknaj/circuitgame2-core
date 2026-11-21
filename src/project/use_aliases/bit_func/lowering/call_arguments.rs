@@ -687,6 +687,39 @@ pub(super) open spec fn builtin_nor_call_matches(builtin: &(NorNetlist, PortBitL
     &&& port_bit_layout_result(seq![1u64, 1u64], 2, Ok(builtin.1))
 }
 
+/// 基底 NOR の評価結果を、宣言順の入力ポートと NOR の真理値に結び付ける。
+pub(super) proof fn builtin_nor_evaluation(
+    builtin: &(NorNetlist, PortBitLayout), input: Seq<bool>, output: Seq<bool>,
+)
+    requires
+        builtin_nor_call_matches(builtin),
+        crate::netlist::nor_evaluation(&builtin.0, input, output),
+    ensures
+        input.len() == 2,
+        port_values(&builtin.1, input) == seq![seq![input[0]], seq![input[1]]],
+        output == seq![!(input[0] || input[1])],
+{
+    reveal(crate::netlist::nor_evaluation);
+    let netlist = &builtin.0;
+    let values = choose|values: Seq<bool>| #[trigger] crate::netlist::gate_values_match(input, netlist.gates@, values)
+        && values.len() == netlist.gates@.len()
+        && crate::netlist::output_values_match(input, values, netlist.outputs@, output);
+    reveal(crate::netlist::gate_values_match);
+    assert(values[0] == !(input[0] || input[1]));
+    assert(output[0] == values[0]);
+    assert(output =~= seq![!(input[0] || input[1])]);
+
+    let widths = seq![1u64, 1u64];
+    port_bit_layout_port(widths, 2, builtin.1, 0);
+    port_bit_layout_port(widths, 2, builtin.1, 1);
+    reveal_with_fuel(preceding_port_bits, 3);
+    reveal(port_values);
+    let ports = port_values(&builtin.1, input);
+    assert(ports[0] =~= seq![input[0]]);
+    assert(ports[1] =~= seq![input[1]]);
+    assert(ports =~= seq![seq![input[0]], seq![input[1]]]);
+}
+
 /// 基底 NOR を入力2本、出力1本の呼び出しとして扱うための回路と入力配置。
 ///
 /// 呼び出し元のビット上限が1でも同じ信号を両入力に渡せるよう、入力配置の容量は2とする。

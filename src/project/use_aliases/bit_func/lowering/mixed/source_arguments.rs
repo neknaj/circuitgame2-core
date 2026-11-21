@@ -320,6 +320,12 @@ pub(super) proof fn nested_child_values<'s, 'p, 'a>(
         &&& evaluation.mapped.len() == call.inputs.total_bits_model()
         &&& evaluation.arguments == instance_wire_values(evaluation.mapped, inputs, gates)
         &&& nor_evaluation(call.circuit, evaluation.arguments, evaluation.outputs)
+        &&& (selected_child.template.is_none() ==> {
+            let arguments = evaluation.arguments;
+            &&& arguments.len() == 2
+            &&& ports == seq![seq![arguments[0]], seq![arguments[1]]]
+            &&& evaluation.outputs == seq![!(arguments[0] || arguments[1])]
+        })
         &&& 0 <= reference < root.end.table.ranges@.len()
         &&& root.end.table.ranges@[reference] matches Some(range)
             && range.start <= range.end <= root.end.table.wires@.len()
@@ -347,6 +353,9 @@ pub(super) proof fn nested_child_values<'s, 'p, 'a>(
     let count = (selected.group.references.end - selected.group.references.start) as usize;
     let result = child_output_evaluates(&invocation, calls, calls.len(), count, step.before.gates, root.trace, root.end,
         child_index, combined, inputs, gates, layouts.inputs.total_bits_model());
+    if selected_child.template.is_none() {
+        super::super::call_arguments::builtin_nor_evaluation(builtin, result.0, result.1);
+    }
     assert(root.trace.len() == calls.len() + 1) by { reveal(child_wiring_trace_matches); };
     let before = root.trace[child].table;
     let (arguments_from, mapped) = choose|arguments_from: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>|
