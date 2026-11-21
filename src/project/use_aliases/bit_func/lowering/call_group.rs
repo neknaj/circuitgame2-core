@@ -820,6 +820,45 @@ pub(super) fn lower_nor_call_group<'s, 'p, 'a>(
     Ok(())
 }
 
+/// 根 NOR の実配線から得た値と、子の後順の配線履歴との対応を表す。
+#[verifier::opaque]
+pub(super) open spec fn nor_call_group_evaluation_matches(
+    selected: &ResolvedNorRoot, references: Range<usize>, forms: Seq<Form>, caller: &Layouts,
+    builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView,
+    combined: Seq<NorGate>, inputs: Seq<bool>, values: Seq<bool>,
+    evaluation: (Seq<ChildCall>, CallerArguments, NestedRootEvaluation),
+) -> bool {
+    let (calls, invocation, root) = evaluation;
+    let count = (references.end - references.start) as usize;
+    let bit = before.definitions.len() as int;
+    let slot = selected.prepared.output_slot as int;
+    &&& super::call_arguments::builtin_nor_call_matches(builtin)
+    &&& references.start <= references.end
+    &&& nor_group_invocation_matches(selected, forms, caller, before, invocation)
+    &&& nor_root_children_bound(selected, references, &invocation, builtin, calls)
+    &&& child_wiring_trace_matches(&invocation, calls, calls.len(), count, before.gates,
+        root.trace, root.end, caller.inputs.total_bits_model())
+    &&& child_ranges_match(calls, calls.len(), root.end.table.ranges@)
+    &&& root.end.table.wires@.len() == child_sizes(calls, calls.len()).1
+    &&& root.end.gates.len() <= combined.len() && root.end.gates == combined.take(root.end.gates.len() as int)
+    &&& root.invocation.source == invocation.source && root.invocation.forms@ == invocation.forms@
+    &&& root.invocation.inputs@ == invocation.inputs@ && root.invocation.definitions@ == invocation.definitions@
+    &&& root.invocation.wires@ == invocation.wires@
+    &&& root.invocation.child_ranges@ == root.end.table.ranges@ && root.invocation.child_wires@ == root.end.table.wires@
+    &&& argument_prefix_wires(&root.invocation, selected.arguments@, builtin.1.ranges_model(),
+        selected.arguments@.len() as int, root.mapped)
+    &&& root.mapped.len() == builtin.1.total_bits_model()
+    &&& root.arguments == instance_wire_values(root.mapped, inputs, values)
+    &&& root.arguments.len() == 2
+    &&& port_values(&builtin.1, root.arguments) == seq![seq![root.arguments[0]], seq![root.arguments[1]]]
+    &&& 0 <= slot < caller.definitions.ranges_model().len()
+    &&& caller.definitions.ranges_model()[slot].start == bit && caller.definitions.ranges_model()[slot].end == bit + 1
+    &&& 0 <= bit < after.definitions.len()
+    &&& wire_available(after.definitions[bit], inputs.len(), values.len())
+    &&& root.outputs == seq![wire_value(after.definitions[bit], inputs, values)]
+    &&& wire_value(after.definitions[bit], inputs, values) == !(root.arguments[0] || root.arguments[1])
+}
+
 /// 呼び出し前の配線と子の展開履歴から根 NOR の入力値を取り出し、出力スロットの値に結び付ける。
 #[verifier::spinoff_prover]
 pub(super) proof fn nor_call_group_values<'s, 'p, 'a>(
@@ -833,36 +872,8 @@ pub(super) proof fn nor_call_group_values<'s, 'p, 'a>(
         after.gates.len() <= combined.len() && after.gates == combined.take(after.gates.len() as int),
         gate_values_match(inputs, combined, values), values.len() == combined.len() <= usize::MAX,
         inputs.len() == caller.inputs.total_bits_model(),
-    ensures ({
-        let (calls, invocation, root) = evaluation;
-        let count = (references.end - references.start) as usize;
-        let bit = before.definitions.len() as int;
-        let slot = selected.prepared.output_slot as int;
-        &&& references.start <= references.end
-        &&& nor_group_invocation_matches(selected, forms, caller, before, invocation)
-        &&& nor_root_children_bound(selected, references, &invocation, builtin, calls)
-        &&& child_wiring_trace_matches(&invocation, calls, calls.len(), count, before.gates,
-            root.trace, root.end, caller.inputs.total_bits_model())
-        &&& child_ranges_match(calls, calls.len(), root.end.table.ranges@)
-        &&& root.end.table.wires@.len() == child_sizes(calls, calls.len()).1
-        &&& root.end.gates.len() <= combined.len() && root.end.gates == combined.take(root.end.gates.len() as int)
-        &&& root.invocation.source == invocation.source && root.invocation.forms@ == invocation.forms@
-        &&& root.invocation.inputs@ == invocation.inputs@ && root.invocation.definitions@ == invocation.definitions@
-        &&& root.invocation.wires@ == invocation.wires@
-        &&& root.invocation.child_ranges@ == root.end.table.ranges@ && root.invocation.child_wires@ == root.end.table.wires@
-        &&& argument_prefix_wires(&root.invocation, selected.arguments@, builtin.1.ranges_model(),
-            selected.arguments@.len() as int, root.mapped)
-        &&& root.mapped.len() == builtin.1.total_bits_model()
-        &&& root.arguments == instance_wire_values(root.mapped, inputs, values)
-        &&& root.arguments.len() == 2
-        &&& port_values(&builtin.1, root.arguments) == seq![seq![root.arguments[0]], seq![root.arguments[1]]]
-        &&& 0 <= slot < caller.definitions.ranges_model().len()
-        &&& caller.definitions.ranges_model()[slot].start == bit && caller.definitions.ranges_model()[slot].end == bit + 1
-        &&& 0 <= bit < after.definitions.len()
-        &&& wire_available(after.definitions[bit], inputs.len(), values.len())
-        &&& root.outputs == seq![wire_value(after.definitions[bit], inputs, values)]
-        &&& wire_value(after.definitions[bit], inputs, values) == !(root.arguments[0] || root.arguments[1])
-    }),
+    ensures nor_call_group_evaluation_matches(selected, references, forms, caller, builtin, before, after,
+        combined, inputs, values, evaluation),
 {
     reveal(nor_call_group_result);
     let input_bits = caller.inputs.total_bits_model();
@@ -885,6 +896,7 @@ pub(super) proof fn nor_call_group_values<'s, 'p, 'a>(
     builtin_nor_evaluation(builtin, root.arguments, root.outputs);
     reveal(wires_available);
     assert(root.outputs[0] == wire_value(wire, inputs, values));
+    reveal(nor_call_group_evaluation_matches);
     (calls, invocation, root)
 }
 
