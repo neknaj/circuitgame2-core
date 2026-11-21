@@ -176,6 +176,67 @@ pub proof fn call_argument_position_bounds(forms: Seq<Form>, call: CallShape, po
     ensures call.form + 2 <= positions[port] < forms[call.form as int]->List_end <= forms.len(),
 {}
 
+/// 呼び出し内のフォームを含む直接引数を見つける。フォーム自体が引数の先頭でもよい。
+proof fn call_argument_containing_form(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, form: int)
+    -> (port: int)
+    requires
+        call_argument_positions(forms, call, positions),
+        call.form + 2 <= form < forms[call.form as int]->List_end,
+    ensures
+        0 <= port < positions.len(),
+        call.form + 2 <= positions[port] <= form,
+        if forms[positions[port] as int] is List {
+            form < forms[positions[port] as int]->List_end <= forms[call.form as int]->List_end
+        } else { form == positions[port] },
+{
+    let last = positions.len() as int - 1;
+    assert(positions[last] == positions.last());
+    call_argument_in_prefix(forms, call, positions, form, last)
+}
+
+proof fn call_argument_in_prefix(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, form: int, last: int)
+    -> (port: int)
+    requires
+        call_argument_positions(forms, call, positions),
+        0 <= last < positions.len(),
+        call.form + 2 <= form < after_form(forms, positions[last] as int),
+    ensures
+        0 <= port <= last,
+        call.form + 2 <= positions[port] <= form < after_form(forms, positions[port] as int)
+            <= forms[call.form as int]->List_end,
+    decreases last,
+{
+    let start = positions[last] as int;
+    if start <= form {
+        last
+    } else {
+        assert(last > 0);
+        assert(start == after_form(forms, positions[last - 1] as int));
+        call_argument_in_prefix(forms, call, positions, form, last - 1)
+    }
+}
+
+/// 通常呼び出し内のリストは、いずれかの直接引数のリストに含まれる。
+pub proof fn call_argument_containing_list(
+    source: &str, forms: Seq<Form>, call: CallShape, positions: Seq<usize>, stop: int, descendant: int,
+) -> (port: int)
+    requires
+        ordinary_call_at(source, forms, call.form as int, stop),
+        call_argument_positions(forms, call, positions),
+        call.form < descendant < forms[call.form as int]->List_end <= forms.len(),
+        forms[descendant] is List,
+    ensures
+        0 <= port < positions.len(),
+        call.form + 2 <= positions[port] <= descendant,
+        forms[positions[port] as int] is List,
+        descendant < forms[positions[port] as int]->List_end <= forms[call.form as int]->List_end,
+{
+    super::expression_forest::ordinary_call_bounds(source, forms, call.form as int, stop);
+    let port = call_argument_containing_form(forms, call, positions, descendant);
+    assert(forms[positions[port] as int] is List);
+    port
+}
+
 /// 二つの列が同じ呼び出しの引数を列挙するなら、対応する引数の位置は等しい。
 pub proof fn call_argument_positions_agree(forms: Seq<Form>, call: CallShape, a: Seq<usize>, b: Seq<usize>)
     requires call_argument_positions(forms, call, a), call_argument_positions(forms, call, b),

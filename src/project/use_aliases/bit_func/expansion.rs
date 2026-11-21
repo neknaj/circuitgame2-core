@@ -962,6 +962,90 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &wiring, child._signature@, projected);
     }
 
+    /// 確定した引数をたどり、対象のリストを含む直下の子呼び出しを見つける。
+    pub(super) proof fn expansion_child_containing_form(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, group_index: int, parent: int, descendant: int,
+    ) -> (edge: (int, int))
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            ({
+                let group = prepared.calls@[group_index];
+                let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+                &&& group.postorder matches Some(children)
+                &&& 0 <= parent <= children@.len()
+                &&& {
+                    let (call, range) = if parent == children@.len() {
+                        (group._signature@.call.call, group.arguments)
+                    } else {
+                        (children@[parent]._signature@.call.call, children@[parent].arguments)
+                    };
+                    &&& call.form < descendant < forms[call.form as int]->List_end <= forms.len()
+                    &&& forms[descendant] is List
+                    &&& forall|i: int| range.start <= i < range.end ==>
+                        !((#[trigger] prepared.projections.call_arguments.arguments@[i]).source is Deferred)
+                }
+            }),
+        ensures ({
+            let group = prepared.calls@[group_index];
+            let children = group.postorder->Some_0@;
+            let (port, child) = edge;
+            let range = if parent == children.len() { group.arguments } else { children[parent].arguments };
+            let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
+            let argument = prepared.projections.call_arguments.arguments@[range.start + port];
+            &&& 0 <= port < range.end - range.start
+            &&& 0 <= child < parent
+            &&& argument.source is NestedCall
+            &&& children[child].reference == group.references.start + argument.source->NestedCall_0
+            &&& children[child]._signature@.call.call.form == argument.form
+            &&& forms[argument.form as int] is List
+            &&& argument.form <= descendant < forms[argument.form as int]->List_end
+        }),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let (file, entry, limit) = caller;
+        let group = prepared.calls@[group_index];
+        let root = prepared.projections.calls@[group_index];
+        let children = group.postorder->Some_0@;
+        let arguments = &prepared.projections.call_arguments;
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let forms = parsed.syntax.forms@;
+        let source = &project.sources_model()[file as int];
+        let row = parsed.definitions@[root.definition as int];
+        let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+        self.checked_types_keep_wiring(file, entry, limit, prepared.typed, wiring);
+        let (typed, range, reference) = if parent == children.len() {
+            self.expansion_arguments_in_source_order(plan, caller, prepared.typed, &wiring, root, group.arguments,
+                arguments, group);
+            (group._signature@, group.arguments, 0usize)
+        } else {
+            let child = children[parent];
+            self.expansion_child_arguments_in_source_order(plan, caller, prepared, group_index, parent);
+            (child._signature@, child.arguments, (child.reference - row.references.start) as usize)
+        };
+        let projected = arguments.arguments@.subrange(range.start as int, range.end as int);
+        let positions = Seq::new(projected.len(), |i: int| projected[i].form);
+        self.typed_call_arguments_ready(file, entry, local, reference, limit, typed);
+        crate::syntax::circuit::indexed_call_arguments(source.text, forms, row,
+            parsed.references@[row.references.start + reference], typed.call.call);
+        let port = crate::syntax::circuit::call_argument_containing_list(source.text, forms, typed.call.call, positions,
+            row.expression.end as int, descendant);
+        let argument = projected[port];
+        assert(argument == arguments.arguments@[range.start + port]);
+        self.checked_projected_argument((file, entry, local, reference), limit, prepared.typed.types@,
+            &wiring, typed, projected, port);
+        assert(argument.source is NestedCall);
+        let child = self.prepared_nested_argument(plan, caller, local, arguments, prepared.typed.types@,
+            &wiring, group._order@.1, children, parent, reference, typed, projected, port);
+        (port, child)
+    }
+
     /// 子の実引数を呼び出し直下のフォームに対応付ける。
     ///
     /// 信号、リテラル、入れ子の呼び出しについて、入力ポートとの型の一致を示す。
