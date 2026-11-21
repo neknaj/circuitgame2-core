@@ -4,6 +4,10 @@
 mod source_arguments;
 #[cfg(verus_only)]
 pub(super) use source_arguments::mixed_function_source_call_values;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_arguments::{
+    EvaluatedCallBits, EvaluatedNestedCall, evaluated_nested_call_matches,
+};
 
 use super::*;
 #[cfg(verus_only)]

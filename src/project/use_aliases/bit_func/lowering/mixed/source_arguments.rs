@@ -541,6 +541,81 @@ pub(in crate::project::use_aliases::bit_func) struct EvaluatedNestedCall {
     pub(in crate::project::use_aliases::bit_func) children: Seq<EvaluatedCallBits>,
 }
 
+/// 配線の評価から、根と各子が元の引数位置で読んだ値を取り出す。
+pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_nested_call_matches(
+    aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, index: int,
+    selected: &ResolvedTemplateCall, incoming: Seq<Seq<bool>>, assigned: Seq<Seq<bool>>, evaluation: EvaluatedNestedCall,
+) -> bool {
+    let project = aliases.targets.project_model();
+    let source = &project.sources_model()[caller.0 as int];
+    let parsed = &project.circuits_model()[caller.0 as int];
+    let wiring = &prepared.typed.literals.wiring->Checked_0;
+    let definition = prepared.projections.calls@[index].definition;
+    let callee = selected.template.circuit_model();
+    let start = selected.group.outputs.start as int;
+    let end = selected.group.outputs.end as int;
+    let prior = assigned.take(start);
+    &&& selected.group.postorder matches Some(postorder) && postorder@.len() == evaluation.children.len()
+    &&& evaluation.children.len() == selected.children@.len()
+    &&& forall|i: int| 0 <= i < evaluation.children.len() ==>
+        #[trigger] expansion_child_reachable(selected.group, prepared.projections.call_arguments.arguments@,
+            evaluation.children.len() as int, i)
+    &&& nor_evaluation(callee.netlist_model(), evaluation.root.input, evaluation.root.output)
+    &&& evaluation.root.ports == port_values(callee.input_layout_model(), evaluation.root.input)
+    &&& evaluation.root.ports.len() == selected.arguments@.len()
+    &&& port_values(callee.output_layout_model(), evaluation.root.output) == assigned.subrange(start, end)
+    &&& forall|port: int| 0 <= port < selected.arguments@.len() ==> {
+        let argument = #[trigger] selected.arguments@[port];
+        let value = evaluation.root.ports[port];
+        &&& value.len() == selected.template.input_widths_model()[port]
+        &&& if argument.source.has_direct_wires() {
+            source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
+                incoming, prior, selected.template.input_widths_model()[port], value)
+        } else {
+            &&& argument.source is NestedCall
+            &&& exists|producer: int| 0 <= producer < evaluation.children.len()
+                && (#[trigger] selected.children@[producer]).child.reference
+                    == selected.group.references.start + argument.source->NestedCall_0
+                && selected.children@[producer].child._signature@.call.call.form == argument.form
+                && value == evaluation.children[producer].output
+        }
+    }
+    &&& forall|child: int| 0 <= child < evaluation.children.len() ==> {
+        let expression = selected.children@[child];
+        let values = #[trigger] evaluation.children[child];
+        &&& values.ports.len() == expression.arguments@.len()
+        &&& match expression.template {
+            Some(template) => {
+                let circuit = template.circuit_model();
+                &&& nor_evaluation(circuit.netlist_model(), values.input, values.output)
+                &&& values.ports == port_values(circuit.input_layout_model(), values.input)
+            },
+            None => {
+                &&& values.input.len() == 2
+                &&& values.ports == seq![seq![values.input[0]], seq![values.input[1]]]
+                &&& values.output == seq![!(values.input[0] || values.input[1])]
+            },
+        }
+        &&& forall|port: int| 0 <= port < expression.arguments@.len() ==> {
+            let argument = #[trigger] expression.arguments@[port];
+            let width = expression_input_width(expression, port);
+            let value = values.ports[port];
+            &&& value.len() == width
+            &&& if argument.source.has_direct_wires() {
+                source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
+                    incoming, prior, width, value)
+            } else {
+                &&& argument.source is NestedCall
+                &&& exists|producer: int| 0 <= producer < child
+                    && (#[trigger] selected.children@[producer]).child.reference
+                        == selected.group.references.start + argument.source->NestedCall_0
+                    && selected.children@[producer].child._signature@.call.call.form == argument.form
+                    && value == evaluation.children[producer].output
+            }
+        }
+    }
+}
+
 /// 入れ子の配線段から、各実引数に渡った値と最終配線に残った根の出力値を取り出す。
 proof fn nested_trace_call_values(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
@@ -573,77 +648,9 @@ proof fn nested_trace_call_values(
         gate_values_match(inputs, final_wiring.gates, gates),
         gates.len() == final_wiring.gates.len() <= usize::MAX,
         inputs.len() == layouts.inputs.total_bits_model(),
-    ensures ({
-        let index = steps[at].group_before as int;
-        let project = aliases.targets.project_model();
-        let source = &project.sources_model()[caller.0 as int];
-        let parsed = &project.circuits_model()[caller.0 as int];
-        let wiring = &prepared.typed.literals.wiring->Checked_0;
-        let definition = prepared.projections.calls@[index].definition;
-        let callee = selected.template.circuit_model();
-        let start = selected.group.outputs.start as int;
-        let end = selected.group.outputs.end as int;
-        let assigned = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates);
-        let incoming = port_values(&layouts.inputs, inputs);
-        let prior = assigned.take(start);
-        &&& selected.group.postorder matches Some(postorder) && postorder@.len() == evaluation.children.len()
-        &&& evaluation.children.len() == selected.children@.len()
-        &&& selected_children_reachable(selected, prepared.projections.call_arguments.arguments@)
-        &&& nor_evaluation(callee.netlist_model(), evaluation.root.input, evaluation.root.output)
-        &&& evaluation.root.ports == port_values(callee.input_layout_model(), evaluation.root.input)
-        &&& evaluation.root.ports.len() == selected.arguments@.len()
-        &&& port_values(callee.output_layout_model(), evaluation.root.output) == assigned.subrange(start, end)
-        &&& forall|port: int| 0 <= port < selected.arguments@.len() ==> {
-            let argument = #[trigger] selected.arguments@[port];
-            let value = evaluation.root.ports[port];
-            &&& value.len() == selected.template.input_widths_model()[port]
-            &&& if argument.source.has_direct_wires() {
-                source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
-                    incoming, prior, selected.template.input_widths_model()[port], value)
-            } else {
-                &&& argument.source is NestedCall
-                &&& exists|producer: int| 0 <= producer < evaluation.children.len()
-                    && (#[trigger] selected.children@[producer]).child.reference
-                        == selected.group.references.start + argument.source->NestedCall_0
-                    && selected.children@[producer].child._signature@.call.call.form == argument.form
-                    && value == evaluation.children[producer].output
-            }
-        }
-        &&& forall|child: int| 0 <= child < evaluation.children.len() ==> {
-            let expression = selected.children@[child];
-            let values = #[trigger] evaluation.children[child];
-            &&& values.ports.len() == expression.arguments@.len()
-            &&& match expression.template {
-                Some(template) => {
-                    let circuit = template.circuit_model();
-                    &&& nor_evaluation(circuit.netlist_model(), values.input, values.output)
-                    &&& values.ports == port_values(circuit.input_layout_model(), values.input)
-                },
-                None => {
-                    &&& values.input.len() == 2
-                    &&& values.ports == seq![seq![values.input[0]], seq![values.input[1]]]
-                    &&& values.output == seq![!(values.input[0] || values.input[1])]
-                },
-            }
-            &&& forall|port: int| 0 <= port < expression.arguments@.len() ==> {
-                let argument = #[trigger] expression.arguments@[port];
-                let width = expression_input_width(expression, port);
-                let value = values.ports[port];
-                &&& value.len() == width
-                &&& if argument.source.has_direct_wires() {
-                    source_call_argument_value(source, parsed, wiring, caller.1, definition, argument.form, caller.2,
-                        incoming, prior, width, value)
-                } else {
-                    &&& argument.source is NestedCall
-                    &&& exists|producer: int| 0 <= producer < child
-                        && (#[trigger] selected.children@[producer]).child.reference
-                            == selected.group.references.start + argument.source->NestedCall_0
-                        && selected.children@[producer].child._signature@.call.call.form == argument.form
-                        && value == evaluation.children[producer].output
-                }
-            }
-        }
-    }),
+    ensures evaluated_nested_call_matches(aliases, caller, prepared, steps[at].group_before as int, selected,
+        port_values(&layouts.inputs, inputs),
+        definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates), evaluation),
 {
     let step = steps[at];
     let index = step.group_before as int;
@@ -696,6 +703,12 @@ proof fn nested_trace_call_values(
         layout_limit, step, forms, builtin, invocation, calls, &root, combined, inputs, gates);
     assert(selected.group.postorder matches Some(postorder) && postorder@.len() == children.len()) by {
         reveal(selected_children_reachable);
+    };
+    assert forall|i: int| 0 <= i < children.len() implies
+        #[trigger] expansion_child_reachable(selected.group, prepared.projections.call_arguments.arguments@,
+            children.len() as int, i) by {
+        reveal(selected_children_reachable);
+        assert(*selected.children@[i].child == selected.group.postorder->Some_0@[i]);
     };
     let root_layout = callee.input_layout_model();
     let ports = port_values(root_layout, root.arguments);

@@ -8,7 +8,9 @@ use crate::project::use_aliases::bit_func::expansion::{
     source_call_arguments_match,
 };
 use crate::project::use_aliases::call_arity::CallArgumentSource;
-use crate::project::use_aliases::bit_func::templates::ResolvedExpressionCall;
+use crate::project::use_aliases::bit_func::frontend::expression_input_width;
+use crate::project::use_aliases::bit_func::lowering::{EvaluatedCallBits, EvaluatedNestedCall, evaluated_nested_call_matches};
+use crate::project::use_aliases::bit_func::templates::{ResolvedExpressionCall, ResolvedTemplateCall};
 use crate::syntax::circuit::{
     build_definition_scope_evidence, call_argument_position_bounds, call_argument_positions,
     call_argument_positions_agree, definition_reference_form_unique,
@@ -203,6 +205,322 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }),
             _ => false,
         }
+    }
+
+    spec fn source_child_projection_matches(
+        &self, scope: &SourceExpressionScope, reference_start: usize, selected: ResolvedExpressionCall,
+        values: EvaluatedCallBits, child: SourceExpressionCall,
+    ) -> bool {
+        &&& child.signature == selected.child._signature@
+        &&& child.callee_rank == selected.child._rank@
+        &&& child.reference + reference_start == selected.child.reference
+        &&& child.arguments == values.ports && child.result == values.output
+        &&& child.widths.len() == child.arguments.len() == selected.arguments@.len()
+        &&& forall|port: int| 0 <= port < child.widths.len() ==>
+            (#[trigger] child.widths[port]) == expression_input_width(selected, port)
+        &&& match child.signature.signature {
+            FuncCallSignature::Nor => child.widths == seq![1u64, 1u64],
+            FuncCallSignature::Function(ports) => self.port_widths_match(ports.inputs@, child.widths, scope.layouts),
+        }
+        &&& source_expression_output_type(child.signature) matches Some(ty)
+            && 0 < child.result.len() <= u64::MAX
+            && self.port_width_matches(ty, child.result.len() as u64, scope.layouts)
+        &&& self.source_expression_result_matches(scope, child)
+    }
+
+    /// 一つの子の配線評価を、ソース側で参照する署名と値へ写す。
+    proof fn project_source_child_values(
+        &self, scope: &SourceExpressionScope, prior: &FunctionTemplates, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, group_index: int, selected: &ResolvedTemplateCall,
+        assigned: Seq<Seq<bool>>, values: EvaluatedNestedCall, child_index: int,
+    ) -> (child: SourceExpressionCall<'p, 'a>)
+        requires
+            self.source_expression_scope_matches(scope),
+            self.prepared_expansion_body_matches(*scope.plan, scope.context.file, scope.context.entry, scope.context.limit, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            prepared.projections.calls@[group_index].definition == scope.definition,
+            self.resolved_template_call_matches(scope.plan, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, group_index, *selected),
+            self.resolved_expression_calls_match(scope.plan, prior, scope.context.limit, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@),
+            assigned.take(selected.group.outputs.start as int) == scope.prior,
+            evaluated_nested_call_matches(self, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, group_index, selected, scope.inputs, assigned, values),
+            0 <= child_index < values.children.len(),
+            scope.derivation == Self::template_evaluations(scope.plan, table),
+            prior.next_rank() == scope.rank,
+            prior.slots_model().len() == table.slots_model().len(),
+            forall|i: int| 0 <= i < scope.rank ==> {
+                let vertex = #[trigger] scope.plan.order_model()[i];
+                prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]
+            },
+            scope.layouts.is_none() ==> (selected.children@[child_index].template matches Some(template) ==>
+                !has_structure_port(template.signature_model().inputs@) && !has_structure_port(template.signature_model().outputs@)),
+        ensures self.source_child_projection_matches(scope, selected.group.references.start, selected.children@[child_index],
+            values.children[child_index], child),
+    {
+        reveal(UseAliases::source_expression_scope_matches);
+        let context = scope.context;
+        let caller = (context.file, context.entry, context.limit);
+        let row = selected.children@[child_index];
+        let value = values.children[child_index];
+        self.expansion_child_template_evidence(*scope.plan, caller, prepared, group_index, child_index);
+        if row.template.is_some() {
+            self.source_prepared_function_child(scope, prior, table, prepared, group_index, child_index, row, value.input, value.output)
+        } else {
+            reveal(UseAliases::resolved_expression_call_matches);
+            SourceExpressionCall { reference: (row.child.reference - selected.group.references.start) as usize,
+                signature: row.child._signature@, callee_rank: None, widths: seq![1u64, 1u64],
+                arguments: value.ports, result: value.output }
+        }
+    }
+
+    /// 後順の配線評価をフォーム添字で引ける表にし、各項目がソースの評価規則を満たすことを示す。
+    proof fn source_children_from_wiring(
+        &self, scope: &SourceExpressionScope, prior: &FunctionTemplates, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, group_index: int, selected: &ResolvedTemplateCall,
+        assigned: Seq<Seq<bool>>, values: EvaluatedNestedCall,
+    ) -> (children: Map<usize, SourceExpressionCall<'p, 'a>>)
+        requires
+            self.source_expression_scope_matches(scope),
+            self.prepared_expansion_body_matches(*scope.plan, scope.context.file, scope.context.entry, scope.context.limit, prepared),
+            prepared.typed == scope.typed,
+            0 <= group_index < prepared.calls@.len(),
+            prepared.projections.calls@[group_index].definition == scope.definition,
+            self.resolved_template_call_matches(scope.plan, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, group_index, *selected),
+            self.resolved_expression_calls_match(scope.plan, prior, scope.context.limit, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@),
+            assigned.take(selected.group.outputs.start as int) == scope.prior,
+            evaluated_nested_call_matches(self, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, group_index, selected, scope.inputs, assigned, values),
+            scope.derivation == Self::template_evaluations(scope.plan, table),
+            prior.next_rank() == scope.rank,
+            prior.slots_model().len() == table.slots_model().len(),
+            forall|i: int| 0 <= i < scope.rank ==> {
+                let vertex = #[trigger] scope.plan.order_model()[i];
+                prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]
+            },
+            scope.layouts.is_none() ==> !has_structure_port(selected.template.signature_model().inputs@)
+                && !has_structure_port(selected.template.signature_model().outputs@),
+            scope.layouts.is_none() ==> (forall|i: int| 0 <= i < selected.children@.len() ==>
+                ((#[trigger] selected.children@[i]).template matches Some(template) ==>
+                    !has_structure_port(template.signature_model().inputs@) && !has_structure_port(template.signature_model().outputs@))),
+        ensures
+            forall|i: int| 0 <= i < values.children.len() ==> {
+                let item = (#[trigger] selected.children@[i]).child;
+                let form = item._signature@.call.call.form;
+                &&& children.contains_key(form)
+                &&& children[form].signature == item._signature@
+                &&& children[form].result == values.children[i].output
+            },
+            forall|form: usize| #[trigger] children.contains_key(form) ==> {
+                let row = scope.context.parsed.definitions@[scope.definition as int];
+                &&& row.expression.start < form < row.expression.end
+                &&& self.source_expression_call_evaluates(scope, form, children[form], children)
+            },
+            self.source_nested_arguments_match(scope, selected.group._signature@,
+                selected.template.input_widths_model(), values.root.ports, children),
+    {
+        reveal(UseAliases::source_expression_scope_matches);
+        let context = scope.context;
+        let caller = (context.file, context.entry, context.limit);
+        let group = selected.group;
+        let postorder = group.postorder->Some_0@;
+        let arguments = prepared.projections.call_arguments.arguments@;
+        let start = group.references.start;
+        assert forall|i: int| #![trigger values.children[i]] 0 <= i < values.children.len() implies exists|child: SourceExpressionCall|
+            #[trigger] self.source_child_projection_matches(scope, start, selected.children@[i],
+                values.children[i], child) by {
+            self.project_source_child_values(scope, prior, table, prepared, group_index, selected, assigned, values, i);
+        };
+        let projected = Seq::new(postorder.len(), |i: int| choose|child: SourceExpressionCall|
+            #[trigger] self.source_child_projection_matches(scope, start, selected.children@[i], values.children[i], child));
+        assert forall|i: int| 0 <= i < postorder.len() implies
+            self.source_child_projection_matches(scope, start, selected.children@[i], values.children[i], #[trigger] projected[i]) by {
+            assert(i < values.children.len());
+            assert(values.children[i].ports.len() == selected.children@[i].arguments@.len());
+            assert(exists|child: SourceExpressionCall| #[trigger] self.source_child_projection_matches(
+                scope, start, selected.children@[i], values.children[i], child));
+        };
+        let forms = Seq::new(postorder.len(), |i: int| postorder[i]._signature@.call.call.form);
+        forms.to_set_ensures();
+        let domain = forms.to_set();
+        let positions = |form: usize| choose|i: int| 0 <= i < forms.len() && (#[trigger] forms[i]) == form;
+        let children = Map::new(domain, |form: usize| projected[positions(form)]);
+        vstd::map::lemma_map_new_domain(domain, |form: usize| projected[positions(form)]);
+        assert forall|i: int| 0 <= i < postorder.len() implies {
+            let item = #[trigger] postorder[i];
+            let form = item._signature@.call.call.form;
+            &&& children.contains_key(form)
+            &&& children[form] == projected[i]
+        } by {
+            let form = postorder[i]._signature@.call.call.form;
+            assert(forms[i] == form);
+            assert(forms.contains(form));
+            assert(domain.contains(form));
+            let key = positions(form);
+            self.expansion_children_at_same_form(*scope.plan, caller, prepared, group_index, i, key);
+            vstd::map::lemma_map_new_index(domain, |form: usize| projected[positions(form)], form);
+        };
+        assert forall|i: int| 0 <= i < postorder.len() implies {
+            let item = (#[trigger] selected.children@[i]).child;
+            let form = item._signature@.call.call.form;
+            &&& children.contains_key(form)
+            &&& children[form].signature == item._signature@
+            &&& children[form].result == values.children[i].output
+        } by {
+            reveal(UseAliases::resolved_expression_call_matches);
+            assert(postorder[i] == *selected.children@[i].child);
+            assert(children[postorder[i]._signature@.call.call.form] == projected[i]);
+        };
+        assert forall|form: usize| #[trigger] children.contains_key(form) implies {
+            let row = scope.context.parsed.definitions@[scope.definition as int];
+            &&& row.expression.start < form < row.expression.end
+            &&& self.source_expression_call_evaluates(scope, form, children[form], children)
+        } by {
+            assert(forms.contains(form));
+            let i = positions(form);
+            let item = postorder[i];
+            let expression = selected.children@[i];
+            let child = projected[i];
+            assert(form == item._signature@.call.call.form && children[form] == child);
+            reveal(UseAliases::resolved_expression_call_matches);
+            assert(item == *expression.child);
+            self.expansion_child_template_evidence(*scope.plan, caller, prepared, group_index, i);
+            assert forall|port: int| 0 <= port < child.arguments.len() implies {
+                let argument = #[trigger] arguments[item.arguments.start + port];
+                &&& child.arguments[port].len() == child.widths[port]
+                &&& if argument.source.has_direct_wires() {
+                    source_call_argument_value(context.source, context.parsed, context.wiring, context.entry,
+                        scope.definition, argument.form, context.limit, scope.inputs, scope.prior,
+                        child.widths[port], child.arguments[port])
+                } else {
+                    &&& argument.source is NestedCall
+                    &&& children.contains_key(argument.form)
+                    &&& child.arguments[port] == children[argument.form].result
+                }
+            } by {
+                let argument = expression.arguments@[port];
+                assert(argument == arguments[item.arguments.start + port]);
+                assert(child.arguments == values.children[i].ports);
+                if !argument.source.has_direct_wires() {
+                    let earlier = choose|producer: int| 0 <= producer < i
+                        && (#[trigger] selected.children@[producer]).child.reference == start + argument.source->NestedCall_0
+                        && selected.children@[producer].child._signature@.call.call.form == argument.form
+                        && child.arguments[port] == values.children[producer].output;
+                    assert(children[argument.form].result == values.children[earlier].output);
+                }
+            };
+            assert forall|j: int| 0 <= j < i implies {
+                let earlier = #[trigger] postorder[j];
+                let form = earlier._signature@.call.call.form;
+                &&& children.contains_key(form)
+                &&& children[form].signature == earlier._signature@
+            } by {
+                assert(*selected.children@[j].child == postorder[j]);
+            };
+            self.source_prepared_child_evaluation(scope, prepared, group_index, i, child, children);
+        };
+        self.source_root_arguments_from_wiring(scope, prior, prepared, group_index, selected, assigned, values, children);
+        children
+    }
+
+    /// 根の実引数を元の順序で読み、入れ子の引数は同じフォームの評価表から得る。
+    proof fn source_root_arguments_from_wiring(
+        &self, scope: &SourceExpressionScope, prior: &FunctionTemplates, prepared: &PreparedExpansionBody, group_index: int,
+        selected: &ResolvedTemplateCall, assigned: Seq<Seq<bool>>, values: EvaluatedNestedCall,
+        children: Map<usize, SourceExpressionCall>,
+    )
+        requires
+            self.source_expression_scope_matches(scope),
+            self.prepared_expansion_body_matches(*scope.plan, scope.context.file, scope.context.entry, scope.context.limit, prepared),
+            prepared.typed == scope.typed,
+            0 <= group_index < prepared.calls@.len(),
+            prepared.projections.calls@[group_index].definition == scope.definition,
+            self.resolved_template_call_matches(scope.plan, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, group_index, *selected),
+            self.resolved_expression_calls_match(scope.plan, prior, scope.context.limit, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@),
+            assigned.take(selected.group.outputs.start as int) == scope.prior,
+            evaluated_nested_call_matches(self, (scope.context.file, scope.context.entry, scope.context.limit),
+                prepared, group_index, selected, scope.inputs, assigned, values),
+            scope.layouts.is_none() ==> !has_structure_port(selected.template.signature_model().inputs@)
+                && !has_structure_port(selected.template.signature_model().outputs@),
+            forall|i: int| 0 <= i < values.children.len() ==> {
+                let item = (#[trigger] selected.children@[i]).child;
+                let form = item._signature@.call.call.form;
+                &&& children.contains_key(form)
+                &&& children[form].signature == item._signature@
+                &&& children[form].result == values.children[i].output
+            },
+            forall|form: usize| #[trigger] children.contains_key(form) ==> {
+                let row = scope.context.parsed.definitions@[scope.definition as int];
+                &&& row.expression.start < form < row.expression.end
+                &&& self.source_expression_call_evaluates(scope, form, children[form], children)
+            },
+        ensures self.source_nested_arguments_match(scope, selected.group._signature@,
+            selected.template.input_widths_model(), values.root.ports, children),
+    {
+        reveal(UseAliases::source_expression_scope_matches);
+        reveal(UseAliases::source_nested_arguments_match);
+        let context = scope.context;
+        let caller = (context.file, context.entry, context.limit);
+        let group = *selected.group;
+        let projections = &prepared.projections.call_arguments;
+        let range = projections.ranges@[group_index];
+        let root = prepared.projections.calls@[group_index];
+        let signature = group._signature@;
+        let template = selected.template;
+        let widths = template.input_widths_model();
+        let ports = values.root.ports;
+        let forms = context.parsed.syntax.forms@;
+        let positions = Seq::new(selected.arguments@.len(), |port: int| selected.arguments@[port].form);
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*context.source, *context.parsed);
+        build_definition_scope_evidence(context.source.text, &context.parsed.build_model(),
+            context.entry as int, scope.definition as int);
+        self.expansion_callee_template_evidence(*scope.plan, caller, prepared, group_index);
+        self.expansion_arguments_in_source_order(*scope.plan, caller, scope.typed, context.wiring, root, range, projections, group);
+        let target = scope.plan.position_model(group._order@.0)->Some_0;
+        self.template_port_evidence(target, context.limit, template);
+        self.template_widths_in_caller_layout(template.signature_model(), context.limit, widths,
+            template.output_widths_model(), template.structure_layouts_model(), scope.layouts);
+        assert(call_argument_positions(forms, signature.call.call, positions));
+        assert forall|port: int| 0 <= port < positions.len() implies
+            self.source_expression_argument_matches(scope, signature, port, #[trigger] positions[port], widths[port],
+                ports[port], children) by {
+            let argument = selected.arguments@[port];
+            assert(argument == projections.arguments@[range.start + port]);
+            self.expansion_argument_evidence(*scope.plan, caller, scope.typed, context.wiring, root, range, projections, group, port);
+            call_argument_position_bounds(forms, signature.call.call, positions, port);
+            let expected = signature.signature->Function_0.inputs@[port].ty;
+            if argument.source.has_direct_wires() {
+                assert(self.source_expression_atom_type(scope, argument.form, expected));
+            } else {
+                assert(argument.source is NestedCall);
+                let producer = choose|i: int| 0 <= i < values.children.len()
+                    && (#[trigger] selected.children@[i]).child.reference == group.references.start + argument.source->NestedCall_0
+                    && selected.children@[i].child._signature@.call.call.form == argument.form
+                    && ports[port] == values.children[i].output;
+                let item = selected.children@[producer].child;
+                assert(children[argument.form].result == values.children[producer].output);
+                let postorder = group.postorder->Some_0@;
+                assert(prepared_nested_output_matches(postorder, group.references.start, postorder.len() as int, argument, expected));
+                let earlier = choose|i: int| 0 <= i < postorder.len() as int
+                    && (#[trigger] postorder[i]).reference == group.references.start + argument.source->NestedCall_0
+                    && postorder[i]._signature@.call.call.form == argument.form
+                    && postorder[i]._signature@.call.target.port_counts().outputs == 1
+                    && match source_expression_output_type(postorder[i]._signature@) {
+                        Some(output) => port_types_equal(output, expected),
+                        None => false,
+                    };
+                reveal(UseAliases::resolved_expression_call_matches);
+                assert(*selected.children@[earlier].child == postorder[earlier]);
+                assert(children[argument.form].signature == postorder[earlier]._signature@);
+            }
+        };
+        assert(self.source_expression_arguments_match(scope, signature, widths, ports, children));
     }
 
     /// 選択した通常関数の配線評価を、先行するソース呼び出しの入出力に対応付ける。

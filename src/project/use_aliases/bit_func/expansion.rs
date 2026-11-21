@@ -695,6 +695,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& parsed.entry_ranges@[caller.1 as int].definitions.start <= root.definition
                 < parsed.entry_ranges@[caller.1 as int].definitions.end <= parsed.definitions@.len()
             &&& group._signature@.call.call.form == parsed.definitions@[root.definition as int].expression.start
+            &&& self.func_call_signature_evidence(caller.0, caller.1,
+                (root.definition - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize,
+                0, caller.2, Ok(Some(group._signature@)))
             &&& crate::syntax::circuit::call_argument_positions(forms, group._signature@.call.call,
                 Seq::new(projected.len(), |i: int| projected[i].form))
         }),
@@ -1115,7 +1118,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 一つの定義で、対象の子と同じフォームを指す後順項目を同定する。
-    proof fn expansion_children_at_same_form(
+    pub(super) proof fn expansion_children_at_same_form(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
         group_index: int, left: int, right: int,
     )
@@ -1540,7 +1543,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let row = parsed.definitions@[definition as int];
             let local = (definition - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize;
             let reference = (child.reference - group.references.start) as usize;
-            &&& group.references == row.references && group.references.start <= child.reference < group.references.end
+            &&& group.references == row.references && group.references.start < child.reference < group.references.end
+            &&& row.expression.start < child._signature@.call.call.form < row.expression.end
             &&& self.func_call_form_reference(caller.0, caller.1, local, child._signature@.call.call.form, reference)
             &&& self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child._signature@)))
             &&& child.arguments.start <= child.arguments.end <= prepared.projections.call_arguments.arguments@.len()
@@ -1572,6 +1576,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             child.arguments.start as int, child.arguments.end as int);
         self.typed_call_arguments_ready(caller.0, caller.1, definition, local, caller.2, child._signature@);
         self.resolved_call_reference_form(caller.0, caller.1, definition, local, child._signature@.call);
+        let children = group.postorder->Some_0@;
+        let order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
+        assert(order[child_index] == child.reference && order.last() == row.references.start);
+        crate::syntax::circuit::call_postorder_references_distinct(
+            parsed.syntax.forms@, parsed.references@, row.references, order, child_index, children.len() as int);
+        let root_form = group._signature@.call.call.form;
+        let source = &self.targets.project_model().sources_model()[caller.0 as int];
+        self.typed_call_arguments_ready(caller.0, caller.1, definition, 0, caller.2, group._signature@);
+        self.resolved_call_reference_form(caller.0, caller.1, definition, 0, group._signature@.call);
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), caller.1 as int, root.definition as int);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        crate::syntax::circuit::root_call_shape_location(source.text, parsed.syntax.forms@, row, parsed.references@,
+            group._signature@.call.call);
+        assert(root_form == row.expression.start);
+        if child._signature@.call.call.form == root_form {
+            definition_reference_form_unique(source.text, parsed.syntax.forms@, parsed.references@, row,
+                row.references.start, child.reference);
+        }
         crate::syntax::circuit::indexed_call_arguments(child._signature@.call.source.text, parsed.syntax.forms@, row,
             parsed.references@[child.reference as int], child._signature@.call.call);
         self.checked_projected_input_count((caller.0, caller.1, definition, local), caller.2,
