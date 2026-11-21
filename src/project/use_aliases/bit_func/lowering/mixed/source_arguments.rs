@@ -2,8 +2,8 @@
 
 use super::*;
 use super::super::call_arguments::child_calls::{
-    ChildCall, NestedRootEvaluation, child_call_binding, child_output_evaluates, child_ranges_match,
-    child_wiring_trace_matches,
+    ChildCall, NestedRootEvaluation, child_call_binding, child_nested_port_value, child_output_evaluates,
+    child_port_reads_producer, child_ranges_match, child_wiring_trace_matches,
 };
 use super::super::call_group::nested_group_invocation_matches;
 use super::super::call_arguments::{
@@ -261,8 +261,8 @@ pub(super) struct NestedChildEvaluation<'s, 'p, 'a> {
     pub(super) outputs: Seq<bool>,
 }
 
-/// 子の評価と、確定した信号・リテラルの引数値を、同じ配線履歴から取り出す。
-pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
+/// 子の評価と、元の引数または先行する子の出力に対応する入力値を、同じ配線履歴から取り出す。
+pub(super) proof fn nested_child_values<'s, 'p, 'a>(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
     index: int, selected: &ResolvedTemplateCall, body: &LoweringBody, layouts: &Layouts, layout_limit: usize,
     step: WiringStep, forms: Seq<Form>, builtin: &(NorNetlist, PortBitLayout), invocation: CallerArguments<'s, 'p, 'a>,
@@ -289,6 +289,7 @@ pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
         wiring_view_is_prefix(step.before, step.after),
         wires_available(step.after.definitions, layouts.inputs.total_bits_model(), gates.len()),
         nested_group_invocation_matches(selected, forms, layouts, builtin, step.before, invocation, calls),
+        selected.group.references.start <= selected.group.references.end,
         child_index < calls.len() == selected.children@.len(),
         child_wiring_trace_matches(&invocation, calls, calls.len(),
             (selected.group.references.end - selected.group.references.start) as usize,
@@ -297,7 +298,9 @@ pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
         root.end.gates.len() <= combined.len() && root.end.gates == combined.take(root.end.gates.len() as int),
         inputs.len() == layouts.inputs.total_bits_model(),
         gate_values_match(inputs, combined, gates), gates.len() == combined.len() <= usize::MAX,
-    ensures ({
+    ensures
+        arguments_are_determined(calls[child_index as int].arguments@),
+        ({
         let project = aliases.targets.project_model();
         let selected_child = selected.children@[child_index as int];
         let call = calls[child_index as int];
@@ -328,6 +331,11 @@ pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
             source_call_argument_value(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
                 &wiring, caller.1, prepared.projections.calls@[index].definition, #[trigger] positions[port], caller.2,
                 incoming, prior, call._input_widths@[port], ports[port])
+        &&& forall|port: usize| port < call.arguments@.len()
+            && (#[trigger] call.arguments@[port as int]).source is NestedCall ==>
+            exists|producer: usize| #[trigger] child_port_reads_producer(calls, root.end, producer, child_index, port,
+                evaluation.arguments, inputs, gates)
+                && selected.children@[producer as int].child._signature@.call.call.form == positions[port as int]
     }),
 {
     reveal(nested_group_invocation_matches);
@@ -339,6 +347,7 @@ pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
     let count = (selected.group.references.end - selected.group.references.start) as usize;
     let result = child_output_evaluates(&invocation, calls, calls.len(), count, step.before.gates, root.trace, root.end,
         child_index, combined, inputs, gates, layouts.inputs.total_bits_model());
+    assert(root.trace.len() == calls.len() + 1) by { reveal(child_wiring_trace_matches); };
     let before = root.trace[child].table;
     let (arguments_from, mapped) = choose|arguments_from: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>|
         #[trigger] argument_prefix_wires(&arguments_from, call.arguments@, call.inputs.ranges_model(),
@@ -361,6 +370,14 @@ pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
     let incoming = port_values(&layouts.inputs, inputs);
     let prior = prior_definition_values(layouts, step, inputs, gates);
     reveal(port_values);
+    assert forall|port: int| 0 <= port < call.arguments@.len() implies
+        !((#[trigger] call.arguments@[port]).source is Deferred) by {
+        reveal(argument_prefix_wires);
+        let slot = call.inputs.ranges_model()[port];
+        assert(slot.end <= mapped.len());
+        assert(argument_source_available(&arguments_from, call.arguments@[port].source));
+    };
+    assert(arguments_are_determined(call.arguments@));
     assert forall|port: int| 0 <= port < call.arguments@.len()
         && call.arguments@[port].source.has_direct_wires() implies
         source_call_argument_value(source, parsed, &wiring, caller.1, definition, #[trigger] positions[port],
@@ -373,6 +390,31 @@ pub(super) proof fn nested_child_atom_values<'s, 'p, 'a>(
             call._layout_limit@, arguments_from, mapped, inputs, gates, caller.2, port as usize);
         aliases.expansion_child_atom_value_from_source(*plan, caller, prepared, index, child, port,
             incoming, prior, call._input_widths@[port], ports[port]);
+    };
+    assert forall|port: usize| port < call.arguments@.len()
+        && (#[trigger] call.arguments@[port as int]).source is NestedCall implies
+        exists|producer: usize| #[trigger] child_port_reads_producer(calls, root.end, producer, child_index, port,
+            result.0, inputs, gates)
+            && selected.children@[producer as int].child._signature@.call.call.form == positions[port as int] by {
+        let producer = child_nested_port_value(&invocation, calls, calls.len(), count, step.before.gates, root.trace,
+            root.end, child_index, port, &arguments_from, mapped, inputs, gates, layouts.inputs.total_bits_model());
+        assert(child_port_reads_producer(calls, root.end, producer, child_index, port, result.0, inputs, gates));
+        assert(call.arguments@[port as int] == prepared.projections.call_arguments.arguments@[range.start + port]);
+        aliases.expansion_child_argument_evidence(*plan, caller, prepared, index, child, port as int);
+        let group = selected.group;
+        let children = group.postorder->Some_0@;
+        let argument = call.arguments@[port as int];
+        let earlier = choose|i: int| 0 <= i < child
+            && (#[trigger] children[i]).reference == group.references.start + argument.source->NestedCall_0
+            && children[i]._signature@.call.call.form == argument.form;
+        assert(child_call_binding(selected.children@[earlier], group.references, builtin, calls[earlier]));
+        assert(child_call_binding(selected.children@[producer as int], group.references, builtin, calls[producer as int]));
+        if earlier < producer {
+            assert(calls[earlier].reference != calls[producer as int].reference);
+        } else if producer < earlier {
+            assert(calls[producer as int].reference != calls[earlier].reference);
+        }
+        assert(earlier == producer);
     };
     NestedChildEvaluation { invocation: arguments_from, mapped, arguments: result.0, outputs: result.1 }
 }

@@ -489,54 +489,63 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_output_ev
     (instance_wire_values(mapped, inputs, values), instance_wire_values(outputs, inputs, values))
 }
 
-/// 子の評価で得た出力が、後続の呼び出しの指定した入力ポートに入ることを示す。
-pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_value_flows_to_consumer(
+/// 先行する子の出力配線を読むと、後続の呼び出しの指定ポートの値になる。
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn child_port_reads_producer(
+    calls: Seq<ChildCall>, end: ChildWiringSnapshot, producer: usize, consumer: usize, port: usize,
+    arguments: Seq<bool>, inputs: Seq<bool>, values: Seq<bool>,
+) -> bool {
+    let call = calls[consumer as int];
+    let reference = calls[producer as int].reference;
+    &&& producer < consumer < calls.len()
+    &&& port < call.arguments@.len() && port < call.inputs.ranges_model().len() && port < call._input_widths@.len()
+    &&& call.arguments@[port as int].source == CallArgumentSource::NestedCall(reference)
+    &&& reference < end.table.ranges@.len()
+    &&& end.table.ranges@[reference as int] matches Some(range)
+    &&& range.start <= range.end <= end.table.wires@.len()
+    &&& range.end - range.start == call._input_widths@[port as int]
+    &&& port_values(call.inputs, arguments)[port as int]
+        == instance_wire_values(end.table.wires@.subrange(range.start as int, range.end as int), inputs, values)
+}
+
+/// 後続の子が実際に読んだポートから、同じ値を出した先行子を求める。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_nested_port_value(
     caller: &CallerArguments, calls: Seq<ChildCall>, stop: nat, reference_count: usize,
     initial: Seq<NorGate>, trace: Seq<ChildWiringSnapshot>, end: ChildWiringSnapshot,
-    child: usize, consumer: usize, port: usize, combined: Seq<NorGate>, inputs: Seq<bool>, values: Seq<bool>, input_bits: usize,
-) -> (result: ((Seq<bool>, Seq<bool>), (Seq<bool>, Seq<bool>)))
+    consumer: usize, port: usize, invocation: &CallerArguments, mapped: Seq<Wire>,
+    inputs: Seq<bool>, values: Seq<bool>, input_bits: usize,
+) -> (producer: usize)
     requires
         child_wiring_trace_matches(caller, calls, stop, reference_count, initial, trace, end, input_bits),
         child_ranges_match(calls, stop, end.table.ranges@),
-        child < consumer < stop <= calls.len(),
+        consumer < stop <= calls.len(),
         forall|i: int, j: int| 0 <= i < j < stop ==> (#[trigger] calls[i]).reference != (#[trigger] calls[j]).reference,
-        child_call_ready(caller, calls, child as int), child_call_ready(caller, calls, consumer as int),
+        child_call_ready(caller, calls, consumer as int),
         port < calls[consumer as int].arguments@.len(),
-        calls[consumer as int].arguments@[port as int].source == CallArgumentSource::NestedCall(calls[child as int].reference),
-        end.gates.len() <= combined.len() && end.gates == combined.take(end.gates.len() as int),
-        gate_values_match(inputs, combined, values), values.len() == combined.len() <= usize::MAX,
-        inputs.len() == input_bits,
-    ensures
-        nor_evaluation(calls[child as int].circuit, result.0.0, result.0.1),
-        nor_evaluation(calls[consumer as int].circuit, result.1.0, result.1.1),
-        port_values(calls[consumer as int].inputs, result.1.0)[port as int] == result.0.1,
+        calls[consumer as int].arguments@[port as int].source is NestedCall,
+        invocation.child_ranges@ == trace[consumer as int].table.ranges@,
+        invocation.child_wires@ == trace[consumer as int].table.wires@,
+        ({
+            let call = calls[consumer as int];
+            &&& argument_prefix_wires(invocation, call.arguments@, call.inputs.ranges_model(),
+                call.arguments@.len() as int, mapped)
+            &&& mapped.len() == call.inputs.total_bits_model()
+        }),
+    ensures child_port_reads_producer(calls, end, producer, consumer, port,
+        instance_wire_values(mapped, inputs, values), inputs, values),
 {
     reveal(child_call_ready);
-    let producer = calls[child as int];
     let call = calls[consumer as int];
-    let produced = child_output_evaluates(caller, calls, stop, reference_count, initial, trace, end,
-        child, combined, inputs, values, input_bits);
-    let consumed = child_output_evaluates(caller, calls, stop, reference_count, initial, trace, end,
-        consumer, combined, inputs, values, input_bits);
     assert(trace.len() == stop + 1 && trace[stop as int] == end) by {
         reveal(child_wiring_trace_matches);
     };
     let before = trace[consumer as int];
-    let (invocation, mapped) = choose|invocation: CallerArguments, mapped: Seq<Wire>|
-        #[trigger] argument_prefix_wires(&invocation, call.arguments@, call.inputs.ranges_model(), call.arguments@.len() as int, mapped)
-        && invocation.child_ranges@ == before.table.ranges@ && invocation.child_wires@ == before.table.wires@
-        && mapped.len() == call.inputs.total_bits_model()
-        && consumed.0 == instance_wire_values(mapped, inputs, values);
-
-    let reference = producer.reference;
+    let reference = call.arguments@[port as int].source->NestedCall_0;
     let dest = call.inputs.ranges_model()[port as int];
     port_bit_layout_port(call._input_widths@, call._layout_limit@, *call.inputs, port);
-    let earlier = choose|i: int| 0 <= i < consumer && (#[trigger] calls[i]).reference == reference
+    assert(exists|i: int| 0 <= i < consumer && (#[trigger] calls[i]).reference == reference
+        && calls[i].circuit.outputs@.len() == (dest.end - dest.start) as usize);
+    let child = choose|i: int| 0 <= i < consumer && (#[trigger] calls[i]).reference == reference
         && calls[i].circuit.outputs@.len() == (dest.end - dest.start) as usize;
-    assert(earlier == child) by {
-        if earlier < child { assert(calls[earlier].reference != calls[child as int].reference); }
-        if child < earlier { assert(calls[child as int].reference != calls[earlier].reference); }
-    };
     child_output_range_preserved(caller, calls, stop, reference_count, initial, trace, end,
         child as nat, consumer as nat, input_bits);
     child_wiring_trace_sizes(caller, calls, stop, reference_count, initial, trace, end, consumer as nat, input_bits);
@@ -551,9 +560,9 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_value_flo
     child_wiring_prefix_preserved(caller, calls, stop, reference_count, initial, trace, end, consumer as nat, stop, input_bits);
     assert(invocation.child_wires@.subrange(range.start as int, range.end as int)
         =~= end.table.wires@.subrange(range.start as int, range.end as int));
-    lowered_nested_argument_port_value(&invocation, call.arguments@, call.inputs, call._input_widths@, call._layout_limit@,
+    lowered_nested_argument_port_value(invocation, call.arguments@, call.inputs, call._input_widths@, call._layout_limit@,
         mapped, inputs, values, port, reference);
-    (produced, consumed)
+    child as usize
 }
 
 #[verifier::opaque]
