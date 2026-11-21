@@ -72,6 +72,7 @@ pub(super) open spec fn call_group_wires_match(
     &&& invocation.inputs@ == caller.inputs.ranges_model()
     &&& invocation.definitions@ == caller.definitions.ranges_model()
     &&& invocation.wires@ == before.definitions
+    &&& invocation.child_ranges@.len() == 0
     &&& mapped.len() == callee.input_layout_model().total_bits_model()
     &&& wires_available(mapped, caller.inputs.total_bits_model(), before.gates.len())
     &&& instance_gates_match(before.gates, callee.netlist_model().gates@, mapped, after.gates)
@@ -256,12 +257,18 @@ pub(super) fn lower_call_group<'s, 'p, 'a>(
     let ghost before_gates = state.gates@;
     let ghost before_definitions = state.definitions@;
     let invocation = CallerArguments { source: group.expression.source, forms,
-        inputs: caller.inputs.ranges(), definitions: caller.definitions.ranges(), wires: state.definitions.as_slice() };
+        inputs: caller.inputs.ranges(), definitions: caller.definitions.ranges(), wires: state.definitions.as_slice(),
+        child_ranges: &[], child_wires: &[] };
     let ghost invoked = invocation;
     let callee_input = callee.inputs();
     let callee_output = callee.outputs();
     let input_count = caller.inputs.total_bits();
-    proof { reveal(argument_wires_ready); }
+    proof {
+        reveal(argument_wires_ready);
+        assert(wires_available(invocation.child_wires@, input_count, before_gates.len())) by {
+            reveal(wires_available);
+        };
+    }
     let mut outputs = match lower_projected_call(&invocation, arguments, callee_input, callee.netlist(),
         &mut state.gates, gate_limit, Ghost(input_widths), Ghost(callee_limit), Ghost(input_count)) {
         Ok(outputs) => outputs,

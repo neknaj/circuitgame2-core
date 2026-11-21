@@ -41,6 +41,17 @@ pub(super) struct CallerArguments<'s, 'p, 'a> {
     pub(super) inputs: &'s [Range<usize>],
     pub(super) definitions: &'s [Range<usize>],
     pub(super) wires: &'s [Wire],
+    /// 定義内の参照添字ごとに、展開済みの子の出力配線範囲を保持する。
+    pub(super) child_ranges: &'s [Option<Range<usize>>],
+    pub(super) child_wires: &'s [Wire],
+}
+
+pub(super) open spec fn argument_source_available(caller: &CallerArguments, source: CallArgumentSource) -> bool {
+    match source {
+        CallArgumentSource::NestedCall(reference) =>
+            reference < caller.child_ranges@.len() && caller.child_ranges@[reference as int].is_some(),
+        _ => source.has_direct_wires(),
+    }
 }
 
 pub(super) open spec fn literal_word(caller: &CallerArguments, form: usize) -> Seq<u8> {
@@ -50,8 +61,14 @@ pub(super) open spec fn literal_word(caller: &CallerArguments, form: usize) -> S
 
 #[verifier::opaque]
 pub(super) open spec fn argument_wires_ready(caller: &CallerArguments, argument: ProjectedCallArgument, width: usize) -> bool {
-    layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
+    &&& layout_argument_ready(caller.source, caller.forms@, caller.inputs@, caller.definitions@,
         caller.wires@.len() as int, argument, width)
+    &&& if let CallArgumentSource::NestedCall(reference) = argument.source {
+        argument_source_available(caller, argument.source) ==> {
+            let range = caller.child_ranges@[reference as int]->Some_0;
+            range.start <= range.end <= caller.child_wires@.len() && range.end - range.start == width
+        }
+    } else { true }
 }
 
 pub(in crate::project::use_aliases::bit_func) open spec fn literal_argument_matches_width(
@@ -87,7 +104,9 @@ pub(super) closed spec fn argument_wire(caller: &CallerArguments, argument: Proj
             Wire::Constant(call_literal_bit(bytes, bit as nat))
 
         },
-        CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => arbitrary(),
+        CallArgumentSource::NestedCall(reference) =>
+            caller.child_wires@[caller.child_ranges@[reference as int]->Some_0.start + bit],
+        CallArgumentSource::Deferred => arbitrary(),
     }
 }
 
@@ -102,7 +121,7 @@ proof fn append_argument_contract(
         previous.len() <= after.len(),
         after.take(previous.len() as int) == previous,
         argument_prefix_wires(caller, arguments, ranges, port, previous),
-        arguments[port].source.has_direct_wires(),
+        argument_source_available(caller, arguments[port].source),
         forall|bit: int| 0 <= bit < ranges[port].end - ranges[port].start
             ==> (#[trigger] after[ranges[port].start + bit]) == argument_wire(caller, arguments[port], bit),
     ensures argument_prefix_wires(caller, arguments, ranges, port + 1, after),
@@ -110,7 +129,7 @@ proof fn append_argument_contract(
     reveal(argument_prefix_wires);
     assert forall|i: int| 0 <= i < port + 1 implies {
         let range = #[trigger] ranges[i];
-        &&& arguments[i].source.has_direct_wires()
+        &&& argument_source_available(caller, arguments[i].source)
         &&& range.end <= after.len()
         &&& forall|bit: int| 0 <= bit < range.end - range.start
             ==> (#[trigger] after[range.start + bit]) == argument_wire(caller, arguments[i], bit)
@@ -133,7 +152,7 @@ pub(super) open spec fn argument_prefix_wires(
     &&& 0 <= ports <= ranges.len() == arguments.len()
     &&& forall|i: int| 0 <= i < ports ==> {
         let range = #[trigger] ranges[i];
-        &&& arguments[i].source.has_direct_wires()
+        &&& argument_source_available(caller, arguments[i].source)
         &&& range.end <= wires.len()
         &&& forall|bit: int| 0 <= bit < range.end - range.start
             ==> (#[trigger] wires[range.start + bit]) == argument_wire(caller, arguments[i], bit)
@@ -163,6 +182,7 @@ pub(super) proof fn lowered_argument_port_value(
     widths: Seq<u64>, limit: usize, mapped: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>, port: usize,
 )
     requires
+        caller.child_ranges@.len() == 0,
         port_bit_layout_result(widths, limit, Ok(*layout)),
         argument_prefix_wires(caller, arguments, layout.ranges_model(), arguments.len() as int, mapped),
         mapped.len() == layout.total_bits_model(),
@@ -348,6 +368,49 @@ fn append_argument_literal(
     }
 }
 
+/// 子の出力範囲を低位ビットから順に実引数へ追加する。
+fn append_child_wires(
+    source: &[Wire], range: &Range<usize>, arguments: &mut Vec<Wire>,
+    Ghost(input_bits): Ghost<usize>, Ghost(gates): Ghost<nat>,
+)
+    requires
+        range.start <= range.end <= source@.len(),
+        old(arguments)@.len() + (range.end - range.start) <= usize::MAX,
+        wires_available(source@, input_bits, gates),
+        wires_available(old(arguments)@, input_bits, gates),
+    ensures
+        final(arguments)@ == old(arguments)@ + source@.subrange(range.start as int, range.end as int),
+        wires_available(final(arguments)@, input_bits, gates),
+{
+    let ghost before = arguments@;
+    let mut index = range.start;
+    assert(source@.subrange(range.start as int, index as int) =~= Seq::<Wire>::empty());
+    while index < range.end
+        invariant
+            range.start <= index <= range.end <= source@.len(),
+            before.len() + (range.end - range.start) <= usize::MAX,
+            arguments@ == before + source@.subrange(range.start as int, index as int),
+            wires_available(source@, input_bits, gates),
+            wires_available(arguments@, input_bits, gates),
+        decreases range.end - index,
+    {
+        let wire = source[index];
+        let ghost previous = arguments@;
+        arguments.push(wire);
+        proof {
+            assert(source@.subrange(range.start as int, index + 1)
+                =~= source@.subrange(range.start as int, index as int).push(wire));
+            assert(arguments@ =~= before + source@.subrange(range.start as int, index + 1));
+            reveal(wires_available);
+            assert forall|i: int| 0 <= i < arguments@.len()
+                implies wire_available(#[trigger] arguments@[i], input_bits as nat, gates) by {
+                if i < previous.len() { assert(arguments@[i] == previous[i]); }
+            };
+        }
+        index += 1;
+    }
+}
+
 /// 実引数を入力ポート順に展開する。未確定の最初の引数は元ソース範囲を返す。
 pub(super) fn lower_call_arguments<'s, 'p, 'a>(
     caller: &CallerArguments<'s, 'p, 'a>, arguments: &[ProjectedCallArgument], callee: &PortBitLayout,
@@ -358,14 +421,16 @@ pub(super) fn lower_call_arguments<'s, 'p, 'a>(
         port_bit_layout_result(widths, limit, Ok(*callee)), arguments@.len() == widths.len(),
         forall|i: int| 0 <= i < caller.inputs@.len() ==> (#[trigger] caller.inputs@[i]).end <= input_bits,
         wires_available(caller.wires@, input_bits, gates),
+        wires_available(caller.child_wires@, input_bits, gates),
         forall|port: int| 0 <= port < arguments@.len() ==> argument_wires_ready(caller, #[trigger] arguments@[port],
             (callee.ranges_model()[port].end - callee.ranges_model()[port].start) as usize),
     ensures match result {
         Ok(wires) => wires@.len() == callee.total_bits_model() && wires_available(wires@, input_bits, gates)
             && argument_prefix_wires(caller, arguments@, callee.ranges_model(), arguments@.len() as int, wires@),
-        Err(site) => exists|port: int| 0 <= port < arguments@.len() && !(#[trigger] arguments@[port]).source.has_direct_wires()
+        Err(site) => exists|port: int| 0 <= port < arguments@.len()
+            && !argument_source_available(caller, (#[trigger] arguments@[port]).source)
             && is_form_location(caller.source, caller.forms@[arguments@[port].form as int], site)
-            && forall|earlier: int| 0 <= earlier < port ==> (#[trigger] arguments@[earlier]).source.has_direct_wires(),
+            && forall|earlier: int| 0 <= earlier < port ==> argument_source_available(caller, (#[trigger] arguments@[earlier]).source),
     },
 {
     let ranges = callee.ranges();
@@ -386,6 +451,7 @@ pub(super) fn lower_call_arguments<'s, 'p, 'a>(
             wires@.len() == preceding_port_bits(widths, port as nat),
             wires_available(wires@, input_bits, gates),
             wires_available(caller.wires@, input_bits, gates),
+            wires_available(caller.child_wires@, input_bits, gates),
             forall|i: int| 0 <= i < caller.inputs@.len() ==> (#[trigger] caller.inputs@[i]).end <= input_bits,
             forall|i: int| 0 <= i < arguments@.len() ==> argument_wires_ready(caller, #[trigger] arguments@[i],
                 (ranges@[i].end - ranges@[i].start) as usize),
@@ -402,7 +468,25 @@ pub(super) fn lower_call_arguments<'s, 'p, 'a>(
                 append_argument_driver(caller, &mut wires, driver, width, Ghost(input_bits), Ghost(gates)),
             CallArgumentSource::Literal(_) =>
                 append_argument_literal(caller, &mut wires, argument, width, Ghost(input_bits), Ghost(gates)),
-            CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => {
+            CallArgumentSource::NestedCall(reference) => {
+                let child = if reference < caller.child_ranges.len() { caller.child_ranges[reference].as_ref() } else { None };
+                let Some(child) = child else {
+                    proof {
+                        assert(reference >= caller.child_ranges@.len() || caller.child_ranges@[reference as int].is_none());
+                        assert(!argument_source_available(caller, argument.source));
+                        reveal(argument_prefix_wires);
+                    }
+                    return Err(form_location(caller.source, caller.forms, argument.form));
+                };
+                append_child_wires(caller.child_wires, child, &mut wires, Ghost(input_bits), Ghost(gates));
+                proof {
+                    reveal(argument_wire);
+                    assert(wires@.take(previous.len() as int) =~= previous);
+                    assert forall|bit: int| 0 <= bit < width implies
+                        (#[trigger] wires@[previous.len() + bit]) == argument_wire(caller, *argument, bit) by {};
+                }
+            },
+            CallArgumentSource::Deferred => {
                 proof { reveal(argument_prefix_wires); }
                 return Err(form_location(caller.source, caller.forms, argument.form));
             },
@@ -443,6 +527,7 @@ pub(super) fn lower_projected_call<'s, 'p, 'a>(
         gates_available(old(gates)@, input_bits as nat, old(gates)@.len() as int),
         forall|i: int| 0 <= i < caller.inputs@.len() ==> (#[trigger] caller.inputs@[i]).end <= input_bits,
         wires_available(caller.wires@, input_bits, old(gates)@.len()),
+        wires_available(caller.child_wires@, input_bits, old(gates)@.len()),
         forall|port: int| 0 <= port < arguments@.len() ==> argument_wires_ready(caller, #[trigger] arguments@[port],
             (layout.ranges_model()[port].end - layout.ranges_model()[port].start) as usize),
     ensures match result {
@@ -459,11 +544,14 @@ pub(super) fn lower_projected_call<'s, 'p, 'a>(
         },
         Err(error) => final(gates)@ == old(gates)@ && match error {
             CallWiringError::DeferredArgument(site) =>
-                exists|port: int| 0 <= port < arguments@.len() && !(#[trigger] arguments@[port]).source.has_direct_wires()
+                exists|port: int| 0 <= port < arguments@.len()
+                    && !argument_source_available(caller, (#[trigger] arguments@[port]).source)
                     && is_form_location(caller.source, caller.forms@[arguments@[port].form as int], site)
-                    && forall|earlier: int| 0 <= earlier < port ==> (#[trigger] arguments@[earlier]).source.has_direct_wires(),
+                    && forall|earlier: int| 0 <= earlier < port ==>
+                        argument_source_available(caller, (#[trigger] arguments@[earlier]).source),
             CallWiringError::GateCapacity => old(gates)@.len() + callee.gates@.len() > capacity
-                && forall|port: int| 0 <= port < arguments@.len() ==> (#[trigger] arguments@[port]).source.has_direct_wires(),
+                && forall|port: int| 0 <= port < arguments@.len() ==>
+                    argument_source_available(caller, (#[trigger] arguments@[port]).source),
         },
     },
 {
@@ -529,6 +617,37 @@ fn checked_group_wires_a_wide_and_a_single_bit_output() {
     let netlist = NorNetlist { input_count: 5, gates: state.gates, outputs: state.definitions };
     assert_eq!(state.origins, [group.outputs.start]);
     assert_eq!(netlist.evaluate(&[true, false, true, true, true]).unwrap(), [true, false, true, true, false]);
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn nested_argument_uses_the_saved_child_output_range() {
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "calls.ncg2",
+        revision: 1,
+        text: "(using nor) (func id (in (a (bits 2))) (out (a (bits 2))))
+               (func caller (in (a (bits 2))) (out (y (bits 2))) (def y (id (id a))))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    let prepared = aliases.prepare_expansion_body(&plan, 0, 2, 8).unwrap();
+    let mut caller = CallerArguments {
+        source: &project.sources()[0], forms: &project.circuits()[0].syntax.forms,
+        inputs: &[], definitions: &[], wires: &[], child_ranges: &[None, Some(1..3)],
+        child_wires: &[Wire::Constant(false), Wire::Input(1), Wire::Input(0)],
+    };
+    let arguments = &prepared.projections.call_arguments.arguments[prepared.calls[0].arguments.clone()];
+    let layout = PortBitLayout::from_widths(&[2], 8).unwrap();
+    let wires = lower_call_arguments(&caller, arguments, &layout,
+        Ghost(seq![2u64]), Ghost(8usize), Ghost(2usize), Ghost(0nat)).unwrap();
+    assert!(matches!(wires.as_slice(), [Wire::Input(1), Wire::Input(0)]));
+    caller.child_ranges = &[None, None];
+    let site = lower_call_arguments(&caller, arguments, &layout,
+        Ghost(seq![2u64]), Ghost(8usize), Ghost(2usize), Ghost(0nat)).unwrap_err();
+    assert_eq!(&site.source.text[site.span], "(id a)");
 }
 
 } // verus!
