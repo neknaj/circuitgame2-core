@@ -11,6 +11,8 @@ use super::evaluation::{definition_values_from_wires, slot_values_match_wiring};
 #[cfg(verus_only)]
 use super::super::semantics::checked_definition_values;
 use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
+#[cfg(verus_only)]
+use super::super::expansion::{expansion_arguments_determined, expansion_child_reachable, expansion_parent_range};
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use crate::project::{FunctionExpansionOrder, UseAliases};
 #[cfg(verus_only)]
@@ -64,6 +66,7 @@ struct NestedWiring<'s, 'p, 'a> {
     selected: &'s [ResolvedTemplateCall<'s, 'p, 'a>],
     builtin: &'s (NorNetlist, PortBitLayout),
     child_limit: usize,
+    _arguments: Ghost<Seq<ProjectedCallArgument>>,
 }
 
 /// 定義順の配線で失敗した箇所と、その処理が返した診断。
@@ -89,11 +92,12 @@ pub(super) struct WiringStep {
     nested: Option<NestedCallStep>,
 }
 
-/// 入れ子呼び出しの配線結果を照合するための基底回路と一時配線の上限。
+/// 入れ子の配線結果を照合するための基底回路、一時配線の上限、型検査済みの引数列。
 #[cfg(verus_only)]
 struct NestedCallStep {
     builtin: (NorNetlist, PortBitLayout),
     child_limit: usize,
+    arguments: Seq<ProjectedCallArgument>,
 }
 
 pub(super) closed spec fn flat_wiring_trace(steps: Seq<WiringStep>) -> bool {
@@ -368,6 +372,7 @@ spec fn wiring_step_valid(
             Some(nested) => {
                 &&& binding_matches_selection(binding, binding._selection@)
                 &&& builtin_nor_call_matches(&nested.builtin)
+                &&& selected_children_reachable(&binding._selection@, nested.arguments)
                 &&& nested_call_group_result(&binding._selection@, forms, layouts, &nested.builtin,
                     step.before, step.after, limit, nested.child_limit, widths, Ok(()))
             },
@@ -719,6 +724,79 @@ spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
         arguments_are_determined((#[trigger] call.children@[i]).arguments@)
 }
 
+#[verifier::opaque]
+spec fn selected_children_reachable(call: &ResolvedTemplateCall, arguments: Seq<ProjectedCallArgument>) -> bool {
+    let group = call.group;
+    &&& group.postorder matches Some(children)
+    &&& group.arguments.start <= group.arguments.end <= arguments.len()
+    &&& call.arguments@ == arguments.subrange(group.arguments.start as int, group.arguments.end as int)
+    &&& call.children@.len() == children@.len()
+    &&& forall|i: int| 0 <= i < children@.len() ==> {
+        let child = #[trigger] call.children@[i];
+        let range = children@[i].arguments;
+        &&& *child.child == children@[i]
+        &&& range.start <= range.end <= arguments.len()
+        &&& child.arguments@ == arguments.subrange(range.start as int, range.end as int)
+        &&& expansion_child_reachable(group, arguments, children@.len() as int, i)
+    }
+}
+
+/// 実際に選んだ根と子の引数列から、根がすべての子を参照することを示す。
+proof fn prove_selected_children_reachable(
+    aliases: &UseAliases, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+    prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>, index: usize,
+)
+    requires
+        aliases.can_resolve(),
+        aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+        aliases.expansion_selection_matches(plan, table, caller, prepared, selected),
+        index < selected.len(),
+        nested_arguments_ready(&selected[index as int]),
+    ensures selected_children_reachable(&selected[index as int], prepared.projections.call_arguments.arguments@),
+{
+    reveal(nested_arguments_ready);
+    reveal(selected_children_reachable);
+    reveal(UseAliases::resolved_expression_call_matches);
+    let call = &selected[index as int];
+    let group = call.group;
+    let arguments = prepared.projections.call_arguments.arguments@;
+    assert(aliases.resolved_expression_calls_match(plan, table, caller.2, group.postorder, arguments, call.children@));
+    assert(group.postorder.is_some());
+    let children = group.postorder->Some_0@;
+    assert forall|parent: int| 0 <= parent <= children.len() implies {
+        let range = #[trigger] expansion_parent_range(group, children, parent);
+        &&& range.start <= range.end <= arguments.len()
+        &&& forall|at: int| range.start <= at < range.end ==> !((#[trigger] arguments[at]).source is Deferred)
+    } by {
+        let range = expansion_parent_range(group, children, parent);
+        let projected = if parent == children.len() {
+            call.arguments@
+        } else {
+            let child = call.children@[parent];
+            assert(aliases.resolved_expression_call_matches(plan, table, caller.2, arguments, children[parent], child));
+            child.arguments@
+        };
+        assert(projected == arguments.subrange(range.start as int, range.end as int));
+        assert(arguments_are_determined(projected));
+        assert forall|at: int| range.start <= at < range.end implies !((#[trigger] arguments[at]).source is Deferred) by {
+            assert(arguments[at] == projected[at - range.start]);
+        };
+    };
+    assert(*group == prepared.calls@[index as int]);
+    assert(expansion_arguments_determined(group, arguments));
+    aliases.expansion_reaches_every_child(*plan, caller, prepared, index as int);
+    assert forall|i: int| 0 <= i < children.len() implies {
+        let child = #[trigger] call.children@[i];
+        let range = children[i].arguments;
+        &&& *child.child == children[i]
+        &&& range.start <= range.end <= arguments.len()
+        &&& child.arguments@ == arguments.subrange(range.start as int, range.end as int)
+        &&& expansion_child_reachable(group, arguments, children.len() as int, i)
+    } by {
+        assert(aliases.resolved_expression_call_matches(plan, table, caller.2, arguments, children[i], call.children@[i]));
+    };
+}
+
 /// 根または子に未確定の引数が残る呼び出しは、従来の引数診断へ渡す。
 fn can_lower_nested_arguments(call: &ResolvedTemplateCall) -> (ready: bool)
     ensures ready == nested_arguments_ready(call),
@@ -768,6 +846,11 @@ spec fn mixed_body_error_at(
             &&& bindings[group as int].group.outputs.start == slot
             &&& bindings[group as int]._selection@ == mode.selected@[group as int]
             &&& nested_arguments_ready(&mode.selected@[group as int])
+            &&& selected_children_reachable(&mode.selected@[group as int], mode._arguments@)
+            &&& match error {
+                NestedCallWiringError::Child(index, _) => index < mode.selected@[group as int].children@.len(),
+                NestedCallWiringError::Root(_) => true,
+            }
             &&& nested_call_group_result(&mode.selected@[group as int], forms, layouts, mode.builtin,
                 before, before, limit, mode.child_limit, definition_widths(body.definitions@), Err(error))
         },
@@ -782,6 +865,7 @@ spec fn wiring_step_uses_mode(step: WiringStep, mode: Option<NestedWiring>) -> b
         &&& group < mode.selected@.len()
         &&& if nested_arguments_ready(&mode.selected@[group]) {
             step.nested matches Some(nested) && nested.builtin == *mode.builtin && nested.child_limit == mode.child_limit
+                && nested.arguments == mode._arguments@
         } else {
             step.nested.is_none()
         }
@@ -843,6 +927,9 @@ fn lower_mixed_call<'s, 'p, 'a>(
         wires_available(old(state).definitions@, layouts.inputs.total_bits_model(), old(state).gates@.len()),
         nested matches Some(mode) ==> {
             &&& context matches Some((aliases, plan, table, caller, prepared))
+            &&& aliases.can_resolve()
+            &&& aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared)
+            &&& mode._arguments@ == prepared.projections.call_arguments.arguments@
             &&& aliases.expansion_selection_matches(plan, table, caller, prepared, mode.selected@)
             &&& bindings_match_calls(bindings@, mode.selected@)
             &&& builtin_nor_call_matches(mode.builtin)
@@ -885,6 +972,9 @@ fn lower_mixed_call<'s, 'p, 'a>(
     let Ghost(step) = if let Some((mode, selected)) = nested_call {
         let ghost (aliases, plan, table, caller, prepared) = context->Some_0;
         assert(binding_matches_selection(*binding, *selected));
+        proof {
+            prove_selected_children_reachable(aliases, plan, table, caller, prepared, mode.selected@, group);
+        }
         let expanded = lower_nested_call_group(selected, forms, layouts, mode.builtin, &mut *state, gate_limit,
             mode.child_limit, Ghost(body), Ghost(aliases),
             Ghost((plan, table, caller.2, prepared.projections.call_arguments.arguments@)), Ghost(layout_limit));
@@ -907,7 +997,7 @@ fn lower_mixed_call<'s, 'p, 'a>(
                     gate_limit, mode.child_limit, widths, outcome);
             },
         };
-        let ghost child_step = NestedCallStep { builtin: *mode.builtin, child_limit: mode.child_limit };
+        let ghost child_step = NestedCallStep { builtin: *mode.builtin, child_limit: mode.child_limit, arguments: mode._arguments@ };
         let ghost step = WiringStep { from, to, group_before: group, group_after: following,
             before, after: state.model(), nested: Some(child_step) };
         assert(wiring_step_valid(body, layouts, forms@, bindings@, gate_limit, step)) by { reveal(wiring_step_valid); };
@@ -949,6 +1039,9 @@ fn lower_mixed_body<'s, 'p, 'a>(
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
         nested matches Some(mode) ==> {
             &&& context matches Some((aliases, plan, table, caller, prepared))
+            &&& aliases.can_resolve()
+            &&& aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared)
+            &&& mode._arguments@ == prepared.projections.call_arguments.arguments@
             &&& aliases.expansion_selection_matches(plan, table, caller, prepared, mode.selected@)
             &&& bindings_match_calls(bindings@, mode.selected@)
             &&& builtin_nor_call_matches(mode.builtin)
@@ -1008,6 +1101,9 @@ fn lower_mixed_body<'s, 'p, 'a>(
             wiring_trace_uses_mode(steps, nested),
             nested matches Some(mode) ==> {
                 &&& context matches Some((aliases, plan, table, caller, prepared))
+                &&& aliases.can_resolve()
+                &&& aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared)
+                &&& mode._arguments@ == prepared.projections.call_arguments.arguments@
                 &&& aliases.expansion_selection_matches(plan, table, caller, prepared, mode.selected@)
                 &&& bindings_match_calls(bindings@, mode.selected@)
                 &&& builtin_nor_call_matches(mode.builtin)
@@ -1388,7 +1484,8 @@ fn check_mixed_body_nested_fixture(text: &str, deferred: Option<&str>) {
         Ghost((&plan, (caller.0, caller.1, 1u64), &prepared)));
     let builtin = builtin_nor_call();
     let lower = |gate_limit| lower_mixed_body(&body, &layouts, forms, &bindings, 3, gate_limit,
-        Some(NestedWiring { selected: &selected, builtin: &builtin, child_limit: 1 }),
+        Some(NestedWiring { selected: &selected, builtin: &builtin, child_limit: 1,
+            _arguments: Ghost(prepared.projections.call_arguments.arguments@) }),
         Ghost(Some((&aliases, &plan, &templates, (caller.0, caller.1, 1u64), &prepared))));
 
     if let Some(expected) = deferred {

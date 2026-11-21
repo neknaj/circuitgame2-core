@@ -373,7 +373,13 @@ pub(super) closed spec fn nested_call_group_result(
                     after.definitions[caller.definitions.ranges_model()[group.outputs.start + port].start + bit]
                         == produced[callee.output_layout_model().ranges_model()[port].start + bit]
         },
-        Err(_) => after.definitions == before.definitions && after.gates == before.gates && after.origins == before.origins,
+        Err(error) => {
+            &&& after.definitions == before.definitions && after.gates == before.gates && after.origins == before.origins
+            &&& match error {
+                NestedCallWiringError::Child(index, _) => index < selected.children@.len(),
+                NestedCallWiringError::Root(_) => true,
+            }
+        },
     }
 }
 
@@ -396,7 +402,13 @@ pub(super) proof fn nested_call_group_frame(
             &&& gates_available(after.gates, input_bits as nat, after.gates.len() as int)
             &&& wires_available(after.definitions, input_bits, after.gates.len())
         },
-        Err(_) => after.definitions == before.definitions && after.gates == before.gates && after.origins == before.origins,
+        Err(error) => {
+            &&& after.definitions == before.definitions && after.gates == before.gates && after.origins == before.origins
+            &&& match error {
+                NestedCallWiringError::Child(index, _) => index < selected.children@.len(),
+                NestedCallWiringError::Root(_) => true,
+            }
+        },
     },
 {
     reveal(nested_call_group_result);
