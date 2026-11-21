@@ -1130,10 +1130,11 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
 
 #[cfg(all(test, not(verus_only)))]
 #[test]
-fn lowers_the_resolved_nor_root_and_rolls_back_at_its_gate_limit() {
+fn adds_the_nor_root_output_and_rolls_back_at_its_gate_limit() {
     use super::{LoweringBody, prepare_body_layouts};
     use super::super::{BitFuncRhs, CheckedBitDefinition};
-    use child_calls::{NestedCallWiringError, lower_resolved_nor_root};
+    use super::call_group::{BodyWiring, lower_nor_call_group};
+    use child_calls::NestedCallWiringError;
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
 
     let project = parse_circuit_project(&[SourceSnapshot {
@@ -1166,22 +1167,20 @@ fn lowers_the_resolved_nor_root_and_rolls_back_at_its_gate_limit() {
     }];
     let layouts = prepare_body_layouts(&[1], &definitions, &[1], 1).unwrap();
     let _body = LoweringBody { input_widths: &[1], definitions: &definitions };
-    let caller = CallerArguments {
-        source: &project.sources()[position.0], forms: &parsed.syntax.forms,
-        inputs: layouts.inputs.ranges(), definitions: layouts.definitions.ranges(),
-        wires: &[], child_ranges: &[], child_wires: &[],
-    };
     let builtin = builtin_nor_call();
     let prefix = NorGate { left: Wire::Constant(false), right: Wire::Constant(false) };
-    let mut gates = alloc::vec![prefix];
-    let limited = lower_resolved_nor_root(&selected, refs, &caller, &builtin, &mut gates, 2, 2, Ghost(&aliases),
-        Ghost((&plan, &templates, 1u64, arguments@)), Ghost((&_body, &layouts, 1usize, 0usize)));
+    let mut state = BodyWiring { definitions: Vec::new(), gates: alloc::vec![prefix], origins: alloc::vec![7] };
+    let limited = lower_nor_call_group(&selected, refs, &parsed.syntax.forms, &layouts, &builtin, &mut state, 2, 2,
+        Ghost(&_body), Ghost(&aliases), Ghost((&plan, &templates, 1u64, arguments@)), Ghost(1usize));
     assert!(matches!(limited, Err(NestedCallWiringError::Root(CallWiringError::GateCapacity))));
-    assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
-    let output = lower_resolved_nor_root(&selected, refs, &caller, &builtin, &mut gates, 3, 2, Ghost(&aliases),
-        Ghost((&plan, &templates, 1u64, arguments@)), Ghost((&_body, &layouts, 1usize, 0usize))).unwrap();
-    assert!(matches!(output, Wire::Gate(2)));
-    let circuit = NorNetlist { input_count: 1, gates, outputs: alloc::vec![output] };
+    assert!(state.definitions.is_empty());
+    assert_eq!(state.gates, [prefix]);
+    assert_eq!(state.origins, [7]);
+    lower_nor_call_group(&selected, refs, &parsed.syntax.forms, &layouts, &builtin, &mut state, 3, 2,
+        Ghost(&_body), Ghost(&aliases), Ghost((&plan, &templates, 1u64, arguments@)), Ghost(1usize)).unwrap();
+    assert_eq!(state.definitions, [Wire::Gate(2)]);
+    assert_eq!(state.origins, [7, 0, 0]);
+    let circuit = NorNetlist { input_count: 1, gates: state.gates, outputs: state.definitions };
     assert_eq!(circuit.evaluate(&[false]).unwrap(), [false]);
     assert_eq!(circuit.evaluate(&[true]).unwrap(), [true]);
 }
