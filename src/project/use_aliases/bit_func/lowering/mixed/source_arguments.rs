@@ -1044,12 +1044,12 @@ proof fn mixed_trace_source_call_values(
 }
 
 /// 配線履歴から得た、実際の呼び出し段に対応する入出力値。
-enum MixedCallEvaluation {
+pub(in crate::project::use_aliases::bit_func) enum MixedCallEvaluation {
     Flat(Seq<bool>, Seq<bool>),
     Nested(EvaluatedNestedCall),
 }
 
-spec fn evaluated_flat_call_matches(
+pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_flat_call_matches(
     aliases: &UseAliases, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, index: int,
     selected: ResolvedTemplateCall, incoming: Seq<Seq<bool>>, definitions: Seq<Seq<bool>>, input: Seq<bool>, output: Seq<bool>,
 ) -> bool {
@@ -1070,7 +1070,7 @@ spec fn evaluated_flat_call_matches(
 }
 
 /// 変換に成功した関数で、指定した呼び出しの引数値と左辺の値を取り出す。
-proof fn mixed_function_call_evaluation(
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_call_evaluation(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
     selected: ResolvedTemplateCall, index: int, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>,
     bindings: Seq<CallBinding>, widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
@@ -1153,56 +1153,4 @@ proof fn mixed_function_call_evaluation(
     }
 }
 
-/// 変換に成功した関数で、指定した呼び出しの引数値と左辺の値を取り出す。
-pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_source_call_values(
-    aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
-    selected: ResolvedTemplateCall, index: int, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>,
-    bindings: Seq<CallBinding>, widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
-    function: &LoweredBitFunc, steps: Ghost<Seq<WiringStep>>, inputs: Seq<bool>, values: Seq<bool>,
-) -> (result: (Seq<bool>, Seq<bool>))
-    requires
-        aliases.can_resolve(),
-        aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
-        prepared.typed.literals.wiring matches FuncWiringResult::Checked(wiring)
-            && body.input_widths@.len() == wiring.drivers.signature.inputs@.len(),
-        ({
-            let project = aliases.targets.project_model();
-            &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
-            &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
-        }),
-        mixed_function_result(body, layouts, forms, bindings, widths, drivers, gate_limit, Ok((*function, steps))),
-        ordered_bindings(bindings),
-        0 <= index < bindings.len(),
-        binding_matches_selection(bindings[index], selected),
-        aliases.resolved_template_call_matches(plan, caller, prepared, index, selected),
-        resolved_call_fits_body(selected, body.input_widths@, body.definitions@, forms, caller.2),
-        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
-        gate_values_match(inputs, function.netlist_model().gates@, values),
-        values.len() == function.netlist_model().gates@.len() <= usize::MAX,
-        inputs.len() == layouts.inputs.total_bits_model(),
-    ensures ({
-        let project = aliases.targets.project_model();
-        let source = &project.sources_model()[caller.0 as int];
-        let parsed = &project.circuits_model()[caller.0 as int];
-        let wiring = prepared.typed.literals.wiring->Checked_0;
-        let root = prepared.projections.calls@[index];
-        let callee = selected.template.circuit_model();
-        let first = selected.group.outputs.start as int;
-        let end = selected.group.outputs.end as int;
-        let definitions = definition_values_from_wires(&layouts.definitions, function.definition_wires@, inputs, values);
-        &&& nor_evaluation(callee.netlist_model(), result.0, result.1)
-        &&& source_call_arguments_match(source, parsed, &wiring, caller.1, root.definition,
-            selected.group._signature@.call.call, caller.2, port_values(&layouts.inputs, inputs), definitions.take(first),
-            selected.template.input_widths_model(), port_values(callee.input_layout_model(), result.0))
-        &&& port_values(callee.output_layout_model(), result.1) == definitions.subrange(first, end)
-    }),
-{
-    assert(wiring_trace_arguments_match(steps@, prepared.projections.call_arguments.arguments@)) by {
-        reveal(flat_wiring_trace);
-        reveal(wiring_trace_arguments_match);
-    };
-    let result = mixed_function_call_evaluation(aliases, plan, caller, prepared, selected, index, body, layouts, forms,
-        bindings, widths, drivers, layout_limit, gate_limit, function, steps, inputs, values);
-    (result->Flat_0, result->Flat_1)
-}
 } // verus!

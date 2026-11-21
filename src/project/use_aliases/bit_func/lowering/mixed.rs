@@ -3,10 +3,10 @@
 #[cfg(verus_only)]
 mod source_arguments;
 #[cfg(verus_only)]
-pub(super) use source_arguments::mixed_function_source_call_values;
+pub(super) use source_arguments::mixed_function_call_evaluation;
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_arguments::{
-    EvaluatedCallBits, EvaluatedNestedCall, evaluated_nested_call_matches,
+    EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluation, evaluated_flat_call_matches, evaluated_nested_call_matches,
 };
 
 use super::*;
@@ -112,6 +112,14 @@ pub(super) closed spec fn flat_wiring_trace(steps: Seq<WiringStep>) -> bool {
 pub(super) closed spec fn wiring_trace_arguments_match(steps: Seq<WiringStep>, arguments: Seq<ProjectedCallArgument>) -> bool {
     forall|i: int| 0 <= i < steps.len() ==> ((#[trigger] steps[i]).nested matches Some(nested)
         ==> nested.arguments == arguments)
+}
+
+pub(super) proof fn flat_trace_arguments_match(steps: Seq<WiringStep>, arguments: Seq<ProjectedCallArgument>)
+    requires flat_wiring_trace(steps),
+    ensures wiring_trace_arguments_match(steps, arguments),
+{
+    reveal(flat_wiring_trace);
+    reveal(wiring_trace_arguments_match);
 }
 
 pub(super) open spec fn binding_covers(bindings: Seq<CallBinding>, slot: int) -> bool {

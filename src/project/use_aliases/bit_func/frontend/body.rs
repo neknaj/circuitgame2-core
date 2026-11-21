@@ -3,12 +3,13 @@
 use super::*;
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 #[cfg(verus_only)]
-use super::super::templates::{FunctionTemplate, ResolvedExpressionCall};
+use super::super::templates::ResolvedExpressionCall;
 use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
 #[cfg(verus_only)]
 use super::super::lowering::{
     expanded_definition_values, projected_lowering_output_values, projected_lowering_view, resolved_call_fits_body,
-    projected_lowering_call_values, projected_lowering_ports, port_values,
+    evaluated_flat_call_matches, evaluated_nested_call_matches, MixedCallEvaluation,
+    projected_lowering_call_evaluation, projected_lowering_ports, port_values,
 };
 #[cfg(verus_only)]
 use super::source_evaluation::{source_outputs_from_driver_values, source_outputs_match};
@@ -1217,11 +1218,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 展開した呼び出しの評価を、同じ参照先と元ソースの引数・左辺に結び付ける。
-    pub(super) proof fn expanded_body_source_call_values(
-        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
-        prepared: &PreparedExpansionBody, bit_limit: usize, gate_limit: usize, value: &ExpandedBody,
+    pub(super) proof fn expanded_body_source_call_evaluation<'w>(
+        &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
+        prepared: &'w PreparedExpansionBody<'p, 'a>, bit_limit: usize, gate_limit: usize, value: &'w ExpandedBody<'p, 'a>,
         index: int, input: Seq<bool>, gates: Seq<bool>,
-    ) -> (result: (FunctionTemplate<'p, 'a>, Seq<bool>, Seq<bool>))
+    ) -> (result: (ResolvedTemplateCall<'w, 'p, 'a>, MixedCallEvaluation))
         requires
             self.can_resolve(),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
@@ -1233,19 +1234,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures ({
             let group = prepared.calls@[index];
             let root = prepared.projections.calls@[index];
-            let template = result.0;
+            let selected = result.0;
+            let template = selected.template;
             let callee = template.circuit_model();
             let wiring = prepared.typed.literals.wiring->Checked_0;
+            let incoming = port_values(value.circuit.input_layout_model(), input);
+            let definitions = expanded_definition_values(&value.circuit, input, gates);
+            &&& self.resolved_template_call_matches(plan, caller, prepared, index, selected)
+            &&& self.resolved_expression_calls_match(plan, table, caller.2, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@)
             &&& 0 <= group._order@.0 < group._order@.1 < plan.order_model().len()
             &&& plan.position_model(group._order@.0) == Some((root.target_file, root.target_entry))
             &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
             &&& group.vertex == plan.order_model()[group._order@.0]
-            &&& table.slots_model()[group.vertex as int] == Some(template)
-            &&& nor_evaluation(callee.netlist_model(), result.1, result.2)
-            &&& self.source_function_call_values(caller, &wiring, root.definition, group._signature@, group.outputs,
-                (root.target_file, root.target_entry), port_values(value.circuit.input_layout_model(), input),
-                expanded_definition_values(&value.circuit, input, gates), template.input_widths_model(),
-                port_values(callee.input_layout_model(), result.1), port_values(callee.output_layout_model(), result.2))
+            &&& table.slots_model()[group.vertex as int] == Some(*template)
+            &&& group.outputs.end <= definitions.len()
+            &&& match result.1 {
+                MixedCallEvaluation::Flat(arguments, outputs) =>
+                    nor_evaluation(callee.netlist_model(), arguments, outputs)
+                    && self.source_function_call_values(caller, &wiring, root.definition, group._signature@, group.outputs,
+                        (root.target_file, root.target_entry), incoming, definitions, template.input_widths_model(),
+                        port_values(callee.input_layout_model(), arguments), port_values(callee.output_layout_model(), outputs)),
+                MixedCallEvaluation::Nested(evaluation) =>
+                    evaluated_nested_call_matches(self, caller, prepared, index, &selected, incoming, definitions, evaluation),
+            }
         }),
     {
         let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
@@ -1258,14 +1270,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::routine_ports_result);
         reveal(UseAliases::template_port_widths_match);
         reveal(UseAliases::prepared_definition_result);
-        let (arguments, results) = projected_lowering_call_values(self, plan, caller, prepared, scope.inputs@,
+        let evidence = projected_lowering_call_evaluation(self, plan, caller, prepared, scope.inputs@,
             slots@, scope.outputs@, drivers, forms, selected, index, bit_limit, gate_limit, &value.circuit, input, gates);
-        let callee = call.template.circuit_model();
-        self.source_function_call_values_intro(caller, scope.wiring, root.definition, call.group._signature@,
-            call.group.outputs, (root.target_file, root.target_entry), port_values(value.circuit.input_layout_model(), input),
-            values, call.template.input_widths_model(), port_values(callee.input_layout_model(), arguments),
-            port_values(callee.output_layout_model(), results));
-        (*call.template, arguments, results)
+        if let MixedCallEvaluation::Flat(arguments, outputs) = evidence {
+            let callee = call.template.circuit_model();
+            assert(evaluated_flat_call_matches(self, caller, prepared, index, call,
+                port_values(value.circuit.input_layout_model(), input), values, arguments, outputs));
+            self.source_function_call_values_intro(caller, scope.wiring, root.definition, call.group._signature@,
+                call.group.outputs, (root.target_file, root.target_entry), port_values(value.circuit.input_layout_model(), input),
+                values, call.template.input_widths_model(), port_values(callee.input_layout_model(), arguments),
+                port_values(callee.output_layout_model(), outputs));
+        }
+        (call, evidence)
     }
 
     /// 厳格解析と型検査を終えた本体を、先行する関数のネットリストを使って配線へ変換する。

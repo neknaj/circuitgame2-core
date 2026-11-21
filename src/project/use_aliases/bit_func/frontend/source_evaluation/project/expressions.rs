@@ -90,6 +90,142 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& self.structure_layout_for_ports(source.limit, scope.layouts)
     }
 
+    /// 構造体ポートを持つテンプレートから、検査済みの構造体配置を得る。
+    proof fn source_template_structure_layout(
+        &self, target: (usize, usize), limit: u64, template: &FunctionTemplate,
+    ) -> (layouts: StructureLayouts<'p, 'a>)
+        requires
+            self.template_abi_matches(target, limit, template),
+            has_structure_port(template.signature_model().inputs@) || has_structure_port(template.signature_model().outputs@),
+        ensures self.structure_types_match(limit, Ok(layouts)),
+    {
+        self.template_port_evidence(target, limit, template);
+        reveal(UseAliases::template_port_widths_match);
+        let signature = template.signature_model();
+        let layouts = template.structure_layouts_model();
+        if layouts.is_none() {
+            let (ports, widths) = if has_structure_port(signature.inputs@) {
+                (signature.inputs@, template.input_widths_model())
+            } else {
+                (signature.outputs@, template.output_widths_model())
+            };
+            let i = choose|i: int| 0 <= i < ports.len() && (#[trigger] ports[i]).ty is Struct;
+            assert(self.port_width_matches(ports[i].ty, widths[i], None));
+            assert(false);
+        }
+        layouts->Some_0
+    }
+
+    /// 根と各子の幅を比較するときに使う一つの検査済み配置表を選ぶ。
+    proof fn source_nested_call_layout(
+        &self, plan: &FunctionExpansionOrder, prior: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, group_index: int, selected: &ResolvedTemplateCall,
+        preferred: Option<StructureLayouts>,
+    ) -> (layouts: Option<StructureLayouts<'p, 'a>>)
+        requires
+            self.resolved_template_call_matches(plan, caller, prepared, group_index, *selected),
+            self.resolved_expression_calls_match(plan, prior, caller.2, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@),
+            preferred matches Some(table) ==> self.structure_types_match(caller.2, Ok(table)),
+        ensures
+            layouts matches Some(table) ==> self.structure_types_match(caller.2, Ok(table)),
+            layouts.is_none() ==> !has_structure_port(selected.template.signature_model().inputs@)
+                && !has_structure_port(selected.template.signature_model().outputs@),
+            layouts.is_none() ==> (forall|i: int| 0 <= i < selected.children@.len() ==>
+                ((#[trigger] selected.children@[i]).template matches Some(template) ==>
+                    !has_structure_port(template.signature_model().inputs@) && !has_structure_port(template.signature_model().outputs@))),
+    {
+        if preferred.is_some() {
+            preferred
+        } else if has_structure_port(selected.template.signature_model().inputs@)
+            || has_structure_port(selected.template.signature_model().outputs@) {
+            let target = plan.position_model(selected.group._order@.0)->Some_0;
+            Some(self.source_template_structure_layout(target, caller.2, selected.template))
+        } else if exists|i: int| 0 <= i < selected.children@.len() && (
+            (#[trigger] selected.children@[i]).template matches Some(template)
+            && (has_structure_port(template.signature_model().inputs@) || has_structure_port(template.signature_model().outputs@))) {
+            let i = choose|i: int| 0 <= i < selected.children@.len() && (
+                (#[trigger] selected.children@[i]).template matches Some(template)
+                && (has_structure_port(template.signature_model().inputs@) || has_structure_port(template.signature_model().outputs@)));
+            let child = selected.children@[i];
+            reveal(UseAliases::resolved_expression_call_matches);
+            let target = plan.position_model(child.child._rank@->Some_0)->Some_0;
+            Some(self.source_template_structure_layout(target, caller.2, child.template->Some_0))
+        } else {
+            None
+        }
+    }
+
+    /// 配線から得た値を、根が参照する先行定義と呼び出し式のソース評価に結び付ける。
+    pub(super) proof fn source_nested_call_from_wiring(
+        &self, context: &SourceFunc, plan: &FunctionExpansionOrder, rank: int,
+        prior: &FunctionTemplates, table: &FunctionTemplates, prepared: &PreparedExpansionBody,
+        index: int, selected: &ResolvedTemplateCall, preferred: Option<StructureLayouts>,
+        inputs: Seq<Seq<bool>>, assigned: Seq<Seq<bool>>, values: EvaluatedNestedCall, site: SourceCallEvaluation,
+    ) -> (nested: NestedSourceArguments<'p, 'a>)
+        requires
+            self.can_resolve(),
+            self.function_expansion_evidence(Ok(*plan)),
+            0 <= rank < plan.order_model().len(),
+            plan.position_model(rank) == Some((context.file, context.entry)),
+            ({
+                let project = self.targets.project_model();
+                &&& context.file < project.sources_model().len() && context.file < project.circuits_model().len()
+                &&& *context.source == project.sources_model()[context.file as int]
+                &&& *context.parsed == project.circuits_model()[context.file as int]
+            }),
+            preferred matches Some(layouts) ==> self.structure_types_match(context.limit, Ok(layouts)),
+            self.prepared_expansion_body_matches(*plan, context.file, context.entry, context.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*context.wiring),
+            assigned.len() == context.wiring.drivers.definitions@.len(),
+            self.resolved_template_call_matches(plan, (context.file, context.entry, context.limit), prepared, index, *selected),
+            self.resolved_expression_calls_match(plan, prior, context.limit, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@),
+            evaluated_nested_call_matches(self, (context.file, context.entry, context.limit), prepared, index,
+                selected, inputs, assigned, values),
+            prior.next_rank() == rank,
+            prior.slots_model().len() == table.slots_model().len(),
+            forall|i: int| 0 <= i < rank ==> {
+                let vertex = #[trigger] plan.order_model()[i];
+                prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]
+            },
+            site.definition == prepared.projections.calls@[index].definition,
+            site.outputs == selected.group.outputs,
+            site.signature == selected.group._signature@,
+            site.widths == selected.template.input_widths_model() && site.arguments == values.root.ports,
+        ensures
+            self.source_nested_arguments_match(
+                &source_expression_scope(context, plan, rank, Self::template_evaluations(plan, table),
+                    SourceCallEvaluation { nested: Some(nested), ..site }, &nested, inputs, assigned),
+                site.signature, site.widths, site.arguments, nested.children),
+    {
+        let caller = (context.file, context.entry, context.limit);
+        let layouts = self.source_nested_call_layout(plan, prior, caller, prepared, index, selected, preferred);
+        let layout_ref = match &layouts { Some(table) => Some(table), None => None };
+        self.prepared_call_matches_source_site(plan, caller, prepared, index);
+        self.expansion_callee_template_evidence(*plan, caller, prepared, index);
+        let root = prepared.projections.calls@[index];
+        let first = site.outputs.start as int;
+        self.source_function_call_site_evidence(caller, context.wiring, first, site.definition, site.signature,
+            site.outputs, (root.target_file, root.target_entry));
+        self.checked_wiring_is_func(context.file, context.entry, context.limit, *context.wiring);
+        let drivers = context.wiring.drivers.definitions@;
+        assert forall|i: int| 0 <= i < drivers.len() implies
+            (i < first) == ((#[trigger] drivers[i]).definition < site.definition) by {
+            if i < first {
+                assert(drivers[i].definition < drivers[first].definition
+                    || (drivers[i].definition == drivers[first].definition && drivers[i].result_index < drivers[first].result_index));
+            } else if first < i {
+                assert(drivers[first].definition < drivers[i].definition
+                    || (drivers[first].definition == drivers[i].definition && drivers[first].result_index < drivers[i].result_index));
+            }
+        };
+        let scope = SourceExpressionScope { context, plan, rank, derivation: Self::template_evaluations(plan, table),
+            definition: site.definition, typed: prepared.typed, layouts: layout_ref, inputs, prior: assigned.take(first) };
+        let children = self.source_children_from_wiring(&scope, prior, table, prepared, index, selected, assigned, values);
+        NestedSourceArguments { typed: prepared.typed, layouts, children }
+    }
+
     spec fn source_expression_atom_type(
         &self, scope: &SourceExpressionScope, form: usize, expected: ResolvedPortType,
     ) -> bool {

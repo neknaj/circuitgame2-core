@@ -393,6 +393,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring)))
             &&& slot < wiring.drivers.definitions@.len()
             &&& wiring.drivers.definitions@[slot].definition == definition
+            &&& wiring.drivers.definitions@[slot].result_index == slot - outputs.start
+            &&& entry < parsed.entry_ranges@.len()
+            &&& parsed.entry_ranges@[entry as int].definitions.start <= definition
+                < parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len()
             &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text,
                 parsed.syntax.forms@, row.expression.start as int, row.expression.end as int)
             &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(signature)))

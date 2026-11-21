@@ -7,6 +7,7 @@ use super::*;
 use self::expressions::{NestedSourceArguments, source_expression_scope};
 use crate::project::FunctionExpansionOrder;
 use crate::netlist::nor_evaluation;
+use crate::project::use_aliases::bit_func::lowering::MixedCallEvaluation;
 use crate::project::use_aliases::bit_func::templates::{FunctionTemplate, FunctionTemplates};
 use core::ops::Range;
 
@@ -398,18 +399,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && (#[trigger] calls[index]).outputs.start <= i < calls[index].outputs.end;
                 let group = calls[index];
                 let root = prepared.projections.calls@[index];
-                let (callee, arguments, results) = self.expanded_body_source_call_values(plan, &prior, caller, &prepared,
+                let (selection, evidence) = self.expanded_body_source_call_evaluation(plan, &prior, caller, &prepared,
                     bit_limit, gate_limit, &body, index, input, gates);
+                let callee = selection.template;
+                let (arguments, results) = match evidence {
+                    MixedCallEvaluation::Flat(arguments, results) => (arguments, results),
+                    MixedCallEvaluation::Nested(call) => (call.root.input, call.root.output),
+                };
                 self.template_rank_from_position(*plan, (file, entry), group._order@.1, rank);
                 let callee_rank = group._order@.0;
-                let child = Self::prior_template_invocation(plan, &prior, table, callee_rank, &callee, arguments, results);
+                let child = Self::prior_template_invocation(plan, &prior, table, callee_rank, callee, arguments, results);
                 let site = SourceCallEvaluation { definition: root.definition, signature: group._signature@,
                     outputs: group.outputs, rank: callee_rank, widths: callee.input_widths_model(),
                     arguments: child.inputs, results: child.outputs, nested: None };
                 assert(site.outputs.start <= i < site.outputs.end && 0 <= site.rank < rank);
                 assert(plan.position_model(site.rank) == Some((root.target_file, root.target_entry)));
-                assert(self.source_function_call_values(caller, scope.wiring, site.definition, site.signature, site.outputs,
-                    plan.position_model(site.rank)->Some_0, incoming, values, site.widths, site.arguments, site.results));
+                let site = if let MixedCallEvaluation::Nested(call) = evidence {
+                    self.prepared_call_matches_source_site(plan, caller, &prepared, index);
+                    let nested = self.source_nested_call_from_wiring(&context, plan, rank, &prior, table, &prepared, index,
+                        &selection, layouts, incoming, values, call, site);
+                    SourceCallEvaluation { nested: Some(nested), ..site }
+                } else { site };
+                assert(self.source_call_matches_slot(plan, caller, rank, scope.wiring, incoming, values, i, site, derivation));
                 self.source_call_slot_intro(plan, caller, rank, derivation, scope.wiring, incoming, values, i, site);
             } else {
                 assert(self.source_definition_value(&context, layout_ref, prepared.typed.types@, incoming, values, i));

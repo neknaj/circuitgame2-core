@@ -8,7 +8,8 @@ pub(super) use call_arguments::literal_argument_matches_width;
 mod call_group;
 mod mixed;
 #[cfg(verus_only)]
-pub(super) use mixed::{EvaluatedCallBits, EvaluatedNestedCall, evaluated_nested_call_matches};
+pub(super) use mixed::{EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluation, evaluated_flat_call_matches,
+    evaluated_nested_call_matches};
 #[cfg(verus_only)]
 pub(super) use mixed::resolved_call_fits_body;
 pub(super) use call_group::CallGroupError;
@@ -22,15 +23,15 @@ use crate::syntax::Form;
 use super::frontend::call_covers;
 #[cfg(verus_only)]
 use mixed::{CallBinding, WiringStep, binding_covers, bindings_match_calls, bindings_preserve_definition_order,
-    mixed_function_local_value, mixed_function_result, mixed_function_source_call_values};
+    flat_trace_arguments_match, mixed_function_call_evaluation, mixed_function_local_value, mixed_function_result};
 #[cfg(verus_only)]
-use super::expansion::{CheckedExpansionCall, source_call_arguments_match};
+use super::expansion::CheckedExpansionCall;
 #[cfg(verus_only)]
 use super::super::FuncWiringResult;
 #[cfg(verus_only)]
 use super::semantics::{checked_definition_values, driver_values};
 #[cfg(verus_only)]
-use crate::netlist::{gate_values_match, nor_evaluation, output_values_match};
+use crate::netlist::{gate_values_match, output_values_match};
 #[cfg(verus_only)]
 pub use evaluation::{bit_func_lowering_preserves_evaluation, port_values};
 
@@ -347,12 +348,12 @@ pub(super) proof fn projected_lowering_output_values(
 }
 
 /// 展開結果から、元の引数と左辺に対応する呼び出し先の評価を取り出す。
-pub(super) proof fn projected_lowering_call_values(
+pub(super) proof fn projected_lowering_call_evaluation(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
     inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
     forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, index: int, layout_limit: usize, gate_limit: usize,
     value: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>,
-) -> (result: (Seq<bool>, Seq<bool>))
+) -> (result: MixedCallEvaluation)
     requires
         aliases.can_resolve(),
         aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
@@ -373,22 +374,16 @@ pub(super) proof fn projected_lowering_call_values(
         gate_values_match(input, value.netlist_model().gates@, gates),
         gates.len() == value.netlist_model().gates@.len() <= usize::MAX,
     ensures ({
-        let project = aliases.targets.project_model();
-        let source = &project.sources_model()[caller.0 as int];
-        let parsed = &project.circuits_model()[caller.0 as int];
-        let wiring = prepared.typed.literals.wiring->Checked_0;
-        let root = prepared.projections.calls@[index];
         let call = selected[index];
-        let callee = call.template.circuit_model();
-        let first = call.group.outputs.start as int;
-        let end = call.group.outputs.end as int;
         let definitions = expanded_definition_values(value, input, gates);
-        &&& end <= definitions.len()
-        &&& nor_evaluation(callee.netlist_model(), result.0, result.1)
-        &&& source_call_arguments_match(source, parsed, &wiring, caller.1, root.definition,
-            call.group._signature@.call.call, caller.2, port_values(value.input_layout_model(), input), definitions.take(first),
-            call.template.input_widths_model(), port_values(callee.input_layout_model(), result.0))
-        &&& port_values(callee.output_layout_model(), result.1) == definitions.subrange(first, end)
+        let incoming = port_values(value.input_layout_model(), input);
+        &&& call.group.outputs.end <= definitions.len()
+        &&& match result {
+            MixedCallEvaluation::Flat(arguments, outputs) =>
+                evaluated_flat_call_matches(aliases, caller, prepared, index, call, incoming, definitions, arguments, outputs),
+            MixedCallEvaluation::Nested(evaluation) =>
+                evaluated_nested_call_matches(aliases, caller, prepared, index, &call, incoming, definitions, evaluation),
+        }
     }),
 {
     let (body, layouts, bindings, steps) =
@@ -397,7 +392,8 @@ pub(super) proof fn projected_lowering_call_values(
         assert(*bindings[i].group == *selected[i].group);
     };
     bindings_preserve_definition_order(bindings, prepared.calls@);
-    mixed_function_source_call_values(aliases, plan, caller, prepared, selected[index], index, &body, &layouts, forms,
+    flat_trace_arguments_match(steps@, prepared.projections.call_arguments.arguments@);
+    mixed_function_call_evaluation(aliases, plan, caller, prepared, selected[index], index, &body, &layouts, forms,
         bindings, outputs, drivers, layout_limit, gate_limit, value, steps, input, gates)
 }
 
