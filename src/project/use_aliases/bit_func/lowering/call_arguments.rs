@@ -61,6 +61,7 @@ pub(super) open spec fn child_outputs_appended(
 ) -> bool {
     let start = before.wires@.len();
     let end = after.wires@.len();
+    &&& reference < before.ranges@.len() && before.ranges@[reference as int].is_none()
     &&& end == start + callee.outputs@.len() <= usize::MAX
     &&& after.ranges@ == before.ranges@.update(reference as int, Some((start as usize)..(end as usize)))
     &&& after.wires@.take(start as int) == before.wires@
@@ -265,6 +266,46 @@ pub(super) open spec fn argument_driver_value(
                 |bit: int| wire_value(caller.wires@[range.start + bit], inputs, gates))
         },
     }
+}
+
+/// 子を指す実引数の入力値は、その参照枠にある出力配線を読んだ値と一致する。
+pub(super) proof fn lowered_nested_argument_port_value(
+    caller: &CallerArguments, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout,
+    widths: Seq<u64>, limit: usize, mapped: Seq<Wire>, inputs: Seq<bool>, gates: Seq<bool>,
+    port: usize, reference: usize,
+)
+    requires
+        port_bit_layout_result(widths, limit, Ok(*layout)),
+        argument_prefix_wires(caller, arguments, layout.ranges_model(), arguments.len() as int, mapped),
+        mapped.len() == layout.total_bits_model(),
+        port < widths.len(), port < arguments.len(),
+        arguments[port as int].source == CallArgumentSource::NestedCall(reference),
+        reference < caller.child_ranges@.len(),
+        caller.child_ranges@[reference as int] matches Some(range)
+            && range.start <= range.end <= caller.child_wires@.len()
+            && range.end - range.start == widths[port as int],
+    ensures ({
+        let range = caller.child_ranges@[reference as int]->Some_0;
+        let value = port_values(layout, instance_wire_values(mapped, inputs, gates))[port as int];
+        &&& value.len() == widths[port as int]
+        &&& value == instance_wire_values(
+            caller.child_wires@.subrange(range.start as int, range.end as int), inputs, gates)
+    }),
+{
+    port_bit_layout_port(widths, limit, *layout, port);
+    reveal(port_values);
+    reveal(argument_prefix_wires);
+    reveal(argument_wire);
+    let destination = layout.ranges_model()[port as int];
+    let range = caller.child_ranges@[reference as int]->Some_0;
+    let child = caller.child_wires@.subrange(range.start as int, range.end as int);
+    let value = port_values(layout, instance_wire_values(mapped, inputs, gates))[port as int];
+    let expected = instance_wire_values(child, inputs, gates);
+    assert forall|bit: int| 0 <= bit < value.len() implies (#[trigger] value[bit]) == expected[bit] by {
+        assert(mapped[destination.start + bit] == argument_wire(caller, arguments[port as int], bit));
+        assert(mapped[destination.start + bit] == child[bit]);
+    };
+    assert(value =~= expected);
 }
 
 /// 実引数から作った配線を読むと、その駆動元またはリテラルの値が一つの入力ポートに入る。
