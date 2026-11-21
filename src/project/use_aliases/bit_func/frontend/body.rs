@@ -4,9 +4,14 @@ use super::*;
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
 #[cfg(verus_only)]
-use super::super::lowering::{projected_lowering_view, resolved_call_fits_body, projected_lowering_ports};
+use super::super::lowering::{
+    expanded_definition_values, projected_lowering_output_values, projected_lowering_view, resolved_call_fits_body,
+    projected_lowering_ports, port_values,
+};
 #[cfg(verus_only)]
-use crate::netlist::{nor_evaluation_ready, port_bit_layout_result};
+use super::source_evaluation::{source_outputs_from_driver_values, source_outputs_match};
+#[cfg(verus_only)]
+use crate::netlist::{gate_values_match, nor_evaluation, nor_evaluation_ready, output_values_match, port_bit_layout_result};
 use super::super::expansion::PreparedExpansionBody;
 use super::super::super::FunctionExpansionOrder;
 #[cfg(verus_only)]
@@ -822,6 +827,58 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 展開に成功した本体から、元ソースの検査結果と同じ呼び出し先を取り出す。
+    proof fn expanded_body_success<'w>(
+        &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
+        prepared: &'w PreparedExpansionBody<'p, 'a>, bit_limit: usize, gate_limit: usize, value: &'w ExpandedBody<'p, 'a>,
+    ) -> (witness: (FuncProjection<'w, 'p, 'a>, Seq<ResolvedTemplateCall<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>))
+        requires self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
+        ensures ({
+            let (scope, selected, slots) = witness;
+            let (file, entry, limit) = caller;
+            let project = self.targets.project_model();
+            let wiring = &prepared.typed.literals.wiring->Checked_0;
+            let ports = &value.ports;
+            let drivers = wiring.drivers.outputs@;
+            &&& scope == (FuncProjection { file, entry, limit, source: &project.sources_model()[file as int],
+                parsed: &project.circuits_model()[file as int], wiring, inputs: &ports.inputs, outputs: &ports.outputs,
+                layouts: match &ports.layouts { Some(table) => Some(table), None => None },
+                types: &prepared.typed.types, structures: &prepared.projections.entries })
+            &&& self.projection_context(&scope)
+            &&& self.expansion_selection_matches(plan, table, caller, prepared, selected)
+            &&& self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, selected, Ok(*ports))
+            &&& self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
+            &&& output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
+            &&& projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
+                selected, bit_limit, gate_limit, Ok(value.circuit))
+            &&& value.has_structure_ports <==> has_structure_port(wiring.drivers.signature.inputs@)
+                || has_structure_port(wiring.drivers.signature.outputs@)
+        }),
+    {
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.circuits_model()[file as int];
+        let wiring = &prepared.typed.literals.wiring->Checked_0;
+        let ports = &value.ports;
+        let scope = FuncProjection {
+            file, entry, limit, source, parsed, wiring, inputs: &ports.inputs, outputs: &ports.outputs,
+            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
+            types: &prepared.typed.types, structures: &prepared.projections.entries,
+        };
+        let selected = choose|rows: Seq<ResolvedTemplateCall<'w, 'p, 'a>>|
+            #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, rows)
+            && self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, rows, Ok(*ports))
+            && self.expanded_definition_lowering_result(&scope, prepared.calls@, rows, bit_limit, gate_limit, Ok(*value));
+        let drivers = wiring.drivers.outputs@;
+        let slots = choose|slots: Vec<CheckedBitDefinition>|
+            #[trigger] self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
+            && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
+            && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
+                parsed.syntax.forms@, selected, bit_limit, gate_limit, Ok(value.circuit));
+        (scope, selected, slots)
+    }
+
     /// 展開した本体のポート幅とビット配置を、元の宣言の署名に結び付ける。
     pub(in crate::project::use_aliases::bit_func) proof fn expanded_body_ports_evidence(
         &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
@@ -841,32 +898,60 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }),
     {
         let (file, entry, limit) = caller;
-        let project = self.targets.project_model();
-        let source = &project.sources_model()[file as int];
-        let parsed = &project.circuits_model()[file as int];
-        let wiring = &prepared.typed.literals.wiring->Checked_0;
+        let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let wiring = scope.wiring;
         let ports = &value.ports;
-        let scope = FuncProjection {
-            file, entry, limit, source, parsed, wiring,
-            inputs: &ports.inputs, outputs: &ports.outputs,
-            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
-            types: &prepared.typed.types, structures: &prepared.projections.entries,
-        };
-        let selected = choose|rows: Seq<ResolvedTemplateCall>|
-            #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, rows)
-            && self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, rows, Ok(*ports))
-            && self.expanded_definition_lowering_result(&scope, prepared.calls@, rows, bit_limit, gate_limit, Ok(*value));
         let drivers = wiring.drivers.outputs@;
-        let slots = choose|slots: Vec<CheckedBitDefinition>|
-            #[trigger] self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
-            && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
-            && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
-                parsed.syntax.forms@, selected, bit_limit, gate_limit, Ok(value.circuit));
         self.checked_wiring_is_func(file, entry, limit, *wiring);
         reveal(UseAliases::routine_ports_result);
         reveal(UseAliases::template_port_widths_match);
-        projected_lowering_ports(ports.inputs@, slots@, ports.outputs@, drivers, parsed.syntax.forms@,
+        projected_lowering_ports(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
             selected, bit_limit, gate_limit, &value.circuit);
+    }
+
+    /// 展開後の評価結果を、ソースが出力ポートごとに指定した駆動元の値に結び付ける。
+    pub(super) proof fn expanded_body_output_values(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, bit_limit: usize, gate_limit: usize, value: &ExpandedBody,
+        input: Seq<bool>, output: Seq<bool>,
+    ) -> (gates: Seq<bool>)
+        requires
+            self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
+            nor_evaluation(value.circuit.netlist_model(), input, output),
+        ensures
+            gate_values_match(input, value.circuit.netlist_model().gates@, gates),
+            gates.len() == value.circuit.netlist_model().gates@.len(),
+            source_outputs_match(&prepared.typed.literals.wiring->Checked_0,
+                port_values(value.circuit.input_layout_model(), input), expanded_definition_values(&value.circuit, input, gates),
+                port_values(value.circuit.output_layout_model(), output)),
+    {
+        let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let circuit = &value.circuit;
+        let netlist = circuit.netlist_model();
+        let drivers = scope.wiring.drivers.outputs@;
+        projected_lowering_ports(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
+            selected, bit_limit, gate_limit, circuit);
+        reveal(UseAliases::routine_ports_result);
+        reveal(nor_evaluation);
+        let gates = choose|gates: Seq<bool>| #[trigger] gate_values_match(input, netlist.gates@, gates)
+            && gates.len() == netlist.gates@.len() && output_values_match(input, gates, netlist.outputs@, output);
+        reveal(UseAliases::template_port_widths_match);
+        projected_lowering_output_values(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
+            selected, bit_limit, gate_limit, circuit, input, gates, output);
+        let incoming = port_values(circuit.input_layout_model(), input);
+        let values = expanded_definition_values(circuit, input, gates);
+        let outgoing = port_values(circuit.output_layout_model(), output);
+        assert forall|i: int| 0 <= i < outgoing.len() implies {
+            let driver = #[trigger] drivers[i];
+            match driver {
+                OutputDriver::Input(port) => port < incoming.len(),
+                OutputDriver::Definition(index) => index < values.len(),
+            }
+        } by {
+            assert(bit_driver_width(scope.inputs@, slots@, drivers[i]) == Some(scope.outputs@[i]));
+        };
+        source_outputs_from_driver_values(scope.wiring, incoming, values, outgoing);
+        gates
     }
 
     /// 厳格解析と型検査を終えた本体を、先行する関数のネットリストを使って配線へ変換する。

@@ -818,7 +818,7 @@ spec fn source_bit_vector_value(
     &&& value == Seq::new(width as nat, |bit: int| bit_literal_value_at(bytes, bit as nat))
 }
 
-spec fn source_outputs_match(
+pub(super) closed spec fn source_outputs_match(
     wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
 ) -> bool {
     &&& outputs.len() == wiring.drivers.signature.outputs@.len()
@@ -838,6 +838,27 @@ spec fn source_output_at(
     &&& outputs[i] == driver_values(inputs, values, driver)
 }
 
+/// 宣言順に並べた出力値を、ソース上の出力の参照評価に対応付ける。
+pub(super) proof fn source_outputs_from_driver_values(
+    wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
+)
+    requires
+        outputs.len() == wiring.drivers.outputs@.len() == wiring.drivers.signature.outputs@.len(),
+        forall|i: int| 0 <= i < outputs.len() ==> {
+            let driver = #[trigger] wiring.drivers.outputs@[i];
+            match driver {
+                OutputDriver::Input(port) => port < inputs.len(),
+                OutputDriver::Definition(index) => index < values.len(),
+            }
+        },
+        forall|i: int| 0 <= i < outputs.len() ==>
+            (#[trigger] outputs[i]) == driver_values(inputs, values, wiring.drivers.outputs@[i]),
+    ensures source_outputs_match(wiring, inputs, values, outputs),
+{
+    assert forall|i: int| 0 <= i < outputs.len() implies
+        #[trigger] source_output_at(wiring, inputs, values, outputs, i) by {};
+}
+
 proof fn source_outputs_follow_wiring(
     checked: &CheckedBitFunc, wiring: &FuncWiring, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, outputs: Seq<Seq<bool>>,
 )
@@ -852,13 +873,17 @@ proof fn source_outputs_follow_wiring(
 {
     reveal(checked_bit_func_available);
     reveal(bit_func_definitions_match);
-    assert forall|i: int| 0 <= i < outputs.len() implies
-        #[trigger] source_output_at(wiring, inputs, values, outputs, i) by {
-        let driver = wiring.drivers.outputs@[i];
-        assert(checked.output_drivers@[i] == driver);
+    assert forall|i: int| 0 <= i < outputs.len() implies {
+        let driver = #[trigger] wiring.drivers.outputs@[i];
+        match driver {
+            OutputDriver::Input(port) => port < inputs.len(),
+            OutputDriver::Definition(index) => index < values.len(),
+        }
+    } by {
+        let driver = checked.output_drivers@[i];
         assert(bit_driver_width(checked.input_widths@, checked.definitions@, driver) == Some(checked.output_widths@[i]));
-        assert(outputs[i] == driver_values(inputs, values, driver));
     };
+    source_outputs_from_driver_values(wiring, inputs, values, outputs);
 }
 
 proof fn atomic_value_intro(

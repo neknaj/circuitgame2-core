@@ -26,9 +26,9 @@ use super::expansion::{CheckedExpansionCall, source_call_arguments_match};
 #[cfg(verus_only)]
 use super::super::FuncWiringResult;
 #[cfg(verus_only)]
-use super::semantics::checked_definition_values;
+use super::semantics::{checked_definition_values, driver_values};
 #[cfg(verus_only)]
-use crate::netlist::{gate_values_match, nor_evaluation};
+use crate::netlist::{gate_values_match, nor_evaluation, output_values_match};
 #[cfg(verus_only)]
 pub use evaluation::{bit_func_lowering_preserves_evaluation, port_values};
 
@@ -310,6 +310,38 @@ pub(super) proof fn projected_lowering_local_values(
         mixed_function_local_value(&body, &layouts, forms, bindings, outputs, drivers, layout_limit, gate_limit,
             value, steps, i, input, gates);
     };
+}
+
+/// 展開後のネットリストの出力を、宣言順に各駆動元の値へ対応付ける。
+pub(super) proof fn projected_lowering_output_values(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, layout_limit: usize, gate_limit: usize,
+    value: &LoweredBitFunc, input: Seq<bool>, gates: Seq<bool>, output: Seq<bool>,
+)
+    requires
+        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, Ok(*value)),
+        outputs.len() == drivers.len(),
+        forall|i: int| 0 <= i < drivers.len() ==>
+            bit_driver_width(inputs, definitions, #[trigger] drivers[i]) == Some(outputs[i]),
+        input.len() == value.input_layout_model().total_bits_model(),
+        gates.len() == value.netlist_model().gates@.len(),
+        output.len() == value.netlist_model().outputs@.len(),
+        output_values_match(input, gates, value.netlist_model().outputs@, output),
+    ensures ({
+        let incoming = port_values(value.input_layout_model(), input);
+        let values = expanded_definition_values(value, input, gates);
+        let outgoing = port_values(value.output_layout_model(), output);
+        &&& incoming.len() == inputs.len()
+        &&& values.len() == definitions.len()
+        &&& outgoing.len() == drivers.len()
+        &&& forall|i: int| 0 <= i < outgoing.len() ==>
+            (#[trigger] outgoing[i]) == driver_values(incoming, values, drivers[i])
+    }),
+{
+    let (_, layouts, _, _) =
+        projected_lowering_success(inputs, definitions, outputs, drivers, forms, selected, layout_limit, gate_limit, value);
+    evaluation::output_ports_follow_drivers(inputs, definitions, outputs, drivers, layout_limit, &layouts,
+        value.definition_wires@, value.netlist.outputs@, input, gates, output);
 }
 
 /// 展開結果から、元の引数と左辺に対応する呼び出し先の評価を取り出す。

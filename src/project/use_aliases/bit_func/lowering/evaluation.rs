@@ -319,6 +319,60 @@ pub(super) proof fn slot_values_match_wiring(
     }
 }
 
+/// 各出力ポートを、宣言で指定した駆動元の値に対応付ける。
+pub(super) proof fn output_ports_follow_drivers(
+    input_widths: Seq<u64>, definitions: Seq<CheckedBitDefinition>, output_widths: Seq<u64>, drivers: Seq<OutputDriver>,
+    capacity: usize, layouts: &Layouts, wires: Seq<Wire>, output_wires: Seq<Wire>,
+    input: Seq<bool>, gates: Seq<bool>, output: Seq<bool>,
+)
+    requires
+        body_layouts_result(input_widths, definitions, output_widths, capacity, Ok(*layouts)),
+        output_widths.len() == drivers.len(),
+        forall|i: int| 0 <= i < drivers.len() ==>
+            bit_driver_width(input_widths, definitions, #[trigger] drivers[i]) == Some(output_widths[i]),
+        input.len() == layouts.inputs.total_bits_model(),
+        wires.len() == layouts.definitions.total_bits_model(),
+        wires_available(wires, layouts.inputs.total_bits_model(), gates.len()),
+        output.len() == layouts.outputs.total_bits_model(),
+        body_output_wiring_matches(drivers, layouts, wires, output_wires, drivers.len() as int),
+        output_values_match(input, gates, output_wires, output),
+    ensures ({
+        let inputs = port_values(&layouts.inputs, input);
+        let values = definition_values_from_wires(&layouts.definitions, wires, input, gates);
+        let outputs = port_values(&layouts.outputs, output);
+        &&& inputs.len() == input_widths.len()
+        &&& values.len() == definitions.len()
+        &&& outputs.len() == drivers.len()
+        &&& forall|i: int| 0 <= i < outputs.len() ==>
+            (#[trigger] outputs[i]) == driver_values(inputs, values, drivers[i])
+    }),
+{
+    reveal(port_values);
+    let inputs = port_values(&layouts.inputs, input);
+    let values = definition_values_from_wires(&layouts.definitions, wires, input, gates);
+    let outputs = port_values(&layouts.outputs, output);
+    let scope = definitions.len() as int;
+    port_bit_layout_size(definition_widths(definitions), capacity, &layouts.definitions);
+    assert(values.take(scope) =~= values);
+    assert forall|i: int| 0 <= i < outputs.len() implies
+        (#[trigger] outputs[i]) == driver_values(inputs, values, drivers[i]) by {
+        let driver = drivers[i];
+        let range = layouts.outputs.ranges_model()[i];
+        let port = outputs[i];
+        let expected = driver_values(inputs, values, driver);
+        let width = output_widths[i];
+        driver_bit_value(input_widths, definitions, layouts, wires, capacity, scope, input, gates, driver, width, 0);
+        assert forall|bit: int| 0 <= bit < width implies (#[trigger] port[bit]) == (#[trigger] expected[bit]) by {
+            driver_bit_value(input_widths, definitions, layouts, wires, capacity, scope, input, gates, driver, width, bit);
+            let j = range.start + bit;
+            assert(port[bit] == output[j]);
+            assert(output_wires[j] == driver_wire(layouts.inputs.ranges_model(),
+                layouts.definitions.ranges_model(), wires, driver, bit));
+        };
+        assert(port =~= expected);
+    };
+}
+
 /// 合法な入力とネットリストの評価結果をポートごとに組み直すと、関数の参照評価になる。
 pub(super) proof fn lowered_bit_func_refines_evaluation(
     source: &CheckedBitFunc, capacity: usize, lowered: &LoweredBitFunc, input: Seq<bool>, output: Seq<bool>,
@@ -369,33 +423,12 @@ pub(super) proof fn lowered_bit_func_refines_evaluation(
         };
     };
     assert(bit_func_outputs_match(source, inputs, values, outputs)) by {
-        port_bit_layout_size(definition_widths(source.definitions@), capacity, &lowered.layouts.definitions);
+        reveal(checked_bit_func_available);
         reveal(output_wiring_matches);
-        assert(outputs.len() == source.output_drivers@.len()) by { reveal(checked_bit_func_available); };
-        assert forall|i: int| 0 <= i < outputs.len() implies
-            (#[trigger] outputs[i]) == driver_values(inputs, values, source.output_drivers@[i]) by {
-            use_bit_output(source, i);
-            let driver = source.output_drivers@[i];
-            let range = lowered.layouts.outputs.ranges_model()[i];
-            let port = outputs[i];
-            let scope = source.definitions@.len() as int;
-            assert(values.take(scope) =~= values) by { reveal(definition_wire_values); };
-            let expected = driver_values(inputs, values, driver);
-            let width = source.output_widths@[i];
-            assert(port == output.subrange(range.start as int, range.end as int));
-            reveal(definition_wire_values);
-            driver_bit_value(source.input_widths@, source.definitions@, &lowered.layouts, wiring.definitions, capacity, scope, input, gates, driver, width, 0);
-            assert forall|bit: int| 0 <= bit < width implies
-                (#[trigger] port[bit]) == (#[trigger] expected[bit]) by {
-                driver_bit_value(source.input_widths@, source.definitions@, &lowered.layouts, wiring.definitions, capacity, scope, input, gates, driver, width, bit);
-                let j = range.start + bit;
-                assert(port[bit] == output[j]);
-                assert(lowered.netlist.outputs@[range.start + bit] == driver_wire(
-                    lowered.layouts.inputs.ranges_model(), lowered.layouts.definitions.ranges_model(),
-                    lowered.definition_wires@, driver, bit));
-            };
-            assert(port =~= expected);
-        };
+        reveal(definition_wire_values);
+        output_ports_follow_drivers(source.input_widths@, source.definitions@, source.output_widths@,
+            source.output_drivers@, capacity, &lowered.layouts, wiring.definitions, lowered.netlist.outputs@,
+            input, gates, output);
     };
     bit_func_evaluation_intro(source, inputs, values, outputs);
 }
