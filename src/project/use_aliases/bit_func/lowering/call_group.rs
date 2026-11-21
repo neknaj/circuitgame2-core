@@ -2,16 +2,22 @@
 
 use super::super::expansion::CheckedExpansionCall;
 use super::super::instances::append_instance_outputs;
+use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
 use super::call_arguments::{CallWiringError, CallerArguments, lower_projected_call};
-use super::{Layouts, LoweredBitFunc, NorGate, Wire, Vec};
+use super::call_arguments::child_calls::{NestedCallWiringError, bind_child_calls, lower_root_with_children};
+use super::{Layouts, LoweredBitFunc, LoweringBody, NorGate, Wire, Vec};
 use super::super::super::call_arity::ProjectedCallArgument;
 use super::super::super::function_atoms::copy_location;
-use crate::project::LocatedName;
+use crate::project::{FunctionExpansionOrder, LocatedName, UseAliases};
 use crate::syntax::Form;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
 use super::call_arguments::{argument_prefix_wires, argument_wires_ready, layout_argument_ready};
+#[cfg(verus_only)]
+use super::call_arguments::child_calls::{ChildCall, child_call_binding, nested_root_wiring_result};
+#[cfg(verus_only)]
+use super::mixed::resolved_call_fits_body;
 #[cfg(verus_only)]
 use super::super::instances::{
     call_output_range_matches, instance_evaluates_from_caller, instance_gates_match, instance_outputs_match, instance_wire_values,
@@ -23,6 +29,7 @@ use crate::netlist::{
     gate_values_match, gates_available, nor_evaluation, nor_evaluation_ready, output_ports_available, output_values_match,
     port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, preceding_port_bits, wire_available, wire_value,
 };
+use crate::netlist::{NorNetlist, PortBitLayout};
 #[cfg(verus_only)]
 use crate::project::circuits::is_form_location;
 #[cfg(verus_only)]
@@ -296,6 +303,149 @@ pub(super) fn lower_call_group<'s, 'p, 'a>(
         reveal(wires_available);
         assert(call_group_wires_match(group, forms@, arguments@, caller, callee, before, state.model(),
             output_widths, invoked, mapped, produced));
+    }
+    Ok(())
+}
+
+#[verifier::opaque]
+spec fn nested_group_invocation_matches(
+    selected: &ResolvedTemplateCall, forms: Seq<Form>, caller: &Layouts, builtin: &(NorNetlist, PortBitLayout),
+    before: WiringView, invocation: CallerArguments, calls: Seq<ChildCall>,
+) -> bool {
+    let group = selected.group;
+    &&& invocation.source == group.expression.source && invocation.forms@ == forms
+    &&& invocation.inputs@ == caller.inputs.ranges_model() && invocation.definitions@ == caller.definitions.ranges_model()
+    &&& invocation.wires@ == before.definitions && invocation.child_ranges@.len() == 0 && invocation.child_wires@.len() == 0
+    &&& calls.len() == selected.children@.len()
+    &&& forall|i: int| 0 <= i < calls.len() ==>
+        child_call_binding(selected.children@[i], group.references, builtin, #[trigger] calls[i])
+}
+
+/// 子と根の配線履歴を保持し、根の出力を左辺のポート順に追加したことを表す。
+#[verifier::opaque]
+pub(super) closed spec fn nested_call_group_result(
+    selected: &ResolvedTemplateCall, forms: Seq<Form>, caller: &Layouts, builtin: &(NorNetlist, PortBitLayout),
+    before: WiringView, after: WiringView, gate_limit: usize, child_limit: usize, destination_widths: Seq<u64>,
+    result: Result<(), NestedCallWiringError>,
+) -> bool {
+    let group = selected.group;
+    let callee = selected.template.circuit_model();
+    let input_bits = caller.inputs.total_bits_model();
+    let output_widths = selected.template.output_widths_model();
+    let produced = after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int);
+    let root = match result { Ok(()) => Ok(produced), Err(error) => Err(error) };
+    &&& exists|calls: Seq<ChildCall>, invocation: CallerArguments|
+        #[trigger] nested_group_invocation_matches(selected, forms, caller, builtin, before, invocation, calls)
+        && nested_root_wiring_result(&invocation, calls, (group.references.end - group.references.start) as usize,
+            selected.arguments@, callee.input_layout_model(), callee.netlist_model(), before.gates, after.gates,
+            gate_limit, child_limit, input_bits, root)
+    &&& match result {
+        Ok(()) => {
+            &&& after.origins.len() == after.gates.len()
+            &&& after.origins.take(before.origins.len() as int) == before.origins
+            &&& forall|i: int| before.origins.len() <= i < after.origins.len() ==>
+                (#[trigger] after.origins[i]) == group.outputs.start
+            &&& after.definitions == before.definitions + produced
+            &&& after.definitions.len() == preceding_port_bits(destination_widths, group.outputs.end as nat)
+            &&& wires_available(after.definitions, input_bits, after.gates.len())
+            &&& forall|port: int, bit: int|
+                #![trigger after.definitions[caller.definitions.ranges_model()[group.outputs.start + port].start + bit]]
+                0 <= port < output_widths.len() && 0 <= bit < output_widths[port] ==>
+                    after.definitions[caller.definitions.ranges_model()[group.outputs.start + port].start + bit]
+                        == produced[callee.output_layout_model().ranges_model()[port].start + bit]
+        },
+        Err(_) => after.definitions == before.definitions && after.gates == before.gates && after.origins == before.origins,
+    }
+}
+
+/// 後順の子と根を展開し、根の出力と全ゲートの由来を呼び出し元へ追加する。
+///
+/// # Errors
+///
+/// 最初に失敗した子または根の診断を返す。失敗時は定義配線、ゲート列、由来を保つ。
+pub(super) fn lower_nested_call_group<'s, 'p, 'a>(
+    selected: &'s ResolvedTemplateCall<'s, 'p, 'a>, forms: &[Form], caller: &Layouts,
+    builtin: &'s (NorNetlist, PortBitLayout),
+    state: &mut BodyWiring, gate_limit: usize, child_limit: usize,
+    Ghost(body): Ghost<&LoweringBody<'_, 'p, 'a>>,
+    Ghost(aliases): Ghost<&UseAliases<'_, 'p, 'a>>,
+    Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, u64, Seq<ProjectedCallArgument>)>,
+    Ghost(caller_limit): Ghost<usize>,
+) -> (result: Result<(), NestedCallWiringError<'p, 'a>>)
+    requires
+        aliases.expansion_child_scope(selected.group),
+        aliases.resolved_expression_calls_match(context.0, context.1, context.2, selected.group.postorder, context.3, selected.children@),
+        super::call_arguments::builtin_nor_call_matches(builtin),
+        super::body_definition_layouts(body.input_widths@, body.definitions@, caller_limit, caller),
+        resolved_call_fits_body(*selected, body.input_widths@, body.definitions@, forms@, context.2),
+        port_bit_layout_result(selected.template.input_widths_model(), selected.template.bit_limit_model(),
+            Ok(*selected.template.circuit_model().input_layout_model())),
+        port_bit_layout_result(selected.template.output_widths_model(), selected.template.bit_limit_model(),
+            Ok(*selected.template.circuit_model().output_layout_model())),
+        selected.arguments@.len() == selected.template.input_widths_model().len(),
+        nor_evaluation_ready(selected.template.circuit_model().netlist_model(),
+            selected.template.circuit_model().input_layout_model().total_bits_model() as nat),
+        selected.template.circuit_model().netlist_model().outputs@.len()
+            == selected.template.circuit_model().output_layout_model().total_bits_model(),
+        old(state).definitions@.len() == preceding_port_bits(super::definition_widths(body.definitions@),
+            selected.group.outputs.start as nat),
+        old(state).origins@.len() == old(state).gates@.len() <= gate_limit,
+        gates_available(old(state).gates@, caller.inputs.total_bits_model() as nat, old(state).gates@.len() as int),
+        wires_available(old(state).definitions@, caller.inputs.total_bits_model(), old(state).gates@.len()),
+    ensures nested_call_group_result(selected, forms@, caller, builtin, old(state).model(), final(state).model(),
+        gate_limit, child_limit, super::definition_widths(body.definitions@), result),
+{
+    let group = selected.group;
+    let template = selected.template;
+    let callee = template.circuit();
+    let ghost input_bits = caller.inputs.total_bits_model();
+    let ghost widths = super::definition_widths(body.definitions@);
+    let ghost before = state.model();
+    let invocation = CallerArguments { source: group.expression.source, forms,
+        inputs: caller.inputs.ranges(), definitions: caller.definitions.ranges(), wires: state.definitions.as_slice(),
+        child_ranges: &[], child_wires: &[] };
+    let ghost invoked = invocation;
+    proof { super::body_inputs_end_within_layout(body, caller_limit, caller); }
+    let (count, children) = bind_child_calls(selected, builtin, Ghost(aliases), Ghost(context),
+        Ghost(&invocation), Ghost((body, caller, caller_limit)));
+    assert(nested_group_invocation_matches(selected, forms@, caller, builtin, before, invoked, children@)) by {
+        reveal(nested_group_invocation_matches);
+    };
+    let expanded = lower_root_with_children(&invocation, children.as_slice(), count, selected.arguments,
+        callee.inputs(), callee.netlist(), &mut state.gates, gate_limit, child_limit,
+        Ghost((template.input_widths_model(), template.bit_limit_model())), Ghost(input_bits));
+    let mut outputs = match expanded {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            assert(nested_call_group_result(selected, forms@, caller, builtin, before, state.model(),
+                gate_limit, child_limit, widths, Err(error))) by {
+                reveal(nested_call_group_result);
+                reveal(nested_root_wiring_result);
+                assert(nested_root_wiring_result(&invoked, children@, count, selected.arguments@, callee.input_layout_model(),
+                    callee.netlist_model(), before.gates, state.gates@, gate_limit, child_limit, input_bits, Err(error)));
+            };
+            return Err(error);
+        },
+    };
+    let ghost produced = outputs@;
+    proof {
+        reveal(nested_root_wiring_result);
+        existing_wires_keep_availability(before.definitions, input_bits, before.gates.len(), state.gates@.len());
+        reveal(wires_available);
+    }
+    append_call_origins(&mut state.origins, state.gates.len(), group.outputs.start);
+    append_instance_outputs(&mut state.definitions, &mut outputs, group.outputs.start,
+        Ghost(widths), Ghost(template.output_widths_model()), Ghost(&caller.definitions), Ghost(callee.output_layout_model()),
+        Ghost(caller_limit), Ghost(template.bit_limit_model()), Ghost(input_bits as nat), Ghost(state.gates@.len()));
+    proof {
+        assert(state.definitions@.subrange(before.definitions.len() as int, state.definitions@.len() as int) =~= produced);
+        assert(nested_call_group_result(selected, forms@, caller, builtin, before, state.model(),
+            gate_limit, child_limit, widths, Ok(()))) by {
+            reveal(nested_call_group_result);
+            reveal(wires_available);
+            assert(nested_root_wiring_result(&invoked, children@, count, selected.arguments@, callee.input_layout_model(),
+                callee.netlist_model(), before.gates, state.gates@, gate_limit, child_limit, input_bits, Ok(produced)));
+        };
     }
     Ok(())
 }

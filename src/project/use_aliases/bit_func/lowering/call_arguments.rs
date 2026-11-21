@@ -1,6 +1,6 @@
 //! 展開に渡す実引数を、呼び出し先の入力ポート順で配線に変換する。
 
-mod child_calls;
+pub(super) mod child_calls;
 
 use super::{append_bit_literal_wires, lower_driver_bit};
 use super::super::instances::{append_instance, append_instance_to};
@@ -1007,6 +1007,7 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
     use super::super::{BitFuncRhs, CheckedBitDefinition};
     use super::{LoweringBody, prepare_body_layouts};
+    use super::call_group::{BodyWiring, lower_nested_call_group};
     use child_calls::{NestedCallWiringError, bind_child_calls, lower_root_with_children};
 
     let project = parse_circuit_project(&[SourceSnapshot {
@@ -1073,9 +1074,22 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
         else { panic!("expected a root argument error"); };
     assert_eq!(&site.source.text[site.span], "(id (nor (nor earlier a) 0))");
     assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
-    let outputs = lower_root_with_children(&base, &calls, count, parent.arguments, parent_circuit.inputs(),
-        parent_circuit.netlist(), &mut gates, 3, 3, Ghost((seq![1u64], 1usize)), Ghost(1usize)).unwrap();
-    let result = NorNetlist { input_count: 1, gates, outputs };
+    let mut state = BodyWiring {
+        definitions: alloc::vec![Wire::Constant(false)], gates, origins: alloc::vec![0],
+    };
+    let failed = lower_nested_call_group(parent, &parsed.syntax.forms, &layouts, &builtin,
+        &mut state, 2, 3, Ghost(&_body), Ghost(&aliases),
+        Ghost((&plan, &templates, 1u64, prepared.projections.call_arguments.arguments@)), Ghost(2usize));
+    assert!(matches!(failed, Err(NestedCallWiringError::Child(1, ChildCallWiringError::GateCapacity(_)))));
+    assert!(matches!(state.definitions.as_slice(), [Wire::Constant(false)]));
+    assert!(matches!(state.gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
+    assert_eq!(state.origins, [0]);
+    lower_nested_call_group(parent, &parsed.syntax.forms, &layouts, &builtin, &mut state, 3, 3,
+        Ghost(&_body), Ghost(&aliases), Ghost((&plan, &templates, 1u64, prepared.projections.call_arguments.arguments@)),
+        Ghost(2usize)).unwrap();
+    assert_eq!(state.origins, [0, 1, 1]);
+    assert!(matches!(state.definitions.as_slice(), [Wire::Constant(false), Wire::Gate(2)]));
+    let result = NorNetlist { input_count: 1, gates: state.gates, outputs: state.definitions.split_off(1) };
     assert_eq!(result.evaluate(&[false]).unwrap(), [false]);
     assert_eq!(result.evaluate(&[true]).unwrap(), [true]);
 }

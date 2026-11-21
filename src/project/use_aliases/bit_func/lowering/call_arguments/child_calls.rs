@@ -1076,6 +1076,43 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nested_root
     }
 }
 
+#[verifier::opaque]
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nested_root_wiring_result(
+    caller: &CallerArguments, calls: Seq<ChildCall>, reference_count: usize, arguments: Seq<ProjectedCallArgument>,
+    layout: &PortBitLayout, callee: &NorNetlist, before: Seq<NorGate>, after: Seq<NorGate>,
+    capacity: usize, output_capacity: usize, input_bits: usize, result: Result<Seq<Wire>, NestedCallWiringError>,
+) -> bool {
+    &&& result matches Ok(outputs) ==> {
+        &&& after.len() == before.len() + child_sizes(calls, calls.len()).0 + callee.gates@.len() <= capacity
+        &&& after.take(before.len() as int) == before
+        &&& gates_available(after, input_bits as nat, after.len() as int)
+        &&& outputs.len() == callee.outputs@.len()
+        &&& output_ports_available(outputs, input_bits as nat, after.len(), outputs.len() as int)
+        &&& nested_root_wiring_matches(caller, calls, reference_count, arguments, layout, callee,
+            before, after, input_bits, outputs)
+    }
+    &&& result matches Err(error) ==> {
+        &&& after == before
+        &&& match error {
+            NestedCallWiringError::Child(index, failure) => child_wiring_failure(caller, calls, index, failure,
+                before.len() as int, capacity, output_capacity),
+            NestedCallWiringError::Root(failure) => {
+                let size = before.len() + child_sizes(calls, calls.len()).0;
+                &&& child_arguments_determined(calls, calls.len())
+                &&& size <= capacity && child_sizes(calls, calls.len()).1 <= output_capacity
+                &&& match failure {
+                    CallWiringError::DeferredArgument(site) =>
+                        exists|i: int| 0 <= i < arguments.len() && (#[trigger] arguments[i]).source is Deferred
+                            && is_form_location(caller.source, caller.forms@[arguments[i].form as int], site)
+                            && forall|j: int| 0 <= j < i ==> !((#[trigger] arguments[j]).source is Deferred),
+                    CallWiringError::GateCapacity => size + callee.gates@.len() > capacity
+                        && forall|j: int| 0 <= j < arguments.len() ==> !((#[trigger] arguments[j]).source is Deferred),
+                }
+            },
+        }
+    }
+}
+
 /// 子を後順に展開し、その出力を根の入力へ渡す。
 ///
 /// # Errors
@@ -1103,36 +1140,11 @@ pub(in crate::project::use_aliases::bit_func::lowering) fn lower_root_with_child
         arguments@.len() == root_layout.0.len(),
         nor_evaluation_ready(callee, layout.total_bits_model() as nat),
         root_arguments_fit_children(caller, calls@, arguments@, layout),
-    ensures
-        result matches Ok(outputs) ==> {
-            &&& final(gates)@.len() == old(gates)@.len() + child_sizes(calls@, calls@.len()).0 + callee.gates@.len() <= capacity
-            &&& final(gates)@.take(old(gates)@.len() as int) == old(gates)@
-            &&& gates_available(final(gates)@, input_bits as nat, final(gates)@.len() as int)
-            &&& output_ports_available(outputs@, input_bits as nat, final(gates)@.len(), outputs@.len() as int)
-            &&& nested_root_wiring_matches(caller, calls@, reference_count, arguments@, layout, callee,
-                old(gates)@, final(gates)@, input_bits, outputs@)
-        },
-        result matches Err(error) ==> {
-            &&& final(gates)@ == old(gates)@
-            &&& match error {
-                NestedCallWiringError::Child(index, failure) => child_wiring_failure(caller, calls@, index, failure,
-                    old(gates)@.len() as int, capacity, output_capacity),
-                NestedCallWiringError::Root(failure) => {
-                    let size = old(gates)@.len() + child_sizes(calls@, calls@.len()).0;
-                    &&& child_arguments_determined(calls@, calls@.len())
-                    &&& size <= capacity && child_sizes(calls@, calls@.len()).1 <= output_capacity
-                    &&& match failure {
-                        CallWiringError::DeferredArgument(site) =>
-                            exists|i: int| 0 <= i < arguments@.len() && (#[trigger] arguments@[i]).source is Deferred
-                                && is_form_location(caller.source, caller.forms@[arguments@[i].form as int], site)
-                                && forall|j: int| 0 <= j < i ==> !((#[trigger] arguments@[j]).source is Deferred),
-                        CallWiringError::GateCapacity => size + callee.gates@.len() > capacity
-                            && forall|j: int| 0 <= j < arguments@.len() ==> !((#[trigger] arguments@[j]).source is Deferred),
-                    }
-                },
-            }
-        },
+    ensures nested_root_wiring_result(caller, calls@, reference_count, arguments@, layout, callee,
+        old(gates)@, final(gates)@, capacity, output_capacity, input_bits,
+        match result { Ok(outputs) => Ok(outputs@), Err(error) => Err(error) }),
 {
+    proof { reveal(nested_root_wiring_result); }
     let checkpoint = gates.len();
     let ghost initial = gates@;
     let table = match lower_child_calls(caller, calls, reference_count, gates, capacity, output_capacity, Ghost(input_bits)) {
