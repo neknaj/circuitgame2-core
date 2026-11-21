@@ -6,7 +6,7 @@ use super::super::StructureTypeError;
 use super::frontend::{BitFuncError, contains_structure_port, ExpandedBody, ExpandedBodyError};
 #[cfg(verus_only)]
 use super::frontend::has_structure_port;
-use super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
+use super::expansion::{CheckedExpansionCall, PreparedExpansionBody, PreparedExpressionCall};
 #[cfg(verus_only)]
 use super::{lowered_bit_func_result, lowering::standalone_template_layouts};
 #[cfg(verus_only)]
@@ -46,6 +46,16 @@ pub(super) struct ResolvedTemplateCall<'s, 'p, 'a> {
     pub(super) group: &'s CheckedExpansionCall<'p, 'a>,
     pub(super) arguments: &'s [ProjectedCallArgument],
     pub(super) template: &'s FunctionTemplate<'p, 'a>,
+    /// 内側から外側へ並べた、定義の右辺にある子呼び出し。
+    pub(super) children: Vec<ResolvedExpressionCall<'s, 'p, 'a>>,
+}
+
+/// 子の呼び出しと、型検査済みの実引数から切り出した区間。
+pub(super) struct ResolvedExpressionCall<'s, 'p, 'a> {
+    pub(super) child: &'s PreparedExpressionCall<'p, 'a>,
+    pub(super) arguments: &'s [ProjectedCallArgument],
+    /// 基底 NOR では `None`。通常関数では展開済みのネットリストを指す。
+    pub(super) template: Option<&'s FunctionTemplate<'p, 'a>>,
 }
 
 /// 展開順の先頭から格納する。実際の配列の添字には頂点番号を使う。
@@ -714,6 +724,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let call = #[trigger] selected[i];
             &&& self.resolved_template_call_matches(plan, caller, prepared, i, call)
             &&& table.slots_model()[call.group.vertex as int] == Some(*call.template)
+            &&& self.resolved_expression_calls_match(plan, table, caller.2, call.group.postorder,
+                prepared.projections.call_arguments.arguments@, call.children@)
         }
     }
 
@@ -749,6 +761,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let call = #[trigger] selected@[i];
                     &&& self.resolved_template_call_matches(plan, caller, &prepared, i, call)
                     &&& table.slots_model()[call.group.vertex as int] == Some(*call.template)
+                    &&& self.resolved_expression_calls_match(plan, table, caller.2, call.group.postorder,
+                        arguments@, call.children@)
                 },
             decreases prepared.calls@.len() - index,
         {
@@ -759,7 +773,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             let template = self.template_for_expansion_call(plan, table, group, Ghost(caller), Ghost(&prepared), Ghost(index as int));
             let inputs = slice_subrange(arguments, group.arguments.start, group.arguments.end);
-            let call = ResolvedTemplateCall { group, arguments: inputs, template };
+            let children = self.select_expression_calls(plan, table, group, arguments,
+                Ghost(caller), Ghost(&prepared), Ghost(index as int));
+            let call = ResolvedTemplateCall { group, arguments: inputs, template, children };
             proof {
                 let target = plan.position_model(group._order@.0)->Some_0;
                 self.template_port_evidence(target, caller.2, template);
@@ -773,7 +789,117 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let row = #[trigger] selected@[i];
                 &&& self.resolved_template_call_matches(plan, caller, &prepared, i, row)
                 &&& table.slots_model()[row.group.vertex as int] == Some(*row.template)
+                &&& self.resolved_expression_calls_match(plan, table, caller.2, row.group.postorder,
+                    arguments@, row.children@)
             } by {
+                if i < index { assert(selected@[i] == previous[i]); }
+            };
+            index += 1;
+        }
+        selected
+    }
+
+    #[verifier::opaque]
+    pub(super) open spec fn resolved_expression_call_matches(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, limit: u64,
+        arguments: Seq<ProjectedCallArgument>, child: PreparedExpressionCall, selected: ResolvedExpressionCall,
+    ) -> bool {
+        let span = child.arguments;
+        &&& *selected.child == child
+        &&& span.start <= span.end <= arguments.len()
+        &&& selected.arguments@ == arguments.subrange(span.start as int, span.end as int)
+        &&& match (child._signature@.signature, selected.template) {
+            (crate::project::FuncCallSignature::Nor, None) => child.vertex.is_none() && selected.arguments@.len() == 2,
+            (crate::project::FuncCallSignature::Function(signature), Some(template)) =>
+                match (child.vertex, child._rank@) {
+                    (Some(vertex), Some(rank)) => {
+                        &&& vertex < table.slots_model().len()
+                        &&& 0 <= rank < table.next_rank()
+                        &&& rank < plan.order_model().len() && plan.order_model()[rank] == vertex
+                        &&& table.slots_model()[vertex as int] == Some(*template)
+                        &&& plan.position_model(rank) matches Some(target)
+                            && self.template_abi_matches(target, limit, template)
+                        &&& signature.inputs@ == template.signature_model().inputs@
+                        &&& selected.arguments@.len() == signature.inputs@.len()
+                        &&& signature.outputs@ == template.signature_model().outputs@
+                        &&& signature.output_inputs@ == template.signature_model().output_inputs@
+                    },
+                    _ => false,
+                },
+            _ => false,
+        }
+    }
+
+    pub(super) open spec fn resolved_expression_calls_match(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, limit: u64,
+        children: Option<Vec<PreparedExpressionCall>>, arguments: Seq<ProjectedCallArgument>,
+        selected: Seq<ResolvedExpressionCall>,
+    ) -> bool {
+        match children {
+            None => selected.len() == 0,
+            Some(children) => selected.len() == children@.len()
+                && forall|i: int| 0 <= i < selected.len() ==> self.resolved_expression_call_matches(
+                    plan, table, limit, arguments, children@[i], #[trigger] selected[i]),
+        }
+    }
+
+    /// 子の実引数を借用し、保存済みの頂点番号で展開済みの回路を引く。
+    fn select_expression_calls<'s>(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, table: &'s FunctionTemplates<'p, 'a>,
+        group: &'s CheckedExpansionCall<'p, 'a>, arguments: &'s [ProjectedCallArgument],
+        Ghost(caller): Ghost<(usize, usize, u64)>, Ghost(prepared): Ghost<&PreparedExpansionBody<'p, 'a>>,
+        Ghost(group_index): Ghost<int>,
+    ) -> (selected: Vec<ResolvedExpressionCall<'s, 'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.function_templates_match(plan, caller.2, table),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len() && prepared.calls@[group_index] == *group,
+            group._order@.1 == table.next_rank(),
+            arguments@ == prepared.projections.call_arguments.arguments@,
+        ensures self.resolved_expression_calls_match(plan, table, caller.2, group.postorder, arguments@, selected@),
+    {
+        let mut selected: Vec<ResolvedExpressionCall<'s, 'p, 'a>> = Vec::new();
+        let Some(children) = &group.postorder else {
+            return selected;
+        };
+        let mut index = 0;
+        while index < children.len()
+            invariant
+                self.can_resolve(),
+                self.function_templates_match(plan, caller.2, table),
+                self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+                0 <= group_index < prepared.calls@.len() && prepared.calls@[group_index] == *group,
+                group._order@.1 == table.next_rank(), group.postorder == Some(*children),
+                arguments@ == prepared.projections.call_arguments.arguments@,
+                index == selected@.len() <= children@.len(),
+                forall|i: int| 0 <= i < selected@.len() ==> self.resolved_expression_call_matches(
+                    plan, table, caller.2, arguments@, children@[i], #[trigger] selected@[i]),
+            decreases children@.len() - index,
+        {
+            let child = &children[index];
+            proof { self.expansion_child_template_evidence(*plan, caller, prepared, group_index, index as int); }
+            let template = if let Some(vertex) = child.vertex {
+                let ghost rank = child._rank@->Some_0;
+                let template = self.get_function_template(plan, table, vertex, Ghost(rank), Ghost(caller.2));
+                proof {
+                    reveal(UseAliases::function_template_matches);
+                    let target = plan.position_model(rank)->Some_0;
+                    self.typed_routine_signatures_agree(target.0, target.1, caller.2,
+                        child._signature@.signature->Function_0, template.signature_model());
+                }
+                Some(template)
+            } else { None };
+            let inputs = slice_subrange(arguments, child.arguments.start, child.arguments.end);
+            let call = ResolvedExpressionCall { child, arguments: inputs, template };
+            assert(self.resolved_expression_call_matches(plan, table, caller.2, arguments@, *child, call)) by {
+                reveal(UseAliases::resolved_expression_call_matches);
+                reveal(UseAliases::function_templates_match);
+            };
+            let ghost previous = selected@;
+            selected.push(call);
+            assert forall|i: int| 0 <= i < selected@.len() implies self.resolved_expression_call_matches(
+                plan, table, caller.2, arguments@, children@[i], #[trigger] selected@[i]) by {
                 if i < index { assert(selected@[i] == previous[i]); }
             };
             index += 1;
@@ -814,6 +940,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         template
     }
+}
+
+#[cfg(all(test, not(verus_only)))]
+#[test]
+fn selects_a_template_for_the_same_child_and_keeps_nor_builtin() {
+    use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "calls.ncg2",
+        revision: 1,
+        text: "(using nor) (func id (in a) (out a))
+               (func caller (in a) (out y) (def y (id (id (nor a a)))))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let plan = aliases.prepare_function_expansion().unwrap();
+    let mut table = aliases.new_function_templates(&plan, Ghost(8u64));
+    let position = plan.get(0).unwrap();
+    let checked = aliases.check_bit_func(position.0, position.1, 8).unwrap();
+    let circuit = checked.lower_bit_func(8).unwrap();
+    let template = aliases.standalone_function_template(position, 8, checked, circuit, 8);
+    aliases.insert_function_template(&plan, &mut table, template, Ghost(8u64));
+    let position = plan.get(1).unwrap();
+    let prepared = aliases.prepare_expansion_body(&plan, position.0, position.1, 8).unwrap();
+    let selected = aliases.resolve_template_calls(&plan, &table, &prepared.calls,
+        &prepared.projections.call_arguments.arguments, Ghost(prepared), Ghost((position.0, position.1, 8u64)));
+    let children = &selected[0].children;
+    assert!(children[0].template.is_none());
+    assert_eq!(children[0].arguments.len(), 2);
+    assert!(core::ptr::eq(children[1].template.unwrap(), selected[0].template));
+    assert_eq!(children[1].arguments.len(), 1);
 }
 
 } // verus!

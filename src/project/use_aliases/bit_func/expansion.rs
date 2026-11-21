@@ -865,6 +865,54 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 子の引数区間と、構文上の同じ呼び出しから得た署名を取り出す。
+    pub(super) proof fn expansion_child_template_evidence(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, group_index: int, child_index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            prepared.calls@[group_index].postorder matches Some(children) && 0 <= child_index < children@.len(),
+        ensures ({
+            let group = prepared.calls@[group_index];
+            let child = group.postorder->Some_0@[child_index];
+            &&& child.arguments.start <= child.arguments.end <= prepared.projections.call_arguments.arguments@.len()
+            &&& match child._signature@.call.target {
+                FuncCallTarget::Nor => child.vertex.is_none() && child._signature@.signature is Nor
+                    && child.arguments.end - child.arguments.start == 2,
+                FuncCallTarget::Function { file, entry, .. } => {
+                    &&& child._rank@ matches Some(rank) && 0 <= rank < group._order@.1 < plan.order_model().len()
+                        && child.vertex == Some(plan.order_model()[rank]) && plan.position_model(rank) == Some((file, entry))
+                    &&& child._signature@.signature matches crate::project::FuncCallSignature::Function(signature)
+                        && self.typed_signature_evidence(file, entry, caller.2, Ok(Some(signature)))
+                        && child.arguments.end - child.arguments.start == signature.inputs@.len()
+                },
+            }
+        }),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::prepared_expression_children_match);
+        reveal(UseAliases::prepared_expression_call_matches);
+        let group = prepared.calls@[group_index];
+        let child = group.postorder->Some_0@[child_index];
+        let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+        let root = prepared.projections.calls@[group_index];
+        let definition = (root.definition - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize;
+        let row = parsed.definitions@[root.definition as int];
+        let local = (child.reference - row.references.start) as usize;
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        let projected = prepared.projections.call_arguments.arguments@.subrange(
+            child.arguments.start as int, child.arguments.end as int);
+        self.typed_call_arguments_ready(caller.0, caller.1, definition, local, caller.2, child._signature@);
+        self.checked_projected_input_count((caller.0, caller.1, definition, local), caller.2,
+            prepared.typed.types@, &wiring, child._signature@, projected);
+        if child._signature@.call.target is Function {
+            self.resolved_function_signature_evidence((caller.0, caller.1, definition, local), caller.2, child._signature@);
+        }
+    }
+
     fn prepare_expression_call(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, definition: usize,
         reference: usize, projections: &FuncProjections<'p, 'a>,

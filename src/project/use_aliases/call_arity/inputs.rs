@@ -670,8 +670,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.can_resolve(),
             self.projected_input_arguments(at, limit, types, wiring, projected),
             self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(Some(call))),
-            call.signature is Function,
-        ensures projected.len() == call.signature->Function_0.inputs@.len(),
+        ensures match call.signature {
+            FuncCallSignature::Nor => projected.len() == 2,
+            FuncCallSignature::Function(ports) => projected.len() == ports.inputs@.len(),
+        },
     {
         self.resolved_signature_excludes_no_call(at, limit, call);
         let (other, _, values) = self.projected_inputs_witness(at, limit, types, wiring, projected);
