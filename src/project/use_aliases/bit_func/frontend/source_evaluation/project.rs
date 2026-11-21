@@ -7,7 +7,7 @@ use super::*;
 use self::expressions::{NestedSourceArguments, source_expression_scope};
 use crate::project::FunctionExpansionOrder;
 use crate::netlist::nor_evaluation;
-use crate::project::use_aliases::bit_func::templates::FunctionTemplates;
+use crate::project::use_aliases::bit_func::templates::{FunctionTemplate, FunctionTemplates};
 use core::ops::Range;
 
 verus! {
@@ -319,6 +319,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] Self::template_invocation_matches(plan, table, invocation, input, output))
     }
 
+    /// 先行表から選んで評価した回路は、完成した表でも同じ順位の関数の評価を表す。
+    proof fn prior_template_invocation(
+        plan: &FunctionExpansionOrder, prior: &FunctionTemplates, table: &FunctionTemplates,
+        rank: int, template: &FunctionTemplate, input: Seq<bool>, output: Seq<bool>,
+    ) -> (invocation: SourceInvocation)
+        requires
+            0 <= rank < prior.next_rank(),
+            rank < plan.order_model().len(),
+            prior.slots_model().len() == table.slots_model().len(),
+            plan.order_model()[rank] < prior.slots_model().len(),
+            prior.slots_model()[plan.order_model()[rank] as int] == Some(*template),
+            forall|i: int| 0 <= i < prior.next_rank() ==> {
+                let vertex = #[trigger] plan.order_model()[i];
+                prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]
+            },
+            nor_evaluation(template.circuit_model().netlist_model(), input, output),
+        ensures
+            invocation.rank == rank,
+            invocation.inputs == port_values(template.circuit_model().input_layout_model(), input),
+            invocation.outputs == port_values(template.circuit_model().output_layout_model(), output),
+            Self::template_invocation_matches(plan, table, invocation, input, output),
+            Self::template_evaluations(plan, table).contains(invocation),
+    {
+        let vertex = plan.order_model()[rank];
+        assert(prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]);
+        let circuit = template.circuit_model();
+        let invocation = SourceInvocation { rank, inputs: port_values(circuit.input_layout_model(), input),
+            outputs: port_values(circuit.output_layout_model(), output) };
+        assert(Self::template_invocation_matches(plan, table, invocation, input, output));
+        invocation
+    }
+
     proof fn completed_template_source_frame(
         &self, plan: &FunctionExpansionOrder, width_limit: u64, bit_limit: usize, gate_limit: usize,
         table: &FunctionTemplates, invocation: SourceInvocation, input: Seq<bool>, output: Seq<bool>,
@@ -370,22 +402,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     bit_limit, gate_limit, &body, index, input, gates);
                 self.template_rank_from_position(*plan, (file, entry), group._order@.1, rank);
                 let callee_rank = group._order@.0;
-                let callee_circuit = callee.circuit_model();
-                assert(plan.order_model()[callee_rank] < table.slots_model().len());
-                assert(prior.slots_model()[plan.order_model()[callee_rank] as int]
-                    == table.slots_model()[plan.order_model()[callee_rank] as int]);
-                assert(table.slots_model()[group.vertex as int] == Some(callee));
+                let child = Self::prior_template_invocation(plan, &prior, table, callee_rank, &callee, arguments, results);
                 let site = SourceCallEvaluation { definition: root.definition, signature: group._signature@,
                     outputs: group.outputs, rank: callee_rank, widths: callee.input_widths_model(),
-                    arguments: port_values(callee_circuit.input_layout_model(), arguments),
-                    results: port_values(callee_circuit.output_layout_model(), results), nested: None };
+                    arguments: child.inputs, results: child.outputs, nested: None };
                 assert(site.outputs.start <= i < site.outputs.end && 0 <= site.rank < rank);
                 assert(plan.position_model(site.rank) == Some((root.target_file, root.target_entry)));
                 assert(self.source_function_call_values(caller, scope.wiring, site.definition, site.signature, site.outputs,
                     plan.position_model(site.rank)->Some_0, incoming, values, site.widths, site.arguments, site.results));
-                let child = SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results };
-                assert(Self::template_invocation_matches(plan, table, child, arguments, results));
-                assert(derivation.contains(child));
                 self.source_call_slot_intro(plan, caller, rank, derivation, scope.wiring, incoming, values, i, site);
             } else {
                 assert(self.source_definition_value(&context, layout_ref, prepared.typed.types@, incoming, values, i));

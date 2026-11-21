@@ -175,6 +175,25 @@ pub(super) closed spec fn expansion_child_reachable(group: &CheckedExpansionCall
         && expansion_child_reachable(group, arguments, next, child))
 }
 
+/// 根から子をたどり、その子の出力を直接使う親を得る。
+proof fn expansion_child_consumer(
+    group: &CheckedExpansionCall, arguments: Seq<ProjectedCallArgument>, parent: int, child: int,
+) -> (consumer: int)
+    requires child < parent, expansion_child_reachable(group, arguments, parent, child),
+    ensures child < consumer <= parent, expansion_child_edge(group, arguments, consumer, child),
+    decreases parent,
+{
+    reveal_with_fuel(expansion_child_reachable, 1);
+    let next = choose|next: int| 0 <= next < parent
+        && #[trigger] expansion_child_edge(group, arguments, parent, next)
+        && expansion_child_reachable(group, arguments, next, child);
+    if next == child {
+        parent
+    } else {
+        expansion_child_consumer(group, arguments, next, child)
+    }
+}
+
 /// 元の字句を低位ビットから読む。自然定数の 0 と 1 は一ビットで表す。
 pub(super) open spec fn call_literal_bit(bytes: Seq<u8>, bit: nat) -> bool {
     if bytes.len() == 1 { bytes[0] == b'1' } else { crate::syntax::bit_literal_value_at(bytes, bit) }
@@ -1434,6 +1453,73 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(source_call_argument_value);
         self.expansion_child_argument_evidence(plan, caller, prepared, group_index, child_index, port);
+    }
+
+    /// 親の型付き引数が参照する子は、出力ポートを一つだけ持つ。
+    pub(super) proof fn expansion_child_single_output(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        group_index: int, index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            ({
+                let group = &prepared.calls@[group_index];
+                &&& group.postorder matches Some(children)
+                &&& 0 <= index < children@.len()
+                &&& expansion_child_reachable(group, prepared.projections.call_arguments.arguments@, children@.len() as int, index)
+            }),
+        ensures ({
+            let child = prepared.calls@[group_index].postorder->Some_0@[index];
+            &&& child._signature@.call.target.port_counts().outputs == 1
+            &&& child._signature@.signature matches crate::project::FuncCallSignature::Function(ports)
+                ==> ports.outputs@.len() == 1
+        }),
+    {
+        let group = &prepared.calls@[group_index];
+        let children = group.postorder->Some_0@;
+        let projections = &prepared.projections.call_arguments;
+        let arguments = projections.arguments@;
+        let parent = expansion_child_consumer(group, arguments, children.len() as int, index);
+        reveal(expansion_child_edge);
+        let range = expansion_parent_range(group, children, parent);
+        let at = choose|at: int| {
+            let argument = #[trigger] arguments[at];
+            &&& range.start <= at < range.end <= arguments.len()
+            &&& argument.source matches CallArgumentSource::NestedCall(reference)
+            &&& children[index].reference == group.references.start + reference
+            &&& children[index]._signature@.call.call.form == argument.form
+        };
+        let port = at - range.start;
+        let argument = arguments[at];
+        let expected = if parent == children.len() {
+            self.expansion_callee_template_evidence(plan, caller, prepared, group_index);
+            let wiring = prepared.typed.literals.wiring->Checked_0;
+            self.checked_types_keep_wiring(caller.0, caller.1, caller.2, prepared.typed, wiring);
+            self.expansion_argument_evidence(plan, caller, prepared.typed, &wiring, prepared.projections.calls@[group_index],
+                range, projections, *group, port);
+            group._signature@.signature->Function_0.inputs@[port].ty
+        } else {
+            self.expansion_child_argument_evidence(plan, caller, prepared, group_index, parent, port);
+            match children[parent]._signature@.signature {
+                crate::project::FuncCallSignature::Nor => crate::project::ResolvedPortType::Bits(1),
+                crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+            }
+        };
+        assert(prepared_nested_output_matches(children, group.references.start, parent, argument, expected));
+        let producer = choose|i: int| 0 <= i < parent
+            && (#[trigger] children[i]).reference == group.references.start + argument.source->NestedCall_0
+            && children[i]._signature@.call.call.form == argument.form
+            && children[i]._signature@.call.target.port_counts().outputs == 1
+            && match children[i]._signature@.signature {
+                crate::project::FuncCallSignature::Nor =>
+                    crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
+                crate::project::FuncCallSignature::Function(ports) =>
+                    ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected),
+            };
+        self.expansion_child_scope_evidence(plan, caller, prepared, group_index);
+        assert(producer == index);
     }
 
     /// 子の引数区間と、構文上の同じ呼び出しから得た署名を取り出す。

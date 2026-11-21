@@ -1,12 +1,14 @@
 //! 厳格構文木にある呼び出し式の引数と、単一の出力値を対応付ける。
 
 use super::*;
+use crate::netlist::{port_bit_layout_port, port_bit_layout_size, preceding_port_bits};
 use crate::project::{FuncCallSignature, FuncCallTarget, ResolvedPortType, port_types_equal};
 use crate::project::use_aliases::bit_func::expansion::{
-    PreparedExpansionBody, prepared_nested_output_matches, source_call_argument_value, source_call_argument_values_agree,
+    PreparedExpansionBody, expansion_child_reachable, prepared_nested_output_matches, source_call_argument_value, source_call_argument_values_agree,
     source_call_arguments_match,
 };
 use crate::project::use_aliases::call_arity::CallArgumentSource;
+use crate::project::use_aliases::bit_func::templates::ResolvedExpressionCall;
 use crate::syntax::circuit::{
     build_definition_scope_evidence, call_argument_position_bounds, call_argument_positions,
     call_argument_positions_agree, definition_reference_form_unique,
@@ -201,6 +203,98 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }),
             _ => false,
         }
+    }
+
+    /// 選択した通常関数の配線評価を、先行するソース呼び出しの入出力に対応付ける。
+    proof fn source_prepared_function_child(
+        &self, scope: &SourceExpressionScope, prior: &FunctionTemplates, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, group_index: int, index: int, selected: ResolvedExpressionCall,
+        input: Seq<bool>, output: Seq<bool>,
+    ) -> (child: SourceExpressionCall<'p, 'a>)
+        requires
+            self.source_expression_scope_matches(scope),
+            self.prepared_expansion_body_matches(*scope.plan, scope.context.file, scope.context.entry, scope.context.limit, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            prepared.projections.calls@[group_index].definition == scope.definition,
+            ({
+                let group = prepared.calls@[group_index];
+                &&& group.postorder matches Some(children)
+                &&& 0 <= index < children@.len()
+                &&& self.resolved_expression_call_matches(scope.plan, prior, scope.context.limit,
+                    prepared.projections.call_arguments.arguments@, children@[index], selected)
+                &&& expansion_child_reachable(&prepared.calls@[group_index], prepared.projections.call_arguments.arguments@,
+                    children@.len() as int, index)
+            }),
+            scope.derivation == Self::template_evaluations(scope.plan, table),
+            prior.next_rank() == scope.rank,
+            prior.slots_model().len() == table.slots_model().len(),
+            forall|i: int| 0 <= i < scope.rank ==> {
+                let vertex = #[trigger] scope.plan.order_model()[i];
+                prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]
+            },
+            selected.template matches Some(template)
+                && nor_evaluation(template.circuit_model().netlist_model(), input, output)
+                && (scope.layouts.is_none() ==> !has_structure_port(template.signature_model().inputs@)
+                    && !has_structure_port(template.signature_model().outputs@)),
+        ensures
+            child.signature == selected.child._signature@,
+            child.callee_rank == selected.child._rank@,
+            child.reference + prepared.calls@[group_index].references.start == selected.child.reference,
+            child.result == output,
+            ({
+                let template = selected.template->Some_0;
+                let signature = template.signature_model();
+                &&& child.widths == template.input_widths_model()
+                &&& child.arguments == port_values(template.circuit_model().input_layout_model(), input)
+                &&& child.arguments.len() == child.widths.len() == selected.arguments@.len()
+                &&& forall|port: int| 0 <= port < child.widths.len() ==>
+                    (#[trigger] child.arguments[port]).len() == child.widths[port]
+                &&& child.signature.signature matches FuncCallSignature::Function(ports)
+                    && ports.inputs@ == signature.inputs@
+                    && self.port_widths_match(ports.inputs@, child.widths, scope.layouts)
+            }),
+            source_expression_output_type(child.signature) matches Some(ty)
+                && 0 < output.len() <= u64::MAX && self.port_width_matches(ty, output.len() as u64, scope.layouts),
+            self.source_expression_result_matches(scope, child),
+    {
+        reveal(UseAliases::resolved_expression_call_matches);
+        reveal(UseAliases::source_expression_scope_matches);
+        let context = scope.context;
+        let item = selected.child;
+        let group = prepared.calls@[group_index];
+        let caller = (context.file, context.entry, context.limit);
+        self.expansion_child_template_evidence(*scope.plan, caller, prepared, group_index, index);
+        self.expansion_child_single_output(*scope.plan, caller, prepared, group_index, index);
+        let template = selected.template->Some_0;
+        let rank = item._rank@->Some_0;
+        let position = scope.plan.position_model(rank)->Some_0;
+        let invocation = Self::prior_template_invocation(scope.plan, prior, table, rank, template, input, output);
+        let circuit = template.circuit_model();
+        let signature = template.signature_model();
+        let inputs = template.input_widths_model();
+        let outputs = template.output_widths_model();
+        let capacity = template.bit_limit_model();
+        self.template_port_evidence(position, context.limit, template);
+        self.template_circuit_evidence(position, context.limit, template);
+        self.template_widths_in_caller_layout(signature, context.limit, inputs, outputs, template.structure_layouts_model(), scope.layouts);
+        let input_layout = circuit.input_layout_model();
+        let output_layout = circuit.output_layout_model();
+        reveal(nor_evaluation);
+        port_bit_layout_size(inputs, capacity, input_layout);
+        reveal(port_values);
+        assert forall|port: int| 0 <= port < inputs.len() implies
+            (#[trigger] invocation.inputs[port]).len() == inputs[port] by {
+            port_bit_layout_port(inputs, capacity, *input_layout, port as usize);
+        };
+        assert(outputs.len() == 1);
+        port_bit_layout_port(outputs, capacity, *output_layout, 0);
+        assert(preceding_port_bits(outputs, 0) == 0) by { reveal(preceding_port_bits); };
+        assert(invocation.outputs[0] =~= output);
+        assert(invocation.outputs =~= seq![output]);
+        let child = SourceExpressionCall { reference: (item.reference - group.references.start) as usize,
+            signature: item._signature@, callee_rank: item._rank@, widths: inputs, arguments: invocation.inputs, result: output };
+        assert(self.source_expression_result_matches(scope, child));
+        child
     }
 
     /// 配線から読んだ一つの子の入出力値を、対応する厳格構文木の評価に結び付ける。
