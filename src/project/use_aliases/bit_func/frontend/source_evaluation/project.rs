@@ -1,5 +1,7 @@
 //! プロジェクト内の呼び出しを含む関数の参照評価と意味保存。
 
+mod determinism;
+
 use super::*;
 use crate::project::FunctionExpansionOrder;
 use crate::netlist::nor_evaluation;
@@ -87,13 +89,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& entry < parsed.syntax.entries@.len() && parsed.syntax.entries@[entry as int].head is Func
             &&& self.source_inputs_match(&wiring, layout_ref, inputs)
             &&& values.len() == wiring.drivers.definitions@.len() == typed.types@.len()
-            &&& forall|i: int| #![trigger values[i]] 0 <= i < values.len() ==> {
-                &&& self.source_value_has_type(layout_ref, typed.types@, values, i)
-                &&& (self.source_definition_value(&context, layout_ref, typed.types@, inputs, values, i)
-                    || self.source_call_slot_evaluates(plan, caller, rank, derivation, &wiring, inputs, values, i))
-            }
+            &&& forall|i: int| #![trigger values[i]] 0 <= i < values.len() ==>
+                self.source_value_has_type(layout_ref, typed.types@, values, i)
+            &&& self.source_slots_evaluate(plan, rank, derivation, &context, layout_ref, typed.types@, inputs, values)
             &&& source_outputs_match(&wiring, inputs, values, outputs)
         }
+    }
+
+    #[verifier::opaque]
+    spec fn source_slots_evaluate(
+        &self, plan: &FunctionExpansionOrder, rank: int, derivation: ISet<SourceInvocation>,
+        context: &SourceFunc, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>,
+    ) -> bool {
+        forall|i: int| 0 <= i < values.len() ==>
+            #[trigger] self.source_slot_evaluates(plan, rank, derivation, context, layouts, types, inputs, values, i)
+    }
+
+    #[verifier::opaque]
+    spec fn source_slot_evaluates(
+        &self, plan: &FunctionExpansionOrder, rank: int, derivation: ISet<SourceInvocation>,
+        context: &SourceFunc, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, i: int,
+    ) -> bool {
+        let caller = (context.file, context.entry, context.limit);
+        self.source_definition_value(context, layouts, types, inputs, values, i)
+            || self.source_call_slot_evaluates(plan, caller, rank, derivation, context.wiring, inputs, values, i)
     }
 
     spec fn source_call_matches_slot(
@@ -127,6 +148,105 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures self.source_call_slot_evaluates(plan, caller, rank, derivation, wiring, inputs, values, slot),
     {
         reveal(UseAliases::source_call_slot_evaluates);
+    }
+
+    /// 二つの評価が使う構造体配置表が異なっていても、同じ宣言の入力幅は等しい。
+    proof fn source_invocation_input_widths_agree(
+        &self, plan: &FunctionExpansionOrder, limit: u64, left_derivation: ISet<SourceInvocation>,
+        right_derivation: ISet<SourceInvocation>, left: SourceInvocation, right: SourceInvocation,
+    )
+        requires
+            self.can_resolve(),
+            left.rank == right.rank,
+            self.source_invocation_evaluates(plan, limit, left_derivation, left),
+            self.source_invocation_evaluates(plan, limit, right_derivation, right),
+        ensures
+            left.inputs.len() == right.inputs.len(),
+            forall|i: int| 0 <= i < left.inputs.len() ==> (#[trigger] left.inputs[i]).len() == right.inputs[i].len(),
+    {
+        reveal(UseAliases::source_invocation_evaluates);
+        let (file, entry) = plan.position_model(left.rank)->Some_0;
+        let caller = (file, entry, limit);
+        let a = choose|body: SourceFunctionEvaluation|
+            #[trigger] self.source_function_evaluation_frame(plan, caller, left_derivation, left, body);
+        let b = choose|body: SourceFunctionEvaluation|
+            #[trigger] self.source_function_evaluation_frame(plan, caller, right_derivation, right, body);
+        reveal(UseAliases::source_function_evaluation_frame);
+        let al = match &a.layouts { Some(table) => Some(table), None => None };
+        let bl = match &b.layouts { Some(table) => Some(table), None => None };
+        let aw = a.typed.literals.wiring->Checked_0;
+        let bw = b.typed.literals.wiring->Checked_0;
+        self.checked_types_keep_wiring(file, entry, limit, a.typed, aw);
+        self.checked_types_keep_wiring(file, entry, limit, b.typed, bw);
+        self.checked_func_wiring_agrees(file, entry, limit, aw, bw);
+        let ports = aw.drivers.signature.inputs@;
+        assert forall|i: int| 0 <= i < left.inputs.len() implies
+            (#[trigger] left.inputs[i]).len() == right.inputs[i].len() by {
+            let ty = ports[i].ty;
+            let x = left.inputs[i].len();
+            let y = right.inputs[i].len();
+            if ty is Struct {
+                self.layout_port_widths_agree_across_tables(limit, al->Some_0, bl->Some_0, ty, x as int, y as int);
+            }
+        };
+    }
+
+    /// 同じ左辺の二つの評価から、同じ呼び出し先に同じ入力を渡すことを示す。
+    proof fn source_call_slots_agree_on_inputs(
+        &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), rank: int, slot: int,
+        left_derivation: ISet<SourceInvocation>, right_derivation: ISet<SourceInvocation>,
+        left_wiring: &FuncWiring, right_wiring: &FuncWiring,
+        inputs: Seq<Seq<bool>>, left: Seq<Seq<bool>>, right: Seq<Seq<bool>>,
+    ) -> (children: (SourceInvocation, SourceInvocation))
+        requires
+            self.can_resolve(),
+            self.function_expansion_evidence(Ok(*plan)),
+            self.source_evaluation_derivation(plan, caller.2, left_derivation),
+            self.source_evaluation_derivation(plan, caller.2, right_derivation),
+            self.source_call_slot_evaluates(plan, caller, rank, left_derivation, left_wiring, inputs, left, slot),
+            self.source_call_slot_evaluates(plan, caller, rank, right_derivation, right_wiring, inputs, right, slot),
+            left.take(slot) == right.take(slot),
+        ensures
+            left_derivation.contains(children.0),
+            right_derivation.contains(children.1),
+            0 <= children.0.rank == children.1.rank < rank,
+            children.0.inputs == children.1.inputs,
+            children.0.outputs == children.1.outputs ==> left[slot] == right[slot],
+    {
+        reveal(UseAliases::source_call_slot_evaluates);
+        let a = choose|site: SourceCallEvaluation|
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, left_wiring, inputs, left, slot, site)
+            && left_derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
+        let b = choose|site: SourceCallEvaluation|
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, right_wiring, inputs, right, slot, site)
+            && right_derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
+        let (at, bt) = (plan.position_model(a.rank)->Some_0, plan.position_model(b.rank)->Some_0);
+        self.source_function_call_values_evidence(caller, left_wiring, a.definition, a.signature, a.outputs, at,
+            inputs, left, a.widths, a.arguments, a.results);
+        self.source_function_call_values_evidence(caller, right_wiring, b.definition, b.signature, b.outputs, bt,
+            inputs, right, b.widths, b.arguments, b.results);
+        self.source_call_sites_agree(caller, left_wiring, right_wiring, slot,
+            (a.definition, a.signature, a.outputs, at), (b.definition, b.signature, b.outputs, bt));
+        self.template_rank_from_position(*plan, at, a.rank, b.rank);
+        let ca = SourceInvocation { rank: a.rank, inputs: a.arguments, outputs: a.results };
+        let cb = SourceInvocation { rank: b.rank, inputs: b.arguments, outputs: b.results };
+        reveal(UseAliases::source_evaluation_derivation);
+        self.source_invocation_input_widths_agree(plan, caller.2, left_derivation, right_derivation, ca, cb);
+        assert(a.widths.len() == b.widths.len());
+        assert forall|i: int| 0 <= i < a.widths.len() implies #[trigger] a.widths[i] == b.widths[i] by {
+            assert(a.arguments[i].len() == a.widths[i]);
+            assert(b.arguments[i].len() == b.widths[i]);
+            assert(ca.inputs[i].len() == cb.inputs[i].len());
+        };
+        assert(a.widths =~= b.widths);
+        assert(left.take(a.outputs.start as int) =~= right.take(b.outputs.start as int));
+        self.source_function_call_arguments_agree(caller, left_wiring, right_wiring, a.definition, a.signature, b.signature,
+            a.outputs, at, inputs, left, right, a.widths, a.arguments, b.arguments, a.results, b.results);
+        if ca.outputs == cb.outputs {
+            let i = slot - a.outputs.start;
+            assert(a.results[i] == left[slot] && b.results[i] == right[slot]);
+        }
+        (ca, cb)
     }
 
     spec fn template_invocation_matches(
@@ -188,11 +308,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.prepared_definition_width_evidence(&scope, calls, selected, slots);
         self.checked_wiring_is_func(file, entry, width_limit, *scope.wiring);
 
-        assert forall|i: int| #![trigger values[i]] 0 <= i < values.len() implies {
-            &&& self.source_value_has_type(layout_ref, prepared.typed.types@, values, i)
-            &&& (self.source_definition_value(&context, layout_ref, prepared.typed.types@, incoming, values, i)
-                || self.source_call_slot_evaluates(plan, caller, rank, derivation, scope.wiring, incoming, values, i))
-        } by {
+        assert forall|i: int| 0 <= i < values.len() implies
+            #[trigger] self.source_slot_evaluates(plan, rank, derivation, &context, layout_ref, prepared.typed.types@,
+                incoming, values, i) by {
+            reveal(UseAliases::source_slot_evaluates);
             if call_covers(calls, i) {
                 let index = choose|index: int| 0 <= index < calls.len()
                     && (#[trigger] calls[index]).outputs.start <= i < calls[index].outputs.end;
@@ -235,6 +354,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.source_inputs_match(scope.wiring, layout_ref, incoming));
         assert(source_outputs_match(scope.wiring, incoming, values, outgoing));
         assert(values.len() == scope.wiring.drivers.definitions@.len() == prepared.typed.types@.len());
+        assert(self.source_slots_evaluate(plan, rank, derivation, &context, layout_ref, prepared.typed.types@, incoming, values)) by {
+            reveal(UseAliases::source_slots_evaluate);
+        };
         reveal(UseAliases::source_function_evaluation_frame);
         assert(self.source_function_evaluation_frame(plan, caller, derivation, invocation, evaluation));
         reveal(UseAliases::source_invocation_evaluates);

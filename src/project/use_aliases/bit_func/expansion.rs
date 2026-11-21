@@ -95,6 +95,53 @@ pub(super) open spec fn source_call_argument_value(
     }
 }
 
+/// 同じ引数フォームを同じ幅で評価すると、信号名でもリテラルでも同じ値になる。
+proof fn source_call_argument_values_agree(
+    source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
+    left_wiring: &FuncWiring, right_wiring: &FuncWiring, entry: usize, definition: usize, form: usize, limit: u64,
+    inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, width: u64, left: Seq<bool>, right: Seq<bool>,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(),
+        left_wiring.signals@ == right_wiring.signals@,
+        source_call_argument_value(source, parsed, left_wiring, entry, definition, form, limit, inputs, prior, width, left),
+        source_call_argument_value(source, parsed, right_wiring, entry, definition, form, limit, inputs, prior, width, right),
+    ensures left == right,
+{
+    reveal(source_call_argument_value);
+    let frame = parsed.entry_ranges@[entry as int];
+    let row = parsed.definitions@[definition as int];
+    if parsed.syntax.forms@[form as int]->Atom_kind is Name {
+        parsed_index_evidence(*source, *parsed);
+        let a = choose|at: int| row.signals.start <= at < row.signals.end <= parsed.signals@.len()
+            && (#[trigger] parsed.signals@[at]) == form
+            && 0 <= at - frame.signals.start < left_wiring.signals@.len()
+            && {
+                let driver = left_wiring.signals@[at - frame.signals.start].driver;
+                &&& (match driver {
+                    super::super::OutputDriver::Input(port) => port < inputs.len(),
+                    super::super::OutputDriver::Definition(slot) => slot < prior.len(),
+                })
+                &&& left == super::semantics::driver_values(inputs, prior, driver)
+            };
+        let b = choose|at: int| row.signals.start <= at < row.signals.end <= parsed.signals@.len()
+            && (#[trigger] parsed.signals@[at]) == form
+            && 0 <= at - frame.signals.start < right_wiring.signals@.len()
+            && {
+                let driver = right_wiring.signals@[at - frame.signals.start].driver;
+                &&& (match driver {
+                    super::super::OutputDriver::Input(port) => port < inputs.len(),
+                    super::super::OutputDriver::Definition(slot) => slot < prior.len(),
+                })
+                &&& right == super::semantics::driver_values(inputs, prior, driver)
+            };
+        crate::syntax::circuit::definition_signal_positions_agree(
+            source.text, &parsed.build_model(), entry as int, definition as int, a, b);
+        assert(left_wiring.signals@[a - frame.signals.start] == right_wiring.signals@[b - frame.signals.start]);
+    }
+}
+
 /// 元の呼び出しに並ぶ引数と、呼び出し先に渡すポートの値を対応付ける。
 pub(super) open spec fn source_call_arguments_match(
     source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
@@ -110,6 +157,40 @@ pub(super) open spec fn source_call_arguments_match(
         && forall|port: int| 0 <= port < positions.len() ==>
             source_call_argument_value(source, parsed, wiring, entry, definition, #[trigger] positions[port],
                 limit, inputs, prior, widths[port], ports[port])
+}
+
+/// 同じ呼び出しとポート幅に対して、元の構文から得られる引数列は一意に決まる。
+proof fn source_call_argument_lists_agree(
+    source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
+    left_wiring: &FuncWiring, right_wiring: &FuncWiring, entry: usize, definition: usize,
+    call: crate::syntax::circuit::CallShape, limit: u64, inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>,
+    widths: Seq<u64>, left: Seq<Seq<bool>>, right: Seq<Seq<bool>>,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(),
+        left_wiring.signals@ == right_wiring.signals@,
+        source_call_arguments_match(source, parsed, left_wiring, entry, definition, call, limit, inputs, prior, widths, left),
+        source_call_arguments_match(source, parsed, right_wiring, entry, definition, call, limit, inputs, prior, widths, right),
+    ensures left == right,
+{
+    let forms = parsed.syntax.forms@;
+    let a = choose|positions: Seq<usize>| #[trigger] crate::syntax::circuit::call_argument_positions(forms, call, positions)
+        && positions.len() == left.len() == widths.len()
+        && forall|i: int| 0 <= i < positions.len() ==>
+            source_call_argument_value(source, parsed, left_wiring, entry, definition, #[trigger] positions[i],
+                limit, inputs, prior, widths[i], left[i]);
+    let b = choose|positions: Seq<usize>| #[trigger] crate::syntax::circuit::call_argument_positions(forms, call, positions)
+        && positions.len() == right.len() == widths.len()
+        && forall|i: int| 0 <= i < positions.len() ==>
+            source_call_argument_value(source, parsed, right_wiring, entry, definition, #[trigger] positions[i],
+                limit, inputs, prior, widths[i], right[i]);
+    crate::syntax::circuit::call_argument_positions_agree(forms, call, a, b);
+    assert forall|i: int| 0 <= i < left.len() implies #[trigger] left[i] == right[i] by {
+        source_call_argument_values_agree(source, parsed, left_wiring, right_wiring, entry, definition, a[i],
+            limit, inputs, prior, widths[i], left[i], right[i]);
+    };
+    assert(left =~= right);
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -147,6 +228,62 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 左辺の添字から、元の定義と解決済みの関数参照を取り出す。
+    pub(super) proof fn source_function_call_site_evidence(
+        &self, caller: (usize, usize, u64), wiring: &FuncWiring, slot: int, definition: usize,
+        signature: TypedFuncCall, outputs: Range<usize>, target: (usize, usize),
+    )
+        requires
+            self.source_function_call_site(caller, wiring, definition, signature, outputs, target),
+            outputs.start <= slot < outputs.end,
+        ensures ({
+            let (file, entry, limit) = caller;
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[file as int];
+            let row = parsed.definitions@[definition as int];
+            let local = (definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+            &&& slot < wiring.drivers.definitions@.len()
+            &&& wiring.drivers.definitions@[slot].definition == definition
+            &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text,
+                parsed.syntax.forms@, row.expression.start as int, row.expression.end as int)
+            &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(signature)))
+            &&& signature.call.target is Function
+        }),
+    {
+        reveal(UseAliases::source_function_call_site);
+        assert(wiring.drivers.definitions@[slot].definition == definition);
+    }
+
+    /// 同じ左辺を評価する二つの導出は、同じ呼び出しと左辺区間を使う。
+    pub(super) proof fn source_call_sites_agree(
+        &self, caller: (usize, usize, u64), left: &FuncWiring, right: &FuncWiring, slot: int,
+        a: (usize, TypedFuncCall, Range<usize>, (usize, usize)),
+        b: (usize, TypedFuncCall, Range<usize>, (usize, usize)),
+    )
+        requires
+            self.can_resolve(),
+            self.source_function_call_site(caller, left, a.0, a.1, a.2, a.3),
+            self.source_function_call_site(caller, right, b.0, b.1, b.2, b.3),
+            a.2.start <= slot < a.2.end,
+            b.2.start <= slot < b.2.end,
+        ensures
+            a.0 == b.0, a.1.call.call == b.1.call.call, a.2 == b.2, a.3 == b.3,
+            a.1.signature matches super::super::FuncCallSignature::Function(x)
+                && b.1.signature matches super::super::FuncCallSignature::Function(y)
+                && x.inputs@ == y.inputs@ && x.outputs@ == y.outputs@,
+    {
+        reveal(UseAliases::source_function_call_site);
+        self.checked_func_wiring_agrees(caller.0, caller.1, caller.2, *left, *right);
+        let first = left.drivers.definitions@[slot];
+        let second = right.drivers.definitions@[slot];
+        assert(super::super::function_drivers::same_definition_driver(first, second));
+        assert(first.definition == a.0 && second.definition == b.0);
+        assert(first.result_index == slot - a.2.start && second.result_index == slot - b.2.start);
+        let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+        let local = (a.0 - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize;
+        self.successful_call_signatures_agree(caller.0, caller.1, local, 0, caller.2, a.1, b.1);
+    }
+
     /// 引数の値と呼び出し先の出力が、元の右辺と左辺に対応することを表す。
     pub(super) closed spec fn source_function_call_values(
         &self, caller: (usize, usize, u64), wiring: &FuncWiring, definition: usize,
@@ -161,6 +298,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             wiring, caller.1, definition, signature.call.call, caller.2, inputs, values.take(outputs.start as int),
             argument_widths, arguments)
         &&& results == values.subrange(outputs.start as int, outputs.end as int)
+    }
+
+    /// ソースの呼び出し評価から、参照先と入出力ポートの対応を取り出す。
+    pub(super) proof fn source_function_call_values_evidence(
+        &self, caller: (usize, usize, u64), wiring: &FuncWiring, definition: usize,
+        signature: TypedFuncCall, outputs: Range<usize>, target: (usize, usize),
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, widths: Seq<u64>,
+        arguments: Seq<Seq<bool>>, results: Seq<Seq<bool>>,
+    )
+        requires self.source_function_call_values(caller, wiring, definition, signature, outputs, target,
+            inputs, values, widths, arguments, results),
+        ensures
+            self.source_function_call_site(caller, wiring, definition, signature, outputs, target),
+            0 <= outputs.start < outputs.end <= values.len(),
+            arguments.len() == widths.len(),
+            forall|i: int| 0 <= i < arguments.len() ==> (#[trigger] arguments[i]).len() == widths[i],
+            results == values.subrange(outputs.start as int, outputs.end as int),
+    {
+        reveal(UseAliases::source_function_call_site);
+        reveal(source_call_argument_value);
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[caller.0 as int];
+        let source = &project.sources_model()[caller.0 as int];
+        let positions = choose|positions: Seq<usize>| #[trigger] crate::syntax::circuit::call_argument_positions(
+            parsed.syntax.forms@, signature.call.call, positions)
+            && positions.len() == arguments.len() == widths.len()
+            && forall|i: int| 0 <= i < positions.len() ==>
+                source_call_argument_value(source, parsed, wiring, caller.1, definition, #[trigger] positions[i],
+                    caller.2, inputs, values.take(outputs.start as int), widths[i], arguments[i]);
+        assert forall|i: int| 0 <= i < positions.len() implies (#[trigger] arguments[i]).len() == widths[i] by {
+            assert(source_call_argument_value(source, parsed, wiring, caller.1, definition, positions[i],
+                caller.2, inputs, values.take(outputs.start as int), widths[i], arguments[i]));
+        };
+    }
+
+    /// 同じ構文と呼び出し直前の値から、同じポート幅の引数列が一意に決まる。
+    pub(super) proof fn source_function_call_arguments_agree(
+        &self, caller: (usize, usize, u64), left_wiring: &FuncWiring, right_wiring: &FuncWiring,
+        definition: usize, left_call: TypedFuncCall, right_call: TypedFuncCall, outputs: Range<usize>,
+        target: (usize, usize), inputs: Seq<Seq<bool>>, left_values: Seq<Seq<bool>>, right_values: Seq<Seq<bool>>,
+        widths: Seq<u64>, left: Seq<Seq<bool>>, right: Seq<Seq<bool>>, left_results: Seq<Seq<bool>>, right_results: Seq<Seq<bool>>,
+    )
+        requires
+            self.can_resolve(),
+            left_call.call.call == right_call.call.call,
+            self.source_function_call_values(caller, left_wiring, definition, left_call, outputs, target,
+                inputs, left_values, widths, left, left_results),
+            self.source_function_call_values(caller, right_wiring, definition, right_call, outputs, target,
+                inputs, right_values, widths, right, right_results),
+            left_values.take(outputs.start as int) == right_values.take(outputs.start as int),
+        ensures left == right,
+    {
+        reveal(UseAliases::source_function_call_site);
+        let (file, entry, limit) = caller;
+        self.checked_func_wiring_agrees(file, entry, limit, *left_wiring, *right_wiring);
+        self.checked_wiring_is_func(file, entry, limit, *left_wiring);
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        source_call_argument_lists_agree(&project.sources_model()[file as int], &project.circuits_model()[file as int],
+            left_wiring, right_wiring, entry, definition, left_call.call.call, limit, inputs, left_values.take(outputs.start as int),
+            widths, left, right);
     }
 
     pub(super) proof fn source_function_call_values_intro(

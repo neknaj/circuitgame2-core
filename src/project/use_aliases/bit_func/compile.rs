@@ -184,7 +184,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && self.project_source_func_evaluation(&expanded.plan, width_limit, rank, inputs, outputs)
     }
 
-    /// 宣言された入力ビット数で評価すると成功し、ソースの規則で同じ出力が得られることを示す。
+    /// 宣言された入力ビット数で評価した結果が、ソースの規則で一意に決まる出力と一致することを示す。
     pub proof fn expanded_function_evaluate_has_source_result(
         &self, expanded: &ExpandedFunctions, file: usize, entry: usize, circuit: &LoweredBitFunc,
         width_limit: u64, bit_limit: usize, gate_limit: usize, input: Seq<bool>, result: Result<Vec<bool>, NorEvaluationError>,
@@ -195,8 +195,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             expanded.circuit_at(file, entry, circuit),
             input.len() == circuit.input_layout_model().total_bits_model(),
             nor_evaluation_result(circuit.netlist_model(), input, result),
-        ensures result matches Ok(output) && self.expanded_function_source_evaluation(expanded, file, entry, width_limit,
-            port_values(circuit.input_layout_model(), input), port_values(circuit.output_layout_model(), output@)),
+        ensures result matches Ok(output) && {
+            let inputs = port_values(circuit.input_layout_model(), input);
+            let outputs = port_values(circuit.output_layout_model(), output@);
+            &&& self.expanded_function_source_evaluation(expanded, file, entry, width_limit, inputs, outputs)
+            &&& forall|expected: Seq<Seq<bool>>|
+                #[trigger] self.expanded_function_source_evaluation(expanded, file, entry, width_limit, inputs, expected)
+                    ==> expected == outputs
+        },
     {
         self.completed_templates_ready(&expanded.plan, width_limit, bit_limit, gate_limit, &expanded.table);
         let rank = choose|rank: int| {
@@ -210,6 +216,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let output = result->Ok_0;
         self.completed_template_preserves_source_evaluation(&expanded.plan, width_limit, bit_limit, gate_limit,
             &expanded.table, rank, input, output@);
+        let inputs = port_values(circuit.input_layout_model(), input);
+        let outputs = port_values(circuit.output_layout_model(), output@);
+        assert forall|expected: Seq<Seq<bool>>|
+            #[trigger] self.expanded_function_source_evaluation(expanded, file, entry, width_limit, inputs, expected)
+                implies expected == outputs by {
+            let other = choose|other: int| 0 <= other < expanded.plan.order_model().len()
+                && #[trigger] expanded.plan.position_model(other) == Some((file, entry))
+                && self.project_source_func_evaluation(&expanded.plan, width_limit, other, inputs, expected);
+            self.template_rank_from_position(expanded.plan, (file, entry), rank, other);
+            self.project_source_func_evaluations_agree(&expanded.plan, width_limit, rank, inputs, expected, outputs);
+        };
     }
 
     /// プロジェクト内のすべての `func` を依存順にネットリストへ展開する。
