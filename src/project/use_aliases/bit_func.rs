@@ -1,6 +1,8 @@
 //! 型と結線が確定したビット列の組み合わせ回路を表す。
 
+mod compile;
 mod frontend;
+pub use compile::{ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic};
 mod expansion;
 mod templates;
 mod instances;

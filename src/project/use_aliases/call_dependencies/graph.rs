@@ -135,6 +135,37 @@ impl<'p, 'a> FunctionExpansionOrder<'p, 'a> {
         assert(self.vertices.positions_model()[self.order@[at] as int] == position);
     }
 
+    pub(in crate::project::use_aliases) closed spec fn declares_function_at(&self, position: (usize, usize)) -> bool {
+        function_position(self.project_model().circuits_model(), position)
+    }
+
+    pub(in crate::project::use_aliases) closed spec fn source_vertices_match(&self) -> bool {
+        self.vertices.matches(&self.project_model())
+    }
+
+    /// 宣言位置の検索が成功する条件と、対応する展開順位を示す。
+    pub(in crate::project::use_aliases) proof fn source_vertex_lookup(
+        &self, position: (usize, usize), vertex: Option<usize>,
+    )
+        requires self.source_positions_complete(), self.source_vertices_match(), self.template_vertex_matches(position, vertex),
+        ensures
+            vertex.is_some() <==> self.declares_function_at(position),
+            vertex matches Some(v) ==> exists|rank: int| 0 <= rank < self.order_model().len()
+                && #[trigger] self.position_model(rank) == Some(position) && self.order_model()[rank] == v,
+    {
+        self.vertices.project_evidence(&self.project_model());
+        if let Some(v) = vertex {
+            assert(self.declares_function_at(position));
+            let rank = choose|rank: int| 0 <= rank < self.order_model().len()
+                && #[trigger] self.position_model(rank) == Some(position);
+            self.template_vertex_at_position(position, rank, vertex);
+        } else if self.declares_function_at(position) {
+            let rank = choose|rank: int| 0 <= rank < self.order_model().len()
+                && #[trigger] self.position_model(rank) == Some(position);
+            self.template_vertex_at_position(position, rank, vertex);
+        }
+    }
+
     /// 展開順が全関数の宣言位置を重複なく含むことを表す。
     pub closed spec fn source_positions_complete(&self) -> bool {
         let circuits = self.project_model().circuits_model();
@@ -680,6 +711,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.function_expansion_evidence(Ok(plan)),
         ensures
             plan.project_model() == self.targets.project_model(),
+            plan.source_positions_complete(), plan.source_vertices_match(),
             forall|rank: int| 0 <= rank < plan.order_model().len() ==>
                 (#[trigger] plan.order_model()[rank]) < plan.order_model().len()
                     && plan.position_model(rank).is_some(),

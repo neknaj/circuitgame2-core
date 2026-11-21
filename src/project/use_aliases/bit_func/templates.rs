@@ -63,6 +63,17 @@ pub(super) enum FunctionTemplateBuildError<'p, 'a> {
     Lower((usize, usize), ExpandedBodyError<'p, 'a>),
 }
 
+pub(super) open spec fn complete_circuit_table(plan: &FunctionExpansionOrder, table: &FunctionTemplates) -> bool {
+    forall|rank: int| 0 <= rank < plan.order_model().len() ==> {
+        let v = #[trigger] plan.order_model()[rank];
+        &&& v < table.slots_model().len()
+        &&& table.slots_model()[v as int] matches Some(template)
+        &&& nor_evaluation_ready(template.circuit_model().netlist_model(),
+            template.circuit_model().input_layout_model().total_bits_model() as nat)
+        &&& template.circuit_model().netlist_model().outputs@.len() == template.circuit_model().output_layout_model().total_bits_model()
+    }
+}
+
 impl<'p, 'a> FunctionTemplate<'p, 'a> {
     pub(super) closed spec fn signature_model(&self) -> TypedRoutineSignature<'p, 'a> { self._signature@ }
     pub(super) closed spec fn input_widths_model(&self) -> Seq<u64> { self.inputs@ }
@@ -508,6 +519,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
             },
         }
+    }
+
+    /// 展開済みの表から、全順位で評価に必要な入出力配置と配線がそろっていることを示す。
+    pub(super) proof fn completed_templates_ready(
+        &self, plan: &FunctionExpansionOrder, width_limit: u64, bit_limit: usize, gate_limit: usize,
+        table: &FunctionTemplates,
+    )
+        requires
+            self.function_expansion_evidence(Ok(*plan)),
+            self.ordered_template_build_result(plan, width_limit, bit_limit, gate_limit, Ok(*table)),
+        ensures
+            plan.source_positions_complete(), plan.source_vertices_match(),
+            complete_circuit_table(plan, table),
+    {
+        reveal(UseAliases::ordered_template_build_result);
+        reveal(UseAliases::function_templates_match);
+        self.template_index_evidence(*plan);
+        assert forall|rank: int| 0 <= rank < plan.order_model().len() implies {
+            let v = #[trigger] plan.order_model()[rank];
+            &&& v < table.slots_model().len()
+            &&& table.slots_model()[v as int] matches Some(template)
+            &&& nor_evaluation_ready(template.circuit_model().netlist_model(),
+                template.circuit_model().input_layout_model().total_bits_model() as nat)
+            &&& template.circuit_model().netlist_model().outputs@.len() == template.circuit_model().output_layout_model().total_bits_model()
+        } by {
+            let v = plan.order_model()[rank];
+            let template = &table.slots_model()[v as int]->Some_0;
+            reveal(UseAliases::function_template_matches);
+            reveal(UseAliases::template_abi_matches);
+            assert(self.template_abi_matches(plan.position_model(rank)->Some_0, width_limit, template));
+        };
     }
 
     /// 展開計画の順に関数を変換し、変換したネットリストを後続の呼び出しで使う。

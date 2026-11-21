@@ -3,7 +3,10 @@
 mod alias_index;
 mod batch;
 mod bit_func;
-pub use bit_func::{BitFuncError, BitFuncLowerError, CheckedBitFunc, LoweredBitFunc, UnsupportedBitFunc};
+pub use bit_func::{
+    BitFuncError, BitFuncLowerError, CheckedBitFunc, ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic,
+    LoweredBitFunc, UnsupportedBitFunc,
+};
 #[cfg(verus_only)]
 pub use bit_func::{
     bit_func_evaluation, bit_func_lowering_preserves_evaluation, bit_func_evaluations_agree,

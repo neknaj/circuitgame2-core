@@ -9,7 +9,9 @@ mod call_group;
 mod mixed;
 #[cfg(verus_only)]
 pub(super) use mixed::resolved_call_fits_body;
-use mixed::{MixedWiringError, lower_resolved_function};
+pub(super) use call_group::CallGroupError;
+pub(super) use mixed::MixedWiringError;
+use mixed::lower_resolved_function;
 use super::templates::ResolvedTemplateCall;
 use super::expansion::PreparedExpansionBody;
 use super::super::{FunctionExpansionOrder, UseAliases};
@@ -1543,6 +1545,9 @@ impl LoweredBitFunc {
     { &self.layouts.outputs }
 
     /// ゲート順に元の定義の添字を返す。
+    ///
+    /// 左辺に複数の結果がある場合は、結果ごとに添字を割り当てる。
+    /// 呼び出し先から展開したゲートには、呼び出し元の左辺の最初の結果の添字を返す。
     pub fn gate_definitions(&self) -> (definitions: &[usize])
         ensures definitions@ == self.gate_definitions_model(),
     { self.gate_definitions.as_slice() }

@@ -177,3 +177,34 @@ fn checks_project_prerequisites_before_definition_references() {
     assert_eq!(first.site.reference.word, "::lib");
     assert_eq!(later.site.reference.word, "::other");
 }
+
+#[test]
+fn expands_functions_and_reports_the_call_that_exceeds_the_gate_limit() {
+    use circuitgame2_core::project::{ExpandFunctionsError, FunctionBuildDiagnostic};
+
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "calls.ncg2",
+        revision: 7,
+        text: "(using nor)
+               (func twice (in a) (out y) (def t (inv a)) (def y (inv t)))
+               (func inv (in a) (out y) (def y (nor a a)))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+
+    let functions = aliases.expand_functions(8, 16, 2).unwrap();
+    assert!(core::ptr::eq(functions.project(), &project));
+    assert!(functions.get(0, 0).is_none());
+    assert!(functions.get(0, usize::MAX).is_none());
+    assert!(functions.get(usize::MAX, 1).is_none());
+    assert_eq!(functions.get(0, 1).unwrap().netlist().evaluate(&[true]).unwrap(), [true]);
+
+    let Err(ExpandFunctionsError::Function {
+        position: (0, 1),
+        diagnostic: FunctionBuildDiagnostic::CallGateCapacity(site),
+    }) = aliases.expand_functions(8, 16, 1) else {
+        panic!("expected the second invocation in twice to exceed the gate limit");
+    };
+    assert_eq!(site.source.revision, 7);
+    assert_eq!(&site.source.text[site.span], "(inv t)");
+}
