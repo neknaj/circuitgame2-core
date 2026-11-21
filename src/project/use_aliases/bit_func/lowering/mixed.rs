@@ -9,6 +9,7 @@ pub(in crate::project::use_aliases::bit_func) use source_arguments::{
     EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluation, evaluated_flat_call_matches, evaluated_nested_call_matches,
 };
 
+use super::super::expansion::{ExpansionSlot, expansion_call_at_slot};
 use super::*;
 #[cfg(verus_only)]
 use super::evaluation::{definition_values_from_wires, slot_values_match_wiring};
@@ -1131,7 +1132,8 @@ fn lower_mixed_body<'s, 'p, 'a>(
         let ghost start = slot;
         let ghost cursor = group;
         let ghost step: WiringStep;
-        if group < bindings.len() && bindings[group].group.outputs.start == slot {
+        let head = if group < bindings.len() { Some(bindings[group].group.outputs.start) } else { None };
+        if matches!(expansion_call_at_slot(head, None, slot), ExpansionSlot::Function) {
             match lower_mixed_call(layouts, forms, bindings, &mut state, gate_limit, group, nested,
                 Ghost(body), Ghost(layout_limit), Ghost(slot), Ghost(context)) {
                 Ok(recorded) => {

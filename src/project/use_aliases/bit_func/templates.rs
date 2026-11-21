@@ -1043,6 +1043,10 @@ fn selects_a_template_for_the_same_child_and_keeps_nor_builtin() {
     assert_eq!(children[1].arguments.len(), 1);
 
     let [root] = prepared.nor_roots.as_slice() else { panic!("expected one NOR root"); };
+    use super::expansion::{ExpansionSlot, expansion_call_at_slot};
+    let head = Some(prepared.calls[0].outputs.start);
+    assert!(matches!(expansion_call_at_slot(head, Some(root.output_slot), 0), ExpansionSlot::Nor));
+    assert!(matches!(expansion_call_at_slot(head, None, 1), ExpansionSlot::Function));
     let nor = aliases.resolve_nor_root(&plan, &table, root, &prepared.projections.call_arguments.arguments,
         Ghost((position.0, position.1, 8u64)), Ghost(&prepared), Ghost(0int));
     assert!(core::ptr::eq(nor.prepared, root));

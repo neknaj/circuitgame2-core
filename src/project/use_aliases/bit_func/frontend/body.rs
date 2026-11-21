@@ -18,7 +18,7 @@ use crate::netlist::{
     gate_values_match, nor_evaluation, nor_evaluation_ready, output_values_match, port_bit_layout_port,
     port_bit_layout_result, preceding_port_bits,
 };
-use super::super::expansion::PreparedExpansionBody;
+use super::super::expansion::{ExpansionSlot, PreparedExpansionBody, expansion_call_at_slot};
 #[cfg(verus_only)]
 use super::super::expansion::{PreparedExpressionCall, prepared_nested_output_matches};
 use super::super::super::FunctionExpansionOrder;
@@ -1101,7 +1101,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             decreases scope.wiring.drivers.definitions@.len() - i,
         {
             let ghost before = slots@;
-            if group < calls.len() && calls[group].outputs.start == i {
+            let head = if group < calls.len() { Some(calls[group].outputs.start) } else { None };
+            if matches!(expansion_call_at_slot(head, None, i), ExpansionSlot::Function) {
                 let call = &calls[group];
                 proof { reveal(UseAliases::body_calls_match); }
                 self.append_call_definitions(scope, call, group, call_widths[group], &mut slots);

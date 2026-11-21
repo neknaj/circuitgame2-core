@@ -141,6 +141,34 @@ pub(super) struct PreparedExpansionBody<'p, 'a> {
     pub(super) nor_roots: Vec<PreparedNorRoot<'p, 'a>>,
 }
 
+/// 現在の出力スロットを持つ定義の種類。
+pub(super) enum ExpansionSlot {
+    Local,
+    Function,
+    Nor,
+}
+
+/// 現在の出力スロットと、通常呼び出しおよび根 NOR の次の出力を照合する。
+///
+/// 通常呼び出しの場合は、呼び出し側が出力区間の末尾まで進む。
+/// 根 NOR と通常の右辺は1スロット分を占める。
+#[inline]
+pub(super) fn expansion_call_at_slot(function: Option<usize>, nor: Option<usize>, slot: usize) -> (position: ExpansionSlot)
+    requires function.is_some() && nor.is_some() ==> function != nor,
+    ensures
+        (position is Function) <==> function == Some(slot),
+        (position is Nor) <==> nor == Some(slot),
+        (position is Local) <==> function != Some(slot) && nor != Some(slot),
+{
+    if function == Some(slot) {
+        ExpansionSlot::Function
+    } else if nor == Some(slot) {
+        ExpansionSlot::Nor
+    } else {
+        ExpansionSlot::Local
+    }
+}
+
 pub(super) open spec fn expansion_parent_range(group: &CheckedExpansionCall, children: Seq<PreparedExpressionCall>, parent: int)
     -> Range<usize> {
     if parent == children.len() { group.arguments } else { children[parent].arguments }
@@ -2709,6 +2737,14 @@ fn prepares_a_nor_root_without_a_function_vertex() {
     let base = project.circuits()[0].entry_ranges[5].definitions.start;
     assert_eq!((first.definition, first.output_slot), (base + 1, 2));
     assert_eq!((second.definition, second.output_slot), (base + 2, 3));
+    let calls = multiple.calls.as_slice();
+    let roots = multiple.nor_roots.as_slice();
+    assert!(matches!(expansion_call_at_slot(Some(calls[0].outputs.start), Some(roots[0].output_slot), 0),
+        ExpansionSlot::Function));
+    assert_eq!(calls[0].outputs, 0..2);
+    assert!(matches!(expansion_call_at_slot(None, Some(roots[0].output_slot), 2), ExpansionSlot::Nor));
+    assert!(matches!(expansion_call_at_slot(None, Some(roots[1].output_slot), 3), ExpansionSlot::Nor));
+    assert!(matches!(expansion_call_at_slot(None, None, 4), ExpansionSlot::Local));
 }
 
 } // verus!
