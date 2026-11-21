@@ -48,7 +48,7 @@ use build::BuildRows;
 pub use call_order::postorder_call_references;
 #[cfg(verus_only)]
 pub use call_order::{
-    call_postorder_positions, call_postorder_reference, call_references_in_postorder,
+    call_postorder_positions, call_postorder_reference, call_references_in_postorder, definition_reference_form_unique,
     nested_call_postorder_position, root_call_postorder_last,
 };
 pub use call_shapes::{

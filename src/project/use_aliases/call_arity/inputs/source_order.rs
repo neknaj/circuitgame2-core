@@ -43,7 +43,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(argument_projections_match);
         reveal(argument_projection_matches);
         assert forall|i: int| 0 <= i < visited.len() implies (#[trigger] projected[i]).form == visited[i] by {
-            assert(argument_projection_matches(projected[i], visited[i], forms, wiring, types, slots, start, values[i]));
+            assert(argument_projection_matches((self, file, entry, definition), projected[i], visited[i],
+                forms, wiring, types, slots, start, values[i]));
         };
         let positions = Seq::new(projected.len(), |i: int| projected[i].form);
         assert(positions =~= visited);

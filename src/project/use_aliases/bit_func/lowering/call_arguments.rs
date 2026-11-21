@@ -74,7 +74,7 @@ pub(super) open spec fn layout_argument_ready(
             #[trigger] driver_bit_available(inputs, definitions, used, driver, bit),
         CallArgumentSource::Literal(bits) => width == bits
             && literal_argument_matches_width(source, forms, argument.form, width as int),
-        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => true,
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => true,
     }
 }
 
@@ -87,7 +87,7 @@ pub(super) closed spec fn argument_wire(caller: &CallerArguments, argument: Proj
             Wire::Constant(call_literal_bit(bytes, bit as nat))
 
         },
-        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => arbitrary(),
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => arbitrary(),
     }
 }
 
@@ -190,7 +190,7 @@ pub(super) proof fn lowered_argument_port_value(
                     &&& bits == widths[port as int]
                     &&& literal_argument_matches_width(caller.source, caller.forms@, form, bits as int)
                 },
-                CallArgumentSource::Deferred | CallArgumentSource::NestedCall => true,
+                CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => true,
             }
         }),
     ensures ({
@@ -202,7 +202,7 @@ pub(super) proof fn lowered_argument_port_value(
             CallArgumentSource::Literal(bits) =>
                 bits == widths[port as int]
                 && value == Seq::new(bits as nat, |bit: int| call_literal_bit(literal_word(caller, argument.form), bit as nat)),
-            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => false,
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => false,
         }
     }),
 {
@@ -217,7 +217,7 @@ pub(super) proof fn lowered_argument_port_value(
         CallArgumentSource::Driver(driver) => argument_driver_value(caller, inputs, gates, driver),
         CallArgumentSource::Literal(bits) =>
             Seq::new(bits as nat, |bit: int| call_literal_bit(literal_word(caller, argument.form), bit as nat)),
-        CallArgumentSource::Deferred | CallArgumentSource::NestedCall => arbitrary(),
+        CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => arbitrary(),
     };
     assert(argument.source.has_direct_wires());
     assert forall|bit: int| 0 <= bit < value.len() implies #[trigger] value[bit] == expected[bit] by {
@@ -236,7 +236,7 @@ pub(super) proof fn lowered_argument_port_value(
             CallArgumentSource::Literal(_) => {
                 assert(wire == Wire::Constant(call_literal_bit(literal_word(caller, argument.form), bit as nat)));
             },
-            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => {},
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => {},
         }
         assert(value[bit] == wire_value(wire, inputs, gates));
     };
@@ -402,7 +402,7 @@ pub(super) fn lower_call_arguments<'s, 'p, 'a>(
                 append_argument_driver(caller, &mut wires, driver, width, Ghost(input_bits), Ghost(gates)),
             CallArgumentSource::Literal(_) =>
                 append_argument_literal(caller, &mut wires, argument, width, Ghost(input_bits), Ghost(gates)),
-            CallArgumentSource::Deferred | CallArgumentSource::NestedCall => {
+            CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => {
                 proof { reveal(argument_prefix_wires); }
                 return Err(form_location(caller.source, caller.forms, argument.form));
             },

@@ -328,6 +328,27 @@ pub proof fn call_postorder_positions(
         (a, b)
     }
 
+/// 同じ定義の参照が同じフォームを指すなら、その参照添字は等しい。
+pub proof fn definition_reference_form_unique(
+    source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,
+    left: usize, right: usize,
+)
+    requires
+        definition_call_index(source, forms, row, references), forms.len() <= usize::MAX,
+        row.references.start <= left < row.references.end,
+        row.references.start <= right < row.references.end,
+        references[left as int].form == references[right as int].form,
+    ensures left == right,
+{
+    row_reference_bounds(source, forms, references, row);
+    reveal(reference_bounds);
+    if left < right {
+        assert(references[left as int].form < references[right as int].form);
+    } else if right < left {
+        assert(references[right as int].form < references[left as int].form);
+    }
+}
+
 /// 親のリスト内で始まる呼び出しについて、親より前の処理位置を返す。
 pub proof fn nested_call_postorder_position(
     source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,

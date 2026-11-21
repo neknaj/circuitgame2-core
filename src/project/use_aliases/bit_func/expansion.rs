@@ -22,7 +22,8 @@ use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges
 use crate::syntax::circuit::postorder_call_references;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    call_postorder_reference, call_references_in_postorder, nested_call_postorder_position, root_call_postorder_last,
+    call_postorder_reference, call_references_in_postorder, definition_reference_form_unique,
+    nested_call_postorder_position, root_call_postorder_last,
 };
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -34,6 +35,7 @@ use vstd::string::StringSliceAdditionalSpecFns;
 mod tests {
     use alloc::vec::Vec;
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+    use crate::project::use_aliases::call_arity::CallArgumentSource;
 
     #[test]
     fn prepares_the_nested_call_order_for_a_checked_root() {
@@ -60,6 +62,9 @@ mod tests {
         assert_eq!(order[1].vertex, Some(prepared.calls[1].vertex));
         assert_eq!(order[1].arguments, 2..3);
         assert_eq!(prepared.calls[1].arguments, 1..2);
+        let arguments = &prepared.projections.call_arguments.arguments;
+        assert!(matches!(arguments[1].source, CallArgumentSource::NestedCall(1)));
+        assert!(matches!(arguments[2].source, CallArgumentSource::NestedCall(2)));
     }
 }
 
@@ -664,7 +669,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Binary)
                         || crate::syntax::bare_atom_kind(bytes) == Some(crate::syntax::AtomKind::Hexadecimal))
                 },
-                CallArgumentSource::NestedCall => {
+                CallArgumentSource::NestedCall(retained) => {
                     let local = (root.definition - frame.definitions.start) as usize;
                     &&& form is List
                     &&& group._signature@.call.call.form + 2 <= argument.form < form->List_end
@@ -672,6 +677,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& group.postorder matches Some(children) && exists|position: int|
                         0 <= position < children@.len()
                         && (#[trigger] children@[position])._signature@.call.call.form == argument.form
+                        && children@[position].reference == row.references.start + retained
                         && children@[position]._signature@.call.target.port_counts().outputs == 1
                     &&& exists|reference: usize, child: TypedFuncCall|
                         #[trigger] self.func_call_form_reference(caller.0, caller.1, local, argument.form, reference)
@@ -773,7 +779,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             project.circuits_model()[caller.0 as int].syntax.forms@, argument.form);
                         width == bits && value == Seq::new(width as nat, |bit: int| call_literal_bit(bytes, bit as nat))
                     },
-                    CallArgumentSource::Deferred | CallArgumentSource::NestedCall => false,
+                    CallArgumentSource::Deferred | CallArgumentSource::NestedCall(_) => false,
                 }
             }),
         ensures ({
@@ -989,11 +995,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ({
                 let child = children[position];
                 let signature = child._signature@;
+                let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+                let row = parsed.definitions@[parsed.entry_ranges@[caller.1 as int].definitions.start + definition];
                 let expected = match parent.signature {
                     crate::project::FuncCallSignature::Nor => crate::project::ResolvedPortType::Bits(1),
                     crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
                 };
                 &&& self.prepared_expression_call_matches(plan, caller, definition, arguments, types, wiring, caller_rank, child)
+                &&& child.reference == row.references.start + projected[port].source->NestedCall_0
                 &&& signature.call.call.form == projected[port].form
                 &&& signature.call.target.port_counts().outputs == 1
                 &&& match signature.signature {
@@ -1030,6 +1039,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.resolved_call_reference_form(file, entry, definition, parent_reference, parent.call);
         let parent_absolute = (row.references.start + parent_reference) as usize;
         let child_absolute = (row.references.start + relative) as usize;
+        let retained = (row.references.start + projected[port].source->NestedCall_0) as usize;
+        definition_reference_form_unique(source.text, forms, refs, row, retained, child_absolute);
         reveal(UseAliases::prepared_expression_children_match);
         let order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
         assert(order[parent_position] == parent_absolute);

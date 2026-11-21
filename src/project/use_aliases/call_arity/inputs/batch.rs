@@ -119,6 +119,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             limit, types, wiring)
     }
 
+    /// 全参照の引数検査を終えた定義を、検査済みの接頭辞に加える。
+    proof fn extend_input_definitions(
+        &self, file: usize, entry: usize, definition: usize, limit: u64,
+        types: Seq<Option<SignalType>>, wiring: &FuncWiring,
+    )
+        requires
+            file < self.targets.project_model().circuits_model().len(),
+            self.input_definitions_before(file, entry, definition as int, limit, types, wiring),
+            self.input_refs_before(file, entry, definition, reference_count(
+                &self.targets.project_model().circuits_model()[file as int], entry as int, definition as int),
+                limit, types, wiring),
+        ensures self.input_definitions_before(file, entry, definition + 1, limit, types, wiring),
+    {
+        reveal(UseAliases::input_definitions_before);
+        let parsed = &self.targets.project_model().circuits_model()[file as int];
+        assert forall|prior: usize| prior <= definition implies #[trigger] self.input_refs_before(
+            file, entry, prior, reference_count(parsed, entry as int, prior as int), limit, types, wiring)
+        by {
+            if prior < definition {
+                assert(self.input_refs_before(file, entry, prior,
+                    reference_count(parsed, entry as int, prior as int), limit, types, wiring));
+            }
+        };
+    }
+
     pub(in crate::project::use_aliases) closed spec fn prepared_call_inputs_match(
         &self, file: usize, entry: usize, limit: u64, types: Seq<Option<SignalType>>, wiring: &FuncWiring,
         result: Result<(), FuncCallInputsError>,
@@ -626,8 +651,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             parsed_index_evidence(*source, *parsed);
             build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
             build_definition_reference_boundaries(source.text, &parsed.build_model(), entry as int);
-            reveal(UseAliases::input_definitions_before);
-            reveal(UseAliases::projected_definitions_before);
+            assert(self.input_definitions_before(file, entry, 0, max_width, types@, wiring)) by {
+                reveal(UseAliases::input_definitions_before);
+            };
+            if retain {
+                assert(self.projected_definitions_before((file, entry, max_width), types@, wiring, 0,
+                    projections.reference_argument_ends@, projections.arguments@, projections.reference_targets@)) by {
+                    reveal(UseAliases::projected_definitions_before);
+                };
+            }
         }
         let frame = &parsed.entry_ranges[entry];
         let range = &frame.definitions;
@@ -749,15 +781,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         assert(calls@[i].definition > calls@[previous_cursor as int].definition);
                     }
                 };
-                reveal(UseAliases::input_definitions_before);
-                assert forall|prior: usize| prior <= definition implies #[trigger] self.input_refs_before(
-                    file, entry, prior, reference_count(parsed, entry as int, prior as int), max_width, types@, wiring)
-                by {
-                    if prior < definition {
-                        assert(self.input_refs_before(file, entry, prior,
-                            reference_count(parsed, entry as int, prior as int), max_width, types@, wiring));
-                    }
-                };
+                self.extend_input_definitions(file, entry, definition, max_width, types@, wiring);
             }
             definition += 1;
         }

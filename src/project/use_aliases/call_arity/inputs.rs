@@ -77,8 +77,8 @@ pub(in crate::project::use_aliases) struct ProjectedCallArgument {
 pub(in crate::project::use_aliases) enum CallArgumentSource {
     Driver(OutputDriver),
     Literal(u64),
-    /// 元フォームを起点に展開する、型が確定した単一出力の通常呼び出し。
-    NestedCall,
+    /// 型が確定した単一出力の呼び出し。添字は同じ定義の参照区間を起点とする。
+    NestedCall(usize),
     /// 型を保留した実引数。
     Deferred,
 }
@@ -242,14 +242,17 @@ proof fn record_nested_output_type(
     };
 }
 
-/// 子呼び出しの単一出力型を、元の型注釈とともに取り出す。
+/// 子呼び出しの単一出力型を元の型注釈とともに取り出し、定義内の参照添字も返す。
 fn nested_output_type_at<'p, 'a>(
     aliases: &UseAliases<'_, 'p, 'a>, file: usize, entry: usize, definition: usize, form: usize, limit: u64,
-) -> (value: Option<SignalType<'p, 'a>>)
+) -> (found: (Option<SignalType<'p, 'a>>, Option<usize>))
     requires aliases.can_resolve(),
-    ensures nested_output_type((aliases, file, entry, definition), form, limit, value),
+    ensures
+        nested_output_type((aliases, file, entry, definition), form, limit, found.0),
+        found.0.is_some() ==> found.1.is_some(),
+        found.1 matches Some(reference) ==> aliases.func_call_form_reference(file, entry, definition, form, reference),
 {
-    let result = aliases.resolve_func_call_signature_at_form(file, entry, definition, form, limit);
+    let (reference, result) = aliases.resolve_func_call_signature_with_reference(file, entry, definition, form, limit);
     // 署名を解決できない子は、その参照を検査する順番まで診断を保留する。
     let value = match &result {
         Ok(Some(call)) if call.call.target.ports().outputs == 1 => match &call.signature {
@@ -275,7 +278,7 @@ fn nested_output_type_at<'p, 'a>(
         _ => None,
     };
     proof { record_nested_output_type((aliases, file, entry, definition), form, limit, result, value); }
-    value
+    (value, reference)
 }
 
 spec fn known_argument(
@@ -367,6 +370,7 @@ spec fn after_argument(forms: Seq<Form>, at: int) -> int {
 
 #[verifier::opaque]
 spec fn argument_projection_matches(
+    context: (&UseAliases, usize, usize, usize),
     argument: ProjectedCallArgument, at: usize, forms: Seq<Form>, wiring: &FuncWiring,
     types: Seq<Option<SignalType>>, slots: Seq<usize>, start: int, value: Option<SignalType>,
 ) -> bool {
@@ -382,19 +386,21 @@ spec fn argument_projection_matches(
             forms[at as int] is Atom && (forms[at as int]->Atom_kind is Natural
                 || forms[at as int]->Atom_kind is Binary || forms[at as int]->Atom_kind is Hexadecimal)
                 && (value matches Some(ty) && ty.ty == ResolvedPortType::Bits(width)),
-        CallArgumentSource::NestedCall => forms[at as int] is List && value.is_some(),
+        CallArgumentSource::NestedCall(reference) => forms[at as int] is List && value.is_some()
+            && context.0.func_call_form_reference(context.1, context.2, context.3, at, reference),
         CallArgumentSource::Deferred => value.is_none(),
     }
 }
 
 #[verifier::opaque]
 spec fn argument_projections_match(
+    context: (&UseAliases, usize, usize, usize),
     forms: Seq<Form>, wiring: &FuncWiring, types: Seq<Option<SignalType>>, slots: Seq<usize>, start: int,
     visited: Seq<usize>, values: Seq<Option<SignalType>>, projected: Seq<ProjectedCallArgument>,
 ) -> bool {
     &&& projected.len() == visited.len() == values.len()
     &&& forall|i: int| 0 <= i < projected.len() ==>
-        argument_projection_matches(#[trigger] projected[i], visited[i], forms, wiring, types, slots, start, values[i])
+        argument_projection_matches(context, #[trigger] projected[i], visited[i], forms, wiring, types, slots, start, values[i])
 }
 
 proof fn extend_argument_prefix(
@@ -422,14 +428,15 @@ proof fn extend_argument_prefix(
 }
 
 proof fn extend_argument_projections(
+    context: (&UseAliases, usize, usize, usize),
     forms: Seq<Form>, wiring: &FuncWiring, types: Seq<Option<SignalType>>, slots: Seq<usize>, start: int,
     visited: Seq<usize>, values: Seq<Option<SignalType>>, projected: Seq<ProjectedCallArgument>,
     root: usize, value: Option<SignalType>, argument: ProjectedCallArgument,
 )
     requires
-        argument_projections_match(forms, wiring, types, slots, start, visited, values, projected),
-        argument_projection_matches(argument, root, forms, wiring, types, slots, start, value),
-    ensures argument_projections_match(forms, wiring, types, slots, start,
+        argument_projections_match(context, forms, wiring, types, slots, start, visited, values, projected),
+        argument_projection_matches(context, argument, root, forms, wiring, types, slots, start, value),
+    ensures argument_projections_match(context, forms, wiring, types, slots, start,
         visited.push(root), values.push(value), projected.push(argument)),
 {
     reveal(argument_projections_match);
@@ -437,7 +444,7 @@ proof fn extend_argument_projections(
     let appended = visited.push(root);
     let results = values.push(value);
     assert forall|i: int| 0 <= i < collected.len() implies
-        argument_projection_matches(#[trigger] collected[i], appended[i], forms, wiring, types, slots, start, results[i])
+        argument_projection_matches(context, #[trigger] collected[i], appended[i], forms, wiring, types, slots, start, results[i])
         by {
             if i < projected.len() { assert(collected[i] == projected[i] && appended[i] == visited[i] && results[i] == values[i]); }
         };
@@ -554,16 +561,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let forms = parsed.syntax.forms@;
         let slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
         let start = row.signals.start - frame.signals.start;
+        let context = (self, file, entry, definition);
         ||| projected.len() == 0 && self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(None))
         ||| exists|call: TypedFuncCall, visited: Seq<usize>, values: Seq<Option<SignalType>>|
             #![trigger self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
-                argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)]
+                argument_projections_match(context, forms, wiring, types, slots, start, visited, values, projected)]
             self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
                 && values.len() == call.call.call.arguments
                 && values.len() == call.call.target.port_counts().inputs
                 && argument_prefix((self, file, entry, definition), &call, forms, wiring, types, slots, start, limit,
                     visited, values, forms[call.call.call.form as int]->List_end)
-                && argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
+                && argument_projections_match(context, forms, wiring, types, slots, start, visited, values, projected)
     }
 
     proof fn record_projected_inputs(
@@ -583,7 +591,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let start = row.signals.start - frame.signals.start;
                 &&& argument_prefix((self, at.0, at.1, at.2), &call, forms, wiring, types, slots, start, limit,
                     visited, values, forms[call.call.call.form as int]->List_end)
-                &&& argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
+                &&& argument_projections_match((self, at.0, at.1, at.2), forms, wiring, types, slots, start, visited, values, projected)
             }),
         ensures self.projected_input_arguments(at, limit, types, wiring, projected),
     {
@@ -610,7 +618,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& values.len() == call.call.call.arguments == call.call.target.port_counts().inputs
             &&& argument_prefix((self, file, entry, definition), &call, forms, wiring, types, slots, start, limit,
                 visited, values, forms[call.call.call.form as int]->List_end)
-            &&& argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
+            &&& argument_projections_match((self, file, entry, definition), forms, wiring, types, slots, start, visited, values, projected)
         }),
     {
         let (file, entry, definition, reference) = at;
@@ -623,13 +631,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::projected_input_arguments);
         choose|call: TypedFuncCall, visited: Seq<usize>, values: Seq<Option<SignalType>>|
             #![trigger self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call))),
-                argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)]
+                argument_projections_match((self, file, entry, definition), forms, wiring, types, slots, start, visited, values, projected)]
             self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
                 && values.len() == call.call.call.arguments
                 && values.len() == call.call.target.port_counts().inputs
                 && argument_prefix((self, file, entry, definition), &call, forms, wiring, types, slots, start, limit,
                     visited, values, forms[call.call.call.form as int]->List_end)
-                && argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
+                && argument_projections_match((self, file, entry, definition), forms, wiring, types, slots, start, visited, values, projected)
     }
 
     proof fn projected_argument_leaf<'s>(
@@ -733,8 +741,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             || crate::syntax::bare_atom_kind(bytes) == Some(AtomKind::Hexadecimal))
                     }
                 },
-                CallArgumentSource::NestedCall =>
-                    self.projected_nested_call_has_type((at.0, at.1, at.2), limit, form, expected),
+                CallArgumentSource::NestedCall(reference) =>
+                    self.func_call_form_reference(at.0, at.1, at.2, form, reference)
+                        && self.projected_nested_call_has_type((at.0, at.1, at.2), limit, form, expected),
                 CallArgumentSource::Deferred => true,
             }
         }),
@@ -761,7 +770,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(projected.len() == values.len() == visited.len()) by { reveal(argument_projections_match); };
         assert(values.len() == other.call.call.arguments == call.call.call.arguments);
         assert(0 <= index < values.len() <= usize::MAX);
-        assert(argument_projection_matches(projected[index], visited[index], forms, wiring, types, slots, start, values[index])) by {
+        assert(argument_projection_matches((self, file, entry, definition), projected[index], visited[index],
+            forms, wiring, types, slots, start, values[index])) by {
             reveal(argument_projections_match);
         };
         let form = projected[index].form;
@@ -808,7 +818,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(circuit_literal_width_matches(bytes, Some(expected), limit, Ok(width)));
                 crate::project::literal_width::checked_literal_for_port(bytes, expected, limit, width);
             },
-            CallArgumentSource::NestedCall => {
+            CallArgumentSource::NestedCall(_) => {
                 assert(forms[form as int] is List && value == known);
                 assert(nested_output_type((self, file, entry, definition), form, limit, value));
                 assert(port_types_equal(value->Some_0.ty, port.ty));
@@ -1061,7 +1071,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(argument_prefix(context, &call, forms@, wiring, types@, slots, start,
                 max_width, visited, values, remaining.start)) by { reveal(argument_prefix); };
             if retain {
-                assert(argument_projections_match(forms@, wiring, types@, slots, start,
+                assert(argument_projections_match(context, forms@, wiring, types@, slots, start,
                     visited, values, projections@.skip(begin))) by { reveal(argument_projections_match); };
             }
         }
@@ -1097,7 +1107,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 if collect { values == inputs@ } else { inputs@.len() == 0 },
                 initial == old(projections)@, begin == initial.len(), begin <= projections@.len(),
                 projections@.take(begin) == initial,
-                if retain { argument_projections_match(forms@, wiring, types@, slots, start, visited, values, projections@.skip(begin)) }
+                if retain { argument_projections_match(context, forms@, wiring, types@, slots, start, visited, values, projections@.skip(begin)) }
                     else { projections@ == initial },
                 count == call.call.target.port_counts().inputs,
                 remaining.start <= remaining.end <= forms@.len(),
@@ -1124,7 +1134,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             assert(input_port_matches(&call, ordinal as int, port));
             let root = argument.start;
-            let (known, driver) = if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
+            let (known, driver, nested_reference) = if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
                 let pos = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), ref_pos, &arity.call,
                     parsed.signals.as_slice(), root);
                 proof { self.checked_signal_driver(file, entry, max_width, *wiring, absolute, pos); }
@@ -1136,10 +1146,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(slots[s] == root);
                     assert(ty == signal_type_at(wiring, types@, wiring.signals@[start + s].driver));
                 };
-                (ty, Some(bound.driver))
+                (ty, Some(bound.driver), None)
             } else if matches!(forms[root], Form::List { .. }) {
-                (nested_output_type_at(self, file, entry, definition, root, max_width), None)
-            } else { (None, None) };
+                let (ty, reference) = nested_output_type_at(self, file, entry, definition, root, max_width);
+                (ty, None, reference)
+            } else { (None, None, None) };
             let ghost input = known;
             let leaf = check_leaf(source, forms, root, &port, known, max_width);
             let ghost checked = leaf;
@@ -1173,7 +1184,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if retain {
                 let source = if let Some(typed) = &value {
                     if matches!(forms[root], Form::List { .. }) {
-                        CallArgumentSource::NestedCall
+                        let Some(reference) = nested_reference else {
+                            proof { reveal(leaf_result); assert(false); }
+                            unreachable!()
+                        };
+                        CallArgumentSource::NestedCall(reference)
                     } else if let Some(driver) = driver {
                         CallArgumentSource::Driver(driver)
                     } else if let ResolvedPortType::Bits(width) = typed.ty {
@@ -1184,14 +1199,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     }
                 } else { CallArgumentSource::Deferred };
                 let projection = ProjectedCallArgument { form: root, source };
-                assert(argument_projection_matches(projection, root, forms@, wiring, types@, slots, start, value)) by {
+                assert(argument_projection_matches(context, projection, root, forms@, wiring, types@, slots, start, value)) by {
                     reveal(argument_projection_matches);
                 };
                 projections.push(projection);
                 assert(projections@.take(begin) =~= initial);
                 proof {
                     assert(projections@.skip(begin) =~= previous_projections.skip(begin).push(projection));
-                    extend_argument_projections(forms@, wiring, types@, slots, start,
+                    extend_argument_projections(context, forms@, wiring, types@, slots, start,
                         visited, values, previous_projections.skip(begin), root, value, projection);
                 }
             }

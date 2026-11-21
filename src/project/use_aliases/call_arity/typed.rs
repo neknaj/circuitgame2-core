@@ -441,8 +441,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && (call.signature matches FuncCallSignature::Function(signature) ==>
                     signature.outputs@.len() == call.call.target.port_counts().outputs),
     {
+        let (_, result) = self.resolve_func_call_signature_with_reference(file, entry, definition, form, max_width);
+        result
+    }
+
+    /// 型付き署名を解決したときの定義内参照添字も返す。
+    pub(super) fn resolve_func_call_signature_with_reference(
+        &self, file: usize, entry: usize, definition: usize, form: usize, max_width: u64,
+    ) -> (resolved: (Option<usize>, Result<Option<TypedFuncCall<'p, 'a>>, FuncCallSignatureError<'p, 'a>>))
+        requires self.can_resolve(),
+        ensures
+            self.func_call_signature_at_form_evidence(file, entry, definition, form, max_width, resolved.1),
+            resolved.0 matches Some(reference) ==> self.func_call_form_reference(file, entry, definition, form, reference)
+                && self.func_call_signature_evidence(file, entry, definition, reference, max_width, resolved.1),
+            resolved.1 matches Ok(Some(call)) ==> resolved.0.is_some() && call.call.call.form == form
+                && (call.signature matches FuncCallSignature::Function(signature) ==>
+                    signature.outputs@.len() == call.call.target.port_counts().outputs),
+    {
         let Some(reference) = self.func_call_reference_at_form(file, entry, definition, form) else {
-            return Ok(None);
+            return (None, Ok(None));
         };
         let result = self.resolve_func_call_signature(file, entry, definition, reference, max_width);
         proof {
@@ -453,7 +470,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(exists|r: usize| #[trigger] self.func_call_form_reference(file, entry, definition, form, r)
                 && self.func_call_signature_evidence(file, entry, definition, r, max_width, result));
         }
-        result
+        (Some(reference), result)
     }
 
     /// 構文木上で選んだ呼び出しと、同じ位置の参照から解決した署名または診断が対応することを表す。
