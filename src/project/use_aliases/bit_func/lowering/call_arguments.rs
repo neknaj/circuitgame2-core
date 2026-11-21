@@ -1,5 +1,7 @@
 //! 展開に渡す実引数を、呼び出し先の入力ポート順で配線に変換する。
 
+mod child_calls;
+
 use super::{append_bit_literal_wires, lower_driver_bit};
 use super::super::instances::{append_instance, append_instance_to};
 #[cfg(verus_only)]
@@ -57,10 +59,10 @@ pub(super) open spec fn child_outputs_appended(
     before: &ChildOutputWires, after: &ChildOutputWires, reference: usize, callee: &NorNetlist,
     arguments: Seq<Wire>, old_gates: Seq<NorGate>, new_gates: Seq<NorGate>, input_bits: usize,
 ) -> bool {
-    let start = before.wires@.len() as usize;
-    let end = after.wires@.len() as usize;
-    &&& end == start + callee.outputs@.len()
-    &&& after.ranges@ == before.ranges@.update(reference as int, Some(start..end))
+    let start = before.wires@.len();
+    let end = after.wires@.len();
+    &&& end == start + callee.outputs@.len() <= usize::MAX
+    &&& after.ranges@ == before.ranges@.update(reference as int, Some((start as usize)..(end as usize)))
     &&& after.wires@.take(start as int) == before.wires@
     &&& instance_outputs_match(callee.outputs@, arguments, old_gates.len() as usize,
         after.wires@.subrange(start as int, end as int))
@@ -638,7 +640,7 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
 ) -> (result: Result<(), CallWiringError<'p, 'a>>)
     requires
         form_spans_valid(caller.source.text, caller.forms@, caller.source.text.spec_bytes().len() as int),
-        port_bit_layout_result(widths, limit, Ok(*layout)), arguments@.len() == widths.len(),
+        port_bit_layout_result(widths, limit, Ok(*layout)), arguments@.len() == widths.len() == layout.ranges_model().len(),
         nor_evaluation_ready(callee, layout.total_bits_model() as nat),
         reference < old(children).ranges@.len(), old(children).ranges@[reference as int].is_none(),
         old(children).wires@.len() + callee.outputs@.len() <= usize::MAX,
@@ -655,10 +657,18 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
                 caller.wires@.len() as int, argument, width)
             &&& child_argument_width_ready(old(children).ranges@, old(children).wires@.len(), argument.source, width)
         },
-    ensures match result {
-        Ok(()) =>
-            old(gates)@.len() + callee.gates@.len() <= capacity
-            && exists|invocation: CallerArguments, mapped: Seq<Wire>|
+    ensures
+        result.is_ok() ==> old(gates)@.len() + callee.gates@.len() <= capacity,
+        result.is_ok() ==> final(gates)@.len() == old(gates)@.len() + callee.gates@.len(),
+        result.is_ok() ==> final(gates)@.take(old(gates)@.len() as int) == old(gates)@,
+        result.is_ok() ==> gates_available(final(gates)@, input_bits as nat, final(gates)@.len() as int),
+        result.is_ok() ==> final(children).wires@.len() == old(children).wires@.len() + callee.outputs@.len(),
+        result.is_ok() ==> wires_available(final(children).wires@, input_bits, final(gates)@.len()),
+        result.is_ok() ==> final(children).ranges@ == old(children).ranges@.update(reference as int,
+            Some((old(children).wires@.len() as usize)..(final(children).wires@.len() as usize))),
+        result.is_ok() ==> forall|i: int| 0 <= i < arguments@.len() ==>
+            projected_source_available(old(children).ranges@, (#[trigger] arguments@[i]).source),
+        result.is_ok() ==> exists|invocation: CallerArguments, mapped: Seq<Wire>|
                 #[trigger] argument_prefix_wires(&invocation, arguments@, layout.ranges_model(), arguments@.len() as int, mapped)
                 && invocation.source == caller.source && invocation.forms@ == caller.forms@
                 && invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
@@ -668,7 +678,7 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
                 && wires_available(mapped, input_bits, old(gates)@.len())
                 && child_outputs_appended(old(children), final(children), reference, callee, mapped,
                     old(gates)@, final(gates)@, input_bits),
-        Err(error) => {
+        result matches Err(error) ==> {
             let ranges = old(children).ranges@;
             &&& final(children).ranges@ == ranges && final(children).wires@ == old(children).wires@
             &&& final(gates)@ == old(gates)@
@@ -682,7 +692,6 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
                         projected_source_available(ranges, (#[trigger] arguments@[i]).source),
             }
         },
-    },
 {
     let ghost before = *children;
     let ghost old_gates = gates@;
@@ -699,6 +708,14 @@ pub(super) fn lower_child_call<'s, 'p, 'a>(
     if !children.append(reference, gates, callee, mapped.as_slice(), capacity, Ghost(input_bits)) {
         proof { reveal(argument_prefix_wires); }
         return Err(CallWiringError::GateCapacity);
+    }
+    proof {
+        reveal(argument_prefix_wires);
+        assert forall|i: int| 0 <= i < arguments@.len()
+            implies projected_source_available(before.ranges@, (#[trigger] arguments@[i]).source) by {
+            assert(argument_source_available(&invoked, arguments@[i].source));
+        };
+        assert(child_outputs_appended(&before, children, reference, callee, mapped@, old_gates, gates@, input_bits));
     }
     assert(exists|invocation: CallerArguments, wires: Seq<Wire>|
         #[trigger] argument_prefix_wires(&invocation, arguments@, layout.ranges_model(), arguments@.len() as int, wires)
@@ -878,12 +895,13 @@ fn nested_argument_uses_the_saved_child_output_range() {
 #[test]
 fn selected_children_feed_the_parent_with_a_one_bit_limit() {
     use crate::project::{SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+    use child_calls::{ChildCall, lower_child_calls};
 
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "calls.ncg2",
         revision: 1,
         text: "(using nor) (func id (in a) (out a))
-               (func caller (in a) (out y) (def y (id (id (nor a a)))))",
+               (func caller (in a) (out y) (def y (id (id (nor (nor a a) 0)))))",
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
@@ -906,33 +924,35 @@ fn selected_children_feed_the_parent_with_a_one_bit_limit() {
         source: &project.sources()[position.0], forms: &parsed.syntax.forms,
         inputs: &[0..1], definitions: &[], wires: &[], child_ranges: &[], child_wires: &[],
     };
-    let mut children = ChildOutputWires::new(references.end - references.start);
-    let mut gates = Vec::new();
     let (nor, layout) = builtin_nor_call();
-    let first = &parent.children[0];
-    let second = &parent.children[1];
-    let first_reference = first.child.reference - references.start;
-    let second_reference = second.child.reference - references.start;
-    let second_circuit = second.template.unwrap().circuit();
-    let missing = lower_child_call(&base, second.arguments, second_circuit.inputs(), second_circuit.netlist(),
-        &mut children, second_reference, &mut gates, 0, Ghost(seq![1u64]), Ghost(1usize), Ghost(1usize));
-    let Err(CallWiringError::DeferredArgument(site)) = missing else { panic!("expected a missing child"); };
-    assert_eq!(&site.source.text[site.span], "(nor a a)");
-    let at_limit = lower_child_call(&base, first.arguments, &layout, &nor, &mut children, first_reference,
-        &mut gates, 0, Ghost(seq![1u64, 1u64]), Ghost(2usize), Ghost(1usize));
-    assert!(matches!(at_limit, Err(CallWiringError::GateCapacity)));
-    assert!(gates.is_empty() && children.wires.is_empty() && children.ranges.iter().all(Option::is_none));
-    lower_child_call(&base, first.arguments, &layout, &nor, &mut children, first_reference,
-        &mut gates, 1, Ghost(seq![1u64, 1u64]), Ghost(2usize), Ghost(1usize)).unwrap();
-    lower_child_call(&base, second.arguments, second_circuit.inputs(), second_circuit.netlist(),
-        &mut children, second_reference, &mut gates, 1, Ghost(seq![1u64]), Ghost(1usize), Ghost(1usize)).unwrap();
+    let mut calls = Vec::new();
+    for child in &parent.children {
+        let reference = child.child.reference - references.start;
+        let arguments = child.arguments;
+        let call = if let Some(template) = child.template {
+            let circuit = template.circuit();
+            ChildCall { reference, arguments, inputs: circuit.inputs(), circuit: circuit.netlist(),
+                _input_widths: Ghost(seq![1u64]), _layout_limit: Ghost(1usize) }
+        } else {
+            ChildCall { reference, arguments, inputs: &layout, circuit: &nor,
+                _input_widths: Ghost(seq![1u64, 1u64]), _layout_limit: Ghost(2usize) }
+        };
+        calls.push(call);
+    }
+    let count = references.end - references.start;
+    let prefix = NorGate { left: Wire::Constant(false), right: Wire::Constant(false) };
+    let mut gates = alloc::vec![prefix];
+    let at_limit = lower_child_calls(&base, &calls, count, &mut gates, 2, Ghost(1usize));
+    assert!(matches!(at_limit, Err((1, CallWiringError::GateCapacity))));
+    assert!(matches!(gates.as_slice(), [NorGate { left: Wire::Constant(false), right: Wire::Constant(false) }]));
+    let children = lower_child_calls(&base, &calls, count, &mut gates, 3, Ghost(1usize)).unwrap();
     let invocation = CallerArguments { child_ranges: &children.ranges, child_wires: &children.wires, ..base };
     let parent_circuit = parent.template.circuit();
     let outputs = lower_projected_call(&invocation, parent.arguments, parent_circuit.inputs(), parent_circuit.netlist(),
-        &mut gates, 1, Ghost(seq![1u64]), Ghost(1usize), Ghost(1usize)).unwrap();
+        &mut gates, 3, Ghost(seq![1u64]), Ghost(1usize), Ghost(1usize)).unwrap();
     let result = NorNetlist { input_count: 1, gates, outputs };
-    assert_eq!(result.evaluate(&[false]).unwrap(), [true]);
-    assert_eq!(result.evaluate(&[true]).unwrap(), [false]);
+    assert_eq!(result.evaluate(&[false]).unwrap(), [false]);
+    assert_eq!(result.evaluate(&[true]).unwrap(), [true]);
 }
 
 } // verus!
