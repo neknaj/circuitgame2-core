@@ -388,6 +388,8 @@ pub(super) proof fn nested_call_group_frame(
     ensures match result {
         Ok(()) => {
             let input_bits = caller.inputs.total_bits_model();
+            &&& nested_call_group_result(selected, forms, caller, builtin, before, after, gate_limit, child_limit,
+                destination_widths, Ok(()))
             &&& wiring_view_is_prefix(before, after)
             &&& after.definitions.len() == preceding_port_bits(destination_widths, selected.group.outputs.end as nat)
             &&& after.gates.len() == after.origins.len() <= gate_limit
