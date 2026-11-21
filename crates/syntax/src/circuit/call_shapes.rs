@@ -219,6 +219,20 @@ pub closed spec fn direct_call_argument(forms: Seq<Form>, call: CallShape, index
 }
 
 
+/// 直接の引数の部分木が、呼び出しリストの内部に収まることを示す。
+pub proof fn direct_call_argument_bounds(forms: Seq<Form>, call: CallShape, index: int)
+    requires direct_call_argument(forms, call, index), nested_list_indices(forms), complete_list_indices(forms),
+    ensures ({
+        let end = forms[call.form as int]->List_end as int;
+        let next = if forms[index] is List { forms[index]->List_end as int } else { index + 1 };
+        call.form + 2 <= index < next <= end <= forms.len()
+    }),
+{
+    reveal(direct_form_in_range);
+    reveal(nested_list_indices);
+    reveal(complete_list_indices);
+}
+
 /// 呼び出しの引数列が空でなければ、先頭を直接の引数として扱えることを示す。
 pub proof fn first_call_argument_evidence(forms: Seq<Form>, call: CallShape, range: Range<usize>)
     requires

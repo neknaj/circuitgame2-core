@@ -258,6 +258,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 元フォームから選んだ参照と、解決した呼び出しが同じ位置を指すことを示す。
+    pub(super) proof fn call_form_matches_reference(
+        &self, file: usize, entry: usize, definition: usize, form: usize, reference: usize, call: FuncCallArity,
+    )
+        requires
+            self.func_call_form_reference(file, entry, definition, form, reference),
+            self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(call))),
+        ensures call.call.form == form,
+    {
+    }
+
     proof fn resolved_arity_excludes_no_call(
         &self, at: (usize, usize, usize, usize), call: FuncCallArity,
     )

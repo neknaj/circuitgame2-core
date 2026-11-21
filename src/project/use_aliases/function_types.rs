@@ -534,8 +534,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& typed.types@.len() == wiring.drivers.definitions@.len()
                     &&& retain_calls ==> self.root_function_calls_match((file, entry, max_width), &wiring.drivers,
                         projections.calls@, typed.types@.len())
-                    &&& self.projected_roots_match((file, entry, max_width), typed.types@, &wiring, projections.calls@,
-                        projections.call_arguments.ranges@, projections.call_arguments.arguments@)
                     &&& (retain_calls ==> self.projected_references_match((file, entry, max_width), typed.types@, &wiring,
                         &projections.call_arguments, projections.calls@))
                     &&& concat_projections_match(file, entry, max_width,

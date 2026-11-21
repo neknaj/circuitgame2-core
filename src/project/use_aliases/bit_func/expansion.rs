@@ -608,9 +608,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 CallArgumentSource::NestedCall => {
                     let local = (root.definition - frame.definitions.start) as usize;
                     &&& form is List
+                    &&& group._signature@.call.call.form + 2 <= argument.form < form->List_end
+                        <= parsed.syntax.forms@[group._signature@.call.call.form as int]->List_end
                     &&& exists|reference: usize, child: TypedFuncCall|
                         #[trigger] self.func_call_form_reference(caller.0, caller.1, local, argument.form, reference)
                         && #[trigger] self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child)))
+                        && child.call.call.form == argument.form
                         && child.call.target.port_counts().outputs == 1
                         && (child.call.target matches FuncCallTarget::Function { file, entry, .. } ==>
                             exists|rank: int| 0 <= rank < group._order@.1
@@ -639,10 +642,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let form = projected[port].form;
             let expected = group._signature@.signature->Function_0.inputs@[port].ty;
             let (reference, child) = self.projected_nested_call_signature((file, entry, local), limit, form, expected);
+            self.typed_call_arguments_ready(file, entry, local, 0, limit, group._signature@);
+            self.typed_call_arguments_ready(file, entry, local, reference, limit, child);
+            crate::syntax::circuit::direct_call_argument_bounds(
+                parsed.syntax.forms@, group._signature@.call.call, form as int);
+            self.call_form_matches_reference(file, entry, local, form, reference, child.call);
             assert(self.func_call_form_reference(file, entry, local, form, reference));
             assert(self.func_call_signature_evidence(file, entry, local, reference, limit, Ok(Some(child))));
             if let FuncCallTarget::Function { file: target_file, entry: target_entry, .. } = child.call.target {
-                self.typed_call_arguments_ready(file, entry, local, reference, limit, child);
                 let source = DefinitionPosition { file, entry, definition: local, reference };
                 let site = self.expansion_site_for_call(source, child.call);
                 let (callee, caller_rank) = self.function_expansion_callee_precedes(plan, site);
@@ -755,8 +762,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             typed.types@.len() == wiring.drivers.definitions@.len(),
             self.root_function_calls_match((file, entry, limit), &wiring.drivers, projections.calls@, typed.types@.len()),
             projections.call_arguments.ranges@.len() == projections.calls@.len(),
-            self.projected_roots_match((file, entry, limit), typed.types@, wiring, projections.calls@,
-                projections.call_arguments.ranges@, projections.call_arguments.arguments@),
+            self.projected_references_match((file, entry, limit), typed.types@, wiring,
+                &projections.call_arguments, projections.calls@),
         ensures
             groups@.len() == projections.calls@.len(),
             forall|i: int, j: int| 0 <= i < j < groups@.len()
@@ -785,14 +792,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 caller == (file, entry, limit),
                 self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
                 self.func_signal_types_evidence(file, entry, limit, Ok(*typed)),
                 typed.literals.wiring == FuncWiringResult::Checked(*wiring),
                 typed.types@.len() == wiring.drivers.definitions@.len(),
                 self.root_function_calls_match(caller, &wiring.drivers, projections.calls@, typed.types@.len()),
                 self.root_call_definitions_in_order(file, entry, projections.calls@),
                 projections.call_arguments.ranges@.len() == projections.calls@.len(),
-                self.projected_roots_match(caller, typed.types@, wiring, projections.calls@,
-                    projections.call_arguments.ranges@, projections.call_arguments.arguments@),
+                self.projected_references_match(caller, typed.types@, wiring,
+                    &projections.call_arguments, projections.calls@),
                 index == groups@.len() <= projections.calls@.len(),
                 file < self.targets.project_model().circuits_model().len(),
                 file < self.targets.project_model().sources_model().len(),
@@ -811,7 +819,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let root = &projections.calls[index];
             let ghost group_model = self.checked_root_call_for_expansion(*plan, caller, *typed, *wiring,
                 projections.calls@, index as int);
-            let arguments = &projections.call_arguments.ranges[index];
+            let start = parsed.entry_ranges[entry].definitions.start;
+            let definition = root.definition - start;
+            proof {
+                let refs = parsed.definitions@[root.definition as int].references;
+                assert(definition < super::super::definitions::definition_count(parsed, entry as int));
+                assert(super::super::definitions::reference_count(parsed, entry as int, definition as int)
+                    == refs.end - refs.start > 0);
+            }
+            let arguments = self.retained_call_argument_range(file, entry, definition, 0, &projections.call_arguments,
+                Ghost(limit), Ghost(typed.types@), Ghost(*wiring), Ghost(projections.calls@));
+            assert(arguments == projections.call_arguments.ranges@[index as int]);
             let target = (root.target_file, root.target_entry);
             let vertex = plan.template_vertex(target);
             proof { plan.template_vertex_at_position(target, group_model.1.0, vertex); }
@@ -823,10 +841,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 vstd::std_specs::vec::axiom_spec_len(&typed.types);
                 parsed_index_evidence(*source, *parsed);
                 build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
-                self.projected_root_argument_range(caller, typed.types@, wiring, projections.calls@,
-                    projections.call_arguments.ranges@, projections.call_arguments.arguments@, index as int);
-                let start = parsed.entry_ranges@[entry as int].definitions.start;
-                self.checked_projected_input_count((file, entry, (root.definition - start) as usize, 0),
+                self.checked_projected_input_count((file, entry, definition, 0),
                     limit, typed.types@, wiring, group_model.0,
                     projections.call_arguments.arguments@.subrange(arguments.start as int, arguments.end as int));
             }
@@ -837,7 +852,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 arguments: arguments.start..arguments.end,
                 vertex, _signature: Ghost(group_model.0), _order: Ghost(group_model.1),
             };
-            assert(self.checked_expansion_call_matches(*plan, caller, *typed, wiring, *root, *arguments,
+            assert(self.checked_expansion_call_matches(*plan, caller, *typed, wiring, *root, arguments,
                 &projections.call_arguments, group)) by { reveal(UseAliases::checked_expansion_call_matches); };
             let ghost prior = groups@;
             groups.push(group);
