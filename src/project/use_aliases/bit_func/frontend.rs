@@ -3,6 +3,8 @@
 #[cfg(verus_only)]
 mod source_evaluation;
 mod body;
+#[cfg(verus_only)]
+pub(super) use body::argument_matches_width;
 
 use alloc::vec::Vec;
 use vstd::prelude::*;

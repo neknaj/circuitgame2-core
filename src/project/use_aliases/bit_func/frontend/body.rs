@@ -343,6 +343,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
                 && self.expansion_definition_prefix(scope, calls@, slots@)
                 && self.definition_widths_match(scope, slots@)
+                && (forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls@, slot) ==>
+                    bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]))
+                && (forall|group: int| 0 <= group < selected@.len() ==> {
+                    let call = #[trigger] selected@[group];
+                    let range = call.group.outputs;
+                    let outputs = call.template.output_widths_model();
+                    &&& range.start < range.end <= slots@.len()
+                    &&& range.start + outputs.len() == range.end
+                    &&& forall|port: int| 0 <= port < outputs.len() ==>
+                        slots@[range.start + port].width == #[trigger] outputs[port]
+                })
                 && form_spans_valid(scope.source.text, scope.parsed.syntax.forms@, scope.source.text.spec_bytes().len() as int)
                 && (forall|group: int| 0 <= group < selected@.len()
                     ==> *(#[trigger] selected@[group]).group.expression.source == *scope.source)
@@ -372,6 +383,39 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let result = self.project_definition_body(scope, calls, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed));
         proof {
             if let Ok(slots) = &result {
+                reveal(UseAliases::body_calls_match);
+                reveal(UseAliases::expansion_definition_prefix);
+                reveal(UseAliases::definition_widths_match);
+                assert forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls@, slot) implies
+                    bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]) by {
+                    assert(self.bit_definition_from_source(scope, slots@.take(slot), slot, slots@[slot]));
+                };
+                assert forall|group: int| 0 <= group < selected@.len() implies {
+                    let call = #[trigger] selected@[group];
+                    let range = call.group.outputs;
+                    let outputs = call.template.output_widths_model();
+                    &&& range.start < range.end <= slots@.len()
+                    &&& range.start + outputs.len() == range.end
+                    &&& forall|port: int| 0 <= port < outputs.len() ==>
+                        slots@[range.start + port].width == #[trigger] outputs[port]
+                } by {
+                    assert(calls@[group] == *selected@[group].group);
+                    let call = &calls@[group];
+                    let outputs = selected@[group].template.output_widths_model();
+                    let first = call.outputs.start;
+                    assert(call_widths@[group]@ == outputs);
+                    reveal(UseAliases::call_definition_widths_match);
+                    assert forall|port: int| 0 <= port < outputs.len() implies
+                        slots@[first + port].width == #[trigger] outputs[port] by {
+                        let slot = slots@[first + port];
+                        let ty = scope.types@[first + port]->Some_0.ty;
+                        assert(self.port_width_matches(ty, slot.width, scope.layouts));
+                        assert(self.port_width_matches(ty, outputs[port], scope.layouts));
+                        if let ResolvedPortType::Struct { .. } = ty {
+                            self.layout_port_widths_agree(scope.layouts->Some_0, ty, slot.width as int, outputs[port] as int);
+                        }
+                    };
+                };
                 parsed_index_evidence(*scope.source, *scope.parsed);
                 assert forall|group: int| 0 <= group < selected@.len()
                     implies *(#[trigger] selected@[group]).group.expression.source == *scope.source by {

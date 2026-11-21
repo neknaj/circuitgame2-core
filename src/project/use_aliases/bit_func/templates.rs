@@ -52,6 +52,16 @@ impl<'p, 'a> FunctionTemplate<'p, 'a> {
         self._structure_layouts@
     }
 
+    pub(super) closed spec fn circuit_model(&self) -> &LoweredBitFunc { &self.circuit }
+    pub(super) closed spec fn bit_limit_model(&self) -> usize { self._bit_limit@ }
+
+    /// 展開時に複製する配線と、入出力のビット配置を借りる。
+    pub(super) fn circuit(&self) -> (circuit: &LoweredBitFunc)
+        ensures circuit == self.circuit_model(),
+    {
+        &self.circuit
+    }
+
     /// 変換した関数の出力幅を宣言順に借りる。
     pub(super) fn output_widths(&self) -> (widths: &[u64])
         ensures widths@ == self.output_widths_model(),
@@ -99,6 +109,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.function_template_matches(position, limit, template),
         ensures self.template_port_widths_match(template.signature_model(), limit, template.input_widths_model(),
             template.output_widths_model(), template.structure_layouts_model()),
+    {
+        reveal(UseAliases::function_template_matches);
+    }
+
+    /// 署名の各ポート幅が、保存したネットリストの入出力配置に対応することを示す。
+    pub(super) proof fn template_circuit_evidence(
+        &self, position: (usize, usize), limit: u64, template: &FunctionTemplate,
+    )
+        requires self.function_template_matches(position, limit, template),
+        ensures
+            port_bit_layout_result(template.input_widths_model(), template.bit_limit_model(), Ok(*template.circuit_model().input_layout_model())),
+            port_bit_layout_result(template.output_widths_model(), template.bit_limit_model(), Ok(*template.circuit_model().output_layout_model())),
+            nor_evaluation_ready(template.circuit_model().netlist_model(),
+                template.circuit_model().input_layout_model().total_bits_model() as nat),
+            template.circuit_model().netlist_model().outputs@.len() == template.circuit_model().output_layout_model().total_bits_model(),
     {
         reveal(UseAliases::function_template_matches);
     }

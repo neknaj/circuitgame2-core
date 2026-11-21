@@ -1,7 +1,13 @@
 //! 通常の定義と関数呼び出しを、同じ配線列へ定義順に変換する。
 
 use super::*;
-use super::super::expansion::CheckedExpansionCall;
+use super::super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
+use super::super::templates::ResolvedTemplateCall;
+use crate::project::{FunctionExpansionOrder, UseAliases};
+#[cfg(verus_only)]
+use super::super::frontend::argument_matches_width;
+#[cfg(verus_only)]
+use super::super::super::call_arity::CallArgumentSource;
 use super::super::super::call_arity::ProjectedCallArgument;
 use super::call_group::{BodyWiring, CallGroupError, lower_call_group};
 use crate::syntax::Form;
@@ -77,6 +83,100 @@ pub(super) closed spec fn binding_ready(
             preceding_port_bits(widths, group.outputs.start as nat) as int, #[trigger] binding.arguments@[i],
             (range.end - range.start) as usize)
     }
+}
+
+/// 先行定義の幅と、呼び出し先の入力ポートごとのビット範囲を結び付ける。
+proof fn call_argument_bits_available(
+    binding: CallBinding, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>,
+    capacity: usize, width_limit: u64, port: int,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        binding.group.outputs.start <= body.definitions@.len(),
+        0 <= port < binding.arguments@.len() == binding._input_widths@.len(),
+        port_bit_layout_result(binding._input_widths@, binding._layout_limit@, Ok(*binding.callee.input_layout_model())),
+        argument_matches_width(binding.group.expression.source, forms, body.input_widths@,
+            body.definitions@.take(binding.group.outputs.start as int), binding.arguments@[port],
+            binding._input_widths@[port], width_limit),
+    ensures ({
+        let range = binding.callee.input_layout_model().ranges_model()[port];
+        layout_argument_ready(binding.group.expression.source, forms,
+            layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
+            preceding_port_bits(definition_widths(body.definitions@), binding.group.outputs.start as nat) as int,
+            binding.arguments@[port], (range.end - range.start) as usize)
+    }),
+{
+    let inputs = binding._input_widths@;
+    let layout = binding.callee.input_layout_model();
+    port_bit_layout_size(inputs, binding._layout_limit@, layout);
+    port_bit_layout_port(inputs, binding._layout_limit@, *layout, port as usize);
+    let range = layout.ranges_model()[port];
+    let width = (range.end - range.start) as usize;
+    assert(width == inputs[port]);
+    if let CallArgumentSource::Driver(driver) = binding.arguments@[port].source {
+        let first = binding.group.outputs.start;
+        let used = preceding_port_bits(definition_widths(body.definitions@), first as nat) as int;
+        assert forall|bit: int| 0 <= bit < width implies
+            #[trigger] driver_bit_available(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), used, driver, bit) by {
+            body_driver_bits_fit_layout(body.input_widths@, body.definitions@, layouts, capacity, first as int, used, driver, inputs[port], bit);
+        };
+    }
+}
+
+/// 選択した呼び出し先と元の実引数を借り、配線生成に渡す。
+pub(super) fn bind_resolved_call<'s, 'p, 'a>(
+    _aliases: &UseAliases<'_, 'p, 'a>, selected: &ResolvedTemplateCall<'s, 'p, 'a>, _body: &LoweringBody,
+    _layouts: &Layouts, Ghost(forms): Ghost<Seq<Form>>, Ghost(capacity): Ghost<usize>,
+    Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>, int)>,
+) -> (binding: CallBinding<'s, 'p, 'a>)
+    requires
+        _aliases.resolved_template_call_matches(context.0, context.1, context.2, context.3, *selected),
+        body_definition_layouts(_body.input_widths@, _body.definitions@, capacity, _layouts),
+        form_spans_valid(selected.group.expression.source.text, forms,
+            selected.group.expression.source.text.spec_bytes().len() as int),
+        selected.group.outputs.start < selected.group.outputs.end <= _body.definitions@.len(),
+        selected.group.outputs.start + selected.template.output_widths_model().len() == selected.group.outputs.end,
+        selected.arguments@.len() == selected.template.input_widths_model().len(),
+        forall|i: int| 0 <= i < selected.template.output_widths_model().len() ==>
+            _body.definitions@[selected.group.outputs.start + i].width == #[trigger] selected.template.output_widths_model()[i],
+        forall|port: int| 0 <= port < selected.arguments@.len() ==>
+            argument_matches_width(selected.group.expression.source, forms, _body.input_widths@,
+                _body.definitions@.take(selected.group.outputs.start as int), #[trigger] selected.arguments@[port],
+                selected.template.input_widths_model()[port], context.1.2),
+    ensures
+        binding.group == selected.group,
+        binding.arguments == selected.arguments,
+        binding.callee == selected.template.circuit_model(),
+        binding._input_widths@ == selected.template.input_widths_model(),
+        binding._output_widths@ == selected.template.output_widths_model(),
+        binding._layout_limit@ == selected.template.bit_limit_model(),
+        binding_ready(binding, _layouts, forms, definition_widths(_body.definitions@)),
+{
+    let template = selected.template;
+    let binding = CallBinding {
+        group: selected.group,
+        arguments: selected.arguments,
+        callee: template.circuit(),
+        _input_widths: Ghost(template.input_widths_model()),
+        _output_widths: Ghost(template.output_widths_model()),
+        _layout_limit: Ghost(template.bit_limit_model()),
+    };
+    proof {
+        let position = context.0.position_model(selected.group._order@.0)->Some_0;
+        let width_limit = context.1.2;
+        _aliases.template_circuit_evidence(position, width_limit, template);
+        reveal(binding_ready);
+        assert forall|i: int| 0 <= i < binding.arguments@.len() implies {
+            let range = binding.callee.input_layout_model().ranges_model()[i];
+            layout_argument_ready(binding.group.expression.source, forms, _layouts.inputs.ranges_model(),
+                _layouts.definitions.ranges_model(), preceding_port_bits(definition_widths(_body.definitions@),
+                    binding.group.outputs.start as nat) as int, #[trigger] binding.arguments@[i],
+                (range.end - range.start) as usize)
+        } by {
+            call_argument_bits_available(binding, _body, _layouts, forms, capacity, width_limit, i);
+        };
+    }
+    binding
 }
 
 pub(super) open spec fn ordered_bindings(bindings: Seq<CallBinding>) -> bool {
@@ -442,15 +542,6 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
     let selected = aliases.resolve_template_calls(&plan, &templates, prepared.calls.as_slice(),
         prepared.projections.call_arguments.arguments.as_slice(), Ghost(prepared), Ghost((0usize, 1usize, 8u64)));
     let call = &selected[0];
-    let callee = call.template;
-    let binding = CallBinding {
-        group: call.group,
-        arguments: call.arguments,
-        callee: &callee.circuit,
-        _input_widths: Ghost(callee.inputs@),
-        _output_widths: Ghost(callee.outputs@),
-        _layout_limit: Ghost(8usize),
-    };
     let bit = SingleBitOperand::Driver(OutputDriver::Definition(1));
     let slots = vec![
         CheckedBitDefinition { expression: copy_location(&group.expression), width: 4,
@@ -467,8 +558,9 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
     let body = LoweringBody { input_widths: ports.inputs.as_slice(), definitions: slots.as_slice() };
     let output_widths = ports.outputs.as_slice();
     let output_drivers = wiring.drivers.outputs.as_slice();
-    let bindings = [binding];
     let limited = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 8).unwrap();
+    let bindings = [bind_resolved_call(&aliases, call, &body, &limited,
+        Ghost(forms@), Ghost(8usize), Ghost((&plan, (0usize, 1usize, 8u64), &prepared, 0int)))];
     let Err(MixedWiringError::LocalGateCapacity(site)) = lower_mixed_function(&body, limited, forms, &bindings,
         output_widths, output_drivers, 8, 1) else {
         panic!("expected the second NOR to exceed the gate limit");
