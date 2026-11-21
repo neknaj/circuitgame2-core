@@ -95,6 +95,23 @@ pub(super) open spec fn source_call_argument_value(
     }
 }
 
+/// 元の呼び出しに並ぶ引数と、呼び出し先に渡すポートの値を対応付ける。
+pub(super) open spec fn source_call_arguments_match(
+    source: &crate::project::ProjectSource, parsed: &crate::syntax::circuit::NamedBuildCircuit,
+    wiring: &FuncWiring, entry: usize, definition: usize, call: crate::syntax::circuit::CallShape, limit: u64,
+    inputs: Seq<Seq<bool>>, prior: Seq<Seq<bool>>, widths: Seq<u64>, ports: Seq<Seq<bool>>,
+) -> bool {
+    &&& entry < parsed.entry_ranges@.len()
+    &&& parsed.entry_ranges@[entry as int].definitions.start <= definition
+        < parsed.entry_ranges@[entry as int].definitions.end <= parsed.definitions@.len()
+    &&& call.form == parsed.definitions@[definition as int].expression.start
+    &&& exists|positions: Seq<usize>| #[trigger] crate::syntax::circuit::call_argument_positions(parsed.syntax.forms@, call, positions)
+        && positions.len() == ports.len() == widths.len()
+        && forall|port: int| 0 <= port < positions.len() ==>
+            source_call_argument_value(source, parsed, wiring, entry, definition, #[trigger] positions[port],
+                limit, inputs, prior, widths[port], ports[port])
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     #[verifier::opaque]
     pub(super) closed spec fn checked_expansion_call_matches(
@@ -191,7 +208,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures ({
             let forms = self.targets.project_model().circuits_model()[caller.0 as int].syntax.forms@;
             let projected = arguments.arguments@.subrange(range.start as int, range.end as int);
-            crate::syntax::circuit::call_argument_positions(forms, group._signature@.call.call,
+            let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+            &&& caller.1 < parsed.entry_ranges@.len()
+            &&& parsed.entry_ranges@[caller.1 as int].definitions.start <= root.definition
+                < parsed.entry_ranges@[caller.1 as int].definitions.end <= parsed.definitions@.len()
+            &&& group._signature@.call.call.form == parsed.definitions@[root.definition as int].expression.start
+            &&& crate::syntax::circuit::call_argument_positions(forms, group._signature@.call.call,
                 Seq::new(projected.len(), |i: int| projected[i].form))
         }),
     {
@@ -201,6 +223,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let local = (root.definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
         let projected = arguments.arguments@.subrange(range.start as int, range.end as int);
         self.projected_arguments_in_source_order((file, entry, local, 0), limit, typed.types@, wiring, group._signature@, projected);
+        self.typed_call_arguments_ready(file, entry, local, 0, limit, group._signature@);
+        self.targets.parsed_project_model();
+        let source = &self.targets.project_model().sources_model()[file as int];
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, root.definition as int);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        crate::syntax::circuit::root_call_shape_location(source.text, parsed.syntax.forms@,
+            parsed.definitions@[root.definition as int], parsed.references@, group._signature@.call.call);
     }
 
     /// 展開に渡す引数の型と、呼び出し前に参照できる駆動元を取り出す。

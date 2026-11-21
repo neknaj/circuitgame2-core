@@ -2,6 +2,8 @@
 
 #[cfg(verus_only)]
 mod source_arguments;
+#[cfg(verus_only)]
+pub(super) use source_arguments::mixed_function_source_call_values;
 
 use super::*;
 #[cfg(verus_only)]

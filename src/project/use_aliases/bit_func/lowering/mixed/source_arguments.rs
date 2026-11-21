@@ -3,7 +3,9 @@
 use super::*;
 use super::super::call_arguments::{argument_driver_value, literal_word, lowered_argument_port_value};
 use super::super::evaluation::definition_values_from_wires;
-use super::super::super::expansion::{call_literal_bit, source_argument_bytes, source_call_argument_value};
+use super::super::super::expansion::{
+    call_literal_bit, source_argument_bytes, source_call_argument_value, source_call_arguments_match,
+};
 use super::super::super::semantics::driver_values;
 use crate::netlist::wire_value;
 use crate::project::FuncWiringResult;
@@ -174,6 +176,8 @@ proof fn trace_call_frame(
         let binding = bindings[step.group_before as int];
         &&& step.group_before < bindings.len()
         &&& step.from == binding.group.outputs.start <= body.definitions@.len()
+        &&& step.to == binding.group.outputs.end
+        &&& binding.callee.netlist_model().outputs@.len() == binding.callee.output_layout_model().total_bits_model()
         &&& step.before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), step.from as nat)
         &&& binding_ready(binding, layouts, forms, definition_widths(body.definitions@))
         &&& binding.arguments@.len() == binding._input_widths@.len()
@@ -189,6 +193,52 @@ proof fn trace_call_frame(
     let step = steps[at];
     existing_wires_keep_availability(step.after.definitions, layouts.inputs.total_bits_model(),
         step.after.gates.len(), final_wiring.gates.len());
+}
+
+/// 呼び出しの出力ポートを宣言順に並べると、呼び出し元の左辺の値列に一致する。
+proof fn call_output_ports_match_definitions(
+    body: &LoweringBody, layouts: &Layouts, capacity: usize, binding: CallBinding, forms: Seq<Form>,
+    final_wiring: WiringView, inputs: Seq<bool>, gates: Seq<bool>, outputs: Seq<bool>,
+)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        binding_ready(binding, layouts, forms, definition_widths(body.definitions@)),
+        outputs.len() == binding.callee.output_layout_model().total_bits_model(),
+        forall|port: int, bit: int| 0 <= port < binding._output_widths@.len() && 0 <= bit < binding._output_widths@[port] ==>
+            #[trigger] call_output_bit_has_value(layouts, binding.callee, final_wiring.definitions,
+                binding.group.outputs.start, port, bit, inputs, gates, outputs),
+    ensures
+        port_values(binding.callee.output_layout_model(), outputs)
+            == definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates)
+                .subrange(binding.group.outputs.start as int, binding.group.outputs.end as int),
+{
+    reveal(binding_ready);
+    reveal(port_values);
+    let widths = binding._output_widths@;
+    let start = binding.group.outputs.start as int;
+    let end = binding.group.outputs.end as int;
+    let layout = binding.callee.output_layout_model();
+    let ports = port_values(layout, outputs);
+    let definitions = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, gates);
+    let assigned = definitions.subrange(start, end);
+    port_bit_layout_size(widths, binding._layout_limit@, layout);
+    assert forall|port: int| 0 <= port < widths.len() implies #[trigger] ports[port] == assigned[port] by {
+        port_bit_layout_port(widths, binding._layout_limit@, *layout, port as usize);
+        let source = layout.ranges_model()[port];
+        let target = layouts.definitions.ranges_model()[start + port];
+        let width = widths[port];
+        assert(definition_widths(body.definitions@)[start + port] == width);
+        assert(assigned[port] == definitions[start + port]);
+        assert(ports[port].len() == assigned[port].len() == width);
+        assert forall|bit: int| 0 <= bit < width implies #[trigger] ports[port][bit] == assigned[port][bit] by {
+            assert(call_output_bit_has_value(layouts, binding.callee, final_wiring.definitions,
+                binding.group.outputs.start, port, bit, inputs, gates, outputs));
+            assert(ports[port][bit] == outputs[source.start + bit]);
+            assert(assigned[port][bit] == wire_value(final_wiring.definitions[target.start + bit], inputs, gates));
+        };
+        assert(ports[port] =~= assigned[port]);
+    };
+    assert(ports =~= assigned);
 }
 
 /// 展開した引数配線から読んだ値を、元の呼び出しにある全引数の値に対応付ける。
@@ -235,14 +285,11 @@ proof fn mixed_trace_source_call_values(
         let prior = definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values).take(step.from as int);
 
         &&& nor_evaluation(binding.callee.netlist_model(), result.0, result.1)
-        &&& exists|positions: Seq<usize>| #[trigger] call_argument_positions(forms, binding.group._signature@.call.call, positions)
-            && positions.len() == ports.len() == binding._input_widths@.len()
-            && forall|port: int| 0 <= port < positions.len() ==>
-                source_call_argument_value(source, parsed, &wiring, caller.1, root.definition, #[trigger] positions[port],
-                    caller.2, incoming, prior, binding._input_widths@[port], ports[port])
-        &&& forall|port: int, bit: int| 0 <= port < binding._output_widths@.len() && 0 <= bit < binding._output_widths@[port] ==>
-            #[trigger] call_output_bit_has_value(layouts, binding.callee, final_wiring.definitions, step.from, port, bit,
-                inputs, values, result.1)
+        &&& source_call_arguments_match(source, parsed, &wiring, caller.1, root.definition,
+            binding.group._signature@.call.call, caller.2, incoming, prior, binding._input_widths@, ports)
+        &&& port_values(binding.callee.output_layout_model(), result.1)
+            == definition_values_from_wires(&layouts.definitions, final_wiring.definitions, inputs, values)
+                .subrange(step.from as int, step.to as int)
     }),
 {
     let result = mixed_trace_call_values(body, layouts, forms, bindings, limit, layout_limit, steps, slot, group,
@@ -293,6 +340,87 @@ proof fn mixed_trace_source_call_values(
     };
     assert(call_argument_positions(forms, binding.group._signature@.call.call, positions));
     prior_definition_values_from_final(body, layouts, layout_limit, step, final_wiring, inputs, values);
+    assert(result.1.len() == binding.callee.output_layout_model().total_bits_model()) by {
+        reveal(nor_evaluation);
+    };
+    call_output_ports_match_definitions(body, layouts, layout_limit, binding, forms, final_wiring, inputs, values, result.1);
+    result
+}
+
+/// 変換に成功した関数で、指定した呼び出しの引数値と左辺の値を取り出す。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_source_call_values(
+    aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+    selected: ResolvedTemplateCall, index: int, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>,
+    bindings: Seq<CallBinding>, widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
+    function: &LoweredBitFunc, steps: Ghost<Seq<WiringStep>>, inputs: Seq<bool>, values: Seq<bool>,
+) -> (result: (Seq<bool>, Seq<bool>))
+    requires
+        aliases.can_resolve(),
+        aliases.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+        prepared.typed.literals.wiring matches FuncWiringResult::Checked(wiring)
+            && body.input_widths@.len() == wiring.drivers.signature.inputs@.len(),
+        ({
+            let project = aliases.targets.project_model();
+            &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
+            &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
+        }),
+        mixed_function_result(body, layouts, forms, bindings, widths, drivers, gate_limit, Ok((*function, steps))),
+        ordered_bindings(bindings),
+        0 <= index < bindings.len(),
+        binding_matches_selection(bindings[index], selected),
+        aliases.resolved_template_call_matches(plan, caller, prepared, index, selected),
+        resolved_call_fits_body(selected, body.input_widths@, body.definitions@, forms, caller.2),
+        body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
+        gate_values_match(inputs, function.netlist_model().gates@, values),
+        values.len() == function.netlist_model().gates@.len() <= usize::MAX,
+        inputs.len() == layouts.inputs.total_bits_model(),
+    ensures ({
+        let project = aliases.targets.project_model();
+        let source = &project.sources_model()[caller.0 as int];
+        let parsed = &project.circuits_model()[caller.0 as int];
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        let root = prepared.projections.calls@[index];
+        let callee = selected.template.circuit_model();
+        let first = selected.group.outputs.start as int;
+        let end = selected.group.outputs.end as int;
+        let definitions = definition_values_from_wires(&layouts.definitions, function.definition_wires@, inputs, values);
+        &&& nor_evaluation(callee.netlist_model(), result.0, result.1)
+        &&& source_call_arguments_match(source, parsed, &wiring, caller.1, root.definition,
+            selected.group._signature@.call.call, caller.2, port_values(&layouts.inputs, inputs), definitions.take(first),
+            selected.template.input_widths_model(), port_values(callee.input_layout_model(), result.0))
+        &&& port_values(callee.output_layout_model(), result.1) == definitions.subrange(first, end)
+    }),
+{
+    let wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    let end = steps@.len() as int - 1;
+    vstd::slice::axiom_spec_len(body.definitions);
+    let slot = body.definitions@.len() as usize;
+    let group = bindings.len() as usize;
+    assert(0 <= end && steps@[end].to == slot) by { reveal(mixed_trace); };
+    let first = selected.group.outputs.start as int;
+    assert(first < body.definitions@.len());
+    assert(binding_covers(bindings, first));
+    let at = mixed_trace_definition_step(body, layouts, forms, bindings, gate_limit, steps@, slot, group, wiring, end, first);
+    let step = steps@[at];
+    assert(step.group_before != step.group_after && step.group_before == index) by {
+        reveal(wiring_step_valid);
+        if step.group_before == step.group_after {
+            assert(step.from == first);
+            assert(!binding_covers(bindings, first));
+        } else {
+            let actual = step.group_before as int;
+            assert(bindings[actual].group.outputs.start <= first < bindings[actual].group.outputs.end);
+            if actual < index {
+                assert(bindings[actual].group.outputs.end <= bindings[index].group.outputs.start);
+            } else if index < actual {
+                assert(bindings[index].group.outputs.end <= bindings[actual].group.outputs.start);
+            }
+        }
+    };
+    let result = mixed_trace_source_call_values(aliases, plan, caller, prepared, selected, body, layouts, forms, bindings,
+        gate_limit, layout_limit, steps@, slot, group, wiring, at, inputs, values);
+    reveal(wiring_step_valid);
     result
 }
 

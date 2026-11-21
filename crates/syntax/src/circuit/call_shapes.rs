@@ -90,6 +90,23 @@ pub proof fn indexed_call_shapes_agree(
 {
 }
 
+/// 右辺全体が通常呼び出しなら、先頭の参照がその呼び出しを指すことを示す。
+pub proof fn root_call_shape_location(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, references: Seq<ExpressionReference>, call: CallShape,
+)
+    requires
+        definition_call_index(source, forms, row, references),
+        forms.len() <= usize::MAX,
+        ordinary_call_at(source, forms, row.expression.start as int, row.expression.end as int),
+        row.references.start < row.references.end <= references.len(),
+        call_shape_matches(source, forms, row, references[row.references.start as int], Some(call)),
+    ensures call.form == row.expression.start,
+{
+    expression_root_callee(source, forms, row.expression.start as int, row.expression.end as int);
+    let refs = references.subrange(row.references.start as int, row.references.end as int);
+    assert(refs[0] == references[row.references.start as int]);
+}
+
 /// 呼び出しの構文木に直接の引数列があり、その個数が索引に記録した値と一致することを表す。
 pub closed spec fn call_arguments_match(forms: Seq<Form>, call: CallShape) -> bool {
     let form = call.form as int;
