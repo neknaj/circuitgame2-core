@@ -138,6 +138,45 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && target_file == row.target_file && target_entry == row.target_entry && arity.outputs == row.count)
     }
 
+    /// 関数呼び出しの出力数が、元の左辺に並ぶ名前の数に等しいことを示す。
+    pub(in crate::project::use_aliases) proof fn root_function_call_target_count(
+        &self, caller: (usize, usize, u64), drivers: &FuncDrivers,
+        rows: Seq<RootFunctionCall>, processed: nat, index: int,
+    )
+        requires
+            self.root_function_calls_match(caller, drivers, rows, processed),
+            0 <= index < rows.len(),
+            ({
+                let project = self.targets.project_model();
+                &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
+                &&& {
+                    let parsed = project.circuits_model()[caller.0 as int];
+                    &&& caller.1 < parsed.entry_ranges@.len()
+                    &&& parsed.entry_ranges@[caller.1 as int].definitions.start <= rows[index].definition
+                        < parsed.entry_ranges@[caller.1 as int].definitions.end <= parsed.definitions@.len()
+                }
+            }),
+        ensures ({
+            let parsed = self.targets.project_model().circuits_model()[caller.0 as int];
+            let row = rows[index];
+            let (start, end) = definition_target_range(parsed.syntax.forms@, parsed.definitions@[row.definition as int]);
+            row.count == end - start
+        }),
+    {
+        reveal(UseAliases::root_function_call_matches);
+        let row = rows[index];
+        let parsed = self.targets.project_model().circuits_model()[caller.0 as int];
+        let base = parsed.entry_ranges@[caller.1 as int].definitions.start;
+        let local = (row.definition - base) as usize;
+        assert(base + local == row.definition);
+        let call = choose|call: TypedFuncCall|
+            #[trigger] self.root_output_signature(caller.0, caller.1, local, caller.2, Ok(Some(call)))
+            && (call.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, arity, .. }
+                && target_file == row.target_file && target_entry == row.target_entry && arity.outputs == row.count);
+        reveal(UseAliases::root_output_signature);
+        assert(call.call.target.port_counts().outputs == row.count);
+    }
+
     pub(in crate::project::use_aliases) closed spec fn root_function_calls_match(
         &self, caller: (usize, usize, u64), drivers: &FuncDrivers, rows: Seq<RootFunctionCall>, processed: nat,
     ) -> bool {

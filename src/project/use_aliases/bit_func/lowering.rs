@@ -381,6 +381,7 @@ pub(super) proof fn projected_lowering_call_values(
         let first = call.group.outputs.start as int;
         let end = call.group.outputs.end as int;
         let definitions = expanded_definition_values(value, input, gates);
+        &&& end <= definitions.len()
         &&& nor_evaluation(callee.netlist_model(), result.0, result.1)
         &&& source_call_arguments_match(source, parsed, &wiring, caller.1, root.definition,
             call.group._signature@.call.call, caller.2, port_values(value.input_layout_model(), input), definitions.take(first),

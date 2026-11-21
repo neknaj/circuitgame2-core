@@ -2,11 +2,13 @@
 
 use super::*;
 use super::super::templates::{FunctionTemplates, ResolvedTemplateCall};
+#[cfg(verus_only)]
+use super::super::templates::FunctionTemplate;
 use super::super::lowering::{LoweredBitFunc, ProjectedLoweringError, lower_projected_expansion};
 #[cfg(verus_only)]
 use super::super::lowering::{
     expanded_definition_values, projected_lowering_output_values, projected_lowering_view, resolved_call_fits_body,
-    projected_lowering_ports, port_values,
+    projected_lowering_call_values, projected_lowering_ports, port_values,
 };
 #[cfg(verus_only)]
 use super::source_evaluation::{source_outputs_from_driver_values, source_outputs_match};
@@ -952,6 +954,58 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         source_outputs_from_driver_values(scope.wiring, incoming, values, outgoing);
         gates
+    }
+
+    /// 展開した呼び出しの評価を、同じ参照先と元ソースの引数・左辺に結び付ける。
+    pub(super) proof fn expanded_body_source_call_values(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, bit_limit: usize, gate_limit: usize, value: &ExpandedBody,
+        index: int, input: Seq<bool>, gates: Seq<bool>,
+    ) -> (result: (FunctionTemplate<'p, 'a>, Seq<bool>, Seq<bool>))
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+            self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
+            0 <= index < prepared.calls@.len(),
+            input.len() == value.circuit.input_layout_model().total_bits_model(),
+            gate_values_match(input, value.circuit.netlist_model().gates@, gates),
+            gates.len() == value.circuit.netlist_model().gates@.len() <= usize::MAX,
+        ensures ({
+            let group = prepared.calls@[index];
+            let root = prepared.projections.calls@[index];
+            let template = result.0;
+            let callee = template.circuit_model();
+            let wiring = prepared.typed.literals.wiring->Checked_0;
+            &&& 0 <= group._order@.0 < group._order@.1 < plan.order_model().len()
+            &&& plan.position_model(group._order@.0) == Some((root.target_file, root.target_entry))
+            &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
+            &&& group.vertex == plan.order_model()[group._order@.0]
+            &&& table.slots_model()[group.vertex as int] == Some(template)
+            &&& nor_evaluation(callee.netlist_model(), result.1, result.2)
+            &&& self.source_function_call_values(caller, &wiring, root.definition, group._signature@, group.outputs,
+                (root.target_file, root.target_entry), port_values(value.circuit.input_layout_model(), input),
+                expanded_definition_values(&value.circuit, input, gates), template.input_widths_model(),
+                port_values(callee.input_layout_model(), result.1), port_values(callee.output_layout_model(), result.2))
+        }),
+    {
+        let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let call = selected[index];
+        let root = prepared.projections.calls@[index];
+        let forms = scope.parsed.syntax.forms@;
+        let drivers = scope.wiring.drivers.outputs@;
+        let values = expanded_definition_values(&value.circuit, input, gates);
+        self.prepared_call_matches_source_site(plan, caller, prepared, index);
+        reveal(UseAliases::routine_ports_result);
+        reveal(UseAliases::template_port_widths_match);
+        reveal(UseAliases::prepared_definition_result);
+        let (arguments, results) = projected_lowering_call_values(self, plan, caller, prepared, scope.inputs@,
+            slots@, scope.outputs@, drivers, forms, selected, index, bit_limit, gate_limit, &value.circuit, input, gates);
+        let callee = call.template.circuit_model();
+        self.source_function_call_values_intro(caller, scope.wiring, root.definition, call.group._signature@,
+            call.group.outputs, (root.target_file, root.target_entry), port_values(value.circuit.input_layout_model(), input),
+            values, call.template.input_widths_model(), port_values(callee.input_layout_model(), arguments),
+            port_values(callee.output_layout_model(), results));
+        (*call.template, arguments, results)
     }
 
     /// 厳格解析と型検査を終えた本体を、先行する関数のネットリストを使って配線へ変換する。

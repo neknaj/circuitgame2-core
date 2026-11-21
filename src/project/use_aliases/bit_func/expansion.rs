@@ -113,6 +113,125 @@ pub(super) open spec fn source_call_arguments_match(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// ソースの右辺が指す関数と、その出力を受け取る左辺の範囲を定める。
+    #[verifier::opaque]
+    pub(super) closed spec fn source_function_call_site(
+        &self, caller: (usize, usize, u64), wiring: &FuncWiring, definition: usize,
+        signature: TypedFuncCall, outputs: Range<usize>, target: (usize, usize),
+    ) -> bool {
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let frame = parsed.entry_ranges@[entry as int].definitions;
+        let row = parsed.definitions@[definition as int];
+        let expression = row.expression;
+        let (first, end) = crate::syntax::circuit::definition_target_range(parsed.syntax.forms@, row);
+
+        &&& self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring)))
+        &&& file < project.circuits_model().len() && file < project.sources_model().len()
+        &&& entry < parsed.entry_ranges@.len()
+        &&& frame.start <= definition < frame.end <= parsed.definitions@.len()
+        &&& signature.call.call.form == expression.start
+        &&& crate::syntax::circuit::ordinary_call_at(source.text, parsed.syntax.forms@, expression.start as int, expression.end as int)
+        &&& self.func_call_signature_evidence(file, entry, (definition - frame.start) as usize, 0, limit, Ok(Some(signature)))
+        &&& signature.call.target matches super::super::FuncCallTarget::Function { file: callee_file, entry: callee_entry, .. }
+        &&& (callee_file, callee_entry) == target
+        &&& signature.signature matches super::super::FuncCallSignature::Function(ports)
+        &&& outputs.start < outputs.end <= wiring.drivers.definitions@.len()
+        &&& outputs.end - outputs.start == ports.outputs@.len() == end - first
+        &&& forall|i: int| outputs.start <= i < outputs.end ==> {
+            let driver = #[trigger] wiring.drivers.definitions@[i];
+            &&& driver.definition == definition
+            &&& driver.result_index == i - outputs.start
+        }
+    }
+
+    /// 引数の値と呼び出し先の出力が、元の右辺と左辺に対応することを表す。
+    pub(super) closed spec fn source_function_call_values(
+        &self, caller: (usize, usize, u64), wiring: &FuncWiring, definition: usize,
+        signature: TypedFuncCall, outputs: Range<usize>, target: (usize, usize),
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, argument_widths: Seq<u64>,
+        arguments: Seq<Seq<bool>>, results: Seq<Seq<bool>>,
+    ) -> bool {
+        let project = self.targets.project_model();
+        &&& self.source_function_call_site(caller, wiring, definition, signature, outputs, target)
+        &&& outputs.end <= values.len()
+        &&& source_call_arguments_match(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
+            wiring, caller.1, definition, signature.call.call, caller.2, inputs, values.take(outputs.start as int),
+            argument_widths, arguments)
+        &&& results == values.subrange(outputs.start as int, outputs.end as int)
+    }
+
+    pub(super) proof fn source_function_call_values_intro(
+        &self, caller: (usize, usize, u64), wiring: &FuncWiring, definition: usize,
+        signature: TypedFuncCall, outputs: Range<usize>, target: (usize, usize),
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, argument_widths: Seq<u64>,
+        arguments: Seq<Seq<bool>>, results: Seq<Seq<bool>>,
+    )
+        requires
+            self.source_function_call_site(caller, wiring, definition, signature, outputs, target),
+            outputs.end <= values.len(),
+            ({
+                let project = self.targets.project_model();
+                source_call_arguments_match(&project.sources_model()[caller.0 as int], &project.circuits_model()[caller.0 as int],
+                    wiring, caller.1, definition, signature.call.call, caller.2, inputs, values.take(outputs.start as int),
+                    argument_widths, arguments)
+            }),
+            results == values.subrange(outputs.start as int, outputs.end as int),
+        ensures self.source_function_call_values(caller, wiring, definition, signature, outputs, target,
+            inputs, values, argument_widths, arguments, results),
+    {}
+
+    /// 準備した呼び出しから、ソース上の参照先と出力順の対応を取り出す。
+    pub(super) proof fn prepared_call_matches_source_site(
+        &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody, index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+            0 <= index < prepared.calls@.len(),
+        ensures ({
+            let group = prepared.calls@[index];
+            let root = prepared.projections.calls@[index];
+            let wiring = prepared.typed.literals.wiring->Checked_0;
+            &&& self.source_function_call_site(caller, &wiring, root.definition, group._signature@, group.outputs,
+                (root.target_file, root.target_entry))
+            &&& 0 <= group._order@.0 < group._order@.1 < plan.order_model().len()
+            &&& plan.position_model(group._order@.0) == Some((root.target_file, root.target_entry))
+            &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
+        }),
+    {
+        reveal(UseAliases::checked_expansion_call_matches);
+        reveal(UseAliases::root_call_result_types_match);
+        reveal(UseAliases::source_function_call_site);
+        let root = prepared.projections.calls@[index];
+        let group = prepared.calls@[index];
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        let arguments = &prepared.projections.call_arguments;
+        let range = arguments.ranges@[index];
+        self.checked_types_keep_wiring(caller.0, caller.1, caller.2, prepared.typed, wiring);
+        self.expansion_arguments_in_source_order(*plan, caller, prepared.typed, &wiring, root, range, arguments, group);
+        self.checked_wiring_is_func(caller.0, caller.1, caller.2, wiring);
+
+        assert(self.checked_expansion_call_matches(*plan, caller, prepared.typed, &wiring, root, range, arguments, group));
+        assert(self.root_call_result_types_match(prepared.typed, wiring, root, group._signature@));
+        assert(group.outputs.end <= wiring.drivers.definitions@.len());
+        assert forall|i: int| group.outputs.start <= i < group.outputs.end implies {
+            let driver = #[trigger] wiring.drivers.definitions@[i];
+            &&& driver.definition == root.definition
+            &&& driver.result_index == i - group.outputs.start
+        } by {
+            let port = i - root.first_output;
+            let expected = group._signature@.signature->Function_0.outputs@[port];
+            assert(prepared.typed.types@[root.first_output + port] == Some(SignalType {
+                ty: expected.ty, origin: expected.annotation,
+            }));
+        };
+        self.root_function_call_target_count(caller, &wiring.drivers, prepared.projections.calls@,
+            prepared.typed.types@.len(), index);
+    }
+
     #[verifier::opaque]
     pub(super) closed spec fn checked_expansion_call_matches(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),

@@ -521,6 +521,47 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 各関数の展開元を取り出し、参照した先行関数が完成後の表にも同じ頂点にあることを示す。
+    pub(super) proof fn completed_template_expansion_at(
+        &self, plan: &FunctionExpansionOrder, width_limit: u64, bit_limit: usize, gate_limit: usize,
+        table: &FunctionTemplates, rank: int,
+    ) -> (evidence: (FunctionTemplate<'p, 'a>, FunctionTemplates<'p, 'a>, PreparedExpansionBody<'p, 'a>, ExpandedBody<'p, 'a>))
+        requires
+            self.function_expansion_evidence(Ok(*plan)),
+            self.ordered_template_build_result(plan, width_limit, bit_limit, gate_limit, Ok(*table)),
+            0 <= rank < plan.order_model().len(),
+        ensures ({
+            let (template, prior, prepared, body) = evidence;
+            let vertex = plan.order_model()[rank];
+            &&& vertex < table.slots_model().len()
+            &&& table.slots_model()[vertex as int] == Some(template)
+            &&& plan.position_model(rank) matches Some(position)
+            &&& body.circuit == *template.circuit_model()
+            &&& self.prepared_expansion_body_matches(*plan, position.0, position.1, width_limit, &prepared)
+            &&& self.expanded_body_lowering_result(plan, &prior, (position.0, position.1, width_limit),
+                &prepared, bit_limit, gate_limit, Ok(body))
+            &&& prior.next_rank() == rank
+            &&& prior.slots_model().len() == table.slots_model().len()
+            &&& forall|i: int| 0 <= i < rank ==> {
+                let earlier = #[trigger] plan.order_model()[i];
+                prior.slots_model()[earlier as int] == table.slots_model()[earlier as int]
+            }
+        }),
+    {
+        reveal(UseAliases::ordered_template_build_result);
+        reveal(UseAliases::ordered_template_prefix);
+        reveal(UseAliases::function_templates_match);
+        let vertex = plan.order_model()[rank];
+        let template = table.slots_model()[vertex as int]->Some_0;
+        let position = plan.position_model(rank)->Some_0;
+        assert(self.function_template_matches(position, width_limit, &template));
+        reveal(UseAliases::function_template_matches);
+        match template._origin@ {
+            TemplateOrigin::Expanded { prior, prepared, body, .. } => (template, prior, prepared, body),
+            TemplateOrigin::Standalone(_) => { assert(false); arbitrary() },
+        }
+    }
+
     /// 展開済みの表から、全順位で評価に必要な入出力配置と配線がそろっていることを示す。
     pub(super) proof fn completed_templates_ready(
         &self, plan: &FunctionExpansionOrder, width_limit: u64, bit_limit: usize, gate_limit: usize,
