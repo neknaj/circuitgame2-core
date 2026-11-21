@@ -11,6 +11,7 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod body;
+mod call_order;
 mod call_shapes;
 mod build;
 mod clauses;
@@ -44,6 +45,9 @@ pub use concat_arguments::{
     strict_concat_has_argument_range,
 };
 use build::BuildRows;
+pub use call_order::postorder_call_references;
+#[cfg(verus_only)]
+pub use call_order::{call_postorder_positions, call_references_in_postorder};
 pub use call_shapes::{
     CallShape, RoutineArity, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,
     indexed_call_signal, next_call_argument, routine_arity,

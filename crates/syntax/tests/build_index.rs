@@ -2,7 +2,7 @@ use circuitgame2_syntax::Form;
 use circuitgame2_syntax::circuit::{
     RoutineArity, callee_reference_at_form, definition_root_is_call, index_build_forms,
     index_definition_references,
-    indexed_call_shape, routine_arity,
+    indexed_call_shape, postorder_call_references, routine_arity,
 };
 
 #[test]
@@ -74,6 +74,23 @@ fn projects_call_positions_and_counts_only_direct_arguments() {
             ("zero", Some(("(zero)", 0))),
         ]
     );
+}
+
+#[test]
+fn orders_child_calls_before_parents_without_reversing_siblings() {
+    let source = concat!(
+        "(func f (in a) (out y) ",
+        " (def earlier (nor a a)) ",
+        " (def y (parent (left (inner (leaf_a))) (as T (right (leaf_b))))))",
+    );
+    let index = index_build_forms(source).unwrap();
+    let row = &index.definitions[1];
+    let order = postorder_call_references(source, &index.syntax.forms, row, &index.references);
+    assert_eq!(
+        order.iter().map(|&i| &source[index.references[i].span.clone()]).collect::<Vec<_>>(),
+        ["leaf_a", "inner", "left", "leaf_b", "right", "parent"]
+    );
+    assert!(order.iter().all(|i| row.references.contains(i)));
 }
 
 #[test]
