@@ -435,7 +435,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures
             self.func_call_signature_at_form_evidence(file, entry, definition, form, max_width, result),
-            result matches Ok(Some(call)) ==> call.call.call.form == form,
+            result matches Ok(Some(call)) ==>
+                call.call.call.form == form
+                && (call.signature matches FuncCallSignature::Function(signature) ==>
+                    signature.outputs@.len() == call.call.target.port_counts().outputs),
     {
         let Some(reference) = self.func_call_reference_at_form(file, entry, definition, form) else {
             return Ok(None);

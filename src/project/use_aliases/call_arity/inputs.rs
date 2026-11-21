@@ -65,7 +65,7 @@ pub(in crate::project::use_aliases) enum CallArgumentSource {
 pub struct CheckedCallInputs<'p, 'a> {
     /// 呼び出しの位置と、名前解決で選ばれた署名。
     pub call: TypedFuncCall<'p, 'a>,
-    /// 直接の引数ごとの型。未検査の複合式や未確定の信号の型は `None`。
+    /// 直接の引数ごとの型。型を保留した引数は `None`。
     pub inputs: Vec<Option<SignalType<'p, 'a>>>,
 }
 
@@ -76,7 +76,7 @@ pub enum CallInputReason<'p, 'a> {
     LiteralWidth(CircuitLiteralWidthError),
     /// 構造体型の入力に裸の定数を渡した。
     StructRequired,
-    /// 確定した信号の型が入力型と異なる。型とその根拠を持つ。
+    /// 信号または子呼び出しの型が入力型と異なる。実際の型とその根拠を持つ。
     SignalType(SignalType<'p, 'a>),
 }
 
@@ -120,7 +120,7 @@ spec fn leaf_result(
                 _ => false,
             },
         }
-    } else if form is Atom && form->Atom_kind is Name {
+    } else if form is List || (form is Atom && form->Atom_kind is Name) {
         if let Some(ty) = known {
             if port_types_equal(ty.ty, port.ty) { result == Ok(Some(ty)) }
             else { result == Err(CallInputReason::SignalType(ty)) }
@@ -148,7 +148,7 @@ fn check_leaf<'p, 'a>(
                 Err(error) => Err(CallInputReason::LiteralWidth(error)),
             }
         },
-        Form::Atom { kind: AtomKind::Name, .. } => {
+        Form::List { .. } | Form::Atom { kind: AtomKind::Name, .. } => {
             if let Some(ty) = known {
                 if ty.ty.is_same_type(&port.ty) { Ok(Some(ty)) } else { Err(CallInputReason::SignalType(ty)) }
             } else { Ok(None) }
@@ -166,14 +166,99 @@ spec fn input_port_matches(call: &TypedFuncCall, i: int, port: CallPortType) -> 
     }
 }
 
+#[verifier::opaque]
+spec fn nested_output_type(
+    context: (&UseAliases, usize, usize, usize), form: usize, limit: u64, value: Option<SignalType>,
+) -> bool {
+    let (aliases, file, entry, definition) = context;
+    exists|result: Result<Option<TypedFuncCall>, FuncCallSignatureError>|
+        #[trigger] aliases.func_call_signature_at_form_evidence(file, entry, definition, form, limit, result)
+        && value == nested_output_from_signature(result)
+}
+
+spec fn nested_output_from_signature<'p, 'a>(
+    result: Result<Option<TypedFuncCall<'p, 'a>>, FuncCallSignatureError<'p, 'a>>,
+) -> Option<SignalType<'p, 'a>> {
+    match result {
+        Ok(Some(call)) if call.call.target.port_counts().outputs == 1 => match call.signature {
+            FuncCallSignature::Nor => Some(SignalType {
+                ty: ResolvedPortType::Bits(1),
+                origin: LocatedName { source: call.call.source, span: call.call.call.span },
+            }),
+            FuncCallSignature::Function(signature) => Some(SignalType {
+                ty: signature.outputs@[0].ty,
+                origin: signature.outputs@[0].annotation,
+            }),
+        },
+        _ => None,
+    }
+}
+
+proof fn record_nested_output_type(
+    context: (&UseAliases, usize, usize, usize), form: usize, limit: u64,
+    result: Result<Option<TypedFuncCall>, FuncCallSignatureError>, value: Option<SignalType>,
+)
+    requires
+        context.0.func_call_signature_at_form_evidence(context.1, context.2, context.3, form, limit, result),
+        value == nested_output_from_signature(result),
+    ensures nested_output_type(context, form, limit, value),
+{
+    reveal(nested_output_type);
+    let (aliases, file, entry, definition) = context;
+    assert(exists|signature: Result<Option<TypedFuncCall>, FuncCallSignatureError>|
+        #[trigger] aliases.func_call_signature_at_form_evidence(file, entry, definition, form, limit, signature)
+        && value == nested_output_from_signature(signature)) by {
+        assert(aliases.func_call_signature_at_form_evidence(file, entry, definition, form, limit, result));
+    };
+}
+
+/// 子呼び出しの単一出力型を、元の型注釈とともに取り出す。
+fn nested_output_type_at<'p, 'a>(
+    aliases: &UseAliases<'_, 'p, 'a>, file: usize, entry: usize, definition: usize, form: usize, limit: u64,
+) -> (value: Option<SignalType<'p, 'a>>)
+    requires aliases.can_resolve(),
+    ensures nested_output_type((aliases, file, entry, definition), form, limit, value),
+{
+    let result = aliases.resolve_func_call_signature_at_form(file, entry, definition, form, limit);
+    // 署名を解決できない子は、その参照を検査する順番まで診断を保留する。
+    let value = match &result {
+        Ok(Some(call)) if call.call.target.ports().outputs == 1 => match &call.signature {
+            FuncCallSignature::Nor => Some(SignalType {
+                ty: ResolvedPortType::Bits(1),
+                origin: LocatedName {
+                    source: call.call.source,
+                    span: call.call.call.span.start..call.call.call.span.end,
+                },
+            }),
+            FuncCallSignature::Function(_) => {
+                let Some(port) = call.signature.port(PortDirection::Output, 0) else {
+                    proof { assert(false); }
+                    unreachable!()
+                };
+                let Some(annotation) = port.annotation else {
+                    proof { assert(false); }
+                    unreachable!()
+                };
+                Some(SignalType { ty: port.ty, origin: copy_location(annotation) })
+            },
+        },
+        _ => None,
+    };
+    proof { record_nested_output_type((aliases, file, entry, definition), form, limit, result, value); }
+    value
+}
+
 spec fn known_argument(
-    forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>, slots: Seq<usize>,
+    context: (&UseAliases, usize, usize, usize), limit: u64, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>, slots: Seq<usize>,
     signal_start: int, at: usize, known: Option<SignalType>,
 ) -> bool {
-    forms[at as int] is Atom && forms[at as int]->Atom_kind is Name
-        ==> exists|s: int| 0 <= s < slots.len() && #[trigger] slots[s] == at
+    match forms[at as int] {
+        Form::List { .. } => nested_output_type(context, at, limit, known),
+        Form::Atom { kind: AtomKind::Name, .. } => exists|s: int| 0 <= s < slots.len() && #[trigger] slots[s] == at
             && 0 <= signal_start + s < scope.signals@.len()
-            && known == signal_type_at(scope, types, scope.signals@[signal_start + s].driver)
+            && known == signal_type_at(scope, types, scope.signals@[signal_start + s].driver),
+        _ => true,
+    }
 }
 
 spec fn reported_argument(
@@ -192,7 +277,7 @@ spec fn reported_argument(
 
 #[verifier::opaque]
 spec fn argument_result(
-    call: &TypedFuncCall, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>,
+    context: (&UseAliases, usize, usize, usize), call: &TypedFuncCall, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>,
     slots: Seq<usize>, signal_start: int, at: usize, ordinal: usize, limit: u64,
     result: Result<Option<SignalType>, CallInputError>,
 ) -> bool {
@@ -200,12 +285,12 @@ spec fn argument_result(
     &&& exists|port: CallPortType, known: Option<SignalType>, leaf: Result<Option<SignalType>, CallInputReason>|
         #[trigger] input_port_matches(call, ordinal as int, port)
         && #[trigger] leaf_result(call.call.source, forms[at as int], &port, known, limit, leaf)
-        && known_argument(forms, scope, types, slots, signal_start, at, known)
+        && known_argument(context, limit, forms, scope, types, slots, signal_start, at, known)
         && reported_argument(call.call.source, forms[at as int], ordinal, port, leaf, result)
 }
 
 proof fn record_argument(
-    call: &TypedFuncCall, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>,
+    context: (&UseAliases, usize, usize, usize), call: &TypedFuncCall, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>,
     slots: Seq<usize>, signal_start: int, at: usize, ordinal: usize, limit: u64,
     port: CallPortType, known: Option<SignalType>, leaf: Result<Option<SignalType>, CallInputReason>,
     result: Result<Option<SignalType>, CallInputError>,
@@ -213,16 +298,16 @@ proof fn record_argument(
     requires
         at < forms.len() && direct_call_argument(forms, call.call.call, at as int),
         input_port_matches(call, ordinal as int, port),
-        known_argument(forms, scope, types, slots, signal_start, at, known),
+        known_argument(context, limit, forms, scope, types, slots, signal_start, at, known),
         leaf_result(call.call.source, forms[at as int], &port, known, limit, leaf),
         reported_argument(call.call.source, forms[at as int], ordinal, port, leaf, result),
-    ensures argument_result(call, forms, scope, types, slots, signal_start, at, ordinal, limit, result),
+    ensures argument_result(context, call, forms, scope, types, slots, signal_start, at, ordinal, limit, result),
 {
     reveal(argument_result);
     assert(exists|p: CallPortType, k: Option<SignalType>, l: Result<Option<SignalType>, CallInputReason>|
         #[trigger] input_port_matches(call, ordinal as int, p)
         && #[trigger] leaf_result(call.call.source, forms[at as int], &p, k, limit, l)
-        && known_argument(forms, scope, types, slots, signal_start, at, k)
+        && known_argument(context, limit, forms, scope, types, slots, signal_start, at, k)
         && reported_argument(call.call.source, forms[at as int], ordinal, p, l, result)) by {
         assert(input_port_matches(call, ordinal as int, port));
         assert(leaf_result(call.call.source, forms[at as int], &port, known, limit, leaf));
@@ -231,7 +316,7 @@ proof fn record_argument(
 
 #[verifier::opaque]
 spec fn argument_prefix(
-    call: &TypedFuncCall, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>,
+    context: (&UseAliases, usize, usize, usize), call: &TypedFuncCall, forms: Seq<Form>, scope: &FuncWiring, types: Seq<Option<SignalType>>,
     slots: Seq<usize>, signal_start: int, limit: u64,
     visited: Seq<usize>, values: Seq<Option<SignalType>>, next: usize,
 ) -> bool {
@@ -242,7 +327,7 @@ spec fn argument_prefix(
         let this = #[trigger] visited[i] as int;
         &&& this == if i == 0 { call.call.call.form + 2 }
             else { after_argument(forms, visited[i - 1] as int) }
-        &&& argument_result(call, forms, scope, types, slots, signal_start, this as usize, i as usize, limit, Ok(values[i]))
+        &&& argument_result(context, call, forms, scope, types, slots, signal_start, this as usize, i as usize, limit, Ok(values[i]))
     }
 }
 
@@ -267,7 +352,7 @@ spec fn argument_projection_matches(
             forms[at as int] is Atom && (forms[at as int]->Atom_kind is Natural
                 || forms[at as int]->Atom_kind is Binary || forms[at as int]->Atom_kind is Hexadecimal)
                 && (value matches Some(ty) && ty.ty == ResolvedPortType::Bits(width)),
-        CallArgumentSource::Deferred => value.is_none(),
+        CallArgumentSource::Deferred => value.is_none() || forms[at as int] is List,
     }
 }
 
@@ -282,16 +367,16 @@ spec fn argument_projections_match(
 }
 
 proof fn extend_argument_prefix(
-    call: &TypedFuncCall, forms: Seq<Form>, wiring: &FuncWiring, types: Seq<Option<SignalType>>,
+    context: (&UseAliases, usize, usize, usize), call: &TypedFuncCall, forms: Seq<Form>, wiring: &FuncWiring, types: Seq<Option<SignalType>>,
     slots: Seq<usize>, start: int, limit: u64, visited: Seq<usize>, values: Seq<Option<SignalType>>,
     root: usize, next: usize, value: Option<SignalType>,
 )
     requires
-        argument_prefix(call, forms, wiring, types, slots, start, limit, visited, values, root),
-        argument_result(call, forms, wiring, types, slots, start, root, visited.len() as usize, limit, Ok(value)),
+        argument_prefix(context, call, forms, wiring, types, slots, start, limit, visited, values, root),
+        argument_result(context, call, forms, wiring, types, slots, start, root, visited.len() as usize, limit, Ok(value)),
         visited.len() <= usize::MAX,
         next == after_argument(forms, root as int),
-    ensures argument_prefix(call, forms, wiring, types, slots, start, limit, visited.push(root), values.push(value), next),
+    ensures argument_prefix(context, call, forms, wiring, types, slots, start, limit, visited.push(root), values.push(value), next),
 {
     reveal(argument_prefix);
     let appended = visited.push(root);
@@ -299,7 +384,7 @@ proof fn extend_argument_prefix(
     assert forall|i: int| 0 <= i < appended.len() implies {
         let form = (#[trigger] appended[i]) as int;
         &&& form == if i == 0 { call.call.call.form + 2 } else { after_argument(forms, appended[i - 1] as int) }
-        &&& argument_result(call, forms, wiring, types, slots, start, form as usize, i as usize, limit, Ok(results[i]))
+        &&& argument_result(context, call, forms, wiring, types, slots, start, form as usize, i as usize, limit, Ok(results[i]))
     } by {
         if i < visited.len() { assert(appended[i] == visited[i] && results[i] == values[i]); }
     };
@@ -328,10 +413,11 @@ proof fn extend_argument_projections(
 }
 
 spec fn arguments_match(
-    parsed: &NamedBuildCircuit, entry: usize, definition: usize, scope: &FuncWiring,
+    context: (&UseAliases, usize, usize, usize), parsed: &NamedBuildCircuit, scope: &FuncWiring,
     types: Seq<Option<SignalType>>, call: &TypedFuncCall, limit: u64, collect: bool,
     result: Result<Option<CheckedCallInputs>, CallInputError>,
 ) -> bool {
+    let (_, _, entry, definition) = context;
     let forms = parsed.syntax.forms@;
     let frame = parsed.entry_ranges@[entry as int];
     let row = parsed.definitions@[frame.definitions.start + definition];
@@ -342,15 +428,86 @@ spec fn arguments_match(
     &&& count == call.call.target.port_counts().inputs
     &&& match result {
         Ok(output) => exists|visited: Seq<usize>, values: Seq<Option<SignalType>>|
-                #[trigger] argument_prefix(call, forms, scope, types, slots, start, limit, visited, values, last)
+                #[trigger] argument_prefix(context, call, forms, scope, types, slots, start, limit, visited, values, last)
                     && values.len() == count && if collect {
                         output matches Some(output) && output.call == *call && output.inputs@ == values
                     } else { output.is_none() },
         Err(error) => exists|visited: Seq<usize>, values: Seq<Option<SignalType>>, at: usize|
-            #[trigger] argument_prefix(call, forms, scope, types, slots, start, limit, visited, values, at)
+            #[trigger] argument_prefix(context, call, forms, scope, types, slots, start, limit, visited, values, at)
                 && visited.len() < count
-                && argument_result(call, forms, scope, types, slots, start, at, visited.len() as usize, limit, Err(error)),
+                && argument_result(context, call, forms, scope, types, slots, start, at, visited.len() as usize, limit, Err(error)),
     }
+}
+
+proof fn record_failed_argument(
+    context: (&UseAliases, usize, usize, usize), parsed: &NamedBuildCircuit, scope: &FuncWiring,
+    types: Seq<Option<SignalType>>, call: &TypedFuncCall, limit: u64, collect: bool,
+    error: CallInputError, visited: Seq<usize>, values: Seq<Option<SignalType>>, at: usize,
+)
+    requires
+        call.call.call.arguments == call.call.target.port_counts().inputs,
+        visited.len() < call.call.call.arguments,
+        ({
+            let (_, _, entry, definition) = context;
+            let frame = parsed.entry_ranges@[entry as int];
+            let row = parsed.definitions@[frame.definitions.start + definition];
+            let forms = parsed.syntax.forms@;
+            let slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
+            let start = row.signals.start - frame.signals.start;
+            &&& argument_prefix(context, call, forms, scope, types, slots, start, limit, visited, values, at)
+            &&& argument_result(context, call, forms, scope, types, slots, start, at, visited.len() as usize, limit, Err(error))
+        }),
+    ensures arguments_match(context, parsed, scope, types, call, limit, collect, Err(error)),
+{
+    let (_, _, entry, definition) = context;
+    let frame = parsed.entry_ranges@[entry as int];
+    let row = parsed.definitions@[frame.definitions.start + definition];
+    let forms = parsed.syntax.forms@;
+    let slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
+    let start = row.signals.start - frame.signals.start;
+    assert(exists|positions: Seq<usize>, inferred: Seq<Option<SignalType>>, root: usize|
+        #[trigger] argument_prefix(context, call, forms, scope, types, slots, start, limit, positions, inferred, root)
+        && positions.len() < call.call.call.arguments
+        && argument_result(context, call, forms, scope, types, slots, start, root, positions.len() as usize, limit, Err(error))) by {
+        assert(argument_prefix(context, call, forms, scope, types, slots, start, limit, visited, values, at));
+    };
+}
+
+proof fn record_completed_arguments(
+    context: (&UseAliases, usize, usize, usize), parsed: &NamedBuildCircuit, scope: &FuncWiring,
+    types: Seq<Option<SignalType>>, call: &TypedFuncCall, limit: u64, collect: bool,
+    result: Option<CheckedCallInputs>, visited: Seq<usize>, values: Seq<Option<SignalType>>,
+)
+    requires
+        ({
+            let (_, _, entry, definition) = context;
+            let frame = parsed.entry_ranges@[entry as int];
+            let row = parsed.definitions@[frame.definitions.start + definition];
+            let forms = parsed.syntax.forms@;
+            let slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
+            argument_prefix(context, call, forms, scope, types, slots, row.signals.start - frame.signals.start,
+                limit, visited, values, forms[call.call.call.form as int]->List_end)
+        }),
+        values.len() == call.call.call.arguments == call.call.target.port_counts().inputs,
+        if collect {
+            result matches Some(output) && output.call == *call && output.inputs@ == values
+        } else { result.is_none() },
+    ensures arguments_match(context, parsed, scope, types, call, limit, collect, Ok(result)),
+{
+    let (_, _, entry, definition) = context;
+    let frame = parsed.entry_ranges@[entry as int];
+    let row = parsed.definitions@[frame.definitions.start + definition];
+    let forms = parsed.syntax.forms@;
+    let slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
+    let start = row.signals.start - frame.signals.start;
+    let last = forms[call.call.call.form as int]->List_end;
+    assert(exists|positions: Seq<usize>, inferred: Seq<Option<SignalType>>|
+        #[trigger] argument_prefix(context, call, forms, scope, types, slots, start, limit, positions, inferred, last)
+        && inferred.len() == call.call.call.arguments && if collect {
+            result matches Some(output) && output.call == *call && output.inputs@ == inferred
+        } else { result.is_none() }) by {
+        assert(argument_prefix(context, call, forms, scope, types, slots, start, limit, visited, values, last));
+    };
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -373,7 +530,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
                 && values.len() == call.call.call.arguments
                 && values.len() == call.call.target.port_counts().inputs
-                && argument_prefix(&call, forms, wiring, types, slots, start, limit,
+                && argument_prefix((self, file, entry, definition), &call, forms, wiring, types, slots, start, limit,
                     visited, values, forms[call.call.call.form as int]->List_end)
                 && argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
     }
@@ -393,7 +550,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let forms = parsed.syntax.forms@;
                 let slots = parsed.signals@[row.signals.start as int..row.signals.end as int];
                 let start = row.signals.start - frame.signals.start;
-                &&& argument_prefix(&call, forms, wiring, types, slots, start, limit,
+                &&& argument_prefix((self, at.0, at.1, at.2), &call, forms, wiring, types, slots, start, limit,
                     visited, values, forms[call.call.call.form as int]->List_end)
                 &&& argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
             }),
@@ -420,7 +577,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let (call, visited, values) = witness;
             &&& self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
             &&& values.len() == call.call.call.arguments == call.call.target.port_counts().inputs
-            &&& argument_prefix(&call, forms, wiring, types, slots, start, limit,
+            &&& argument_prefix((self, file, entry, definition), &call, forms, wiring, types, slots, start, limit,
                 visited, values, forms[call.call.call.form as int]->List_end)
             &&& argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
         }),
@@ -439,16 +596,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
                 && values.len() == call.call.call.arguments
                 && values.len() == call.call.target.port_counts().inputs
-                && argument_prefix(&call, forms, wiring, types, slots, start, limit,
+                && argument_prefix((self, file, entry, definition), &call, forms, wiring, types, slots, start, limit,
                     visited, values, forms[call.call.call.form as int]->List_end)
                 && argument_projections_match(forms, wiring, types, slots, start, visited, values, projected)
     }
 
     proof fn projected_argument_leaf<'s>(
-        call: &'s TypedFuncCall<'p, 'a>, forms: Seq<Form>, wiring: &FuncWiring<'p, 'a>, types: Seq<Option<SignalType<'p, 'a>>>,
+        context: (&UseAliases, usize, usize, usize), call: &'s TypedFuncCall<'p, 'a>, forms: Seq<Form>, wiring: &FuncWiring<'p, 'a>, types: Seq<Option<SignalType<'p, 'a>>>,
         slots: Seq<usize>, start: int, form: usize, index: usize, limit: u64, value: Option<SignalType<'p, 'a>>,
     ) -> (leaf: (CallPortType<'s, 'p, 'a>, Option<SignalType<'p, 'a>>))
-        requires argument_result(call, forms, wiring, types, slots, start, form, index, limit, Ok(value)),
+        requires argument_result(context, call, forms, wiring, types, slots, start, form, index, limit, Ok(value)),
         ensures
             form < forms.len() && direct_call_argument(forms, call.call.call, form as int),
             input_port_matches(call, index as int, leaf.0),
@@ -458,7 +615,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let (port, known, result) = choose|port: CallPortType, known: Option<SignalType>, result: Result<Option<SignalType>, CallInputReason>|
             #[trigger] input_port_matches(call, index as int, port)
             && #[trigger] leaf_result(call.call.source, forms[form as int], &port, known, limit, result)
-            && known_argument(forms, wiring, types, slots, start, form, known)
+            && known_argument(context, limit, forms, wiring, types, slots, start, form, known)
             && reported_argument(call.call.source, forms[form as int], index, port, result, Ok(value));
         assert(result == Ok(value));
         (port, known)
@@ -570,10 +727,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let form = projected[index].form;
         let value = values[index];
         assert(visited[index] == form) by { reveal(argument_projection_matches); };
-        assert(argument_result(&other, forms, wiring, types, slots, start, form, index as usize, limit, Ok(value))) by {
+        assert(argument_result((self, file, entry, definition), &other, forms, wiring, types, slots, start, form, index as usize, limit, Ok(value))) by {
             reveal(argument_prefix);
         };
-        let (port, known) = Self::projected_argument_leaf(&other, forms, wiring, types, slots, start,
+        let (port, known) = Self::projected_argument_leaf((self, file, entry, definition), &other, forms, wiring, types, slots, start,
             form, index as usize, limit, value);
         assert(port.ty == call.signature->Function_0.inputs@[index].ty);
         reveal(argument_projection_matches);
@@ -622,8 +779,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             _ => (result == Ok(None) && self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(None)))
                 || exists|call: TypedFuncCall|
                 #[trigger] self.func_call_signature_evidence(file, entry, definition, reference, limit, Ok(Some(call)))
-                    && arguments_match(&self.targets.project_model().circuits_model()[file as int], entry,
-                        definition, scope, types, &call, limit, collect, result),
+                    && arguments_match((self, file, entry, definition), &self.targets.project_model().circuits_model()[file as int],
+                        scope, types, &call, limit, collect, result),
         }
     }
 
@@ -644,7 +801,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// 添字は [`Self::resolve_func_call_signature`] と同じ。呼び出し元の検査で違反がなければ、
     /// 型名の参照、対象外の添字、展開待ちには `None` を返す。
-    /// 複合式や未確定の信号の型は保留する。
+    /// 子呼び出しの単一出力型を入力型と照合する。子の署名を解決できない場合や、
+    /// 信号の型が未確定の場合、型検査が未対応の専用フォームでは引数の型を保留する。
     ///
     /// # Errors
     ///
@@ -687,6 +845,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             retain && result.is_ok() ==> self.projected_input_arguments((file, entry, definition, reference),
                 max_width, types@, wiring, final(projections)@.skip(old(projections)@.len() as int)),
     {
+        let ghost context = (self, file, entry, definition);
         let ghost initial = projections@;
         let ghost begin = initial.len() as int;
         assert(initial.take(begin) =~= initial);
@@ -752,7 +911,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let ghost values: Seq<Option<SignalType>> = Seq::empty();
         proof {
             first_call_argument_evidence(forms@, call.call.call, remaining);
-            assert(argument_prefix(&call, forms@, wiring, types@, slots, start,
+            assert(argument_prefix(context, &call, forms@, wiring, types@, slots, start,
                 max_width, visited, values, remaining.start)) by { reveal(argument_prefix); };
             if retain {
                 assert(argument_projections_match(forms@, wiring, types@, slots, start,
@@ -762,6 +921,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while remaining.start < remaining.end
             invariant
                 self.can_resolve(), *project == self.targets.project_model(),
+                context == (self, file, entry, definition),
                 signatures.matches(self, max_width),
                 arity == call.call,
                 owned.is_some() == collect,
@@ -799,7 +959,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 expression_region(forms@, remaining.start as int, remaining.end as int),
                 call_argument_sequence(forms@, remaining, count - ordinal),
                 remaining.start < remaining.end ==> direct_call_argument(forms@, call.call.call, remaining.start as int),
-                argument_prefix(&call, forms@, wiring, types@, slots, start, max_width, visited, values, remaining.start),
+                argument_prefix(context, &call, forms@, wiring, types@, slots, start, max_width, visited, values, remaining.start),
             decreases remaining.end - remaining.start,
         {
             proof {
@@ -824,12 +984,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let bound = &wiring.signals[pos - frame.signals.start];
                 assert(slots[pos - row.signals.start] == root);
                 let ty = inherit_type(wiring, types, bound.driver);
-                assert(known_argument(forms@, wiring, types@, slots, start, root, ty)) by {
+                assert(known_argument(context, max_width, forms@, wiring, types@, slots, start, root, ty)) by {
                     let s = pos - row.signals.start;
                     assert(slots[s] == root);
                     assert(ty == signal_type_at(wiring, types@, wiring.signals@[start + s].driver));
                 };
                 (ty, Some(bound.driver))
+            } else if matches!(forms[root], Form::List { .. }) {
+                (nested_output_type_at(self, file, entry, definition, root, max_width), None)
             } else { (None, None) };
             let ghost input = known;
             let leaf = check_leaf(source, forms, root, &port, known, max_width);
@@ -844,24 +1006,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         reason,
                     };
                     proof {
-                        self::record_argument(&call, forms@, wiring, types@, slots, start,
+                        self::record_argument(context, &call, forms@, wiring, types@, slots, start,
                             root, ordinal, max_width, port, input, checked, Err(error));
                         reveal(argument_prefix);
                         assert(visited.len() == ordinal && ordinal < count);
-                        assert(argument_prefix(&call, forms@, wiring, types@, slots, start,
+                        assert(argument_prefix(context, &call, forms@, wiring, types@, slots, start,
                             max_width, visited, values, root));
-                        assert(arguments_match(parsed, entry, definition, wiring, types@, &call, max_width, collect, Err(error)));
+                        record_failed_argument(context, parsed, wiring, types@, &call, max_width, collect,
+                            error, visited, values, root);
                     }
                     return Err(error);
                 }
             };
             proof {
-                self::record_argument(&call, forms@, wiring, types@, slots, start,
+                self::record_argument(context, &call, forms@, wiring, types@, slots, start,
                     root, ordinal, max_width, port, input, checked, Ok(value));
             }
             let ghost previous_projections = projections@;
             if retain {
-                let source = if let Some(typed) = &value {
+                let source = if matches!(forms[root], Form::List { .. }) {
+                    CallArgumentSource::Deferred
+                } else if let Some(typed) = &value {
                     if let Some(driver) = driver {
                         CallArgumentSource::Driver(driver)
                     } else if let ResolvedPortType::Bits(width) = typed.ty {
@@ -885,7 +1050,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             proof {
                 following_call_argument(forms@, call.call.call, root as int, argument.end as int);
-                extend_argument_prefix(&call, forms@, wiring, types@, slots, start, max_width,
+                extend_argument_prefix(context, &call, forms@, wiring, types@, slots, start, max_width,
                     visited, values, root, argument.end, value);
                 visited = visited.push(root);
                 values = values.push(value);
@@ -901,7 +1066,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         } else { None });
         proof {
             exhausted_call_arguments(forms@, remaining, count - ordinal);
-            assert(arguments_match(parsed, entry, definition, wiring, types@, &call, max_width, collect, result));
+            assert(ordinal == count && remaining.start == remaining.end);
+            let last = forms@[call.call.call.form as int]->List_end;
+            assert(remaining.start == last);
+            assert(result is Ok);
+            record_completed_arguments(context, parsed, wiring, types@, &call, max_width, collect,
+                result->Ok_0, visited, values);
             if retain {
                 let retained = projections@.skip(begin);
                 self.record_projected_inputs((file, entry, definition, reference), max_width, types@, wiring,
