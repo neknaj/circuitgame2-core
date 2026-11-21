@@ -2258,12 +2258,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let project = self.targets.project_model();
             let parsed = &project.circuits_model()[caller.0 as int];
             let expr = parsed.definitions@[root.definition as int].expression;
+            let frame = parsed.entry_ranges@[caller.1 as int].definitions;
             let at = root.output_slot as int;
-            &&& root.definition < parsed.definitions@.len()
+            &&& caller.1 < parsed.entry_ranges@.len()
+            &&& frame.start <= root.definition < frame.end <= parsed.definitions@.len()
             &&& at < prepared.typed.types@.len() == wiring.drivers.definitions@.len()
             &&& prepared.typed.types@[at] matches Some(ty) && ty.ty == crate::project::ResolvedPortType::Bits(1)
             &&& wiring.drivers.definitions@[at].definition == root.definition
             &&& wiring.drivers.definitions@[at].result_index == 0
+            &&& forall|i: int| 0 <= i < wiring.drivers.definitions@.len()
+                && (#[trigger] wiring.drivers.definitions@[i]).definition == root.definition ==> i == at
             &&& location_in_source(root.root.expression)
             &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[caller.0 as int].text,
                 parsed.syntax.forms@, expr.start as int, expr.end as int)

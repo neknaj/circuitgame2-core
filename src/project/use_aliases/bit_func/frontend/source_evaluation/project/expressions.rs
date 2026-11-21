@@ -4,7 +4,7 @@ use super::*;
 use crate::netlist::{port_bit_layout_port, port_bit_layout_size, preceding_port_bits};
 use crate::project::{FuncCallSignature, FuncCallTarget, ResolvedPortType, port_types_equal};
 use crate::project::use_aliases::bit_func::expansion::{
-    PreparedExpansionBody, prepared_nested_output_matches, source_call_argument_value, source_call_argument_values_agree,
+    PreparedExpansionBody, PreparedExpressionCall, prepared_nested_output_matches, source_call_argument_value, source_call_argument_values_agree,
     source_call_arguments_match,
 };
 use crate::project::use_aliases::call_arity::{CallArgumentSource, ProjectedCallArgument};
@@ -74,6 +74,13 @@ pub(super) struct NestedSourceArguments<'p, 'a> {
     pub(super) typed: FuncSignalTypes<'p, 'a>,
     pub(super) layouts: Option<StructureLayouts<'p, 'a>>,
     pub(super) children: Map<usize, SourceExpressionCall<'p, 'a>>,
+}
+
+/// 根 NOR の厳格な署名と、子から得た引数値を保持する。
+pub(super) struct SourceNorEvaluation<'p, 'a> {
+    call: TypedFuncCall<'p, 'a>,
+    operands: Seq<Seq<bool>>,
+    nested: NestedSourceArguments<'p, 'a>,
 }
 
 pub(super) closed spec fn source_expression_scope<'s, 'w, 'p, 'a>(
@@ -169,16 +176,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             || has_structure_port(selected.template.signature_model().outputs@) {
             let target = plan.position_model(selected.group._order@.0)->Some_0;
             Some(self.source_template_structure_layout(target, caller.2, selected.template))
-        } else if exists|i: int| 0 <= i < selected.children@.len() && (
-            (#[trigger] selected.children@[i]).template matches Some(template)
+        } else {
+            self.source_expression_children_layout(plan, prior, caller.2, selected.group.postorder,
+                prepared.projections.call_arguments.arguments@, selected.children@)
+        }
+    }
+
+    /// 子に構造体ポートがある場合は、先行テンプレートの検査済み配置表を取得する。
+    proof fn source_expression_children_layout(
+        &self, plan: &FunctionExpansionOrder, prior: &FunctionTemplates, limit: u64,
+        postorder: Option<Vec<PreparedExpressionCall>>, arguments: Seq<ProjectedCallArgument>,
+        children: Seq<ResolvedExpressionCall>,
+    ) -> (layouts: Option<StructureLayouts<'p, 'a>>)
+        requires self.resolved_expression_calls_match(plan, prior, limit, postorder, arguments, children),
+        ensures
+            layouts matches Some(table) ==> self.structure_types_match(limit, Ok(table)),
+            layouts.is_none() ==> (forall|i: int| 0 <= i < children.len() ==>
+                ((#[trigger] children[i]).template matches Some(template) ==>
+                    !has_structure_port(template.signature_model().inputs@) && !has_structure_port(template.signature_model().outputs@))),
+    {
+        if exists|i: int| 0 <= i < children.len() && (
+            (#[trigger] children[i]).template matches Some(template)
             && (has_structure_port(template.signature_model().inputs@) || has_structure_port(template.signature_model().outputs@))) {
-            let i = choose|i: int| 0 <= i < selected.children@.len() && (
-                (#[trigger] selected.children@[i]).template matches Some(template)
+            let i = choose|i: int| 0 <= i < children.len() && (
+                (#[trigger] children[i]).template matches Some(template)
                 && (has_structure_port(template.signature_model().inputs@) || has_structure_port(template.signature_model().outputs@)));
-            let child = selected.children@[i];
+            let child = children[i];
+            reveal(UseAliases::resolved_expression_calls_match);
             reveal(UseAliases::resolved_expression_call_matches);
             let target = plan.position_model(child.child._rank@->Some_0)->Some_0;
-            Some(self.source_template_structure_layout(target, caller.2, child.template->Some_0))
+            Some(self.source_template_structure_layout(target, limit, child.template->Some_0))
         } else {
             None
         }
@@ -873,6 +900,194 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let local = (left.definition - frame.start) as usize;
         self.successful_call_signatures_agree(context.file, context.entry, local, 0, context.limit, a.0, b.0);
         self.source_expression_arguments_agree(left, right, (a.0, a.1, a.2), (b.0, b.1, b.2), seq![1u64, 1u64]);
+    }
+
+    spec fn source_nor_scope_at_slot<'s, 'w>(
+        context: &'s SourceFunc<'w, 'p, 'a>, plan: &'s FunctionExpansionOrder<'p, 'a>, rank: int,
+        derivation: ISet<SourceInvocation>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int,
+        site: &'s SourceNorEvaluation<'p, 'a>,
+    ) -> SourceExpressionScope<'s, 'w, 'p, 'a> {
+        SourceExpressionScope {
+            context, plan, rank, derivation, definition: context.wiring.drivers.definitions@[slot].definition,
+            typed: site.nested.typed,
+            layouts: match &site.nested.layouts { Some(layouts) => Some(layouts), None => None },
+            inputs, prior: values.take(slot),
+        }
+    }
+
+    spec fn source_nested_nor_matches_slot(
+        &self, plan: &FunctionExpansionOrder, rank: int, derivation: ISet<SourceInvocation>,
+        context: &SourceFunc, types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int,
+        site: &SourceNorEvaluation,
+    ) -> bool {
+        &&& 0 <= slot < values.len() == context.wiring.drivers.definitions@.len() == types.len()
+        &&& context.wiring.drivers.definitions@[slot].result_index == 0
+        &&& site.nested.typed.types@ == types
+        &&& types[slot] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1)
+        &&& self.source_nested_nor_evaluates(
+            &Self::source_nor_scope_at_slot(context, plan, rank, derivation, inputs, values, slot, site),
+            site.call, site.operands, site.nested.children, values[slot])
+    }
+
+    /// 根 NOR のソース評価を、定義の単一出力スロットに対応付ける。
+    pub(super) closed spec fn source_nested_nor_slot_evaluates(
+        &self, plan: &FunctionExpansionOrder, rank: int, derivation: ISet<SourceInvocation>,
+        context: &SourceFunc, types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int,
+    ) -> bool {
+        exists|site: SourceNorEvaluation| #[trigger] self.source_nested_nor_matches_slot(
+            plan, rank, derivation, context, types, inputs, values, slot, &site)
+    }
+
+    /// 配線から得た根 NOR の値が、同じ定義の出力スロットをソースの規則で評価した値に一致することを示す。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn source_nested_nor_slot_from_wiring(
+        &self, context: &SourceFunc, plan: &FunctionExpansionOrder, rank: int,
+        prior: &FunctionTemplates, table: &FunctionTemplates, prepared: &PreparedExpansionBody, binding: &NorBinding,
+        preferred: Option<StructureLayouts>, inputs: Seq<Seq<bool>>, assigned: Seq<Seq<bool>>, evaluation: EvaluatedNestedCall,
+    )
+        requires
+            self.can_resolve(),
+            self.function_expansion_evidence(Ok(*plan)),
+            0 <= rank < plan.order_model().len() && plan.position_model(rank) == Some((context.file, context.entry)),
+            ({
+                let project = self.targets.project_model();
+                &&& context.file < project.sources_model().len() && context.file < project.circuits_model().len()
+                &&& *context.source == project.sources_model()[context.file as int]
+                &&& *context.parsed == project.circuits_model()[context.file as int]
+            }),
+            self.prepared_expansion_body_matches(*plan, context.file, context.entry, context.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*context.wiring),
+            binding.candidate < prepared.nor_roots@.len(),
+            *binding.selected.prepared == prepared.nor_roots@[binding.candidate as int],
+            self.nor_binding_context(plan, prior, context.limit, prepared.projections.call_arguments.arguments@, *binding),
+            preferred matches Some(layouts) ==> self.structure_types_match(context.limit, Ok(layouts)),
+            assigned.len() == context.wiring.drivers.definitions@.len(),
+            evaluated_nor_call_matches(self, (context.file, context.entry, context.limit), prepared, binding, inputs, assigned, evaluation),
+            prior.next_rank() == rank,
+            prior.slots_model().len() == table.slots_model().len(),
+            forall|i: int| 0 <= i < rank ==> {
+                let vertex = #[trigger] plan.order_model()[i];
+                prior.slots_model()[vertex as int] == table.slots_model()[vertex as int]
+            },
+        ensures self.source_nested_nor_slot_evaluates(plan, rank, Self::template_evaluations(plan, table),
+            context, prepared.typed.types@, inputs, assigned, binding.selected.prepared.output_slot as int),
+    {
+        reveal(UseAliases::source_expression_scope_matches);
+        reveal(UseAliases::source_nested_nor_slot_evaluates);
+        let caller = (context.file, context.entry, context.limit);
+        let root = binding.selected.prepared;
+        let slot = root.output_slot as int;
+        let layouts = if preferred.is_some() {
+            preferred
+        } else {
+            self.source_expression_children_layout(plan, prior, context.limit, Some(root.postorder),
+                prepared.projections.call_arguments.arguments@, binding.selected.children@)
+        };
+        let layout_ref = match &layouts { Some(table) => Some(table), None => None };
+        self.prepared_nor_output_evidence(*plan, caller, prepared, binding.candidate as int);
+        self.prepared_nor_arguments_in_source_order(*plan, caller, prepared, binding.candidate as int, root.postorder@.len() as int);
+        self.checked_types_keep_wiring(context.file, context.entry, context.limit, prepared.typed, *context.wiring);
+        self.checked_wiring_is_func(context.file, context.entry, context.limit, *context.wiring);
+        let drivers = context.wiring.drivers.definitions@;
+        assert forall|i: int| 0 <= i < drivers.len() implies
+            (i < slot) == ((#[trigger] drivers[i]).definition < root.definition) by {
+            if i < slot {
+                assert(drivers[i].definition <= drivers[slot].definition);
+            } else if slot < i {
+                assert(drivers[slot].definition <= drivers[i].definition);
+            }
+        };
+        let derivation = Self::template_evaluations(plan, table);
+        let scope = SourceExpressionScope { context, plan, rank, derivation, definition: root.definition,
+            typed: prepared.typed, layouts: layout_ref, inputs, prior: assigned.take(slot) };
+        let children = self.source_nor_child_values_by_form(&scope, prior, table, prepared, binding, assigned, evaluation);
+        let site = SourceNorEvaluation { call: root.root._signature@, operands: evaluation.root.ports,
+            nested: NestedSourceArguments { typed: prepared.typed, layouts, children } };
+        assert(Self::source_nor_scope_at_slot(context, plan, rank, derivation, inputs, assigned, slot, &site) == scope);
+        assert(self.source_nested_nor_matches_slot(plan, rank, derivation, context,
+            prepared.typed.types@, inputs, assigned, slot, &site));
+    }
+
+    /// 根 NOR の出力スロットから、厳格構文木の署名とリスト引数の位置を得る。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn source_nested_nor_slot_evidence(
+        &self, plan: &FunctionExpansionOrder, rank: int, derivation: ISet<SourceInvocation>,
+        context: &SourceFunc, types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int,
+    ) -> (evidence: (TypedFuncCall<'p, 'a>, usize))
+        requires self.source_nested_nor_slot_evaluates(plan, rank, derivation, context, types, inputs, values, slot),
+        ensures ({
+            let (call, list) = evidence;
+            let definition = context.wiring.drivers.definitions@[slot].definition;
+            let row = context.parsed.definitions@[definition as int];
+            let frame = context.parsed.entry_ranges@[context.entry as int].definitions;
+            let local = (definition - frame.start) as usize;
+            let forms = context.parsed.syntax.forms@;
+            let project = self.targets.project_model();
+            &&& self.can_resolve()
+            &&& context.file < project.circuits_model().len()
+            &&& *context.parsed == project.circuits_model()[context.file as int]
+            &&& context.entry < context.parsed.entry_ranges@.len()
+            &&& frame.start <= definition < frame.end <= context.parsed.definitions@.len()
+            &&& 0 <= slot < context.wiring.drivers.definitions@.len()
+            &&& call.call.target is Nor && call.call.call.form == row.expression.start
+            &&& self.func_call_signature_evidence(context.file, context.entry, local, 0, context.limit, Ok(Some(call)))
+            &&& ordinary_call_at(context.source.text, forms, row.expression.start as int, row.expression.end as int)
+            &&& row.expression.start + 2 <= list < row.expression.end <= forms.len()
+            &&& forms[list as int] is List
+        }),
+    {
+        reveal(UseAliases::source_nested_nor_slot_evaluates);
+        reveal(UseAliases::source_nested_nor_evaluates);
+        reveal(UseAliases::source_nested_arguments_match);
+        reveal(UseAliases::source_expression_scope_matches);
+        let site = choose|site: SourceNorEvaluation| #[trigger] self.source_nested_nor_matches_slot(
+            plan, rank, derivation, context, types, inputs, values, slot, &site);
+        let scope = Self::source_nor_scope_at_slot(context, plan, rank, derivation, inputs, values, slot, &site);
+        let definition = scope.definition;
+        let row = context.parsed.definitions@[definition as int];
+        let local = (definition - context.parsed.entry_ranges@[context.entry as int].definitions.start) as usize;
+        let forms = context.parsed.syntax.forms@;
+        let shape = site.call.call.call;
+        self.typed_call_arguments_ready(context.file, context.entry, local, 0, context.limit, site.call);
+        self.resolved_call_reference_form(context.file, context.entry, local, 0, site.call.call);
+        indexed_call_arguments(context.source.text, forms, row,
+            context.parsed.references@[row.references.start as int], shape);
+        ordinary_call_excludes_special_forms(context.source.text, forms, row.expression.start as int, row.expression.end as int);
+        let positions = choose|positions: Seq<usize>| #[trigger] call_argument_positions(forms, shape, positions)
+            && positions.len() == 2
+            && ((positions[0] < forms.len() && forms[positions[0] as int] is List)
+                || (positions[1] < forms.len() && forms[positions[1] as int] is List));
+        let port = if positions[0] < forms.len() && forms[positions[0] as int] is List { 0int } else { 1int };
+        call_argument_position_bounds(forms, shape, positions, port);
+        (site.call, positions[port])
+    }
+
+    /// 二つの根 NOR の評価が同じ定義と先行値を使うなら、出力スロットの値も一致する。
+    pub(super) proof fn source_nested_nor_slots_agree(
+        &self, plan: &FunctionExpansionOrder, rank: int, left_derivation: ISet<SourceInvocation>,
+        right_derivation: ISet<SourceInvocation>, left: &SourceFunc, right: &SourceFunc,
+        types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, a: Seq<Seq<bool>>, b: Seq<Seq<bool>>, slot: int,
+    )
+        requires
+            same_source_bindings(left, right),
+            a.take(slot) == b.take(slot),
+            self.source_nested_nor_slot_evaluates(plan, rank, left_derivation, left, types, inputs, a, slot),
+            self.source_nested_nor_slot_evaluates(plan, rank, right_derivation, right, types, inputs, b, slot),
+            forall|x: SourceInvocation, y: SourceInvocation|
+                #[trigger] left_derivation.contains(x) && #[trigger] right_derivation.contains(y)
+                && 0 <= x.rank == y.rank < rank && x.inputs == y.inputs ==> x.outputs == y.outputs,
+        ensures a[slot] == b[slot],
+    {
+        reveal(UseAliases::source_nested_nor_slot_evaluates);
+        let x = choose|site: SourceNorEvaluation| #[trigger] self.source_nested_nor_matches_slot(
+            plan, rank, left_derivation, left, types, inputs, a, slot, &site);
+        let y = choose|site: SourceNorEvaluation| #[trigger] self.source_nested_nor_matches_slot(
+            plan, rank, right_derivation, right, types, inputs, b, slot, &site);
+        let ac = Self::source_nor_scope_at_slot(left, plan, rank, left_derivation, inputs, a, slot, &x);
+        let bc = Self::source_nor_scope_at_slot(right, plan, rank, right_derivation, inputs, b, slot, &y);
+        assert(same_definition_driver(left.wiring.drivers.definitions@[slot], right.wiring.drivers.definitions@[slot]));
+        self.source_nested_nor_evaluations_agree(&ac, &bc,
+            (x.call, x.operands, x.nested.children, a[slot]), (y.call, y.operands, y.nested.children, b[slot]));
     }
 
     /// 根の実引数を元の順序で読み、入れ子の引数は同じフォームの評価表から得る。

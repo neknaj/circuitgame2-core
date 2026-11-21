@@ -101,6 +101,43 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 引数にリストがある通常呼び出しは、先行値だけで評価する右辺の規則に当てはまらない。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn source_rhs_excludes_list_argument(
+        &self, context: &SourceFunc, layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,
+        inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, slot: int, argument: usize,
+    )
+        requires
+            0 <= slot < values.len() && slot < context.wiring.drivers.definitions@.len(),
+            self.source_definition_value(context, layouts, types, inputs, values, slot),
+            ({
+                let row = context.parsed.definitions@[context.wiring.drivers.definitions@[slot].definition as int];
+                let forms = context.parsed.syntax.forms@;
+                &&& ordinary_call_at(context.source.text, forms, row.expression.start as int, row.expression.end as int)
+                &&& row.expression.start + 2 <= argument < row.expression.end <= forms.len()
+                &&& forms[argument as int] is List
+            }),
+        ensures false,
+    {
+        reveal(UseAliases::source_definition_value);
+        let prior = values.take(slot);
+        let forms = context.parsed.syntax.forms@;
+        let definition = context.wiring.drivers.definitions@[slot].definition;
+        let row = context.parsed.definitions@[definition as int];
+        let root = row.expression.start as int;
+        ordinary_call_excludes_special_forms(context.source.text, forms, root, row.expression.end as int);
+        let kind = self.source_rhs_kind(context, layouts, types, inputs, prior, values[slot]);
+        if kind is Nor {
+            reveal(UseAliases::source_nor_value);
+            reveal(UseAliases::source_nor_operands);
+            let (call, left, right) = choose|call: TypedFuncCall, left: Seq<bool>, right: Seq<bool>|
+                #[trigger] self.source_nor_operands(context, inputs, prior, call, left, right)
+                    && values[slot] == seq![!(left[0] || right[0])];
+            assert(forms[root + 2] is Atom && forms[root + 3] is Atom);
+            assert(argument == root + 2 || argument == root + 3);
+        }
+    }
+
     pub(super) proof fn source_rhs_values_agree(
         &self, context: &SourceFunc, other: &SourceFunc, layouts: Option<&StructureLayouts>,
         other_layouts: Option<&StructureLayouts>, types: Seq<Option<SignalType>>,

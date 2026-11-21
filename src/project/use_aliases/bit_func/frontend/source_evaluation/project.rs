@@ -119,6 +119,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let caller = (context.file, context.entry, context.limit);
         self.source_definition_value(context, layouts, types, inputs, values, i)
             || self.source_call_slot_evaluates(plan, caller, rank, derivation, context.wiring, inputs, values, i)
+            || self.source_nested_nor_slot_evaluates(plan, rank, derivation, context, types, inputs, values, i)
     }
 
     spec fn source_call_matches_slot(

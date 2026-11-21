@@ -126,11 +126,11 @@ pub(super) proof fn ordinary_call_bounds(source: &str, forms: Seq<Form>, call: i
 {
 }
 
-/// 通常呼び出しをビット選択、構造体式、連接として解釈できないことを示す。
+/// 通常呼び出しのリストが指定区間に収まり、ビット選択、構造体式、連接に当たらないことを示す。
 pub proof fn ordinary_call_excludes_special_forms(source: &str, forms: Seq<Form>, call: int, stop: int)
     requires ordinary_call_at(source, forms, call, stop),
     ensures
-        forms[call] is List,
+        forms[call] is List && forms[call]->List_end <= stop <= forms.len(),
         !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source, forms, call, shape)),
         !(exists|shape: StructureExpressionShape| #[trigger] structure_expression_matches(source, forms, call, shape)),
         !(exists|range: Range<usize>| #[trigger] super::concat_arguments::concat_arguments_match(source, forms, call, range)),
