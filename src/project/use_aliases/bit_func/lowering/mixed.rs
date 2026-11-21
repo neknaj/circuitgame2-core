@@ -439,11 +439,13 @@ fn mixed_body_uses_a_call_output_in_the_next_nor() {
     let circuit = checked.lower_bit_func(8).unwrap();
     let callee = aliases.standalone_function_template(position, 8, checked, circuit, 8);
     aliases.insert_function_template(&plan, &mut templates, callee, Ghost(8u64));
-    let callee = aliases.template_for_expansion_call(&plan, &templates, group,
-        Ghost((0usize, 1usize, 8u64)), Ghost(&prepared), Ghost(0int));
+    let selected = aliases.resolve_template_calls(&plan, &templates, prepared.calls.as_slice(),
+        prepared.projections.call_arguments.arguments.as_slice(), Ghost(prepared), Ghost((0usize, 1usize, 8u64)));
+    let call = &selected[0];
+    let callee = call.template;
     let binding = CallBinding {
-        group,
-        arguments: &prepared.projections.call_arguments.arguments[group.arguments.clone()],
+        group: call.group,
+        arguments: call.arguments,
         callee: &callee.circuit,
         _input_widths: Ghost(callee.inputs@),
         _output_widths: Ghost(callee.outputs@),

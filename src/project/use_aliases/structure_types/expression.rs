@@ -133,6 +133,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         layouts.representation_width_agrees(a, left, right);
     }
 
+    pub(in crate::project::use_aliases) proof fn layout_port_width_transfers(
+        &self, limit: u64, from: &StructureLayouts, to: &StructureLayouts, port: ResolvedPortType, width: int,
+    )
+        requires
+            self.can_resolve(),
+            self.structure_types_match(limit, Ok(*from)),
+            self.structure_types_match(limit, Ok(*to)),
+            self.layout_port_width_matches(from, port, width),
+        ensures self.layout_port_width_matches(to, port, width),
+    {
+        let ty = choose|ty: StructureFieldType| #[trigger] self.expression_port_matches(ty, port)
+            && from.representation_width_matches(ty, width);
+        self.representation_width_transfers(limit, from, to, ty, width);
+    }
+
     pub(in crate::project::use_aliases) proof fn layout_port_widths_agree_across_tables(
         &self, limit: u64, left: &StructureLayouts, right: &StructureLayouts, port: ResolvedPortType, a: int, b: int,
     )

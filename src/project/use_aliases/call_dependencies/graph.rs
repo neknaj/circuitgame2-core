@@ -716,6 +716,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    pub(in crate::project::use_aliases) proof fn template_rank_from_position(
+        &self, plan: FunctionExpansionOrder, position: (usize, usize), first: int, other: int,
+    )
+        requires
+            self.function_expansion_evidence(Ok(plan)),
+            plan.position_model(first) == Some(position),
+            plan.position_model(other) == Some(position),
+        ensures first == other,
+    {
+        reveal(FunctionExpansionOrder::source_positions_complete);
+        assert(0 <= first < plan.order_model().len());
+        assert(0 <= other < plan.order_model().len());
+        if first < other {
+            assert(plan.position_model(first) != plan.position_model(other));
+        } else if other < first {
+            assert(plan.position_model(other) != plan.position_model(first));
+        }
+    }
+
     /// 循環診断の呼び出しが、元の関数参照と一致することを表す。
     pub closed spec fn expansion_call_in_source(&self, site: FunctionCallSite) -> bool {
         self.function_call_site_matches(site)

@@ -302,6 +302,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         index
     }
 
+    pub(super) proof fn checked_layout_entries_are_valid(&self, limit: u64, layouts: StructureLayouts)
+        requires self.structure_types_match(limit, Ok(layouts)),
+        ensures layouts.layout_entries_valid(),
+    {
+        let index = self.structure_type_layout_index(limit, layouts);
+        self.layouts_preserve_order_and_ranges(&index, limit, layouts.entries_model());
+    }
+
     /// 型検査を通過した配置表には、このプロジェクトの各構造体の配置がある。
     pub(in crate::project::use_aliases) proof fn checked_layout_contains(
         &self, limit: u64, layouts: StructureLayouts, position: StructurePosition,

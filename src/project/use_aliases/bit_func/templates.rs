@@ -7,7 +7,9 @@ use super::expansion::{CheckedExpansionCall, PreparedExpansionBody};
 use super::{lowered_bit_func_result, lowering::standalone_template_layouts};
 #[cfg(verus_only)]
 use crate::netlist::{nor_evaluation_ready, port_bit_layout_result};
+use super::super::call_arity::ProjectedCallArgument;
 use alloc::vec::Vec;
+use vstd::slice::slice_subrange;
 use vstd::prelude::*;
 
 verus! {
@@ -27,6 +29,13 @@ pub(super) struct FunctionTemplate<'p, 'a> {
     _origin: Ghost<TemplateOrigin<'p, 'a>>,
 }
 
+/// 一つの呼び出しと、その実引数および変換済みの呼び出し先。
+pub(super) struct ResolvedTemplateCall<'s, 'p, 'a> {
+    pub(super) group: &'s CheckedExpansionCall<'p, 'a>,
+    pub(super) arguments: &'s [ProjectedCallArgument],
+    pub(super) template: &'s FunctionTemplate<'p, 'a>,
+}
+
 /// 展開順の先頭から格納する。実際の配列の添字には頂点番号を使う。
 pub(super) struct FunctionTemplates<'p, 'a> {
     slots: Vec<Option<FunctionTemplate<'p, 'a>>>,
@@ -35,6 +44,20 @@ pub(super) struct FunctionTemplates<'p, 'a> {
 
 impl<'p, 'a> FunctionTemplate<'p, 'a> {
     pub(super) closed spec fn signature_model(&self) -> TypedRoutineSignature<'p, 'a> { self._signature@ }
+    pub(super) closed spec fn input_widths_model(&self) -> Seq<u64> { self.inputs@ }
+
+    pub(super) closed spec fn output_widths_model(&self) -> Seq<u64> { self.outputs@ }
+
+    pub(super) closed spec fn structure_layouts_model(&self) -> Option<StructureLayouts<'p, 'a>> {
+        self._structure_layouts@
+    }
+
+    /// 変換した関数の出力幅を宣言順に借りる。
+    pub(super) fn output_widths(&self) -> (widths: &[u64])
+        ensures widths@ == self.output_widths_model(),
+    {
+        self.outputs.as_slice()
+    }
 }
 
 impl<'p, 'a> FunctionTemplates<'p, 'a> {
@@ -68,6 +91,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && self.checked_bit_func_matches(position.0, position.1, width_limit, &checked)
                     && lowered_bit_func_result(&checked, template._bit_limit@, Ok(template.circuit)),
         }
+    }
+
+    pub(super) proof fn template_port_evidence(
+        &self, position: (usize, usize), limit: u64, template: &FunctionTemplate,
+    )
+        requires self.function_template_matches(position, limit, template),
+        ensures self.template_port_widths_match(template.signature_model(), limit, template.input_widths_model(),
+            template.output_widths_model(), template.structure_layouts_model()),
+    {
+        reveal(UseAliases::function_template_matches);
     }
 
     /// 検査した単独関数のネットリストを、同じ宣言の入出力幅とともに保持する。
@@ -205,6 +238,83 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         template
     }
+    pub(super) open spec fn resolved_template_call_matches(
+        &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        index: int, selected: ResolvedTemplateCall,
+    ) -> bool {
+        let group = prepared.calls@[index];
+        &&& 0 <= index < prepared.calls@.len()
+        &&& *selected.group == group
+        &&& group.arguments.start <= group.arguments.end <= prepared.projections.call_arguments.arguments@.len()
+        &&& selected.arguments@ == prepared.projections.call_arguments.arguments@.subrange(
+            group.arguments.start as int, group.arguments.end as int)
+        &&& selected.arguments@.len() == selected.template.signature_model().inputs@.len()
+        &&& 0 <= group._order@.0 < group._order@.1 < plan.order_model().len()
+        &&& plan.position_model(group._order@.1) == Some((caller.0, caller.1))
+        &&& group.vertex == plan.order_model()[group._order@.0]
+        &&& plan.position_model(group._order@.0) matches Some(target)
+        &&& self.function_template_matches(target, caller.2, selected.template)
+        &&& group._signature@.signature matches crate::project::FuncCallSignature::Function(signature)
+        &&& signature.inputs@ == selected.template.signature_model().inputs@
+        &&& signature.outputs@ == selected.template.signature_model().outputs@
+        &&& signature.output_inputs@ == selected.template.signature_model().output_inputs@
+    }
+
+    /// 呼び出し順に、元の実引数区間と展開済みの関数を組にする。
+    pub(super) fn resolve_template_calls<'s>(
+        &self, plan: &FunctionExpansionOrder<'p, 'a>, table: &'s FunctionTemplates<'p, 'a>,
+        groups: &'s [CheckedExpansionCall<'p, 'a>], arguments: &'s [ProjectedCallArgument],
+        Ghost(prepared): Ghost<PreparedExpansionBody<'p, 'a>>, Ghost(caller): Ghost<(usize, usize, u64)>,
+    ) -> (selected: Vec<ResolvedTemplateCall<'s, 'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.function_expansion_evidence(Ok(*plan)),
+            self.function_templates_match(plan, caller.2, table),
+            plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
+            groups@ == prepared.calls@,
+            arguments@ == prepared.projections.call_arguments.arguments@,
+        ensures
+            selected@.len() == prepared.calls@.len(),
+            forall|i: int| 0 <= i < selected@.len() ==>
+                self.resolved_template_call_matches(plan, caller, &prepared, i, #[trigger] selected@[i]),
+    {
+        let mut selected: Vec<ResolvedTemplateCall<'s, 'p, 'a>> = Vec::new();
+        let mut index = 0;
+        while index < groups.len()
+            invariant
+                self.can_resolve(),
+                self.function_expansion_evidence(Ok(*plan)),
+                self.function_templates_match(plan, caller.2, table),
+                plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
+                self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
+                groups@ == prepared.calls@,
+                arguments@ == prepared.projections.call_arguments.arguments@,
+                index == selected@.len() <= prepared.calls@.len(),
+                forall|i: int| 0 <= i < selected@.len() ==>
+                    self.resolved_template_call_matches(plan, caller, &prepared, i, #[trigger] selected@[i]),
+            decreases prepared.calls@.len() - index,
+        {
+            let group = &groups[index];
+            proof {
+                self.expansion_callee_template_evidence(*plan, caller, &prepared, index as int);
+                self.template_rank_from_position(*plan, (caller.0, caller.1), group._order@.1, table.next_rank() as int);
+            }
+            let template = self.template_for_expansion_call(plan, table, group, Ghost(caller), Ghost(&prepared), Ghost(index as int));
+            let inputs = slice_subrange(arguments, group.arguments.start, group.arguments.end);
+            let call = ResolvedTemplateCall { group, arguments: inputs, template };
+            assert(self.resolved_template_call_matches(plan, caller, &prepared, index as int, call));
+            let ghost previous = selected@;
+            selected.push(call);
+            assert forall|i: int| 0 <= i < selected@.len() implies
+                self.resolved_template_call_matches(plan, caller, &prepared, i, #[trigger] selected@[i]) by {
+                if i < index { assert(selected@[i] == previous[i]); }
+            };
+            index += 1;
+        }
+        selected
+    }
+
     /// 解決済みの呼び出し先と同じ宣言のネットリストを取り出す。
     pub(super) fn template_for_expansion_call<'s>(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, table: &'s FunctionTemplates<'p, 'a>,

@@ -1,6 +1,7 @@
 //! 通常の右辺と関数呼び出しの出力を、定義順に取り出す。
 
 use super::*;
+use super::super::templates::ResolvedTemplateCall;
 use super::super::expansion::PreparedExpansionBody;
 use super::super::super::FunctionExpansionOrder;
 #[cfg(verus_only)]
@@ -154,6 +155,76 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    fn resolved_call_output_widths<'s>(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, selected: &[ResolvedTemplateCall<'s, 'p, 'a>],
+        Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(prepared): Ghost<PreparedExpansionBody<'p, 'a>>,
+    ) -> (widths: Vec<&'s [u64]>)
+        requires
+            self.can_resolve(),
+            self.structure_layout_for_ports(scope.limit, scope.layouts),
+            selected@.len() == prepared.calls@.len(),
+            forall|i: int| 0 <= i < selected@.len() ==> {
+                let call = #[trigger] selected@[i];
+                &&& self.resolved_template_call_matches(&plan, (scope.file, scope.entry, scope.limit), &prepared, i, call)
+                &&& scope.layouts.is_none() ==>
+                    !has_structure_port(call.template.signature_model().inputs@)
+                        && !has_structure_port(call.template.signature_model().outputs@)
+            },
+        ensures
+            widths@.len() == prepared.calls@.len(),
+            forall|i: int| 0 <= i < widths@.len() ==> {
+                let signature = prepared.calls@[i]._signature@.signature;
+                &&& (#[trigger] widths@[i])@ == selected@[i].template.output_widths_model()
+                &&& signature is Function
+                &&& self.port_widths_match(signature->Function_0.outputs@, widths@[i]@, scope.layouts)
+            },
+    {
+        let mut widths: Vec<&'s [u64]> = Vec::new();
+        let mut index = 0;
+        while index < selected.len()
+            invariant
+                self.can_resolve(),
+                self.structure_layout_for_ports(scope.limit, scope.layouts),
+                index == widths@.len() <= selected@.len() == prepared.calls@.len(),
+                forall|i: int| 0 <= i < selected@.len() ==> {
+                    let call = #[trigger] selected@[i];
+                    &&& self.resolved_template_call_matches(&plan, (scope.file, scope.entry, scope.limit), &prepared, i, call)
+                    &&& scope.layouts.is_none() ==>
+                        !has_structure_port(call.template.signature_model().inputs@)
+                            && !has_structure_port(call.template.signature_model().outputs@)
+                },
+                forall|i: int| 0 <= i < widths@.len() ==> {
+                    let signature = prepared.calls@[i]._signature@.signature;
+                    &&& (#[trigger] widths@[i])@ == selected@[i].template.output_widths_model()
+                    &&& signature is Function
+                    &&& self.port_widths_match(signature->Function_0.outputs@, widths@[i]@, scope.layouts)
+                },
+            decreases selected@.len() - index,
+        {
+            let template = selected[index].template;
+            proof {
+                let rank = prepared.calls@[index as int]._order@.0;
+                let position = plan.position_model(rank)->Some_0;
+                self.template_port_evidence(position, scope.limit, template);
+                self.template_widths_in_caller_layout(template.signature_model(), scope.limit, template.input_widths_model(),
+                    template.output_widths_model(), template.structure_layouts_model(), scope.layouts);
+            }
+            let row = template.output_widths();
+            let ghost prior = widths@;
+            widths.push(row);
+            assert forall|i: int| 0 <= i < widths@.len() implies {
+                let signature = prepared.calls@[i]._signature@.signature;
+                &&& (#[trigger] widths@[i])@ == selected@[i].template.output_widths_model()
+                &&& signature is Function
+                &&& self.port_widths_match(signature->Function_0.outputs@, widths@[i]@, scope.layouts)
+            } by {
+                if i < index { assert(widths@[i] == prior[i]); }
+            };
+            index += 1;
+        }
+        widths
+    }
+
     /// 展開準備で確定した呼び出しと実際の出力幅から、関数本体を定義順に取り出す。
     ///
     /// # Errors
@@ -161,7 +232,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 通常の右辺の変換で最初に見つかったエラーを返す。
     pub(super) fn project_prepared_definition_body(
         &self, scope: &FuncProjection<'_, 'p, 'a>, calls: &[CheckedExpansionCall<'p, 'a>],
-        call_widths: &[&[u64]], literal_widths: &[Option<u64>], concats: Vec<ConcatProjection>,
+        selected: &[ResolvedTemplateCall<'_, 'p, 'a>], literal_widths: &[Option<u64>], concats: Vec<ConcatProjection>,
         Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(prepared): Ghost<PreparedExpansionBody<'p, 'a>>,
     ) -> (result: Result<Vec<CheckedBitDefinition<'p, 'a>>, BitFuncError<'p, 'a>>)
         requires
@@ -173,11 +244,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             literal_widths@ == prepared.typed.literals.widths@ && literal_widths@.len() == scope.types@.len(),
             concats@ == prepared.projections.concats@,
             scope.structures@ == prepared.projections.entries@,
-            calls@.len() == call_widths@.len(),
-            forall|i: int| 0 <= i < calls@.len() ==> {
-                let signature = (#[trigger] calls@[i])._signature@.signature;
-                signature is Function
-                    && self.port_widths_match(signature->Function_0.outputs@, call_widths@[i]@, scope.layouts)
+            calls@.len() == selected@.len(),
+            forall|i: int| 0 <= i < selected@.len() ==> {
+                let call = #[trigger] selected@[i];
+                &&& self.resolved_template_call_matches(&plan, (scope.file, scope.entry, scope.limit), &prepared, i, call)
+                &&& scope.layouts.is_none() ==>
+                    !has_structure_port(call.template.signature_model().inputs@)
+                        && !has_structure_port(call.template.signature_model().outputs@)
             },
         ensures match result {
             Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
@@ -191,8 +264,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && self.definition_error(scope, prefix, error),
         },
     {
-        proof { self.prepared_calls_fit_body(scope, plan, &prepared, call_widths@); }
-        self.project_definition_body(scope, calls, call_widths, literal_widths, concats, Ghost(prepared.typed))
+        let call_widths = self.resolved_call_output_widths(scope, selected, Ghost(plan), Ghost(prepared));
+        proof {
+            assert forall|i: int| 0 <= i < call_widths@.len() implies {
+                let signature = (#[trigger] prepared.calls@[i])._signature@.signature;
+                signature is Function && self.port_widths_match(signature->Function_0.outputs@, call_widths@[i]@, scope.layouts)
+            } by {
+                assert(call_widths@[i]@ == selected@[i].template.output_widths_model());
+            };
+            self.prepared_calls_fit_body(scope, plan, &prepared, call_widths@);
+        }
+        self.project_definition_body(scope, calls, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed))
     }
 
     proof fn keep_body_prefix(

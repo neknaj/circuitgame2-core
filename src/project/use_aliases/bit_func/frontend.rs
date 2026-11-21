@@ -729,6 +729,49 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& self.port_widths_match(signature.outputs@, outputs, table)
     }
 
+    /// 呼び出し先のポート幅を、呼び出し元で使う検査済みの配置表へ引き継ぐ。
+    proof fn template_widths_in_caller_layout(
+        &self, signature: TypedRoutineSignature, limit: u64, inputs: Seq<u64>, outputs: Seq<u64>,
+        from: Option<StructureLayouts>, to: Option<&StructureLayouts>,
+    )
+        requires
+            self.can_resolve(),
+            self.template_port_widths_match(signature, limit, inputs, outputs, from),
+            to matches Some(table) ==> self.structure_types_match(limit, Ok(*table)),
+            to.is_none() ==> !has_structure_port(signature.inputs@) && !has_structure_port(signature.outputs@),
+        ensures
+            self.port_widths_match(signature.inputs@, inputs, to),
+            self.port_widths_match(signature.outputs@, outputs, to),
+    {
+        let source = match &from { Some(table) => Some(table), None => None };
+        self.port_widths_in_caller_layout(signature.inputs@, inputs, limit, source, to);
+        self.port_widths_in_caller_layout(signature.outputs@, outputs, limit, source, to);
+    }
+
+    proof fn port_widths_in_caller_layout(
+        &self, ports: Seq<TypedPort>, widths: Seq<u64>, limit: u64,
+        from: Option<&StructureLayouts>, to: Option<&StructureLayouts>,
+    )
+        requires
+            self.can_resolve(),
+            self.port_widths_match(ports, widths, from),
+            self.structure_layout_for_ports(limit, from),
+            self.structure_layout_for_ports(limit, to),
+            to.is_none() ==> !has_structure_port(ports),
+        ensures self.port_widths_match(ports, widths, to),
+    {
+        assert forall|i: int| 0 <= i < widths.len() implies
+            self.port_width_matches(ports[i].ty, #[trigger] widths[i], to) by {
+            let ty = ports[i].ty;
+            assert(self.port_width_matches(ty, widths[i], from));
+            if ty is Struct {
+                let origin = from->Some_0;
+                let table = to->Some_0;
+                self.layout_port_width_transfers(limit, origin, table, ty, widths[i] as int);
+            }
+        };
+    }
+
     /// 単独関数で検査したポート幅を、同じ宣言と構造体配置に結び付ける。
     pub(super) proof fn standalone_template_ports(
         &self, file: usize, entry: usize, limit: u64, checked: &CheckedBitFunc,
@@ -1879,9 +1922,16 @@ fn body_projects_concat_after_call_outputs() {
         outputs: &vec![1],
         structures: &prepared.projections.entries,
     };
-    let callee = aliases.check_bit_func(0, 1, 8).unwrap();
+    let mut templates = aliases.new_function_templates(&plan, Ghost(8u64));
+    let position = plan.get(templates.next_index()).unwrap();
+    let checked = aliases.check_bit_func(position.0, position.1, 8).unwrap();
+    let lowered = checked.lower_bit_func(8).unwrap();
+    let callee = aliases.standalone_function_template(position, 8, checked, lowered, 8);
+    aliases.insert_function_template(&plan, &mut templates, callee, Ghost(8u64));
+    let selected = aliases.resolve_template_calls(&plan, &templates, prepared.calls.as_slice(),
+        prepared.projections.call_arguments.arguments.as_slice(), Ghost(prepared), Ghost((0usize, 2usize, 8u64)));
     let definitions = aliases.project_prepared_definition_body(
-        &scope, prepared.calls.as_slice(), &[callee.output_widths.as_slice()],
+        &scope, prepared.calls.as_slice(), selected.as_slice(),
         prepared.typed.literals.widths.as_slice(), prepared.projections.concats, Ghost(plan), Ghost(prepared),
     ).unwrap();
     assert_eq!(definitions.len(), 4);
