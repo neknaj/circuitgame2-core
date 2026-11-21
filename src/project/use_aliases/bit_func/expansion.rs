@@ -1335,7 +1335,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& super::lowering::literal_argument_matches_width(source, parsed.syntax.forms@, arg.form, width as int)
                 },
                 CallArgumentSource::NestedCall(_) =>
-                    prepared_nested_output_matches(children, group.references.start, parent_index, arg, expected),
+                    form is List && prepared_nested_output_matches(children, group.references.start, parent_index, arg, expected),
                 CallArgumentSource::Deferred => true,
             }
         }),
@@ -1449,9 +1449,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures ({
             let group = prepared.calls@[group_index];
             let child = group.postorder->Some_0@[child_index];
+            let parsed = self.targets.project_model().circuits_model()[caller.0 as int];
+            let definition = prepared.projections.calls@[group_index].definition;
+            let row = parsed.definitions@[definition as int];
+            let local = (definition - parsed.entry_ranges@[caller.1 as int].definitions.start) as usize;
+            let reference = (child.reference - group.references.start) as usize;
+            &&& group.references == row.references && group.references.start <= child.reference < group.references.end
+            &&& self.func_call_form_reference(caller.0, caller.1, local, child._signature@.call.call.form, reference)
+            &&& self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child._signature@)))
             &&& child.arguments.start <= child.arguments.end <= prepared.projections.call_arguments.arguments@.len()
             &&& match child._signature@.call.target {
-                FuncCallTarget::Nor => child.vertex.is_none() && child._signature@.signature is Nor
+                FuncCallTarget::Nor => child.vertex.is_none() && child._rank@.is_none() && child._signature@.signature is Nor
                     && child.arguments.end - child.arguments.start == 2,
                 FuncCallTarget::Function { file, entry, .. } => {
                     &&& child._rank@ matches Some(rank) && 0 <= rank < group._order@.1 < plan.order_model().len()
@@ -1477,6 +1485,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let projected = prepared.projections.call_arguments.arguments@.subrange(
             child.arguments.start as int, child.arguments.end as int);
         self.typed_call_arguments_ready(caller.0, caller.1, definition, local, caller.2, child._signature@);
+        self.resolved_call_reference_form(caller.0, caller.1, definition, local, child._signature@.call);
+        crate::syntax::circuit::indexed_call_arguments(child._signature@.call.source.text, parsed.syntax.forms@, row,
+            parsed.references@[child.reference as int], child._signature@.call.call);
         self.checked_projected_input_count((caller.0, caller.1, definition, local), caller.2,
             prepared.typed.types@, &wiring, child._signature@, projected);
         if child._signature@.call.target is Function {
@@ -1632,6 +1643,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& self.prepared_expression_call_matches(plan, caller, definition, arguments, types, wiring, caller_rank, child)
                 &&& child.reference == row.references.start + projected[port].source->NestedCall_0
                 &&& signature.call.call.form == projected[port].form
+                &&& parsed.syntax.forms@[projected[port].form as int] is List
                 &&& signature.call.target.port_counts().outputs == 1
                 &&& match signature.signature {
                     crate::project::FuncCallSignature::Nor =>
@@ -1680,6 +1692,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::prepared_expression_call_matches);
         self.successful_call_signatures_agree(file, entry, definition, relative, limit, signature, child._signature@);
         self.typed_call_arguments_ready(file, entry, definition, relative, limit, child._signature@);
+        crate::syntax::circuit::call_form_bounds(forms, child._signature@.call.call);
         assert(child._signature@.call.call.form == form);
         assert(child._signature@.call.target.port_counts().outputs == 1);
         position

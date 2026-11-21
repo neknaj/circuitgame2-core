@@ -3,8 +3,10 @@
 use super::*;
 use crate::project::{FuncCallSignature, FuncCallTarget, ResolvedPortType, port_types_equal};
 use crate::project::use_aliases::bit_func::expansion::{
-    source_call_argument_value, source_call_argument_values_agree, source_call_arguments_match,
+    PreparedExpansionBody, prepared_nested_output_matches, source_call_argument_value, source_call_argument_values_agree,
+    source_call_arguments_match,
 };
+use crate::project::use_aliases::call_arity::CallArgumentSource;
 use crate::syntax::circuit::{
     build_definition_scope_evidence, call_argument_position_bounds, call_argument_positions,
     call_argument_positions_agree, definition_reference_form_unique,
@@ -183,7 +185,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && 0 < child.result.len() <= u64::MAX
             && self.port_width_matches(output, child.result.len() as u64, scope.layouts)
         &&& self.source_expression_arguments_match(scope, signature, child.widths, child.arguments, children)
-        &&& match (signature.call.target, signature.signature, child.callee_rank) {
+        &&& self.source_expression_result_matches(scope, child)
+    }
+
+    spec fn source_expression_result_matches(&self, scope: &SourceExpressionScope, child: SourceExpressionCall) -> bool {
+        let signature = child.signature;
+        match (signature.call.target, signature.signature, child.callee_rank) {
             (FuncCallTarget::Nor, FuncCallSignature::Nor, None) =>
                 child.arguments.len() == 2 && child.arguments[0].len() == 1 && child.arguments[1].len() == 1
                 && child.result == seq![!(child.arguments[0][0] || child.arguments[1][0])],
@@ -194,6 +201,112 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }),
             _ => false,
         }
+    }
+
+    /// 配線から読んだ一つの子の入出力値を、対応する厳格構文木の評価に結び付ける。
+    proof fn source_prepared_child_evaluation(
+        &self, scope: &SourceExpressionScope, prepared: &PreparedExpansionBody, group_index: int, index: int,
+        child: SourceExpressionCall, children: Map<usize, SourceExpressionCall>,
+    )
+        requires
+            self.source_expression_scope_matches(scope),
+            self.prepared_expansion_body_matches(*scope.plan, scope.context.file, scope.context.entry, scope.context.limit, prepared),
+            prepared.typed == scope.typed,
+            0 <= group_index < prepared.calls@.len(),
+            prepared.projections.calls@[group_index].definition == scope.definition,
+            ({
+                let group = prepared.calls@[group_index];
+                let arguments = prepared.projections.call_arguments.arguments@;
+                let context = scope.context;
+                let frame = context.parsed.entry_ranges@[context.entry as int];
+                let local = (scope.definition - frame.definitions.start) as usize;
+                &&& group.postorder matches Some(postorder)
+                &&& 0 <= index < postorder@.len()
+                &&& {
+                    let item = postorder@[index];
+                    let range = item.arguments;
+                    &&& range.start <= range.end <= arguments.len()
+                    &&& child.signature == item._signature@
+                    &&& child.callee_rank == item._rank@
+                    &&& child.reference + group.references.start == item.reference
+                    &&& self.func_call_form_reference(context.file, context.entry, local,
+                        child.signature.call.call.form, child.reference)
+                    &&& self.func_call_signature_evidence(context.file, context.entry, local, child.reference,
+                        context.limit, Ok(Some(child.signature)))
+                    &&& child.arguments.len() == child.widths.len() == range.end - range.start
+                    &&& forall|port: int| 0 <= port < child.arguments.len() ==> {
+                        let argument = #[trigger] arguments[range.start + port];
+                        &&& child.arguments[port].len() == child.widths[port]
+                        &&& if argument.source.has_direct_wires() {
+                            source_call_argument_value(context.source, context.parsed, context.wiring, context.entry,
+                                scope.definition, argument.form, context.limit, scope.inputs, scope.prior,
+                                child.widths[port], child.arguments[port])
+                        } else {
+                            &&& argument.source is NestedCall
+                            &&& children.contains_key(argument.form)
+                            &&& child.arguments[port] == children[argument.form].result
+                        }
+                    }
+                }
+                &&& forall|i: int| 0 <= i < index ==> {
+                    let earlier = #[trigger] postorder@[i];
+                    let form = earlier._signature@.call.call.form;
+                    &&& children.contains_key(form)
+                    &&& children[form].signature == earlier._signature@
+                }
+            }),
+            match child.signature.signature {
+                FuncCallSignature::Nor => child.widths == seq![1u64, 1u64],
+                FuncCallSignature::Function(ports) => self.port_widths_match(ports.inputs@, child.widths, scope.layouts),
+            },
+            source_expression_output_type(child.signature) matches Some(output)
+                && 0 < child.result.len() <= u64::MAX
+                && self.port_width_matches(output, child.result.len() as u64, scope.layouts),
+            self.source_expression_result_matches(scope, child),
+        ensures self.source_expression_call_evaluates(scope, child.signature.call.call.form, child, children),
+    {
+        let context = scope.context;
+        let caller = (context.file, context.entry, context.limit);
+        let group = prepared.calls@[group_index];
+        let postorder = group.postorder->Some_0@;
+        let range = postorder[index].arguments;
+        let arguments = prepared.projections.call_arguments.arguments@;
+        let projected = arguments.subrange(range.start as int, range.end as int);
+        let positions = Seq::new(projected.len(), |port: int| projected[port].form);
+        let forms = context.parsed.syntax.forms@;
+        let call = child.signature;
+        self.expansion_child_arguments_in_source_order(*scope.plan, caller, prepared, group_index, index);
+        assert forall|port: int| 0 <= port < positions.len() implies
+            self.source_expression_argument_matches(scope, call, port, #[trigger] positions[port],
+                child.widths[port], child.arguments[port], children) by {
+            let argument = projected[port];
+            assert(argument == arguments[range.start + port]);
+            self.expansion_child_argument_evidence(*scope.plan, caller, prepared, group_index, index, port);
+            call_argument_position_bounds(forms, call.call.call, positions, port);
+            let expected = match call.signature {
+                FuncCallSignature::Nor => ResolvedPortType::Bits(1),
+                FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+            };
+            match argument.source {
+                CallArgumentSource::Driver(_) | CallArgumentSource::Literal(_) => {
+                    assert(self.source_expression_atom_type(scope, argument.form, expected));
+                },
+                CallArgumentSource::NestedCall(reference) => {
+                    assert(prepared_nested_output_matches(postorder, group.references.start, index, argument, expected));
+                    let i = choose|i: int| 0 <= i < index
+                        && (#[trigger] postorder[i]).reference == group.references.start + reference
+                        && postorder[i]._signature@.call.call.form == argument.form
+                        && match source_expression_output_type(postorder[i]._signature@) {
+                            Some(output) => port_types_equal(output, expected),
+                            None => false,
+                        };
+                    assert(children[argument.form].signature == postorder[i]._signature@);
+                    assert(forms[argument.form as int] is List);
+                },
+                CallArgumentSource::Deferred => {},
+            }
+        };
+        assert(self.source_expression_arguments_match(scope, call, child.widths, child.arguments, children));
     }
 
     /// 元の右辺の根から引数をたどり、各リストの呼び出しをソースの規則で評価する。
