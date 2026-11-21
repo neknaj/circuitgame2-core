@@ -4,7 +4,7 @@ use super::frontend::BitFuncError;
 use super::super::{FuncSignalTypes, FuncWiring, FuncWiringResult, FunctionExpansionOrder, TypedFuncCall, UseAliases};
 use super::super::call_arity::RetainedCallTarget;
 #[cfg(verus_only)]
-use super::super::call_arity::{CallArgumentProjections, CallArgumentSource, RootFunctionCall};
+use super::super::call_arity::{CallArgumentProjections, CallArgumentSource, ProjectedCallArgument, RootFunctionCall};
 use super::super::function_atoms::{FuncProjections, SignalType};
 #[cfg(verus_only)]
 use super::super::function_atoms::{concat_projections_match, signal_type_at, structure_projection_matches,
@@ -21,7 +21,9 @@ use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
 use crate::syntax::circuit::postorder_call_references;
 #[cfg(verus_only)]
-use crate::syntax::circuit::{call_postorder_reference, call_references_in_postorder, root_call_postorder_last};
+use crate::syntax::circuit::{
+    call_postorder_reference, call_references_in_postorder, nested_call_postorder_position, root_call_postorder_last,
+};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
@@ -667,6 +669,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& form is List
                     &&& group._signature@.call.call.form + 2 <= argument.form < form->List_end
                         <= parsed.syntax.forms@[group._signature@.call.call.form as int]->List_end
+                    &&& group.postorder matches Some(children) && exists|position: int|
+                        0 <= position < children@.len()
+                        && (#[trigger] children@[position])._signature@.call.call.form == argument.form
+                        && children@[position]._signature@.call.target.port_counts().outputs == 1
                     &&& exists|reference: usize, child: TypedFuncCall|
                         #[trigger] self.func_call_form_reference(caller.0, caller.1, local, argument.form, reference)
                         && #[trigger] self.func_call_signature_evidence(caller.0, caller.1, local, reference, caller.2, Ok(Some(child)))
@@ -706,6 +712,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.call_form_matches_reference(file, entry, local, form, reference, child.call);
             assert(self.func_call_form_reference(file, entry, local, form, reference));
             assert(self.func_call_signature_evidence(file, entry, local, reference, limit, Ok(Some(child))));
+            match group.postorder {
+                Some(children) => {
+                    let position = self.prepared_nested_argument(plan, caller, local, arguments, typed.types@, wiring,
+                        group._order@.1, children@, children@.len() as int, 0, group._signature@, projected, port);
+                    assert(children@[position]._signature@.call.call.form == form);
+                },
+                None => {
+                    let row = parsed.definitions@[root.definition as int];
+                    assert(reference < row.references.end - row.references.start);
+                    assert(reference == 0);
+                    self.call_form_matches_reference(file, entry, local, form, 0, group._signature@.call);
+                    assert(false);
+                },
+            }
             if let FuncCallTarget::Function { file: target_file, entry: target_entry, .. } = child.call.target {
                 let source = DefinitionPosition { file, entry, definition: local, reference };
                 let site = self.expansion_site_for_call(source, child.call);
@@ -934,6 +954,96 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& call_references_in_postorder(parsed.syntax.forms@, parsed.references@, row.references, source_order)
         &&& forall|i: int| 0 <= i < children.len() ==> self.prepared_expression_call_matches(
             plan, caller, definition, projections, types, wiring, caller_rank, #[trigger] children[i])
+    }
+
+    /// 実引数の位置から、親より先に展開する子の位置と出力型を取り出す。
+    pub(super) proof fn prepared_nested_argument(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), definition: usize,
+        arguments: &CallArgumentProjections, types: Seq<Option<SignalType>>, wiring: &FuncWiring,
+        caller_rank: int, children: Seq<PreparedExpressionCall>, parent_position: int,
+        parent_reference: usize, parent: TypedFuncCall, projected: Seq<ProjectedCallArgument>, port: int,
+    ) -> (position: int)
+        requires
+            self.can_resolve(),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(FuncWiringResult::Checked(*wiring))),
+            self.prepared_expression_children_match(plan, caller, definition, arguments, types, wiring, caller_rank, children),
+            self.func_call_signature_evidence(caller.0, caller.1, definition, parent_reference, caller.2, Ok(Some(parent))),
+            self.projected_input_arguments((caller.0, caller.1, definition, parent_reference), caller.2, types, wiring, projected),
+            self.position_exists(caller.0, caller.1, definition, parent_reference),
+            0 <= port < projected.len(),
+            projected[port].source is NestedCall,
+            0 <= parent_position <= children.len(),
+            if parent_position == children.len() {
+                parent_reference == 0
+            } else {
+                let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+                let row = parsed.definitions@[parsed.entry_ranges@[caller.1 as int].definitions.start + definition];
+                children[parent_position].reference == row.references.start + parent_reference
+            },
+        ensures
+            0 <= position < parent_position <= children.len(),
+            match parent.signature {
+                crate::project::FuncCallSignature::Nor => projected.len() == 2,
+                crate::project::FuncCallSignature::Function(ports) => projected.len() == ports.inputs@.len(),
+            },
+            ({
+                let child = children[position];
+                let signature = child._signature@;
+                let expected = match parent.signature {
+                    crate::project::FuncCallSignature::Nor => crate::project::ResolvedPortType::Bits(1),
+                    crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+                };
+                &&& self.prepared_expression_call_matches(plan, caller, definition, arguments, types, wiring, caller_rank, child)
+                &&& signature.call.call.form == projected[port].form
+                &&& signature.call.target.port_counts().outputs == 1
+                &&& match signature.signature {
+                    crate::project::FuncCallSignature::Nor =>
+                        crate::project::port_types_equal(crate::project::ResolvedPortType::Bits(1), expected),
+                    crate::project::FuncCallSignature::Function(ports) =>
+                        ports.outputs@.len() == 1 && crate::project::port_types_equal(ports.outputs@[0].ty, expected),
+                }
+            }),
+    {
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        let row = parsed.definitions@[absolute];
+        let forms = parsed.syntax.forms@;
+        let refs = parsed.references@;
+        self.typed_call_arguments_ready(file, entry, definition, parent_reference, limit, parent);
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute);
+        vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+        self.checked_projected_argument((file, entry, definition, parent_reference), limit, types, wiring, parent, projected, port);
+        let form = projected[port].form;
+        let expected = match parent.signature {
+            crate::project::FuncCallSignature::Nor => crate::project::ResolvedPortType::Bits(1),
+            crate::project::FuncCallSignature::Function(ports) => ports.inputs@[port].ty,
+        };
+        let (relative, signature) = self.projected_nested_call_signature((file, entry, definition), limit, form, expected);
+        self.typed_call_arguments_ready(file, entry, definition, relative, limit, signature);
+        self.call_form_matches_reference(file, entry, definition, form, relative, signature.call);
+        crate::syntax::circuit::direct_call_argument_bounds(forms, parent.call.call, form as int);
+        self.resolved_call_reference_form(file, entry, definition, parent_reference, parent.call);
+        let parent_absolute = (row.references.start + parent_reference) as usize;
+        let child_absolute = (row.references.start + relative) as usize;
+        reveal(UseAliases::prepared_expression_children_match);
+        let order = Seq::new(children.len(), |i: int| children[i].reference).push(row.references.start);
+        assert(order[parent_position] == parent_absolute);
+        let position = nested_call_postorder_position(source.text, forms, refs, row, order,
+            parent_absolute, child_absolute, parent_position);
+        let child = children[position];
+        assert(child.reference == child_absolute);
+        assert(self.prepared_expression_call_matches(plan, caller, definition, arguments, types, wiring, caller_rank, child));
+        reveal(UseAliases::prepared_expression_call_matches);
+        self.successful_call_signatures_agree(file, entry, definition, relative, limit, signature, child._signature@);
+        self.typed_call_arguments_ready(file, entry, definition, relative, limit, child._signature@);
+        assert(child._signature@.call.call.form == form);
+        assert(child._signature@.call.target.port_counts().outputs == 1);
+        position
     }
 
     /// 入れ子の呼び出しごとに、型検査済みの引数範囲と展開先を処理順に集める。

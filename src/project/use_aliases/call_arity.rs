@@ -269,6 +269,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
     }
 
+    /// 呼び出しのリスト位置と、参照が指す直後の呼び出し名の位置を対応付ける。
+    pub(super) proof fn resolved_call_reference_form(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, call: FuncCallArity,
+    )
+        requires
+            self.can_resolve(),
+            self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(call))),
+        ensures ({
+            let parsed = self.targets.project_model().circuits_model()[file as int];
+            let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+            &&& reference < row.references.end - row.references.start
+            &&& row.references.start + reference < parsed.references@.len()
+            &&& parsed.references@[row.references.start + reference].form == call.call.form + 1
+        }),
+    {
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[file as int];
+        let source = project.sources_model()[file as int];
+        let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        parsed_index_evidence(source, parsed);
+        build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute);
+    }
+
     proof fn resolved_arity_excludes_no_call(
         &self, at: (usize, usize, usize, usize), call: FuncCallArity,
     )

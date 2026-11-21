@@ -47,7 +47,10 @@ pub use concat_arguments::{
 use build::BuildRows;
 pub use call_order::postorder_call_references;
 #[cfg(verus_only)]
-pub use call_order::{call_postorder_positions, call_postorder_reference, call_references_in_postorder, root_call_postorder_last};
+pub use call_order::{
+    call_postorder_positions, call_postorder_reference, call_references_in_postorder,
+    nested_call_postorder_position, root_call_postorder_last,
+};
 pub use call_shapes::{
     CallShape, RoutineArity, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,
     indexed_call_signal, next_call_argument, routine_arity,

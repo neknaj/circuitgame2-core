@@ -683,14 +683,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_wiring_evidence(at.0, at.1, limit, Ok(FuncWiringResult::Checked(*wiring))),
             self.projected_input_arguments(at, limit, types, wiring, projected),
             self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(Some(call))),
-            call.signature is Function,
             0 <= index < projected.len(),
         ensures ({
             let parsed = &self.targets.project_model().circuits_model()[at.0 as int];
             let absolute = parsed.entry_ranges@[at.1 as int].definitions.start + at.2;
             let form = projected[index].form;
-            let expected = call.signature->Function_0.inputs@[index].ty;
-            &&& projected.len() == call.signature->Function_0.inputs@.len()
+            let expected = match call.signature {
+                FuncCallSignature::Nor => ResolvedPortType::Bits(1),
+                FuncCallSignature::Function(ports) => ports.inputs@[index].ty,
+            };
+            &&& projected.len() == call.call.target.port_counts().inputs
+            &&& match call.signature {
+                FuncCallSignature::Nor => projected.len() == 2,
+                FuncCallSignature::Function(ports) => projected.len() == ports.inputs@.len(),
+            }
             &&& form < parsed.syntax.forms@.len()
             &&& direct_call_argument(parsed.syntax.forms@, call.call.call, form as int)
             &&& match projected[index].source {
@@ -752,9 +758,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let (other, visited, values) = self.projected_inputs_witness(at, limit, types, wiring, projected);
         self.successful_call_signatures_agree(file, entry, definition, reference, limit, call, other);
         self.typed_call_arguments_ready(file, entry, definition, reference, limit, other);
-        assert(projected.len() == other.signature->Function_0.inputs@.len()) by {
-            reveal(argument_projections_match);
-        };
+        assert(projected.len() == values.len() == visited.len()) by { reveal(argument_projections_match); };
+        assert(values.len() == other.call.call.arguments == call.call.call.arguments);
+        assert(0 <= index < values.len() <= usize::MAX);
         assert(argument_projection_matches(projected[index], visited[index], forms, wiring, types, slots, start, values[index])) by {
             reveal(argument_projections_match);
         };
@@ -766,7 +772,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         let (port, known) = Self::projected_argument_leaf((self, file, entry, definition), &other, forms, wiring, types, slots, start,
             form, index as usize, limit, value);
-        assert(port.ty == call.signature->Function_0.inputs@[index].ty);
+        match (call.signature, other.signature) {
+            (FuncCallSignature::Nor, FuncCallSignature::Nor) => {
+                assert(projected.len() == 2 && port.ty == ResolvedPortType::Bits(1));
+            },
+            (FuncCallSignature::Function(ports), FuncCallSignature::Function(other_ports)) => {
+                assert(ports.inputs@ == other_ports.inputs@);
+                assert(projected.len() == ports.inputs@.len() && port.ty == ports.inputs@[index].ty);
+            },
+            _ => assert(false),
+        }
         reveal(argument_projection_matches);
         match projected[index].source {
             CallArgumentSource::Driver(driver) => {

@@ -225,7 +225,8 @@ pub proof fn direct_call_argument_bounds(forms: Seq<Form>, call: CallShape, inde
     ensures ({
         let end = forms[call.form as int]->List_end as int;
         let next = if forms[index] is List { forms[index]->List_end as int } else { index + 1 };
-        call.form + 2 <= index < next <= end <= forms.len()
+        &&& call.form < forms.len() && forms[call.form as int] is List
+        &&& call.form + 2 <= index < next <= end <= forms.len()
     }),
 {
     reveal(direct_form_in_range);

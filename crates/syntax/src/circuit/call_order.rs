@@ -328,6 +328,39 @@ pub proof fn call_postorder_positions(
         (a, b)
     }
 
+/// 親のリスト内で始まる呼び出しについて、親より前の処理位置を返す。
+pub proof fn nested_call_postorder_position(
+    source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,
+    order: Seq<usize>, parent: usize, child: usize, parent_position: int,
+) -> (position: int)
+    requires
+        definition_call_index(source, forms, row, references), forms.len() <= usize::MAX,
+        nested_list_indices(forms), call_references_in_postorder(forms, references, row.references, order),
+        row.references.start <= parent < row.references.end, row.references.start <= child < row.references.end,
+        references[parent as int].kind is Callee, references[child as int].kind is Callee,
+        0 <= parent_position < order.len(), order[parent_position] == parent,
+        references[parent as int].form < references[child as int].form,
+        0 <= references[parent as int].form - 1 < forms.len(),
+        forms[references[parent as int].form - 1] is List,
+        references[child as int].form - 1 < forms[references[parent as int].form - 1]->List_end,
+    ensures 0 <= position < parent_position, order[position] == child,
+{
+    row_reference_bounds(source, forms, references, row);
+    reveal(reference_bounds);
+    if child < parent {
+        assert(references[child as int].form < references[parent as int].form);
+    }
+    let (first, second) = call_postorder_positions(source, forms, references, row, order, parent, child);
+    reveal(call_references_in_postorder);
+    if first < parent_position {
+        assert(precedes(forms, references, order[first], order[parent_position]));
+    } else if parent_position < first {
+        assert(precedes(forms, references, order[parent_position], order[first]));
+    }
+    assert(first == parent_position);
+    second
+}
+
 /// 右辺全体が通常呼び出しなら、その参照は順序の最後に現れる。
 pub proof fn root_call_postorder_last(
     source: &str, forms: Seq<Form>, references: Seq<ExpressionReference>, row: BuildDefinition,
