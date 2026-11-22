@@ -15,6 +15,8 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
 #[cfg(verus_only)]
+use crate::netlist::{instance_gates_at, instance_gates_in_extension};
+#[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence,
     call_argument_position_bounds, call_argument_position_is_direct};
 
@@ -68,14 +70,33 @@ spec fn instance_counts_match(instances: Seq<SourceInstance>, counts: Seq<usize>
     }
 }
 
-fn symbolic_driver(driver: OutputDriver) -> (wire: ClockedWireDriver) {
+spec fn symbolic_output(driver: OutputDriver) -> ClockedWireDriver {
+    match driver {
+        OutputDriver::Input(port) => ClockedWireDriver::Terminal(Wire::Input(port)),
+        OutputDriver::Definition(slot) => ClockedWireDriver::Alias(slot),
+    }
+}
+
+fn symbolic_driver(driver: OutputDriver) -> (wire: ClockedWireDriver)
+    ensures wire == symbolic_output(driver),
+{
     match driver {
         OutputDriver::Input(port) => ClockedWireDriver::Terminal(Wire::Input(port)),
         OutputDriver::Definition(definition) => ClockedWireDriver::Alias(definition),
     }
 }
 
-fn resolve_driver(driver: ClockedWireDriver, wires: &[Wire]) -> (wire: Option<Wire>) {
+spec fn resolved_driver(driver: ClockedWireDriver, wires: Seq<Wire>) -> Option<Wire> {
+    match driver {
+        ClockedWireDriver::Terminal(wire) => Some(wire),
+        ClockedWireDriver::Alias(slot) if slot < wires.len() => Some(wires[slot as int]),
+        _ => None,
+    }
+}
+
+fn resolve_driver(driver: ClockedWireDriver, wires: &[Wire]) -> (wire: Option<Wire>)
+    ensures wire == resolved_driver(driver, wires@),
+{
     match driver {
         ClockedWireDriver::Terminal(wire) => Some(wire),
         ClockedWireDriver::Alias(target) => {
@@ -329,6 +350,131 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 }
 
+spec fn resolved_arguments(instance: SourceInstance, wires: Seq<Wire>) -> Seq<Wire> {
+    Seq::new(instance.arguments@.len(), |i: int| resolved_driver(instance.arguments@[i], wires)->Some_0)
+}
+
+spec fn arguments_valid(instance: SourceInstance, wires: Seq<Wire>) -> bool {
+    forall|i: int| 0 <= i < instance.arguments@.len() ==>
+        resolved_driver(#[trigger] instance.arguments@[i], wires).is_some()
+}
+
+// 各インスタンスの実引数と、割り当てたゲート区間の配線が対応する。
+spec fn instance_assembled(instance: SourceInstance, base: usize, wires: Seq<Wire>, gates: Seq<NorGate>) -> bool {
+    arguments_valid(instance, wires)
+        && instance_gates_at(instance.template.netlist_model().gates@, resolved_arguments(instance, wires), base, gates)
+}
+
+spec fn assembled_gate_prefix(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>,
+    wires: Seq<Wire>, gates: Seq<NorGate>, end: int) -> bool
+{
+    &&& 0 <= end <= instances.len() == regions.len()
+    &&& forall|i: int| 0 <= i < end ==> #[trigger] instance_assembled(instances[i], regions[i].start, wires, gates)
+}
+
+proof fn extend_assembled_gate_prefix(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>,
+    wires: Seq<Wire>, before: Seq<NorGate>, after: Seq<NorGate>, added: int)
+    requires
+        0 <= added < instances.len(),
+        assembled_gate_prefix(instances, regions, wires, before, added),
+        before.len() <= after.len(), after.take(before.len() as int) == before,
+        instance_assembled(instances[added], regions[added].start, wires, after),
+    ensures assembled_gate_prefix(instances, regions, wires, after, added + 1),
+{
+    assert forall|i: int| 0 <= i < added + 1 implies
+        #[trigger] instance_assembled(instances[i], regions[i].start, wires, after) by {
+        if i < added {
+            let instance = instances[i];
+            assert(instance_assembled(instance, regions[i].start, wires, before));
+            instance_gates_in_extension(instance.template.netlist_model().gates@, resolved_arguments(instance, wires),
+                regions[i].start, before, after);
+        }
+    };
+}
+
+spec fn child_output_driver(output: Wire, arguments: Seq<ClockedWireDriver>, gate_base: usize) -> ClockedWireDriver {
+    match output {
+        Wire::Input(i) => arguments[i as int],
+        Wire::Constant(bit) => ClockedWireDriver::Terminal(Wire::Constant(bit)),
+        Wire::Gate(i) => ClockedWireDriver::Terminal(Wire::Gate((gate_base + i) as usize)),
+    }
+}
+
+spec fn child_output_count(instance: SourceInstance) -> nat {
+    instance.template.netlist_model().outputs@.len()
+}
+
+// 出力番号は、呼び出し順に各インスタンスの出力ポートを並べて決める。
+spec fn child_drivers_match(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>,
+    offsets: Seq<nat>, drivers: Seq<ClockedWireDriver>) -> bool
+{
+    &&& offsets.len() <= instances.len() == regions.len()
+    &&& drivers.len() == if offsets.len() == 0 { 0 }
+        else { offsets.last() + child_output_count(instances[offsets.len() - 1]) }
+    &&& forall|i: int| 0 <= i < offsets.len() ==> {
+        let base = #[trigger] offsets[i];
+        let child = instances[i];
+        let outputs = child.template.netlist_model().outputs@;
+        &&& base == if i == 0 { 0 } else { offsets[i - 1] + child_output_count(instances[i - 1]) }
+        &&& base + outputs.len() <= drivers.len()
+        &&& forall|j: int| 0 <= j < outputs.len() ==> (#[trigger] drivers[base + j])
+            == child_output_driver(outputs[j], child.arguments@, regions[i].start)
+    }
+}
+
+spec fn assembled_outputs(drivers: Seq<OutputDriver>, wires: Seq<Wire>, outputs: Seq<Wire>) -> bool {
+    forall|i: int| 0 <= i < outputs.len() ==> Some(#[trigger] outputs[i]) == resolved_driver(symbolic_output(drivers[i]), wires)
+}
+
+spec fn source_assembly_matches(instances: Seq<SourceInstance>, counts: Seq<usize>, inputs: usize,
+    output_drivers: Seq<OutputDriver>, netlist: NorNetlist) -> bool
+{
+    &&& instance_counts_match(instances, counts)
+    &&& netlist.input_count == inputs && netlist.outputs@.len() == output_drivers.len()
+    &&& netlist.gates@.len() <= usize::MAX
+    &&& exists|regions: Seq<core::ops::Range<usize>>, offsets: Seq<nat>, drivers: Seq<ClockedWireDriver>, wires: Seq<Wire>|
+        #![trigger child_drivers_match(instances, regions, offsets, drivers), super::clocked_plan::clocked_wires_match(drivers, wires)]
+        super::clocked_plan::clocked_regions_cover(counts, regions, netlist.gates@.len() as usize)
+        && offsets.len() == instances.len()
+        && child_drivers_match(instances, regions, offsets, drivers)
+        && super::clocked_plan::clocked_wires_match(drivers, wires)
+        && assembled_gate_prefix(instances, regions, wires, netlist.gates@, instances.len() as int)
+        && assembled_outputs(output_drivers, wires, netlist.outputs@)
+}
+
+fn resolve_instance_arguments<'p, 'a>(instance: &SourceInstance<'_, 'p, 'a>, wires: &[Wire])
+    -> (result: Result<Vec<Wire>, ClockedModuleError<'p, 'a>>)
+    ensures
+        result matches Ok(arguments) ==> arguments@ == resolved_arguments(*instance, wires@) && arguments_valid(*instance, wires@),
+        !(result matches Err(ClockedModuleError::Parent(_))),
+{
+    let mut arguments: Vec<Wire> = Vec::new();
+    let mut j = 0;
+    while j < instance.arguments.len()
+        invariant j == arguments@.len() <= instance.arguments@.len(),
+            forall|k: int| 0 <= k < j ==>
+                Some(#[trigger] arguments@[k]) == resolved_driver(instance.arguments@[k], wires@),
+        decreases instance.arguments@.len() - j,
+    {
+        let Some(wire) = resolve_driver(instance.arguments[j], wires) else {
+            return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
+        };
+        let ghost before = arguments@;
+        arguments.push(wire);
+        assert forall|k: int| 0 <= k < arguments@.len() implies
+            Some(#[trigger] arguments@[k]) == resolved_driver(instance.arguments@[k], wires@) by {
+            if k < j { assert(arguments@[k] == before[k]); }
+        };
+        j += 1;
+    }
+    assert forall|k: int| 0 <= k < instance.arguments@.len() implies
+        resolved_driver(#[trigger] instance.arguments@[k], wires@).is_some() by {
+        assert(Some(arguments@[k]) == resolved_driver(instance.arguments@[k], wires@));
+    };
+    assert(arguments@ =~= resolved_arguments(*instance, wires@));
+    Ok(arguments)
+}
+
 fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], counts: &[usize], inputs: usize,
     output_drivers: &[OutputDriver], limit: usize,
 ) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
@@ -337,29 +483,38 @@ fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], c
         result matches Ok(circuit) ==> circuit.netlist_model().input_count == inputs
             && circuit.netlist_model().outputs@.len() == output_drivers@.len()
             && circuit.netlist_model().gates@.len() <= limit
-            && crate::netlist::clocked_wiring_valid(&circuit.netlist_model()),
+            && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
+            && source_assembly_matches(instances@, counts@, inputs, output_drivers@, circuit.netlist_model()),
         !(result matches Err(ClockedModuleError::Parent(_))),
 {
     let (regions, total) = match clocked_reserve(counts, limit) {
         Ok(plan) => plan,
         Err(i) => return Err(ClockedModuleError::Capacity(copy_location(&instances[i].site))),
     };
-    let mut drivers = Vec::new();
+    let mut drivers: Vec<ClockedWireDriver> = Vec::new();
     let mut sites = Vec::new();
+    let ghost mut offsets = Seq::<nat>::empty();
     let mut i = 0;
     while i < instances.len()
         invariant i <= instances@.len(), regions@.len() == instances@.len(), drivers@.len() == sites@.len(),
             instance_counts_match(instances@, counts@),
             super::clocked_plan::clocked_regions_cover(counts@, regions@, total),
+            offsets.len() == i, child_drivers_match(instances@, regions@, offsets, drivers@),
         decreases instances@.len() - i,
     {
         let instance = &instances[i];
         let netlist = instance.template.checked_netlist();
         let region = &regions[i];
+        let ghost prefix = drivers@;
+        let ghost base = prefix.len();
+        let ghost outputs = netlist.outputs@;
         let mut j = 0;
         while j < netlist.outputs.len()
             invariant j <= netlist.outputs@.len() == instance.output_sites@.len(), drivers@.len() == sites@.len(),
                 region.start <= region.end <= total, crate::netlist::clocked_wiring_valid(netlist),
+                netlist.outputs@ == outputs, drivers@.len() == base + j, drivers@.take(base as int) == prefix,
+                forall|k: int| 0 <= k < j ==> (#[trigger] drivers@[base + k])
+                    == child_output_driver(outputs[k], instance.arguments@, region.start),
             decreases netlist.outputs@.len() - j,
         {
             let driver = match netlist.outputs[j] {
@@ -377,9 +532,40 @@ fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], c
                     ClockedWireDriver::Terminal(Wire::Gate(region.start + gate))
                 },
             };
+            let ghost before = drivers@;
             drivers.push(driver);
+            assert(drivers@.take(base as int) =~= prefix);
+            assert forall|k: int| 0 <= k <= j implies (#[trigger] drivers@[base + k])
+                == child_output_driver(outputs[k], instance.arguments@, region.start) by {
+                if k < j { assert(drivers@[base + k] == before[base + k]); }
+            };
             sites.push(copy_location(&instance.output_sites[j]));
             j += 1;
+        }
+        proof {
+            let prior_offsets = offsets;
+            offsets = offsets.push(base);
+            assert forall|k: int| 0 <= k < offsets.len() implies {
+                let start = #[trigger] offsets[k];
+                let child = instances@[k];
+                let child_outputs = child.template.netlist_model().outputs@;
+                &&& start == if k == 0 { 0 } else { offsets[k - 1] + child_output_count(instances@[k - 1]) }
+                &&& start + child_outputs.len() <= drivers@.len()
+                &&& forall|l: int| 0 <= l < child_outputs.len() ==> (#[trigger] drivers@[start + l])
+                    == child_output_driver(child_outputs[l], child.arguments@, regions@[k].start)
+            } by {
+                if k > 0 { assert(offsets[k - 1] == prior_offsets[k - 1]); }
+                if k < i {
+                    let start = offsets[k];
+                    let child = instances@[k];
+                    let child_outputs = child.template.netlist_model().outputs@;
+                    assert(start == prior_offsets[k]);
+                    assert forall|l: int| 0 <= l < child_outputs.len() implies (#[trigger] drivers@[start + l])
+                        == child_output_driver(child_outputs[l], child.arguments@, regions@[k].start) by {
+                        assert(drivers@[start + l] == prefix[start + l]);
+                    };
+                }
+            };
         }
         i += 1;
     }
@@ -414,40 +600,46 @@ fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], c
             instance_counts_match(instances@, counts@),
             super::clocked_plan::clocked_regions_cover(counts@, regions@, total),
             gates@.len() == if i == 0 { 0usize } else { regions@[i - 1].end },
+            assembled_gate_prefix(instances@, regions@, wires@, gates@, i as int),
         decreases instances@.len() - i,
     {
         let instance = &instances[i];
-        let mut arguments = Vec::new();
-        let mut j = 0;
-        while j < instance.arguments.len()
-            invariant j <= instance.arguments@.len(),
-            decreases instance.arguments@.len() - j,
-        {
-            let Some(wire) = resolve_driver(instance.arguments[j], &wires) else {
-                return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
-            };
-            arguments.push(wire);
-            j += 1;
-        }
+        let arguments = resolve_instance_arguments(instance, &wires)?;
+        let ghost before = gates@;
+        assert(before.len() == regions@[i as int].start);
         if let Err(error) = instance.template.append_instance(&mut gates, &arguments, inputs, total) {
             return Err(ClockedModuleError::Instance(copy_location(&instance.site), error));
         }
+        proof { extend_assembled_gate_prefix(instances@, regions@, wires@, before, gates@, i as int); }
         i += 1;
     }
-    let mut outputs = Vec::new();
+    let mut outputs: Vec<Wire> = Vec::new();
     assert(gates@.len() == total);
     let mut i = 0;
     while i < output_drivers.len()
-        invariant i == outputs@.len() <= output_drivers@.len(),
+        invariant i == outputs@.len() <= output_drivers@.len(), assembled_outputs(output_drivers@, wires@, outputs@),
         decreases output_drivers@.len() - i,
     {
         let Some(wire) = resolve_driver(symbolic_driver(output_drivers[i]), &wires) else {
             return Err(ClockedModuleError::Netlist(ClockedNorError::Output { output: i }));
         };
+        let ghost before = outputs@;
         outputs.push(wire);
+        assert forall|k: int| 0 <= k < outputs@.len() implies
+            Some(#[trigger] outputs@[k]) == resolved_driver(symbolic_output(output_drivers@[k]), wires@) by {
+            if k < i { assert(outputs@[k] == before[k]); }
+        };
         i += 1;
     }
-    match ClockedNor::check(NorNetlist { input_count: inputs, gates, outputs }) {
+    let netlist = NorNetlist { input_count: inputs, gates, outputs };
+    proof {
+        assert(source_assembly_matches(instances@, counts@, inputs, output_drivers@, netlist)) by {
+            assert(super::clocked_plan::clocked_regions_cover(counts@, regions@, netlist.gates@.len() as usize));
+            assert(child_drivers_match(instances@, regions@, offsets, drivers@));
+            assert(super::clocked_plan::clocked_wires_match(drivers@, wires@));
+        };
+    }
+    match ClockedNor::check(netlist) {
         Ok(circuit) => Ok(circuit),
         Err(error) => Err(ClockedModuleError::Netlist(error)),
     }
