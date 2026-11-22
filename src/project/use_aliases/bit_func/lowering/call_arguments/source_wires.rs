@@ -797,6 +797,21 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_ca
     } else { None }
 }
 
+/// 子がない右辺では、右辺全体と根だけのソース配線が一致する。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_call_definition_without_children(
+    context: &SourceArguments, definition: DefinitionPosition, first_ref: usize, prior: Seq<SourceGateId>,
+    ordinary: Option<SourceChildModel>, arguments: Seq<ProjectedCallArgument>, widths: Seq<u64>,
+)
+    ensures source_call_definition_wiring(context, definition, first_ref, prior, Seq::empty(), Seq::empty(), ordinary, arguments, widths)
+        == source_root_wiring(context, source_child_site(definition, 0), prior, ordinary, arguments, widths),
+{
+    reveal(source_children_wiring);
+    let root = source_root_wiring(context, source_child_site(definition, 0), prior, ordinary, arguments, widths);
+    if let Some((order, gates, outputs)) = root {
+        assert(Seq::<SourceNor>::empty() + gates =~= gates);
+    }
+}
+
 /// 成功した右辺の展開から、子と根の全配線がソース仕様に対応することを示す。
 #[verifier::spinoff_prover]
 pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_call_definition_agrees(

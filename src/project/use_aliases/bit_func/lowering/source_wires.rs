@@ -109,6 +109,56 @@ pub(super) proof fn definition_wires_in_extension(
     };
 }
 
+/// 呼び出し結果を出力ポートごとに分け、先行する定義の配線表に追加する。
+pub(super) open spec fn source_definition_outputs(
+    previous: Seq<Seq<SourceWire>>, outputs: Seq<SourceWire>, ports: Seq<Range<usize>>,
+) -> Seq<Seq<SourceWire>> {
+    previous + Seq::new(ports.len(), |i: int| outputs.subrange(ports[i].start as int, ports[i].end as int))
+}
+
+/// 連続した出力配線を左辺の定義ごとに分けても、各ビットの配線元を保つ。
+pub(super) proof fn source_definition_outputs_agree(
+    prior: Seq<SourceGateId>, order: Seq<SourceGateId>, previous: Seq<Seq<SourceWire>>,
+    before: Seq<Wire>, after: Seq<Wire>, ranges: Seq<Range<usize>>,
+    source: Seq<SourceWire>, outputs: Seq<Wire>, ports: Seq<Range<usize>>,
+)
+    requires
+        definition_wires_pair(prior, previous, ranges, before),
+        order.take(prior.len() as int) == prior, prior.len() <= order.len(),
+        source_wires_pair(order, source, outputs),
+        after == before + outputs,
+        previous.len() + ports.len() <= ranges.len(),
+        forall|i: int| 0 <= i < ports.len() ==> {
+            let port = #[trigger] ports[i];
+            let slot = ranges[previous.len() + i];
+            &&& port.start <= port.end <= outputs.len()
+            &&& slot.start == before.len() + port.start && slot.end == before.len() + port.end
+        },
+    ensures definition_wires_pair(order, source_definition_outputs(previous, source, ports), ranges, after),
+{
+    definition_wires_in_extension(prior, order, previous, ranges, before);
+    let next = source_definition_outputs(previous, source, ports);
+    assert forall|i: int| 0 <= i < next.len() implies
+        definition_wire_row_pair(order, #[trigger] next[i], ranges[i], after) by {
+        let slot = ranges[i];
+        let lowered = after.subrange(slot.start as int, slot.end as int);
+        if i < previous.len() {
+            assert(next[i] == previous[i]);
+            assert(definition_wire_row_pair(order, previous[i], slot, before));
+            assert(lowered =~= before.subrange(slot.start as int, slot.end as int));
+        } else {
+            let port = ports[i - previous.len()];
+            assert(next[i] == source.subrange(port.start as int, port.end as int));
+            assert(lowered =~= outputs.subrange(port.start as int, port.end as int));
+            assert forall|bit: int| 0 <= bit < next[i].len() implies
+                source_wire_pair(order, #[trigger] next[i][bit], lowered[bit]) by {
+                assert(next[i][bit] == source[port.start + bit]);
+                assert(lowered[bit] == outputs[port.start + bit]);
+            };
+        }
+    };
+}
+
 /// 型が指定する一ビット参照を、配線表の同じポートとビットに対応付ける。
 pub(super) proof fn source_driver_wire_agrees(
     widths: Seq<u64>, definitions: Seq<CheckedBitDefinition>, layouts: &Layouts, capacity: usize,

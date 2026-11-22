@@ -151,6 +151,29 @@ pub(super) open spec fn call_group_result(
     }
 }
 
+/// 入れ子を含まない呼び出しの成功結果から、実引数と左辺に追加した出力の配線を取り出す。
+pub(super) proof fn flat_call_group_wiring<'s, 'p, 'a>(
+    group: &CheckedExpansionCall, forms: Seq<Form>, arguments: Seq<ProjectedCallArgument>,
+    caller: &Layouts, callee: &LoweredBitFunc, before: WiringView, after: WiringView,
+    gate_limit: usize, destination_widths: Seq<u64>, output_widths: Seq<u64>,
+) -> (wiring: (CallerArguments<'s, 'p, 'a>, Seq<Wire>, Seq<Wire>))
+    requires
+        call_group_result(group, forms, arguments, caller, callee, before, after,
+            gate_limit, destination_widths, output_widths, Ok(())),
+    ensures ({
+        let (invocation, mapped, outputs) = wiring;
+        &&& call_group_wires_match(group, forms, arguments, caller, callee, before, after,
+            output_widths, invocation, mapped, outputs)
+        &&& outputs == after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int)
+    }),
+{
+    let (invocation, mapped, outputs) = choose|invocation: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>, outputs: Seq<Wire>|
+        #[trigger] call_group_wires_match(group, forms, arguments, caller, callee, before, after, output_widths,
+            invocation, mapped, outputs);
+    assert(outputs =~= after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int));
+    (invocation, mapped, outputs)
+}
+
 pub(super) open spec fn call_output_bit_has_value(
     caller: &Layouts, callee: &LoweredBitFunc, definitions: Seq<Wire>, first: usize, port: int, bit: int,
     inputs: Seq<bool>, values: Seq<bool>, outputs: Seq<bool>,
@@ -196,9 +219,9 @@ pub(super) proof fn call_group_values(
             #[trigger] call_output_bit_has_value(caller, callee, after.definitions, group.outputs.start, port, bit,
                 inputs, values, result.1),
 {
-    let (invocation, mapped, outputs) = choose|invocation: CallerArguments, mapped: Seq<Wire>, outputs: Seq<Wire>|
-        #[trigger] call_group_wires_match(group, forms, arguments, caller, callee, before, after, output_widths,
-            invocation, mapped, outputs);
+    let (invocation, mapped, outputs) =
+        flat_call_group_wiring(group, forms, arguments, caller, callee, before, after, gate_limit,
+            destination_widths, output_widths);
     reveal(wires_available);
     instance_evaluates_from_caller(before.gates, callee.netlist_model(), combined, mapped, outputs, inputs, values);
     let input_values = instance_wire_values(mapped, inputs, values);
@@ -583,11 +606,9 @@ pub(super) proof fn flat_call_group_gate<'s, 'p, 'a>(
         call_gate_wiring_matches(row, before.gates, after.gates, gate),
         flat_call_group_gate_matches(row, group, forms, arguments, layouts, template, before, after, output_widths, gate),
 {
-    reveal(call_group_result);
     let callee = template.circuit_model();
-    let (invocation, mapped, outputs) = choose|invocation: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>, outputs: Seq<Wire>|
-        #[trigger] call_group_wires_match(group, forms, arguments, layouts, callee, before, after,
-            output_widths, invocation, mapped, outputs);
+    let (invocation, mapped, outputs) =
+        flat_call_group_wiring(group, forms, arguments, layouts, callee, before, after, limit, widths, output_widths);
     assert(after.gates.take(after.gates.len() as int) =~= after.gates);
     CallGateWiring { reference: 0, template: Some(template), target: *callee.netlist_model(), prior: before.gates,
         inputs: mapped, invocation, nested: None, outputs }

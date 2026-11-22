@@ -6,6 +6,8 @@ mod call_arguments;
 #[cfg(verus_only)]
 pub(super) use call_arguments::literal_argument_matches_width;
 mod call_group;
+#[cfg(verus_only)]
+mod source_calls;
 mod mixed;
 #[cfg(verus_only)]
 mod source_wires;
