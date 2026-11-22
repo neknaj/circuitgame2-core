@@ -20,7 +20,7 @@ pub struct ModuleAliasCycleStep<'p, 'a> {
     pub reference: LocatedName<'p, 'a>,
 }
 
-/// 通常呼び出しとモジュール入力から、裸の信号参照を介して得られた型。
+/// 型が決まった式や入力から、裸の信号参照を介して得られた型。
 #[derive(Debug)]
 pub struct ModuleAliasTypes<'p, 'a> {
     /// 型伝播の起点と、全断片の配線・依存先。
@@ -32,7 +32,7 @@ pub struct ModuleAliasTypes<'p, 'a> {
 /// 裸の信号参照を介した型伝播までに見つかった違反。
 #[derive(Debug)]
 pub enum ModuleAliasTypesError<'p, 'a> {
-    /// 配線または通常呼び出しの診断。
+    /// 配線、通常呼び出し、またはビット選択の診断。
     Sources(ModuleRootTypesError<'p, 'a>),
     /// 裸の信号参照だけで閉じる循環。末尾の参照は先頭の定義へ戻る。
     Cycle(Vec<ModuleAliasCycleStep<'p, 'a>>),
@@ -303,13 +303,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 全断片で、裸の信号参照を介して入力または通常呼び出しの出力から型を引き継ぐ。
+    /// 全断片で、裸の信号参照を介して入力や右辺から型を引き継ぐ。
     ///
-    /// 型の根拠には、引き継ぐ前の宣言や呼び出しの範囲が残る。型が未確定の式は後段で扱う。
+    /// 型の根拠には、引き継ぐ前の宣言や式の範囲が残る。型が未確定の式は後段で扱う。
     ///
     /// # Errors
     ///
-    /// 配線または通常呼び出しの違反を先に返す。裸の信号参照だけで閉じる循環があれば、
+    /// 配線、通常呼び出し、ビット選択の違反を先に返す。裸の信号参照だけで閉じる循環があれば、
     /// 参照の範囲を閉路の順に返す。
     pub fn resolve_module_alias_types(&self, owner: ModuleBodyPosition, limit: u64)
         -> (result: Result<Option<ModuleAliasTypes<'p, 'a>>, ModuleAliasTypesError<'p, 'a>>)

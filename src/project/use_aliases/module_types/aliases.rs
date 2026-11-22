@@ -23,10 +23,10 @@ pub struct ModuleAliasSource<'p, 'a> {
     pub reference: LocatedName<'p, 'a>,
 }
 
-/// 署名で確定した型と、裸の信号名を介した型の依存先。
+/// 通常呼び出しやビット選択から得た型と、裸の信号名を介した型の依存先。
 #[derive(Debug)]
 pub struct ModuleTypeSources<'p, 'a> {
-    /// 配線検査と、通常呼び出しから確定した型。
+    /// 配線検査と、通常呼び出しやビット選択から確定した型。
     pub roots: ModuleRootTypes<'p, 'a>,
     /// 左辺の駆動元と同じ順。右辺が単一の左辺を持つ裸名参照の場合に依存先を持つ。
     pub aliases: Vec<Option<ModuleAliasSource<'p, 'a>>>,
@@ -162,14 +162,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::alias_sources_prefix);
     }
 
-    /// 通常呼び出しが返す型と、裸の信号名が参照する駆動元を全断片から集める。
+    /// 右辺の型を決める通常呼び出しやビット選択と、裸の信号名の依存先を全断片から集める。
     ///
     /// 信号の型を伝播する前に、前方参照を含む依存先を確定する。
     /// 左辺に複数の名前がある裸名参照は、右辺の出力数を検査する段階で扱う。
     ///
     /// # Errors
     ///
-    /// 配線、または右辺全体を占める通常呼び出しに見つかった最初の違反を返す。
+    /// 配線、通常呼び出し、ビット選択の検査で見つかった最初の違反を返す。
     pub fn check_module_type_sources(&self, owner: ModuleBodyPosition, limit: u64)
         -> (result: Result<Option<ModuleTypeSources<'p, 'a>>, ModuleRootTypesError<'p, 'a>>)
         requires self.can_resolve(),

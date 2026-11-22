@@ -411,6 +411,28 @@ pub(super) closed spec fn selection_numbers_match(
     }
 }
 
+/// 自然数を変換した後に、選択数と刻みが正であることを検査した結果を表す。
+pub(super) closed spec fn selection_parameters_match(
+    source: &ProjectSource, forms: Seq<Form>, shape: &BitSelectionShape,
+    result: Result<(u64, u64, u64, usize), SelectionArgumentError>,
+) -> bool {
+    ||| result matches Err(error) && selection_numbers_match(source, forms, shape, Err(error))
+    ||| {
+        let start = natural_value(source, forms, shape.start) as u64;
+        let count = natural_or_one(source, forms, explicit_count(shape)) as u64;
+        let stride = natural_or_one(source, forms, explicit_stride(shape)) as u64;
+        let numbers = (start, count, stride, last_argument(shape));
+        &&& selection_numbers_match(source, forms, shape, Ok(numbers))
+        &&& if count == 0 {
+            explicit_count(shape) matches Some(index) && result matches Err(SelectionArgumentError::ZeroCount { site })
+                && is_form_location(source, forms[index as int], site)
+        } else if stride == 0 {
+            explicit_stride(shape) matches Some(index) && result matches Err(SelectionArgumentError::ZeroStride { site })
+                && is_form_location(source, forms[index as int], site)
+        } else { result == Ok(numbers) }
+    }
+}
+
 /// 選択の値、最初に見つかる違反、その主範囲と関連範囲を元の引数と入力幅から定める。
 pub(super) closed spec fn selection_arguments_match(
     source: &ProjectSource, forms: Seq<Form>, shape: &BitSelectionShape, input_width: u64,
@@ -419,19 +441,13 @@ pub(super) closed spec fn selection_arguments_match(
     let start = natural_value(source, forms, shape.start);
     let count = natural_or_one(source, forms, explicit_count(shape));
     let stride = natural_or_one(source, forms, explicit_stride(shape));
-    ||| result matches Err(error) && selection_numbers_match(source, forms, shape, Err(error))
+    ||| result matches Err(error) && selection_parameters_match(source, forms, shape, Err(error))
     ||| {
-        &&& selection_numbers_match(source, forms, shape,
+        &&& selection_parameters_match(source, forms, shape,
             Ok((start as u64, count as u64, stride as u64, last_argument(shape))))
         &&& match result {
             Ok(checked) => checked.start == start && checked.count == count && checked.stride == stride
                 && bit_selection_matches(input_width, checked.start, checked.count, checked.stride, Ok(checked.last)),
-            Err(SelectionArgumentError::ZeroCount { site }) => explicit_count(shape) matches Some(index)
-                && is_form_location(source, forms[index as int], site)
-                && bit_selection_matches(input_width, start as u64, count as u64, stride as u64, Err(BitSelectionError::ZeroCount)),
-            Err(SelectionArgumentError::ZeroStride { site }) => explicit_stride(shape) matches Some(index)
-                && is_form_location(source, forms[index as int], site)
-                && bit_selection_matches(input_width, start as u64, count as u64, stride as u64, Err(BitSelectionError::ZeroStride)),
             Err(SelectionArgumentError::Outside { site, width_origin: origin, start: first, last, input_width: width }) =>
                 selection_range_site(source, forms, shape.start, last_argument(shape), site)
                 && origin == *width_origin && location_in_source(origin)
@@ -440,6 +456,18 @@ pub(super) closed spec fn selection_arguments_match(
             _ => false,
         }
     }
+}
+
+/// 入力幅を検査した後も、数値引数で決めた選択数が変わらないことを示す。
+pub(super) proof fn selection_parameters_keep_count(
+    source: &ProjectSource, forms: Seq<Form>, shape: &BitSelectionShape, numbers: (u64, u64, u64, usize),
+    input_width: u64, width_origin: &LocatedName, checked: CheckedBitSelection,
+)
+    requires
+        selection_parameters_match(source, forms, shape, Ok(numbers)),
+        selection_arguments_match(source, forms, shape, input_width, width_origin, Ok(checked)),
+    ensures checked.count == numbers.1,
+{
 }
 
 /// 引数の検査結果から、選択した位置が入力幅に収まる根拠を取り出す。
@@ -561,6 +589,40 @@ pub(super) fn read_selection_numbers<'p, 'a>(
     Ok((start, count, stride, last_arg))
 }
 
+/// ビット選択の数値引数を読み、選択数と刻みが正であることを確認する。
+///
+/// # Errors
+///
+/// 数値の変換をすべて行った後、選択数、刻みの順に0を検査する。
+pub(super) fn read_selection_parameters<'p, 'a>(
+    source: &'p ProjectSource<'a>, forms: &[Form], root: usize, shape: &BitSelectionShape,
+) -> (result: Result<(u64, u64, u64, usize), SelectionArgumentError<'p, 'a>>)
+    requires
+        bit_selection_shape_matches(source.text, forms@, root as int, *shape),
+        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+    ensures
+        selection_parameters_match(source, forms@, shape, result),
+        result matches Ok((_, count, stride, _)) ==> count > 0 && stride > 0,
+{
+    proof { bit_selection_shape_positions(source.text, forms@, root as int, *shape); }
+    let numbers = read_selection_numbers(source, forms, root, shape)?;
+    if numbers.1 == 0 {
+        let BitSelectionTail::Slice { count: count_arg, .. } = shape.tail else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        return Err(SelectionArgumentError::ZeroCount { site: form_location(source, forms, count_arg) });
+    }
+    if numbers.2 == 0 {
+        let BitSelectionTail::Slice { stride: Some(stride), .. } = shape.tail else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        return Err(SelectionArgumentError::ZeroStride { site: form_location(source, forms, stride) });
+    }
+    Ok(numbers)
+}
+
 /// 選択式の自然数を読み、入力のビット幅に収まる選択を返す。
 ///
 /// `bit` の選択数と刻みは1とする。`slice` で刻みを省略したときも1とする。
@@ -582,22 +644,12 @@ pub(super) fn check_selection_arguments<'p, 'a>(
         result matches Ok(checked) ==> bit_selection_matches(input_width, checked.start, checked.count, checked.stride, Ok(checked.last)),
 {
     proof { bit_selection_shape_positions(source.text, forms@, _root as int, *shape); }
-    let (start, count, stride, last_arg) = read_selection_numbers(source, forms, _root, shape)?;
+    let (start, count, stride, last_arg) = read_selection_parameters(source, forms, _root, shape)?;
     match check_bit_selection(input_width, start, count, stride) {
         Ok(last) => Ok(CheckedBitSelection { start, count, stride, last }),
-        Err(BitSelectionError::ZeroCount) => {
-            let BitSelectionTail::Slice { count: count_arg, .. } = shape.tail else {
-                proof { assert(false); }
-                unreachable!()
-            };
-            Err(SelectionArgumentError::ZeroCount { site: form_location(source, forms, count_arg) })
-        },
-        Err(BitSelectionError::ZeroStride) => {
-            let BitSelectionTail::Slice { stride: Some(stride_arg), .. } = shape.tail else {
-                proof { assert(false); }
-                unreachable!()
-            };
-            Err(SelectionArgumentError::ZeroStride { site: form_location(source, forms, stride_arg) })
+        Err(BitSelectionError::ZeroCount | BitSelectionError::ZeroStride) => {
+            proof { assert(false); }
+            unreachable!()
         },
         Err(BitSelectionError::Outside { start: first, last, input_width: width }) =>
             Err(SelectionArgumentError::Outside {

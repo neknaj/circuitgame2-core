@@ -1,4 +1,4 @@
-//! モジュールで右辺全体を占める呼び出しから、左辺の信号に型を割り当てる。
+//! 右辺全体を占める呼び出しやビット選択から、左辺の信号に型を割り当てる。
 
 mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
@@ -7,35 +7,110 @@ pub use propagation::{ModuleAliasCycleStep, ModuleAliasTypes, ModuleAliasTypesEr
 
 use super::{DefinitionDriver, DefinitionPosition, ModuleCallPortsError, ModuleWiring, ModuleWiringError, UseAliases};
 use super::function_atoms::copy_location;
-use crate::project::{LocatedName, ModuleBodyPosition, PortDirection, SignalType};
+use crate::project::{LocatedName, ModuleBodyPosition, PortDirection, ProjectSource, ResolvedPortType, SelectionArgumentError, SignalType, circuits::form_location};
+use super::selection_arguments::read_selection_parameters;
+#[cfg(verus_only)]
+use super::selection_arguments::selection_parameters_match;
 #[cfg(verus_only)]
 use super::{ModuleCallPorts, function_drivers::indexed_driver_site};
 #[cfg(verus_only)]
-use crate::project::{CircuitProject, circuits::parsed_index_evidence};
-use crate::syntax::circuit::definition_root_is_call;
+use crate::project::{CircuitProject, circuits::{is_form_location, parsed_index_evidence}};
+use crate::syntax::{Form, circuit::{BuildDefinition, bit_selection_shape, definition_root_is_call, definition_target_atoms}};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, ordinary_call_at};
+use crate::syntax::{form_spans_valid, circuit::{BitSelectionShape, bit_selection_shape_matches, build_definition_scope_evidence,
+    build_entry_ranges_evidence, definition_target_range, definition_targets_match, ordinary_call_at}};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
 verus! {
 
-/// モジュールの配線と、呼び出しの署名から決まる信号型。
+/// モジュールの配線と、呼び出しの署名やビット選択の選択数から決まる信号型。
 #[derive(Debug)]
 pub struct ModuleRootTypes<'p, 'a> {
     /// 全断片から得た信号の駆動元と束縛。
     pub wiring: ModuleWiring<'p, 'a>,
-    /// `wiring.drivers.definitions` と同じ順の型。通常呼び出し以外の右辺は `None`。
+    /// `wiring.drivers.definitions` と同じ順の型。この段階で型を決めない右辺は `None`。
     pub types: Vec<Option<SignalType<'p, 'a>>>,
 }
 
-/// 呼び出しの出力型を決めるまでに見つかった診断。
+/// 呼び出しやビット選択の出力型を決めるまでに見つかった診断。
 #[derive(Debug)]
 pub enum ModuleRootTypesError<'p, 'a> {
     /// 駆動元または信号の参照に関する診断。
     Wiring(ModuleWiringError<'p, 'a>),
     /// 右辺全体を占める通常呼び出しの診断。
     Call(ModuleCallPortsError<'p, 'a>),
+    /// ビット選択の数値引数に違反がある。
+    SelectionArgument(SelectionArgumentError<'p, 'a>),
+    /// 出力が一つのビット選択を複数の左辺に割り当てた。
+    SelectionOutputs {
+        /// ビット選択式全体のソース範囲。
+        expression: LocatedName<'p, 'a>,
+        /// 左辺全体のソース範囲。
+        left: LocatedName<'p, 'a>,
+        /// 左辺の名前の数。
+        targets: usize,
+    },
+}
+
+spec fn selection_root_type(
+    source: &ProjectSource, forms: Seq<Form>, row: BuildDefinition, result: Result<Option<SignalType>, ModuleRootTypesError>,
+) -> bool {
+    let root = row.expression.start as int;
+    match result {
+        Ok(None) => forall|shape: BitSelectionShape| !#[trigger] bit_selection_shape_matches(source.text, forms, root, shape),
+        _ => exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source.text, forms, root, shape) && {
+            let (start, end) = definition_target_range(forms, row);
+            if end - start != 1 {
+                result matches Err(ModuleRootTypesError::SelectionOutputs { expression, left, targets })
+                    && targets == end - start && is_form_location(source, forms[root], expression)
+                    && is_form_location(source, forms[row.form + 2], left)
+            } else {
+                match result {
+                    Ok(Some(ty)) => ty.ty is Bits && 0 < ty.ty->Bits_0 && is_form_location(source, forms[root], ty.origin)
+                        && exists|start: u64, stride: u64, last: usize| #[trigger]
+                            selection_parameters_match(source, forms, &shape, Ok((start, ty.ty->Bits_0, stride, last))),
+                    Err(ModuleRootTypesError::SelectionArgument(error)) => selection_parameters_match(source, forms, &shape, Err(error)),
+                    _ => false,
+                }
+            }
+        },
+    }
+}
+
+fn check_selection_root<'p, 'a>(source: &'p ProjectSource<'a>, forms: &[Form], row: &BuildDefinition)
+    -> (result: Result<Option<SignalType<'p, 'a>>, ModuleRootTypesError<'p, 'a>>)
+    requires
+        row.expression.start < forms@.len(), definition_targets_match(forms@, *row),
+        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+    ensures selection_root_type(source, forms@, *row, result),
+{
+    let root = row.expression.start;
+    let Some(shape) = bit_selection_shape(source.text, forms, root) else { return Ok(None); };
+    assert(bit_selection_shape_matches(source.text, forms@, root as int, shape));
+    let left = definition_target_atoms(forms, row);
+    let targets = left.end - left.start;
+    let expression = form_location(source, forms, root);
+    if targets != 1 {
+        let left = form_location(source, forms, row.form + 2);
+        return Err(ModuleRootTypesError::SelectionOutputs { expression, left, targets });
+    }
+    let (_start, count, _stride, _last) = match read_selection_parameters(source, forms, root, &shape) {
+        Ok(numbers) => numbers,
+        Err(error) => return Err(ModuleRootTypesError::SelectionArgument(error)),
+    };
+    let ty = SignalType { ty: ResolvedPortType::Bits(count), origin: expression };
+    proof {
+        assert(ty.ty->Bits_0 == count && is_form_location(source, forms@[root as int], ty.origin));
+        assert(exists|start: u64, stride: u64, last: usize| #[trigger]
+            selection_parameters_match(source, forms@, &shape, Ok((start, ty.ty->Bits_0, stride, last)))) by {
+            assert(selection_parameters_match(source, forms@, &shape, Ok((_start, ty.ty->Bits_0, _stride, _last))));
+        };
+        assert(selection_root_type(source, forms@, *row, Ok(Some(ty))));
+    }
+    Ok(Some(ty))
 }
 
 spec fn direct_output_type(call: &ModuleCallPorts, output: usize, ty: SignalType) -> bool {
@@ -51,7 +126,7 @@ spec fn direct_output_type(call: &ModuleCallPorts, output: usize, ty: SignalType
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn root_type(
         &self, at: ModuleBodyPosition, driver: DefinitionDriver, max_width: u64,
-        result: Result<Option<SignalType>, ModuleCallPortsError>,
+        result: Result<Option<SignalType>, ModuleRootTypesError>,
     ) -> bool {
         let project = self.targets.project_model();
         let parsed = &project.circuits_model()[at.file as int];
@@ -65,14 +140,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(Some(ty)) => exists|call: ModuleCallPorts|
                     #[trigger] self.module_call_ports_result(reference, max_width, Ok(Some(call)))
                     && direct_output_type(&call, driver.result_index, ty),
-                Err(error) => self.module_call_ports_result(reference, max_width, Err(error)),
-                Ok(None) => false,
+                Err(ModuleRootTypesError::Call(error)) => self.module_call_ports_result(reference, max_width, Err(error)),
+                _ => false,
             }
-        } else { result == Ok(None) }
+        } else { selection_root_type(source, parsed.syntax.forms@, row, result) }
     }
 
     fn check_root_type(&self, at: ModuleBodyPosition, driver: &DefinitionDriver<'a>, max_width: u64)
-        -> (result: Result<Option<SignalType<'p, 'a>>, ModuleCallPortsError<'p, 'a>>)
+        -> (result: Result<Option<SignalType<'p, 'a>>, ModuleRootTypesError<'p, 'a>>)
         requires
             self.can_resolve(),
             ({
@@ -96,14 +171,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let row = &parsed.definitions[driver.definition];
         if !definition_root_is_call(source.text, parsed.syntax.forms.as_slice(), row, parsed.references.as_slice()) {
-            return Ok(None);
+            return check_selection_root(source, parsed.syntax.forms.as_slice(), row);
         }
         let local = driver.definition - parsed.entry_ranges[at.entry].definitions.start;
         let reference = DefinitionPosition { file: at.file, entry: at.entry, definition: local, reference: 0 };
         assert(self.module_call_at(reference));
-        let Some(call) = self.check_module_call_ports(reference, max_width)? else {
-            proof { self.module_call_ports_present(reference, max_width); }
-            unreachable!()
+        let call = match self.check_module_call_ports(reference, max_width) {
+            Ok(Some(call)) => call,
+            Ok(None) => {
+                proof { self.module_call_ports_present(reference, max_width); }
+                unreachable!()
+            },
+            Err(error) => return Err(ModuleRootTypesError::Call(error)),
         };
         proof {
             self.module_call_ports_evidence(reference, max_width, call);
@@ -140,7 +219,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(Some(typed)) => self.module_wiring_result(owner, max_width, Ok(Some(typed.wiring)))
                 && typed.types@.len() == typed.wiring.drivers.definitions@.len()
                 && self.root_types_prefix(&typed.wiring, max_width, typed.types@),
-            Err(ModuleRootTypesError::Call(error)) => exists|wiring: ModuleWiring, before: Seq<Option<SignalType>>|
+            Err(error) => exists|wiring: ModuleWiring, before: Seq<Option<SignalType>>|
                 #[trigger] self.module_wiring_result(owner, max_width, Ok(Some(wiring)))
                 && #[trigger] self.root_types_prefix(&wiring, max_width, before)
                 && before.len() < wiring.drivers.definitions@.len()
@@ -160,14 +239,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
     }
 
-    /// 全断片の右辺全体を占める通常呼び出しから、左辺の型を求める。
+    /// 全断片の右辺全体を占める通常呼び出しやビット選択から、左辺の型を求める。
     ///
-    /// 型は参照先の署名で決まるため、呼び出しの引数が後続定義を参照しても取り出せる。
-    /// 引数と、呼び出し以外の右辺の型は後段で検査する。
+    /// 呼び出しの出力型は署名、ビット選択の出力幅は選択数で決まる。引数や選択対象が
+    /// 後続定義を参照していても取り出せる。入力の型と選択範囲は後段で検査する。
+    /// `max_width` はこの段階では署名に適用する。ビット選択の幅は選択範囲とともに検査する。
     ///
     /// # Errors
     ///
-    /// 配線を検査した後、本体順・定義順に呼び出しを検査して最初の違反を返す。
+    /// 配線を検査した後、本体順・定義順に呼び出しとビット選択を検査して最初の違反を返す。
+    /// ビット選択では左辺の名前数を先に検査する。
     pub fn check_module_root_types(&self, owner: ModuleBodyPosition, max_width: u64)
         -> (result: Result<Option<ModuleRootTypes<'p, 'a>>, ModuleRootTypesError<'p, 'a>>)
         requires self.can_resolve(),
@@ -196,7 +277,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let driver = &wiring.drivers.definitions[index];
             let ty = match self.check_root_type(at, driver, max_width) {
                 Ok(ty) => ty,
-                Err(error) => return Err(ModuleRootTypesError::Call(error)),
+                Err(error) => return Err(error),
             };
             let ghost before = types@;
             types.push(ty);

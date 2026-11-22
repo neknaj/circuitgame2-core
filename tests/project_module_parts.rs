@@ -1,7 +1,8 @@
 use circuitgame2_core::project::{
     CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
-    ModuleCallSignatureError, ModuleCallTarget, ModuleDriverError, ModulePartError, ModuleWiringError,
-    OutputDriver, PortDirection, ResolvedPortType, SignalType, SourceSnapshot,
+    ModuleCallSignatureError, ModuleCallTarget, ModuleDriverError, ModulePartError, ModuleRootTypesError,
+    ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
+    SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
@@ -150,7 +151,8 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
                   (module root (in (wide (bits 2))) (out y (z (bits 2)))
                     (def (y z) (pair bridge wide)) (def bridge mid))" },
         SourceSnapshot { path: "part.ncg2", revision: 6,
-            text: "(module-part root (def mid (nor (bit z 0) 0)) (def part-copy wide))" },
+            text: "(module-part root (def mid (nor (bit z 0) 0)) (def part-copy wide)
+                    (def sampled (slice later 0 1 18446744073709551615)) (def later wide))" },
     ];
     let project = parse_circuit_project(&input).unwrap();
     let targets = index_use_targets(&project).unwrap();
@@ -158,7 +160,7 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
     let aliases = check_use_aliases(&targets).unwrap();
     let resolved = aliases.resolve_module_alias_types(owner, 16).unwrap().unwrap();
     let checked = &resolved.sources;
-    let [Some(y), Some(z), None, Some(mid), None] = checked.roots.types.as_slice() else {
+    let [Some(y), Some(z), None, Some(mid), None, Some(sampled), None] = checked.roots.types.as_slice() else {
         panic!("both calls must seed all their output types");
     };
     assert!(matches!(y.ty, ResolvedPortType::Bits(1)));
@@ -167,20 +169,43 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
     assert_eq!(&z.origin.source.text[z.origin.span.clone()], "2");
     assert_eq!(mid.origin.source.revision, 6);
     assert_eq!(&mid.origin.source.text[mid.origin.span.clone()], "(nor (bit z 0) 0)");
-    let [None, None, Some(bridge), None, Some(copy)] = checked.aliases.as_slice() else {
+    assert!(matches!(sampled.ty, ResolvedPortType::Bits(1)));
+    assert_eq!(&sampled.origin.source.text[sampled.origin.span.clone()], "(slice later 0 1 18446744073709551615)");
+    let [None, None, Some(bridge), None, Some(copy), None, Some(_)] = checked.aliases.as_slice() else {
         panic!("only bare signal references carry alias dependencies");
     };
     assert_eq!(bridge.driver, OutputDriver::Definition(3));
     assert_eq!(&bridge.reference.source.text[bridge.reference.span.clone()], "mid");
     assert_eq!(copy.driver, OutputDriver::Input(0));
     assert_eq!(copy.reference.source.revision, 6);
-    let [_, _, Some(bridge), _, Some(copy)] = resolved.types.as_slice() else {
+    let [_, _, Some(bridge), _, Some(copy), _, Some(_)] = resolved.types.as_slice() else {
         panic!("the aliases must inherit their types from the bound driver");
     };
     assert!(matches!(bridge.ty, ResolvedPortType::Bits(1)));
     assert_eq!((bridge.origin.source.revision, bridge.origin.span.clone()), (6, mid.origin.span.clone()));
     assert!(matches!(copy.ty, ResolvedPortType::Bits(2)));
     assert_eq!(copy.origin.source.revision, 2);
+}
+
+#[test]
+fn reports_selection_numeric_overflow_before_a_zero_count() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 2,
+            text: "(using nor) (module root (in a) (out y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 6,
+            text: "(module-part root (def y (slice a 0 0 18446744073709551616)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleRootTypesError::SelectionArgument(SelectionArgumentError::NaturalOverflow {
+        argument: SelectionArgument::Stride, site,
+    })) = aliases.check_module_root_types(owner, 16) else {
+        panic!("all explicit arguments must be converted before requiring a positive count");
+    };
+    assert_eq!(site.source.revision, 6);
+    assert_eq!(&site.source.text[site.span], "18446744073709551616");
 }
 
 #[test]
