@@ -13,7 +13,8 @@ use super::{
 };
 use crate::netlist::{
     NorGate, NorNetlist, SourceGateId, SourceNor, SourceTickCircuit, SourceWire, Wire, clocked_wiring_endpoints,
-    clocked_wiring_valid, instance_wire, source_clocked_layout, source_clocked_layout_from_pairs, source_gate_wiring_pair,
+    clocked_wiring_valid, source_clocked_layout, source_clocked_layout_from_pairs,
+    source_gate_under, source_wire_in_parent, source_instance_gate_agrees, source_instance_order_at,
     source_output_pair_at, source_output_pairs, source_output_wiring_pair, source_wire_pair, wire_available,
 };
 use crate::project::DefinitionPosition;
@@ -167,36 +168,6 @@ proof fn source_argument_values(
     values
 }
 
-spec fn source_gate_under(prefix: Seq<DefinitionPosition>, child: SourceGateId) -> SourceGateId {
-    SourceGateId { instance: prefix + child.instance, gate: child.gate }
-}
-
-spec fn source_wire_in_parent(prefix: Seq<DefinitionPosition>, arguments: Seq<SourceWire>, wire: SourceWire) -> SourceWire {
-    match wire {
-        SourceWire::Input(port) => arguments[port as int],
-        SourceWire::Constant(bit) => SourceWire::Constant(bit),
-        SourceWire::Gate(gate) => SourceWire::Gate(source_gate_under(prefix, gate)),
-    }
-}
-
-proof fn source_wire_pair_in_parent(prefix: Seq<DefinitionPosition>, child_order: Seq<SourceGateId>, order: Seq<SourceGateId>,
-    source_arguments: Seq<SourceWire>, flat_arguments: Seq<Wire>, gate_start: usize, source: SourceWire, flat: Wire)
-    requires
-        source_wire_pair(child_order, source, flat),
-        gate_start + child_order.len() <= order.len() <= usize::MAX,
-        forall|i: int| 0 <= i < child_order.len() ==>
-            (#[trigger] order[gate_start + i]) == source_gate_under(prefix, child_order[i]),
-        flat matches Wire::Input(port) ==> port < source_arguments.len() == flat_arguments.len()
-            && source_wire_pair(order, source_arguments[port as int], flat_arguments[port as int]),
-    ensures
-        source_wire_pair(order, source_wire_in_parent(prefix, source_arguments, source),
-            instance_wire(flat, flat_arguments, gate_start)),
-{
-    if let Wire::Gate(gate) = flat {
-        assert(order[gate_start + gate] == source_gate_under(prefix, child_order[gate as int]));
-    }
-}
-
 proof fn assembled_child_gate_with_source(
     instance: SourceInstance, prefix: Seq<DefinitionPosition>, child: &SourceTickCircuit,
     child_order: Seq<SourceGateId>, child_index: Map<SourceGateId, int>, source_arguments: Seq<SourceWire>,
@@ -206,13 +177,11 @@ proof fn assembled_child_gate_with_source(
         0 <= gate < child_order.len(),
         source_clocked_layout(child, &instance.template.netlist_model(), child_order, child_index),
         instance_assembled(instance, start, flat_wires, gates),
-        start + child_order.len() <= order.len() <= usize::MAX,
+        source_instance_order_at(prefix, child_order, order, start),
         source_arguments.len() == instance.template.netlist_model().input_count,
         resolved_arguments(instance, flat_wires).len() == source_arguments.len(),
         forall|i: int| 0 <= i < source_arguments.len() ==> source_wire_pair(order, #[trigger] source_arguments[i],
             resolved_arguments(instance, flat_wires)[i]),
-        forall|i: int| 0 <= i < child_order.len() ==>
-            (#[trigger] order[start + i]) == source_gate_under(prefix, child_order[i]),
     ensures
         start + gate < gates.len(),
         source.left == source_wire_in_parent(prefix, source_arguments, child.gates[child_order[gate]].left),
@@ -221,18 +190,9 @@ proof fn assembled_child_gate_with_source(
         source_wire_pair(order, source.right, gates[start + gate].right),
 {
     let netlist = instance.template.netlist_model();
-    source_gate_wiring_pair(child, &netlist, child_order, child_index, gate);
-    let original = child.gates[child_order[gate]];
-    let lowered = netlist.gates@[gate];
     let flat_arguments = resolved_arguments(instance, flat_wires);
-    source_wire_pair_in_parent(prefix, child_order, order, source_arguments, flat_arguments, start, original.left, lowered.left);
-    source_wire_pair_in_parent(prefix, child_order, order, source_arguments, flat_arguments, start, original.right, lowered.right);
-    assert(gates[start + gate].left == instance_wire(lowered.left, flat_arguments, start));
-    assert(gates[start + gate].right == instance_wire(lowered.right, flat_arguments, start));
-    SourceNor {
-        left: source_wire_in_parent(prefix, source_arguments, original.left),
-        right: source_wire_in_parent(prefix, source_arguments, original.right),
-    }
+    source_instance_gate_agrees(prefix, child, &netlist, child_order, child_index, order, source_arguments,
+        flat_arguments, gates, start, gate)
 }
 
 spec fn source_output_link(prefix: Seq<DefinitionPosition>, arguments: Seq<SourceLink>, wire: SourceWire) -> SourceLink {
@@ -253,9 +213,7 @@ proof fn assembled_child_output_with_source(
         source_clocked_layout(child, &instance.template.netlist_model(), child_order, child_index),
         child_driver_block_matches(instance, start, flat_drivers),
         instance.arguments@.len() == instance.template.netlist_model().input_count == arguments.len(),
-        start + child_order.len() <= order.len() <= usize::MAX,
-        forall|i: int| 0 <= i < child_order.len() ==>
-            (#[trigger] order[start + i]) == source_gate_under(prefix, child_order[i]),
+        source_instance_order_at(prefix, child_order, order, start),
         forall|i: int| 0 <= i < arguments.len() ==>
             source_link_pair(order, #[trigger] arguments[i], instance.arguments@[i]),
     ensures
@@ -285,9 +243,7 @@ spec fn child_source_placement(instance: SourceInstance, layout: ChildSourceLayo
 {
     &&& source_clocked_layout(&layout.circuit, &instance.template.netlist_model(), layout.order, layout.index)
     &&& layout.order.len() == instance.template.netlist_model().gates@.len()
-    &&& start + layout.order.len() <= order.len() <= usize::MAX
-    &&& forall|i: int| 0 <= i < layout.order.len() ==>
-        (#[trigger] order[start + i]) == source_gate_under(layout.prefix, layout.order[i])
+    &&& source_instance_order_at(layout.prefix, layout.order, order, start)
 }
 
 spec fn all_child_source_placements(instances: Seq<SourceInstance>, layouts: Seq<ChildSourceLayout>,

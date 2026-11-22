@@ -4,6 +4,10 @@ use super::{NorNetlist, TickFrame, Wire, clocked_wiring_valid, nor_trace, reset_
 use crate::project::DefinitionPosition;
 use vstd::prelude::*;
 
+mod placement;
+pub(crate) use placement::{source_gate_under, source_instance_gate_agrees, source_instance_outputs_agree,
+    source_instance_order, source_instance_order_at, source_wire_in_parent};
+
 verus! {
 
 /// ソースのゲート位置と、その位置に至る回路呼び出しの列。

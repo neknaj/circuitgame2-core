@@ -270,6 +270,7 @@ proof fn placed_gate_matches(checked: &ModuleCalls, layer: &SourceLayer, source:
     assert(mapped == gate_by_source_call(checked, layer, i, site));
 }
 
+#[verifier::spinoff_prover]
 proof fn parent_gate_origin(checked: &ModuleCalls, layer: &SourceLayer, source: &SourceAssembly,
     layouts: Seq<ChildSourceLayout>, instances: Seq<SourceInstance>, counts: Seq<usize>, regions: Seq<Range<usize>>,
     order: Seq<SourceGateId>, netlist: &NorNetlist, site: SourceGateId)
@@ -290,7 +291,11 @@ proof fn parent_gate_origin(checked: &ModuleCalls, layer: &SourceLayer, source: 
     let child = layouts[i];
     let start = regions[i].start;
     assert(child_source_placement(instances[i], child, start, order));
-    assert(regions[i].end - start == child.order.len());
+    assert(child.order.len() == instances[i].template.netlist_model().gates@.len());
+    assert(counts[i] == child.order.len());
+    assert(regions[i].end - start == counts[i]);
+    assert(start <= gate < regions[i].end);
+    assert(layer.children[i] == child.circuit);
     gate_origin_in_child(checked, layer, instances[i], child, order, start, i, gate - start, site);
 }
 

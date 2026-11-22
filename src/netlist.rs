@@ -31,6 +31,8 @@ pub use source_trace::{
 };
 #[cfg(verus_only)]
 pub(crate) use source_trace::{
+    source_gate_under, source_instance_gate_agrees, source_instance_order, source_instance_order_at,
+    source_instance_outputs_agree, source_wire_in_parent,
     source_clocked_layout_from_pairs, source_gate_positions_distinct, source_gate_wiring_pair, source_output_pair_at, source_output_pairs,
     source_output_wiring_pair, source_trace_gate_index, source_trace_layout_counts, source_wire_pair,
 };

@@ -1353,6 +1353,53 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_value_flo
     (child_index, argument_values, output_values)
 }
 
+/// 消費側の直前の配線表で、先行する子の出力幅が入力ポートの幅と一致することを示す。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn preceding_child_argument_widths(
+    caller: &CallerArguments, calls: Seq<ChildCall>, count: usize, initial: Seq<NorGate>,
+    trace: Seq<ChildWiringSnapshot>, end: ChildWiringSnapshot, input_bits: usize,
+    before: nat, arguments: Seq<ProjectedCallArgument>, layout: &PortBitLayout, widths: Seq<u64>, capacity: usize,
+)
+    requires
+        child_wiring_trace_matches(caller, calls, calls.len(), count, initial, trace, end, input_bits),
+        before <= calls.len(),
+        forall|i: int, j: int| 0 <= i < j < calls.len() ==> (#[trigger] calls[i]).reference != (#[trigger] calls[j]).reference,
+        arguments_fit_preceding_children(caller, calls, before as int, arguments, layout),
+        port_bit_layout_result(widths, capacity, Ok(*layout)), widths.len() == arguments.len(),
+    ensures forall|port: int| 0 <= port < arguments.len() ==> {
+        let argument = #[trigger] arguments[port];
+        let table = trace[before as int].table;
+        &&& widths[port] <= usize::MAX
+        &&& child_argument_width_ready(table.ranges@, table.wires@.len(), argument.source, widths[port] as usize)
+    },
+{
+    port_bit_layout_size(widths, capacity, layout);
+    child_wiring_trace_sizes(caller, calls, calls.len(), count, initial, trace, end, before, input_bits);
+    let table = trace[before as int].table;
+    assert forall|port: int| 0 <= port < arguments.len() implies {
+        let argument = #[trigger] arguments[port];
+        &&& widths[port] <= usize::MAX
+        &&& child_argument_width_ready(table.ranges@, table.wires@.len(), argument.source, widths[port] as usize)
+    } by {
+        let argument = arguments[port];
+        let width = widths[port];
+        port_bit_layout_port(widths, capacity, *layout, port as usize);
+        if let CallArgumentSource::NestedCall(reference) = argument.source {
+            let span = layout.ranges_model()[port];
+            assert(span.end - span.start == width <= usize::MAX);
+            let producer = choose|i: int| 0 <= i < before && (#[trigger] calls[i]).reference == reference
+                && calls[i].circuit.outputs@.len() == width;
+            child_output_range_preserved(caller, calls, calls.len(), count, initial, trace, end, producer as nat, before, input_bits);
+            child_wiring_trace_sizes(caller, calls, calls.len(), count, initial, trace, end, (producer + 1) as nat, input_bits);
+            child_sizes_step(calls, producer);
+            child_sizes_grow(calls, (producer + 1) as nat, before);
+            vstd::std_specs::vec::axiom_spec_len(&table.wires);
+            let range = table.ranges@[reference as int]->Some_0;
+            assert(range.start <= range.end <= table.wires@.len());
+            assert(range.end - range.start == width);
+        }
+    };
+}
+
 /// 選んだ子が受け取った実引数と、その子の出力を登録した直後の状態を示す。
 pub(in crate::project::use_aliases::bit_func::lowering) proof fn child_wiring_instance_at<'s, 'p, 'a>(
     caller: &CallerArguments<'s, 'p, 'a>, calls: Seq<ChildCall>, count: usize, initial: Seq<NorGate>,

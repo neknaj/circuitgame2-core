@@ -6,7 +6,14 @@ use super::super::source_wires::{
     source_driver_wire_agrees, source_wires_pair,
 };
 use super::super::super::expansion::source_argument_bytes;
-use crate::netlist::{SourceGateId, SourceWire, source_wire_pair};
+use crate::netlist::{
+    SourceGateId, SourceWire, SourceTickCircuit, source_wire_pair, source_clocked_layout, source_instance_gate_agrees,
+    source_instance_order_at, source_instance_outputs_agree, source_trace_layout_counts, source_wire_in_parent,
+};
+use super::child_calls::{
+    ChildCall, ChildWiringSnapshot, child_call_ready, child_wiring_instance_at, child_wiring_trace_matches,
+    preceding_child_argument_widths,
+};
 
 verus! {
 
@@ -234,6 +241,96 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_argument
     port_ranges_cover(widths, callee_inputs, callee_limit, mapped, widths.len());
     assert(pieces.take(widths.len() as int) =~= pieces);
     assert(mapped.take(mapped.len() as int) =~= mapped);
+}
+
+/// 子のソース出力を親の引数と呼び出し経路で置き換える。
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn source_child_outputs(
+    prefix: Seq<crate::project::DefinitionPosition>, source: &SourceTickCircuit, arguments: Seq<SourceWire>,
+) -> Seq<SourceWire> {
+    Seq::new(source.outputs.len(), |bit: int| source_wire_in_parent(prefix, arguments, source.outputs[bit]))
+}
+
+/// 同じ呼び出しの実引数を子の配線へ渡し、親のゲート区間と出力表に対応付ける。
+#[verifier::spinoff_prover]
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_child_placement_agrees(
+    context: &SourceArguments, body: &LoweringBody, layouts: &Layouts, capacity: usize, width_limit: u64,
+    caller: &CallerArguments, calls: Seq<ChildCall>, count: usize, initial: Seq<NorGate>,
+    trace: Seq<ChildWiringSnapshot>, end: ChildWiringSnapshot, input_bits: usize, i: int,
+    prefix: Seq<crate::project::DefinitionPosition>, source: &SourceTickCircuit, child_order: Seq<SourceGateId>,
+    child_index: Map<SourceGateId, int>, order: Seq<SourceGateId>,
+) -> (arguments: Seq<SourceWire>)
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        context.source == caller.source && context.forms == caller.forms@,
+        context.input_widths == body.input_widths@, context.definitions.len() <= body.definitions@.len(),
+        caller.inputs@ == layouts.inputs.ranges_model() && caller.definitions@ == layouts.definitions.ranges_model(),
+        caller.wires@.len() == preceding_port_bits(definition_widths(body.definitions@), context.definitions.len()),
+        definition_wires_pair(order, context.definitions, caller.definitions@, caller.wires@),
+        child_wiring_trace_matches(caller, calls, calls.len(), count, initial, trace, end, input_bits),
+        0 <= i < calls.len(), child_call_ready(caller, calls, i),
+        forall|left: int, right: int| 0 <= left < right < calls.len() ==>
+            (#[trigger] calls[left]).reference != (#[trigger] calls[right]).reference,
+        ({
+            let call = calls[i];
+            let before = trace[i];
+            &&& source_child_outputs_pair(order, context.children, before.table.ranges@, before.table.wires@)
+            &&& source_clocked_layout(source, call.circuit, child_order, child_index)
+            &&& source_instance_order_at(prefix, child_order, order, before.gates.len() as usize)
+            &&& before.gates.len() <= usize::MAX
+            &&& forall|port: int| 0 <= port < call.arguments@.len() ==>
+                argument_matches_width(context.source, context.forms, context.input_widths,
+                    body.definitions@.take(context.definitions.len() as int), #[trigger] call.arguments@[port],
+                    call._input_widths@[port], width_limit)
+        }),
+    ensures ({
+        let call = calls[i];
+        let before = trace[i];
+        let after = trace[i + 1];
+        &&& source_argument_wires(context, call.arguments@, call._input_widths@) == Some(arguments)
+        &&& source_child_outputs_pair(order, context.children.insert(call.reference, source_child_outputs(prefix, source, arguments)),
+            after.table.ranges@, after.table.wires@)
+        &&& before.gates.len() + child_order.len() == after.gates.len()
+        &&& forall|gate: int| 0 <= gate < child_order.len() ==> {
+            let original = source.gates[child_order[gate]];
+            let flat = #[trigger] after.gates[before.gates.len() + gate];
+            &&& source_wire_pair(order, source_wire_in_parent(prefix, arguments, original.left), flat.left)
+            &&& source_wire_pair(order, source_wire_in_parent(prefix, arguments, original.right), flat.right)
+        }
+    }),
+{
+    reveal(child_call_ready);
+    let call = calls[i];
+    let before = trace[i];
+    let after = trace[i + 1];
+    let (invocation, mapped) = child_wiring_instance_at(caller, calls, count, initial, trace, end, input_bits, i);
+    let widths = call._input_widths@;
+    let cap = call._layout_limit@;
+    preceding_child_argument_widths(caller, calls, count, initial, trace, end, input_bits, i as nat, call.arguments@,
+        call.inputs, widths, cap);
+    source_argument_wires_agree(context, &invocation, body, layouts, capacity, order, call.arguments@,
+        widths, width_limit, call.inputs, cap, mapped);
+    let arguments = source_argument_wires(context, call.arguments@, widths)->Some_0;
+    let base = before.gates.len() as usize;
+    let wires = after.table.wires@.subrange(before.table.wires@.len() as int, after.table.wires@.len() as int);
+    source_trace_layout_counts(source, call.circuit, child_order, child_index);
+    assert(mapped.len() == call.circuit.input_count) by { reveal(nor_evaluation_ready); };
+    assert forall|gate: int| 0 <= gate < child_order.len() implies {
+        let original = source.gates[child_order[gate]];
+        let flat = #[trigger] after.gates[before.gates.len() + gate];
+        &&& source_wire_pair(order, source_wire_in_parent(prefix, arguments, original.left), flat.left)
+        &&& source_wire_pair(order, source_wire_in_parent(prefix, arguments, original.right), flat.right)
+    } by {
+        source_instance_gate_agrees(prefix, source, call.circuit, child_order, child_index, order, arguments, mapped,
+            after.gates, base, gate);
+    };
+    source_instance_outputs_agree(prefix, source, call.circuit, child_order, child_index, order, arguments, mapped, base, wires);
+    let outputs = source_child_outputs(prefix, source, arguments);
+    assert forall|bit: int| 0 <= bit < outputs.len() implies source_wire_pair(order, #[trigger] outputs[bit], wires[bit]) by {
+        assert(outputs[bit] == source_wire_in_parent(prefix, arguments, source.outputs[bit]));
+    };
+    source_child_outputs_registered(order, context.children, outputs, &before.table, &after.table, call.reference,
+        call.circuit, mapped, before.gates, after.gates, input_bits);
+    arguments
 }
 
 } // verus!
