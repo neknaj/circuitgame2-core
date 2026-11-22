@@ -139,7 +139,7 @@ proof fn source_operand_bit_agrees(
     }
 }
 
-proof fn flatten_source_wire_pairs(order: Seq<SourceGateId>, source: Seq<Seq<SourceWire>>, flat: Seq<Seq<Wire>>)
+pub(super) proof fn flatten_source_wire_pairs(order: Seq<SourceGateId>, source: Seq<Seq<SourceWire>>, flat: Seq<Seq<Wire>>)
     requires
         source.len() == flat.len(),
         forall|i: int| 0 <= i < source.len() ==> source_wires_pair(order, #[trigger] source[i], flat[i]),
@@ -310,7 +310,7 @@ pub(super) open spec fn source_output_wires(
         source_driver_wire(widths, definitions, drivers[port], bit))).flatten()
 }
 
-proof fn output_ranges_cover(
+pub(super) proof fn port_ranges_cover(
     widths: Seq<u64>, layout: &PortBitLayout, capacity: usize, wire: Seq<Wire>, ports: nat,
 )
     requires
@@ -329,7 +329,7 @@ proof fn output_ranges_cover(
     if ports > 0 {
         let port = (ports - 1) as usize;
         port_bit_layout_port(widths, capacity, *layout, port);
-        output_ranges_cover(widths, layout, capacity, wire, (ports - 1) as nat);
+        port_ranges_cover(widths, layout, capacity, wire, (ports - 1) as nat);
         let prefix = pieces.take(ports - 1);
         let range = ranges[port as int];
         assert(pieces.take(ports as int) =~= prefix.push(pieces[port as int]));
@@ -387,7 +387,7 @@ pub(super) proof fn source_output_wires_agree(
         };
     };
     flatten_source_wire_pairs(order, source, pieces);
-    output_ranges_cover(outputs, &layouts.outputs, capacity, wires, outputs.len());
+    port_ranges_cover(outputs, &layouts.outputs, capacity, wires, outputs.len());
     port_bit_layout_size(outputs, capacity, &layouts.outputs);
     assert(pieces.take(outputs.len() as int) =~= pieces);
     assert(wires.take(wires.len() as int) =~= wires);

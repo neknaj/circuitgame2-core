@@ -818,6 +818,7 @@ pub(super) closed spec fn rooted_gate_step_origin(
 /// 最終ゲート列の添字から、ゲートを追加した定義と展開時の配線状態を取り出す。
 ///
 /// ゲートを追加しない定義や呼び出しを含んでも、追加区間は重ならず最終ゲート列を覆う。
+#[verifier::spinoff_prover]
 pub(super) proof fn rooted_trace_gate_step(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
     limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
