@@ -1,6 +1,8 @@
 //! 型が判明した信号のビット選択を検査し、元の信号への射影を得る。
 
-use super::{ModuleAliasTypes, ModuleAliasTypesError, UseAliases, aliases::find_member};
+use super::{ModuleAliasTypes, ModuleAliasTypesError, ModuleConcat, ModuleConcatsError, UseAliases, aliases::find_member};
+#[cfg(verus_only)]
+use super::{ModuleConcats, propagation::type_sites_valid};
 use crate::project::{CheckedBitSelection, LocatedName, ModuleBodyPosition, OutputDriver, ResolvedPortType,
     SelectionArgumentError, SignalType, circuits::form_location};
 use crate::project::use_aliases::{function_atoms::{copy_location, copy_signal_type}, selection_arguments::check_selection_chain};
@@ -30,8 +32,12 @@ pub struct ModuleSelection {
 /// 型伝播の結果と、現在検査できたビット選択。
 #[derive(Debug)]
 pub struct ModuleSelections<'p, 'a> {
-    /// 全断片の配線と、現在確定している型。
+    /// 全断片の配線と、連接の幅を伝える前に決まった型。
     pub typed: ModuleAliasTypes<'p, 'a>,
+    /// 連接と別名を再評価して得た、左辺の駆動元順の型表。
+    pub types: Vec<Option<SignalType<'p, 'a>>>,
+    /// 左辺の駆動元順に並んだ、幅が決まった連接。
+    pub concats: Vec<Option<ModuleConcat<'p, 'a>>>,
     /// 左辺の駆動元順の射影。選択以外の式や、入力型を保留した選択は `None`。
     pub selections: Vec<Option<ModuleSelection>>,
 }
@@ -41,6 +47,8 @@ pub struct ModuleSelections<'p, 'a> {
 pub enum ModuleSelectionsError<'p, 'a> {
     /// 配線、式の結果幅、または型伝播の診断。
     Types(ModuleAliasTypesError<'p, 'a>),
+    /// 連接の型や幅に違反がある。
+    Concat(ModuleConcatsError<'p, 'a>),
     /// ビット列以外の型の信号を選択対象にした。
     InputType {
         /// 選択対象として書いた信号名の範囲。
@@ -61,31 +69,31 @@ pub enum ModuleSelectionsError<'p, 'a> {
     },
 }
 
-pub(super) open spec fn bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, driver: OutputDriver) -> Option<SignalType<'p, 'a>> {
+pub(super) open spec fn bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, types: Seq<Option<SignalType<'p, 'a>>>, driver: OutputDriver) -> Option<SignalType<'p, 'a>> {
     match driver {
         OutputDriver::Input(index) => {
             let port = typed.sources.roots.wiring.drivers.signature.inputs@[index as int];
             Some(SignalType { ty: port.ty, origin: port.annotation })
         },
-        OutputDriver::Definition(index) => typed.types@[index as int],
+        OutputDriver::Definition(index) => types[index as int],
     }
 }
 
 /// 駆動元の型と根拠位置を取り出す。定義の型が未確定なら `None` を返す。
-pub(super) fn read_bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, driver: OutputDriver)
+pub(super) fn read_bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, types: &[Option<SignalType<'p, 'a>>], driver: OutputDriver)
     -> (result: Option<SignalType<'p, 'a>>)
     requires match driver {
         OutputDriver::Input(index) => index < typed.sources.roots.wiring.drivers.signature.inputs@.len(),
-        OutputDriver::Definition(index) => index < typed.types@.len(),
+        OutputDriver::Definition(index) => index < types@.len(),
     },
-    ensures result == bound_type(typed, driver),
+    ensures result == bound_type(typed, types@, driver),
 {
     match driver {
         OutputDriver::Input(index) => {
             let port = &typed.sources.roots.wiring.drivers.signature.inputs[index];
             Some(SignalType { ty: port.ty, origin: copy_location(&port.annotation) })
         },
-        OutputDriver::Definition(index) => copy_signal_type(&typed.types[index]),
+        OutputDriver::Definition(index) => copy_signal_type(&types[index]),
     }
 }
 
@@ -117,7 +125,7 @@ spec fn checked_range(
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn module_selection_at(
-        &self, typed: &ModuleAliasTypes, index: int, limit: u64,
+        &self, typed: &ModuleAliasTypes, types: Seq<Option<SignalType>>, index: int, limit: u64,
         result: Result<Option<ModuleSelection>, ModuleSelectionsError>,
     ) -> bool {
         let wiring = &typed.sources.roots.wiring;
@@ -139,17 +147,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         let frame = parsed.entry_ranges@[at.entry as int].signals;
                         let bound = wiring.signals@[member]@[row.signals.start - frame.start];
                         bound.form == leaf && checked_range(source, forms, root, leaf, steps, bound.driver,
-                            bound_type(typed, bound.driver), limit, result)
+                            bound_type(typed, types, bound.driver), limit, result)
                     }
             }
     }
 
-    fn check_bound_selection(&self, _owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes<'p, 'a>, index: usize)
+    fn check_bound_selection(&self, _owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes<'p, 'a>,
+        types: &[Option<SignalType<'p, 'a>>], index: usize)
         -> (result: Result<Option<ModuleSelection>, ModuleSelectionsError<'p, 'a>>)
         requires
             self.can_resolve(), self.module_alias_types_result(_owner, limit, Ok(Some(*typed))),
             index < typed.sources.roots.wiring.drivers.definitions@.len(),
-        ensures self.module_selection_at(typed, index as int, limit, result),
+            types@.len() == typed.sources.roots.wiring.drivers.definitions@.len(), type_sites_valid(types@),
+        ensures self.module_selection_at(typed, types@, index as int, limit, result),
     {
         let wiring = &typed.sources.roots.wiring;
         proof {
@@ -188,7 +198,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let frame = &parsed.entry_ranges[at.entry].signals;
         let bound = &wiring.signals[member][row.signals.start - frame.start];
-        let Some(actual) = read_bound_type(typed, bound.driver) else { return Ok(None); };
+        let Some(actual) = read_bound_type(typed, types, bound.driver) else { return Ok(None); };
         let ResolvedPortType::Bits(width) = actual.ty else {
             return Err(ModuleSelectionsError::InputType { input: form_location(source, forms, leaf), actual });
         };
@@ -203,9 +213,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     #[verifier::opaque]
-    spec fn selection_prefix(&self, typed: &ModuleAliasTypes, limit: u64, selections: Seq<Option<ModuleSelection>>) -> bool {
+    spec fn selection_prefix(&self, typed: &ModuleAliasTypes, types: Seq<Option<SignalType>>, limit: u64, selections: Seq<Option<ModuleSelection>>) -> bool {
         &&& selections.len() <= typed.sources.roots.wiring.drivers.definitions@.len()
-        &&& forall|i: int| 0 <= i < selections.len() ==> self.module_selection_at(typed, i, limit, Ok(#[trigger] selections[i]))
+        &&& forall|i: int| 0 <= i < selections.len() ==> self.module_selection_at(typed, types, i, limit, Ok(#[trigger] selections[i]))
     }
 
     /// 全断片の選択の結果と、最初の違反を元のソースに対応付ける。
@@ -213,16 +223,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, owner: ModuleBodyPosition, limit: u64, result: Result<Option<ModuleSelections>, ModuleSelectionsError>,
     ) -> bool {
         match result {
-            Ok(None) => self.module_alias_types_result(owner, limit, Ok(None)),
-            Err(ModuleSelectionsError::Types(error)) => self.module_alias_types_result(owner, limit, Err(error)),
-            Ok(Some(checked)) => self.module_alias_types_result(owner, limit, Ok(Some(checked.typed)))
+            Ok(None) => self.module_concats_result(owner, limit, Ok(None)),
+            Err(ModuleSelectionsError::Types(error)) => self.module_concats_result(owner, limit, Err(ModuleConcatsError::Types(error))),
+            Err(ModuleSelectionsError::Concat(error)) => !(error is Types) && self.module_concats_result(owner, limit, Err(error)),
+            Ok(Some(checked)) => self.module_concats_result(owner, limit,
+                Ok(Some(ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats })))
                 && checked.selections@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len()
-                && self.selection_prefix(&checked.typed, limit, checked.selections@),
-            Err(error) => exists|typed: ModuleAliasTypes, prefix: Seq<Option<ModuleSelection>>|
-                #[trigger] self.module_alias_types_result(owner, limit, Ok(Some(typed)))
-                && #[trigger] self.selection_prefix(&typed, limit, prefix)
-                && prefix.len() < typed.sources.roots.wiring.drivers.definitions@.len()
-                && self.module_selection_at(&typed, prefix.len() as int, limit, Err(error)),
+                && self.selection_prefix(&checked.typed, checked.types@, limit, checked.selections@),
+            Err(error) => exists|inferred: ModuleConcats, prefix: Seq<Option<ModuleSelection>>|
+                #[trigger] self.module_concats_result(owner, limit, Ok(Some(inferred)))
+                && #[trigger] self.selection_prefix(&inferred.typed, inferred.types@, limit, prefix)
+                && prefix.len() < inferred.typed.sources.roots.wiring.drivers.definitions@.len()
+                && self.module_selection_at(&inferred.typed, inferred.types@, prefix.len() as int, limit, Err(error)),
         }
     }
 
@@ -232,42 +244,48 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// # Errors
     ///
-    /// 配線、右辺の結果幅、型伝播の違反を先に返す。その後、定義順に選択対象の型、範囲、
+    /// 配線、右辺の結果幅、型伝播、連接の違反を先に返す。その後、定義順に選択対象の型、範囲、
     /// 結果幅の上限を検査する。
     pub fn check_module_selections(&self, owner: ModuleBodyPosition, limit: u64)
         -> (result: Result<Option<ModuleSelections<'p, 'a>>, ModuleSelectionsError<'p, 'a>>)
         requires self.can_resolve(),
         ensures self.module_selections_result(owner, limit, result),
     {
-        let typed = match self.resolve_module_alias_types(owner, limit) {
-            Ok(Some(typed)) => typed,
+        let inferred = match self.check_module_concats(owner, limit) {
+            Ok(Some(inferred)) => inferred,
             Ok(None) => return Ok(None),
-            Err(error) => return Err(ModuleSelectionsError::Types(error)),
+            Err(ModuleConcatsError::Types(error)) => return Err(ModuleSelectionsError::Types(error)),
+            Err(error) => return Err(ModuleSelectionsError::Concat(error)),
         };
+        proof { self.module_concats_evidence(owner, limit, inferred); }
+        let typed = &inferred.typed;
+        let types = inferred.types.as_slice();
         let count = typed.sources.roots.wiring.drivers.definitions.len();
         let mut selections = Vec::new();
         let mut i = 0;
-        assert(self.selection_prefix(&typed, limit, selections@)) by { reveal(UseAliases::selection_prefix); };
+        assert(self.selection_prefix(typed, types@, limit, selections@)) by { reveal(UseAliases::selection_prefix); };
         while i < count
             invariant
-                self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(typed))),
+                self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+                self.module_concats_result(owner, limit, Ok(Some(inferred))), *typed == inferred.typed,
+                types@ == inferred.types@, types@.len() == count, type_sites_valid(types@),
                 i == selections@.len() <= count == typed.sources.roots.wiring.drivers.definitions@.len(),
-                self.selection_prefix(&typed, limit, selections@),
+                self.selection_prefix(typed, types@, limit, selections@),
             decreases count - i,
         {
-            let selection = self.check_bound_selection(owner, limit, &typed, i)?;
+            let selection = self.check_bound_selection(owner, limit, typed, types, i)?;
             let ghost before = selections@;
             selections.push(selection);
-            assert(self.selection_prefix(&typed, limit, selections@)) by {
+            assert(self.selection_prefix(typed, types@, limit, selections@)) by {
                 reveal(UseAliases::selection_prefix);
                 assert forall|j: int| 0 <= j < selections@.len() implies
-                    self.module_selection_at(&typed, j, limit, Ok(#[trigger] selections@[j])) by {
+                    self.module_selection_at(typed, types@, j, limit, Ok(#[trigger] selections@[j])) by {
                         if j < i { assert(selections@[j] == before[j]); }
                     };
             };
             i += 1;
         }
-        Ok(Some(ModuleSelections { typed, selections }))
+        Ok(Some(ModuleSelections { typed: inferred.typed, types: inferred.types, concats: inferred.concats, selections }))
     }
 }
 

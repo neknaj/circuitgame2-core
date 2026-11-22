@@ -1,13 +1,15 @@
 //! 連接の引数をソース順で型検査し、合計のビット幅を求める。
 
 use super::{ModuleAliasTypes, ModuleAliasTypesError, UseAliases, aliases::find_member, selections::read_bound_type};
+use crate::project::use_aliases::function_atoms::copy_signal_type;
 use crate::project::{CircuitLiteralWidthError, ConcatResultWidthError, LocatedName, ModuleBodyPosition, OutputDriver,
     ProjectSource, ResolvedPortType, SignalType, check_circuit_literal_width, check_concat_result_width,
     circuits::{form_location, read_indexed_atom}};
 #[cfg(verus_only)]
-use crate::project::{circuit_literal_width_matches, concat_result_width_matches, circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence}};
+use crate::project::{circuit_literal_width_matches, concat_result_width_matches, location_in_source,
+    circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence}};
 #[cfg(verus_only)]
-use super::selections::bound_type;
+use super::{propagation::type_sites_valid, selections::bound_type};
 use crate::syntax::{AtomKind, Form, circuit::{NamedBuildCircuit, concat_argument_range,
     definition_target_atoms, next_call_argument}};
 #[cfg(verus_only)]
@@ -47,6 +49,8 @@ pub struct ModuleConcat<'p, 'a> {
 pub struct ModuleConcats<'p, 'a> {
     /// 全断片の配線と確定済みの型。
     pub typed: ModuleAliasTypes<'p, 'a>,
+    /// 別名と連接で追加の型を求めた、左辺の駆動元順の型表。
+    pub types: Vec<Option<SignalType<'p, 'a>>>,
     /// 左辺の駆動元順の連接。対象外または保留中なら `None`。
     pub concats: Vec<Option<ModuleConcat<'p, 'a>>>,
 }
@@ -90,6 +94,7 @@ pub enum ModuleConcatsError<'p, 'a> {
 
 struct ConcatContext<'w, 'p, 'a> {
     typed: &'w ModuleAliasTypes<'p, 'a>,
+    types: &'w Vec<Option<SignalType<'p, 'a>>>,
     body: ModuleBodyPosition,
     member: usize,
     definition: usize,
@@ -145,7 +150,7 @@ spec fn concat_operand(
             && {
                 let bound = wiring.signals@[context.member as int]@[i - frame.start];
                 &&& bound.form == form
-                &&& match bound_type(context.typed, bound.driver) {
+                &&& match bound_type(context.typed, context.types@, bound.driver) {
                     None => result == Ok(None),
                     Some(ty) => match ty.ty {
                         ResolvedPortType::Bits(width) => result matches Ok(Some(item))
@@ -188,6 +193,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let wiring = context.typed.sources.roots.wiring;
         let body = context.body;
         &&& self.can_resolve() && self.module_alias_types_result(owner, limit, Ok(Some(*context.typed)))
+        &&& context.types@.len() == wiring.drivers.definitions@.len()
         &&& body.file < project.circuits_model().len() && body.file < project.sources_model().len()
         &&& *context.parsed == project.circuits_model()[body.file as int]
         &&& *context.source == project.sources_model()[body.file as int]
@@ -231,7 +237,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     self.module_signal_index_item(_owner, limit, *wiring, context.member as int, position as int);
                 }
                 let bound = &wiring.signals[context.member][position - frame.start];
-                let Some(actual) = read_bound_type(context.typed, bound.driver) else { return Ok(None); };
+                let Some(actual) = read_bound_type(context.typed, context.types.as_slice(), bound.driver) else { return Ok(None); };
                 let ResolvedPortType::Bits(width) = actual.ty else {
                     return Err(ModuleConcatsError::InputType { argument: form_location(source, forms, at), actual });
                 };
@@ -357,7 +363,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    spec fn concat_at(&self, typed: &ModuleAliasTypes, index: int, limit: u64, result: Result<Option<ModuleConcat>, ModuleConcatsError>) -> bool {
+    spec fn concat_at(&self, typed: &ModuleAliasTypes, types: &Vec<Option<SignalType>>, index: int, limit: u64, result: Result<Option<ModuleConcat>, ModuleConcatsError>) -> bool {
         let drivers = &typed.sources.roots.wiring.drivers;
         let body = drivers.origins@[index];
         let definition = drivers.definitions@[index].definition;
@@ -369,14 +375,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             concat_arguments_match(source.text, parsed.syntax.forms@, root, arguments)))
         || exists|arguments: Range<usize>, member: usize| #[trigger] concat_arguments_match(source.text, parsed.syntax.forms@, root, arguments)
             && (#[trigger] drivers.body.members@[member as int]) == body && member < drivers.body.members@.len()
-            && self.concat_result(&ConcatContext { typed, body, member, definition, source, parsed }, root as usize, arguments, limit, result)
+            && self.concat_result(&ConcatContext { typed, types, body, member, definition, source, parsed }, root as usize, arguments, limit, result)
     }
 
-    fn check_module_concat_row(&self, _owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes<'p, 'a>, i: usize)
+    fn check_module_concat_row(&self, _owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes<'p, 'a>,
+        types: &Vec<Option<SignalType<'p, 'a>>>, i: usize)
         -> (result: Result<Option<ModuleConcat<'p, 'a>>, ModuleConcatsError<'p, 'a>>)
         requires self.can_resolve(), self.module_alias_types_result(_owner, limit, Ok(Some(*typed))),
             i < typed.sources.roots.wiring.drivers.definitions@.len(),
-        ensures self.concat_at(typed, i as int, limit, result),
+            types@.len() == typed.sources.roots.wiring.drivers.definitions@.len(),
+        ensures self.concat_at(typed, types, i as int, limit, result),
+            result matches Ok(Some(concat)) ==> location_in_source(concat.result.origin),
     {
         let wiring = &typed.sources.roots.wiring;
         proof {
@@ -396,22 +405,184 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         assert(concat_arguments_match(source.text, parsed.syntax.forms@, row.expression.start as int, arguments));
         let member = find_member(wiring.drivers.body.members.as_slice(), body);
-        let context = ConcatContext { typed, body, member, definition, source, parsed };
+        let context = ConcatContext { typed, types, body, member, definition, source, parsed };
         let result = self.check_concat_arguments(_owner, limit, &context, arguments);
         proof {
             let model = self.targets.project_model();
-            assert(context == (ConcatContext { typed, body, member, definition,
+            assert(context == (ConcatContext { typed, types, body, member, definition,
                 source: &model.sources_model()[body.file as int], parsed: &model.circuits_model()[body.file as int] }));
             assert(self.concat_result(&context, row.expression.start, arguments, limit, result));
-            assert(self.concat_at(typed, i as int, limit, result));
+            assert(self.concat_at(typed, types, i as int, limit, result));
         }
         result
     }
 
+    spec fn next_type(&self, typed: &ModuleAliasTypes, types: &Vec<Option<SignalType>>, i: usize, limit: u64,
+        result: Option<SignalType>) -> bool {
+        match typed.sources.aliases@[i as int] {
+            Some(alias) => result == bound_type(typed, types@, alias.driver),
+            None => exists|checked: Result<Option<ModuleConcat>, ModuleConcatsError>|
+                #[trigger] self.concat_at(typed, types, i as int, limit, checked)
+                && result == match checked { Ok(Some(concat)) => Some(concat.result), _ => None },
+        }
+    }
+
+    fn infer_concat_or_alias(&self, owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes<'p, 'a>,
+        types: &Vec<Option<SignalType<'p, 'a>>>, i: usize) -> (result: Option<SignalType<'p, 'a>>)
+        requires
+            self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+            i < types@.len() == typed.sources.roots.wiring.drivers.definitions@.len(),
+            type_sites_valid(types@),
+        ensures self.next_type(typed, types, i, limit, result),
+            result matches Some(ty) ==> location_in_source(ty.origin),
+    {
+        proof {
+            self.module_alias_types_evidence(owner, limit, *typed);
+            self.module_type_sources_bounds(owner, limit, typed.sources);
+            self.module_wiring_keeps_drivers(owner, limit, typed.sources.roots.wiring);
+            self.module_input_sites(owner, limit, typed.sources.roots.wiring.drivers);
+        }
+        if let Some(alias) = &typed.sources.aliases[i] {
+            return read_bound_type(typed, types.as_slice(), alias.driver);
+        }
+        let checked = self.check_module_concat_row(owner, limit, typed, types, i);
+        match checked {
+            Ok(Some(concat)) => Some(concat.result),
+            _ => None,
+        }
+    }
+
+    spec fn inference_step(&self, typed: &ModuleAliasTypes, limit: u64, before: Vec<Option<SignalType>>,
+        after: Vec<Option<SignalType>>, index: usize) -> bool {
+        &&& index < before@.len() && before@[index as int].is_none()
+        &&& after@.len() == before@.len() && after@[index as int].is_some()
+        &&& after@ == before@.update(index as int, after@[index as int])
+        &&& self.next_type(typed, &before, index, limit, after@[index as int])
+    }
+
     #[verifier::opaque]
-    spec fn concat_prefix(&self, typed: &ModuleAliasTypes, limit: u64, concats: Seq<Option<ModuleConcat>>) -> bool {
+    spec fn derivation(&self, typed: &ModuleAliasTypes, limit: u64,
+        trail: Seq<(usize, Vec<Option<SignalType>>)>, types: Vec<Option<SignalType>>) -> bool {
+        &&& trail.len() > 0 && trail[0].1@ == typed.types@ && trail.last().1 == types
+        &&& forall|i: int| 0 < i < trail.len() ==> {
+            let step = #[trigger] trail[i];
+            self.inference_step(typed, limit, trail[i - 1].1, step.1, step.0)
+        }
+    }
+
+    proof fn record_inference(&self, typed: &ModuleAliasTypes, limit: u64,
+        trail: Seq<(usize, Vec<Option<SignalType>>)>, before: Vec<Option<SignalType>>, after: Vec<Option<SignalType>>, index: usize,
+    )
+        requires self.derivation(typed, limit, trail, before), self.inference_step(typed, limit, before, after, index),
+        ensures self.derivation(typed, limit, trail.push((index, after)), after),
+    {
+        reveal(UseAliases::derivation);
+        let updated = trail.push((index, after));
+        assert forall|i: int| 0 < i < updated.len() implies {
+            let step = #[trigger] updated[i];
+            self.inference_step(typed, limit, updated[i - 1].1, step.1, step.0)
+        } by {
+            if i < trail.len() { assert(updated[i] == trail[i]); }
+        };
+    }
+
+    #[verifier::opaque]
+    spec fn blocked_prefix(&self, typed: &ModuleAliasTypes, types: &Vec<Option<SignalType>>, limit: u64, stop: int) -> bool {
+        forall|i: int| 0 <= i < stop && (#[trigger] types@[i]).is_none() ==> self.next_type(typed, types, i as usize, limit, None)
+    }
+
+    spec fn fixed_point(&self, typed: &ModuleAliasTypes, limit: u64, types: Vec<Option<SignalType>>) -> bool {
+        &&& types@.len() == typed.types@.len()
+        &&& type_sites_valid(types@)
+        &&& self.blocked_prefix(typed, &types, limit, types@.len() as int)
+        &&& exists|trail: Seq<(usize, Vec<Option<SignalType>>)>| #[trigger] self.derivation(typed, limit, trail, types)
+    }
+
+    /// 未確定の行だけを更新し、追加できる型がなくなるまで別名と連接を調べる。
+    fn infer_module_concat_types(&self, owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes<'p, 'a>)
+        -> (result: Vec<Option<SignalType<'p, 'a>>>)
+        requires self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+        ensures self.fixed_point(typed, limit, result),
+    {
+        proof { self.module_alias_types_evidence(owner, limit, *typed); }
+        let count = typed.types.len();
+        let mut types = Vec::new();
+        let mut i = 0;
+        while i < count
+            invariant count == typed.types@.len(), i <= count, types@ == typed.types@.take(i as int),
+            decreases count - i,
+        {
+            types.push(copy_signal_type(&typed.types[i]));
+            assert(types@ =~= typed.types@.take(i + 1));
+            i += 1;
+        }
+        assert(types@ =~= typed.types@);
+        let ghost mut trail = seq![(0usize, types)];
+        let ghost mut pending = vstd::set_lib::set_int_range(0, count as int);
+        proof {
+            vstd::set_lib::lemma_int_range(0, count as int);
+            assert(self.derivation(typed, limit, trail, types)) by { reveal(UseAliases::derivation); };
+        }
+        loop
+            invariant
+                self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+                count == typed.types@.len() == typed.sources.roots.wiring.drivers.definitions@.len() == types@.len(),
+                self.derivation(typed, limit, trail, types), type_sites_valid(types@),
+                forall|j: int| 0 <= j < count && (#[trigger] types@[j]).is_none() ==> pending.contains(j),
+            decreases pending.len(),
+        {
+            let ghost before_round = pending;
+            let mut changed = false;
+            let mut index = 0;
+            assert(self.blocked_prefix(typed, &types, limit, 0)) by { reveal(UseAliases::blocked_prefix); };
+            while index < count
+                invariant
+                    self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+                    index <= count == typed.types@.len() == typed.sources.roots.wiring.drivers.definitions@.len() == types@.len(),
+                    self.derivation(typed, limit, trail, types), type_sites_valid(types@),
+                    forall|j: int| 0 <= j < count && (#[trigger] types@[j]).is_none() ==> pending.contains(j),
+                    if changed { pending.len() < before_round.len() } else { pending == before_round },
+                    !changed ==> self.blocked_prefix(typed, &types, limit, index as int),
+                decreases count - index,
+            {
+                if types[index].is_none() {
+                    match self.infer_concat_or_alias(owner, limit, typed, &types, index) {
+                        Some(value) => {
+                            let ghost before = types;
+                            types.set(index, Some(value));
+                            proof {
+                                self.record_inference(typed, limit, trail, before, types, index);
+                                assert forall|j: int| 0 <= j < types@.len() implies
+                                    ((#[trigger] types@[j]) matches Some(ty) ==> location_in_source(ty.origin)) by {
+                                    if j != index { assert(types@[j] == before@[j]); }
+                                };
+                                trail = trail.push((index, types));
+                                vstd::set::lemma_set_remove_len(pending, index as int);
+                                pending = pending.remove(index as int);
+                            }
+                            changed = true;
+                        },
+                        None => {},
+                    }
+                }
+                if !changed {
+                    assert(self.blocked_prefix(typed, &types, limit, index + 1)) by {
+                        reveal(UseAliases::blocked_prefix);
+                    };
+                }
+                index += 1;
+            }
+            if !changed {
+                assert(self.fixed_point(typed, limit, types));
+                return types;
+            }
+        }
+    }
+
+    #[verifier::opaque]
+    spec fn concat_prefix(&self, typed: &ModuleAliasTypes, types: &Vec<Option<SignalType>>, limit: u64, concats: Seq<Option<ModuleConcat>>) -> bool {
         &&& concats.len() <= typed.sources.roots.wiring.drivers.definitions@.len()
-        &&& forall|i: int| 0 <= i < concats.len() ==> self.concat_at(typed, i, limit, Ok(#[trigger] concats[i]))
+        &&& forall|i: int| 0 <= i < concats.len() ==> self.concat_at(typed, types, i, limit, Ok(#[trigger] concats[i]))
     }
 
     /// 連接の幅と引数順、または最初に見つかった違反を元の断片に対応付ける。
@@ -422,22 +593,36 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(ModuleConcatsError::Types(error)) => self.module_alias_types_result(owner, limit, Err(error)),
             Ok(Some(checked)) => self.module_alias_types_result(owner, limit, Ok(Some(checked.typed)))
                 && checked.concats@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len()
-                && self.concat_prefix(&checked.typed, limit, checked.concats@),
-            Err(error) => exists|typed: ModuleAliasTypes, prefix: Seq<Option<ModuleConcat>>|
+                && self.fixed_point(&checked.typed, limit, checked.types)
+                && self.concat_prefix(&checked.typed, &checked.types, limit, checked.concats@),
+            Err(error) => exists|typed: ModuleAliasTypes, types: Vec<Option<SignalType>>, prefix: Seq<Option<ModuleConcat>>|
                 #[trigger] self.module_alias_types_result(owner, limit, Ok(Some(typed)))
-                && #[trigger] self.concat_prefix(&typed, limit, prefix)
+                && self.fixed_point(&typed, limit, types)
+                && #[trigger] self.concat_prefix(&typed, &types, limit, prefix)
                 && prefix.len() < typed.sources.roots.wiring.drivers.definitions@.len()
-                && self.concat_at(&typed, prefix.len() as int, limit, Err(error)),
+                && self.concat_at(&typed, &types, prefix.len() as int, limit, Err(error)),
         }
+    }
+
+    /// 後続の式検査で使う型表の長さと、型の根拠位置を示す。
+    pub(super) proof fn module_concats_evidence(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleConcats)
+        requires self.module_concats_result(owner, limit, Ok(Some(checked))),
+        ensures
+            self.module_alias_types_result(owner, limit, Ok(Some(checked.typed))),
+            checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
+            type_sites_valid(checked.types@),
+    {
+        self.module_alias_types_evidence(owner, limit, checked.typed);
     }
 
     /// 右辺全体を占める連接の幅を、型が分かった信号名とリテラルから求める。
     ///
-    /// 引数順に幅を記録する。子式や型が未確定の信号を含む場合は、その引数から先を保留する。
+    /// 連接の幅を別名や別の連接へ伝え、追加の型が得られなくなったときの結果を返す。
+    /// 型が未確定の子式や信号を含む場合は、その引数から先を保留する。
     ///
     /// # Errors
     ///
-    /// 配線と型伝播を先に検査する。定義順に、左辺の名前数、引数、合計幅の順で違反を調べる。
+    /// 配線と型伝播を先に検査する。型表が確定した後、定義順に左辺の名前数、引数、合計幅を検査する。
     pub fn check_module_concats(&self, owner: ModuleBodyPosition, limit: u64)
         -> (result: Result<Option<ModuleConcats<'p, 'a>>, ModuleConcatsError<'p, 'a>>)
         requires self.can_resolve(),
@@ -448,29 +633,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(None) => return Ok(None),
             Err(error) => return Err(ModuleConcatsError::Types(error)),
         };
+        proof { self.module_alias_types_evidence(owner, limit, typed); }
+        let types = self.infer_module_concat_types(owner, limit, &typed);
         let count = typed.sources.roots.wiring.drivers.definitions.len();
         let mut concats = Vec::new();
         let mut i = 0;
-        assert(self.concat_prefix(&typed, limit, concats@)) by { reveal(UseAliases::concat_prefix); };
+        assert(self.concat_prefix(&typed, &types, limit, concats@)) by { reveal(UseAliases::concat_prefix); };
         while i < count
             invariant
                 self.can_resolve(), self.module_alias_types_result(owner, limit, Ok(Some(typed))),
                 i == concats@.len() <= count == typed.sources.roots.wiring.drivers.definitions@.len(),
-                self.concat_prefix(&typed, limit, concats@),
+                types@.len() == count, self.fixed_point(&typed, limit, types),
+                self.concat_prefix(&typed, &types, limit, concats@),
             decreases count - i,
         {
-            let concat = self.check_module_concat_row(owner, limit, &typed, i)?;
+            let concat = self.check_module_concat_row(owner, limit, &typed, &types, i)?;
             let ghost before = concats@;
             concats.push(concat);
-            assert(self.concat_prefix(&typed, limit, concats@)) by {
+            assert(self.concat_prefix(&typed, &types, limit, concats@)) by {
                 reveal(UseAliases::concat_prefix);
-                assert forall|j: int| 0 <= j < concats@.len() implies self.concat_at(&typed, j, limit, Ok(#[trigger] concats@[j])) by {
+                assert forall|j: int| 0 <= j < concats@.len() implies self.concat_at(&typed, &types, j, limit, Ok(#[trigger] concats@[j])) by {
                     if j < i { assert(concats@[j] == before[j]); }
                 };
             };
             i += 1;
         }
-        Ok(Some(ModuleConcats { typed, concats }))
+        Ok(Some(ModuleConcats { typed, types, concats }))
     }
 }
 
