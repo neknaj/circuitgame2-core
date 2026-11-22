@@ -248,8 +248,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// `width_limit` は型のビット幅の上限、`bit_limit` は入力・定義・出力それぞれの
     /// ビット配列の上限、`gate_limit` は呼び出しを展開した関数ごとの NOR ゲート数の上限。
-    /// 通常関数を `def` の右辺全体で呼び出せる。その実引数には型が確定した信号名、
-    /// 対応するリテラル、出力が一つの通常関数や基底 NOR の呼び出しを使える。
+    /// `def` の右辺で通常関数や基底 NOR を呼び出すときは、型が確定した信号名、
+    /// 型に合うリテラル、出力が一つの通常関数や基底 NOR の呼び出しを引数に使える。
     /// 基底の宣言などプロジェクト全体の検査には [crate::project::analyze_definitions] を使う。
     ///
     /// # Errors
@@ -268,13 +268,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///     revision: 1,
     ///     text: "(using nor)
     ///            (func inv (in a) (out y) (def y (nor a a)))
-    ///            (func twice (in a) (out y) (def t (inv a)) (def y (inv t)))",
+    ///            (func copy (in a) (out y) (def y (nor (inv a) (nor a a))))",
     /// }]).unwrap();
     /// let targets = index_use_targets(&project).unwrap();
     /// let aliases = check_use_aliases(&targets).unwrap();
     /// let functions = aliases.expand_functions(8, 16, 4).unwrap();
-    /// let twice = functions.get(0, 2).unwrap();
-    /// assert_eq!(twice.netlist().evaluate(&[true]).unwrap(), [true]);
+    /// let copy = functions.get(0, 2).unwrap();
+    /// assert_eq!(copy.netlist().evaluate(&[true]).unwrap(), [true]);
+    /// assert_eq!(copy.netlist().evaluate(&[false]).unwrap(), [false]);
     /// assert!(functions.get(0, 0).is_none());
     /// ```
     pub fn expand_functions(

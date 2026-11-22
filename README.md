@@ -6,7 +6,7 @@ NCG2 の CLI と Web で共用する Rust ライブラリ。回路ソースの�
 
 `def` の右辺には、単独の二進・十六進リテラルや、信号名またはそのフィールドに対する `bit`・`slice` の入れ子を書ける。`concat` は、型が確定した裸のビット列信号と定数 `0`・`1` を引数に取る。構造体ポートの直結と `as`・`raw` の変換では、フィールドに割り当てていないビットも保持する。
 
-関数呼び出しを含むプロジェクトは、[`UseAliases::expand_functions`](src/project/use_aliases/bit_func/compile.rs) で依存順に展開できる。通常関数を `def` の右辺全体で呼ぶときは、型が確定した信号名、型に合うリテラル、出力が一つの通常関数や基底 NOR の呼び出しを実引数に使える。
+関数呼び出しを含むプロジェクトは、[`UseAliases::expand_functions`](src/project/use_aliases/bit_func/compile.rs) で依存順に展開できる。`def` の右辺で通常関数や基底 NOR を呼び出すときは、型が確定した信号名、型に合うリテラル、出力が一つの呼び出しを引数に使える。
 
 ## 使い方
 

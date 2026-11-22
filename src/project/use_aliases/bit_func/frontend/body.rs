@@ -493,11 +493,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 展開できる根 NOR を集め、元の候補添字を残す。
     #[verifier::spinoff_prover]
     #[verifier::rlimit(40)]
-    pub(super) fn select_nor_definitions<'s>(
-        &self, prepared: &'s PreparedExpansionBody<'p, 'a>,
+    fn select_nor_definitions<'s>(
+        &self, candidates: &'s [PreparedNorRoot<'p, 'a>], arguments: &[ProjectedCallArgument],
+        Ghost(prepared): Ghost<&PreparedExpansionBody<'p, 'a>>,
         Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(caller): Ghost<(usize, usize, u64)>,
     ) -> (selected: Vec<NorDefinition<'s, 'p, 'a>>)
         requires self.can_resolve(), self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            candidates@ == prepared.nor_roots@, arguments@ == prepared.projections.call_arguments.arguments@,
         ensures
             forall|i: int| 0 <= i < selected@.len() ==> {
                 let row = #[trigger] selected@[i];
@@ -505,12 +507,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& nor_definition_determined(row.root, prepared.projections.call_arguments.arguments@)
             },
             forall|a: int, b: int| 0 <= a < b < selected@.len() ==> (#[trigger] selected@[a]).index < (#[trigger] selected@[b]).index,
-            forall|i: int| 0 <= i < prepared.nor_roots@.len()
-                && nor_definition_determined(&prepared.nor_roots@[i], prepared.projections.call_arguments.arguments@) ==>
-                exists|j: int| 0 <= j < selected@.len() && #[trigger] selected@[j].index == i,
+            nor_selection_prefix(prepared, prepared.nor_roots@.len() as int, selected@),
+            nor_selection_covers(prepared, prepared.nor_roots@.len() as int, nor_selection_indices(selected@)),
     {
         let mut selected: Vec<NorDefinition<'s, 'p, 'a>> = Vec::new();
-        let arguments = prepared.projections.call_arguments.arguments.as_slice();
         let mut at = 0;
         proof {
             assert forall|i: int| 0 <= i < prepared.nor_roots@.len() implies
@@ -520,8 +520,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         assert(nor_selection_prefix(prepared, 0, selected@)) by { reveal(nor_selection_prefix); };
         assert(nor_selection_covers(prepared, 0, nor_selection_indices(selected@))) by { reveal(nor_selection_covers); };
-        while at < prepared.nor_roots.len()
+        while at < candidates.len()
             invariant
+                candidates@ == prepared.nor_roots@,
                 arguments@ == prepared.projections.call_arguments.arguments@,
                 at <= prepared.nor_roots@.len(),
                 forall|i: int| 0 <= i < prepared.nor_roots@.len() ==>
@@ -530,7 +531,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 nor_selection_covers(prepared, at as int, nor_selection_indices(selected@)),
             decreases prepared.nor_roots@.len() - at,
         {
-            let root = &prepared.nor_roots[at];
+            let root = &candidates[at];
             let ghost before = selected@;
             let ready = nor_definition_determined_exec(root, arguments);
             if ready {
@@ -543,17 +544,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             at += 1;
         }
         reveal(nor_selection_prefix);
-        proof {
-            reveal(nor_selection_covers);
-            let indices = nor_selection_indices(selected@);
-            assert forall|i: int| 0 <= i < prepared.nor_roots@.len()
-                && nor_definition_determined(&prepared.nor_roots@[i], arguments@) implies
-                exists|j: int| 0 <= j < selected@.len() && #[trigger] selected@[j].index == i by {
-                assert(indices.contains(i as usize));
-                let j = choose|j: int| 0 <= j < indices.len() && indices[j] == i as usize;
-                assert(indices[j] == selected@[j].index);
-            };
-        }
         selected
     }
 
@@ -574,14 +564,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     #[verifier::spinoff_prover]
     pub(super) fn resolve_selected_nor_roots<'s>(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, table: &'s FunctionTemplates<'p, 'a>,
-        prepared: &'s PreparedExpansionBody<'p, 'a>, roots: &[NorDefinition<'s, 'p, 'a>],
-        parsed: &'s NamedBuildCircuit, Ghost(caller): Ghost<(usize, usize, u64)>,
+        arguments: &'s [ProjectedCallArgument], roots: &[NorDefinition<'s, 'p, 'a>],
+        parsed: &'s NamedBuildCircuit, Ghost(prepared): Ghost<&PreparedExpansionBody<'p, 'a>>, Ghost(caller): Ghost<(usize, usize, u64)>,
     ) -> (bindings: Vec<NorBinding<'s, 'p, 'a>>)
         requires
             self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
             self.function_templates_match(plan, caller.2, table),
             plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+            arguments@ == prepared.projections.call_arguments.arguments@,
             *parsed == self.targets.project_model().circuits_model()[caller.0 as int],
             forall|i: int| 0 <= i < roots@.len() ==> {
                 let row = #[trigger] roots@[i];
@@ -598,7 +589,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             forall|i: int, j: int| 0 <= i < j < bindings@.len() ==>
                 (#[trigger] bindings@[i]).selected.prepared.output_slot < (#[trigger] bindings@[j]).selected.prepared.output_slot,
     {
-        let arguments = prepared.projections.call_arguments.arguments.as_slice();
         let mut bindings = Vec::new();
         let mut i = 0usize;
         while i < roots.len()
@@ -1250,15 +1240,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         widths
     }
 
+    #[verifier::opaque]
     pub(super) closed spec fn prepared_definition_result(
-        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorDefinition>,
         result: Result<Vec<CheckedBitDefinition>, BitFuncError>,
     ) -> bool {
         match result {
             Ok(slots) => slots@.len() == scope.wiring.drivers.definitions@.len()
-                && self.expansion_definition_prefix(scope, calls, Seq::empty(), slots@)
+                && self.expansion_definition_prefix(scope, calls, roots, slots@)
                 && self.definition_widths_match(scope, slots@)
-                && (forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls, slot) ==>
+                && (forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls, slot) && !nor_covers(roots, slot) ==>
                     bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]))
                 && (forall|group: int| 0 <= group < selected.len() ==> {
                     let call = #[trigger] selected[group];
@@ -1282,38 +1273,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     #[trigger] expression_argument_matches_width(scope.source, scope.parsed.syntax.forms@,
                         scope.inputs@, slots@, selected[group], child, port, scope.limit),
             Err(error) => exists|prefix: Seq<CheckedBitDefinition>|
-                #[trigger] self.expansion_definition_prefix(scope, calls, Seq::empty(), prefix)
+                #[trigger] self.expansion_definition_prefix(scope, calls, roots, prefix)
                 && self.definition_widths_match(scope, prefix)
                 && prefix.len() < scope.wiring.drivers.definitions@.len()
                 && !call_covers(calls, prefix.len() as int)
+                && !nor_covers(roots, prefix.len() as int)
                 && self.definition_error(scope, prefix, error),
         }
     }
 
     pub(super) proof fn prepared_definition_width_evidence(
-        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorDefinition>,
         definitions: Vec<CheckedBitDefinition>,
     )
-        requires self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+        requires self.prepared_definition_result(scope, calls, selected, roots, Ok(definitions)),
         ensures
             definitions@.len() == scope.wiring.drivers.definitions@.len(),
             self.definition_widths_match(scope, definitions@),
-    {}
+    {
+        reveal(UseAliases::prepared_definition_result);
+    }
 
     /// 展開準備が成功したとき、通常の定義が元の右辺と型に対応することを取り出す。
     pub(super) proof fn prepared_ordinary_definition_evidence(
-        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorDefinition>,
         definitions: Vec<CheckedBitDefinition>, i: int,
     )
         requires
-            self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+            self.prepared_definition_result(scope, calls, selected, roots, Ok(definitions)),
             0 <= i < definitions@.len(),
-            !call_covers(calls, i),
+            !call_covers(calls, i), !nor_covers(roots, i),
         ensures
             definitions@.len() == scope.wiring.drivers.definitions@.len(),
             self.bit_definition_from_source(scope, definitions@.take(i), i, definitions@[i]),
             self.definition_widths_match(scope, definitions@),
     {
+        reveal(UseAliases::prepared_definition_result);
         reveal(UseAliases::expansion_definition_prefix);
     }
 
@@ -1324,7 +1319,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 通常の右辺の変換で最初に見つかったエラーを返す。
     pub(super) fn project_prepared_definition_body(
         &self, scope: &FuncProjection<'_, 'p, 'a>, calls: &[CheckedExpansionCall<'p, 'a>],
-        selected: &[ResolvedTemplateCall<'_, 'p, 'a>], literal_widths: &[Option<u64>], concats: Vec<ConcatProjection>,
+        selected: &[ResolvedTemplateCall<'_, 'p, 'a>], roots: &[NorDefinition<'_, 'p, 'a>], literal_widths: &[Option<u64>], concats: Vec<ConcatProjection>,
         Ghost(plan): Ghost<FunctionExpansionOrder<'p, 'a>>, Ghost(prepared): Ghost<PreparedExpansionBody<'p, 'a>>,
         Ghost(templates): Ghost<&FunctionTemplates<'p, 'a>>,
     ) -> (result: Result<Vec<CheckedBitDefinition<'p, 'a>>, BitFuncError<'p, 'a>>)
@@ -1336,6 +1331,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             calls@ == prepared.calls@,
             literal_widths@ == prepared.typed.literals.widths@ && literal_widths@.len() == scope.types@.len(),
             concats@ == prepared.projections.concats@,
+            self.body_nor_slots_match(scope, calls@, roots@, concats@),
             scope.structures@ == prepared.projections.entries@,
             self.expansion_selection_matches(&plan, templates, (scope.file, scope.entry, scope.limit), &prepared, selected@),
             forall|i: int| 0 <= i < selected@.len() ==> {
@@ -1345,7 +1341,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     !has_structure_port(call.template.signature_model().inputs@)
                         && !has_structure_port(call.template.signature_model().outputs@)
             },
-        ensures self.prepared_definition_result(scope, calls@, selected@, result),
+        ensures self.prepared_definition_result(scope, calls@, selected@, roots@, result),
     {
         let call_widths = self.resolved_call_output_widths(scope, selected, Ghost(plan), Ghost(prepared));
         proof {
@@ -1357,18 +1353,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             self.prepared_calls_fit_body(scope, plan, &prepared, call_widths@);
         }
-        let roots: &[NorDefinition] = &[];
-        assert(roots@ =~= Seq::empty());
-        assert(self.body_nor_slots_match(scope, calls@, roots@, concats@)) by {
-            reveal(UseAliases::body_nor_slots_match);
-        };
         let result = self.project_definition_body(scope, calls, roots, call_widths.as_slice(), literal_widths, concats, Ghost(prepared.typed));
         proof {
+            reveal(UseAliases::prepared_definition_result);
             if let Ok(slots) = &result {
                 reveal(UseAliases::body_calls_match);
                 reveal(UseAliases::expansion_definition_prefix);
                 reveal(UseAliases::definition_widths_match);
-                assert forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls@, slot) implies
+                assert forall|slot: int| 0 <= slot < slots@.len() && !call_covers(calls@, slot) && !nor_covers(roots@, slot) implies
                     bit_definition_matches(scope.inputs@, slots@.take(slot), #[trigger] slots@[slot]) by {
                     assert(self.bit_definition_from_source(scope, slots@.take(slot), slot, slots@[slot]));
                 };
@@ -1850,14 +1842,27 @@ pub(in crate::project::use_aliases::bit_func) enum ExpandedBodyError<'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    spec fn expanded_projection_scope<'w>(
+        &self, caller: (usize, usize, u64), prepared: &'w PreparedExpansionBody<'p, 'a>,
+        ports: &'w PreparedBitFuncPorts<'p, 'a>,
+    ) -> FuncProjection<'w, 'p, 'a> {
+        let (file, entry, limit) = caller;
+        let project = self.targets.project_model();
+        FuncProjection {
+            file, entry, limit, source: &project.sources_model()[file as int],
+            parsed: &project.circuits_model()[file as int], wiring: &prepared.typed.literals.wiring->Checked_0,
+            inputs: &ports.inputs, outputs: &ports.outputs,
+            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
+            types: &prepared.typed.types, structures: &prepared.projections.entries,
+        }
+    }
+
+    #[verifier::opaque]
     pub(in crate::project::use_aliases::bit_func) closed spec fn expanded_body_lowering_result(
         &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
         layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
     ) -> bool {
         let (file, entry, limit) = caller;
-        let project = self.targets.project_model();
-        let source = &project.sources_model()[file as int];
-        let parsed = &project.circuits_model()[file as int];
         let wiring = &prepared.typed.literals.wiring->Checked_0;
         exists|selected: Seq<ResolvedTemplateCall>|
         {
@@ -1872,96 +1877,358 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && (expanded.has_structure_ports <==> has_structure_port(wiring.drivers.signature.inputs@)
                             || has_structure_port(wiring.drivers.signature.outputs@)))
                     && {
-                        let scope = FuncProjection {
-                            file, entry, limit, source, parsed, wiring,
-                            inputs: &ports.inputs, outputs: &ports.outputs,
-                            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
-                            types: &prepared.typed.types, structures: &prepared.projections.entries,
-                        };
-                        self.expanded_definition_lowering_result(&scope, prepared.calls@, selected,
-                            prepared.projections.call_arguments.arguments@, layout_limit, gate_limit, result)
+                        let scope = self.expanded_projection_scope(caller, prepared, &ports);
+                        self.expanded_definition_lowering_result(&scope, plan, table, prepared, selected, layout_limit, gate_limit, result)
                     },
             }
         }
     }
 
+    #[verifier::opaque]
+    spec fn nor_expansion_selection_matches(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, rows: Seq<NorDefinition>, bindings: Seq<NorBinding>,
+    ) -> bool {
+        let arguments = prepared.projections.call_arguments.arguments@;
+        &&& rows.len() == bindings.len()
+        &&& self.body_nor_slots_match(scope, prepared.calls@, rows, prepared.projections.concats@)
+        &&& nor_selection_prefix(prepared, prepared.nor_roots@.len() as int, rows)
+        &&& forall|i: int| 0 <= i < bindings.len() ==>
+            self.nor_binding_matches(plan, table, scope.limit, scope.parsed, arguments, rows[i], #[trigger] bindings[i])
+        &&& nor_selection_covers(prepared, prepared.nor_roots@.len() as int, nor_selection_indices(rows))
+        &&& forall|i: int, j: int| 0 <= i < j < bindings.len() ==>
+            (#[trigger] bindings[i]).selected.prepared.output_slot < (#[trigger] bindings[j]).selected.prepared.output_slot
+    }
+
+    #[verifier::opaque]
     spec fn expanded_definition_lowering_result(
-        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
-        arguments: Seq<ProjectedCallArgument>, layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>,
+        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
+    ) -> bool {
+        &&& self.projection_context(scope)
+        &&& exists|rows: Seq<NorDefinition>, bindings: Seq<NorBinding>|
+            #[trigger] self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings)
+            && self.expanded_bound_definitions_result(scope, prepared, selected, rows, bindings, layout_limit, gate_limit, result)
+    }
+
+    #[verifier::opaque]
+    spec fn expanded_bound_definitions_result(
+        &self, scope: &FuncProjection, prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>,
+        rows: Seq<NorDefinition>, bindings: Seq<NorBinding>,
+        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
     ) -> bool {
         let drivers = scope.wiring.drivers.outputs@;
-        &&& self.projection_context(scope)
-        &&& match result {
-            Err(ExpandedBodyError::Definition(error)) => self.prepared_definition_result(scope, calls, selected, Err(error)),
+        let arguments = prepared.projections.call_arguments.arguments@;
+        match result {
+            Err(ExpandedBodyError::Definition(error)) =>
+                self.prepared_definition_result(scope, prepared.calls@, selected, rows, Err(error)),
             _ => exists|slots: Vec<CheckedBitDefinition>|
-                #[trigger] self.prepared_definition_result(scope, calls, selected, Ok(slots))
-                && match result {
-                    Err(ExpandedBodyError::Output(error)) => output_width_failure(
-                        &scope.wiring.drivers.signature, scope.inputs@, scope.outputs@, slots@, drivers, error),
-                    Ok(value) => output_widths_before(scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
-                        && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, Seq::empty(), arguments, layout_limit, gate_limit, Ok(value.circuit)),
-                    Err(ExpandedBodyError::Lowering(error)) => output_widths_before(
-                        scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
-                        && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, Seq::empty(), arguments, layout_limit, gate_limit, Err(error)),
-                    _ => false,
-                },
+                #[trigger] self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(slots))
+                && self.expanded_slots_result(scope, selected, bindings, arguments, slots, layout_limit, gate_limit, result),
         }
     }
 
-    /// 展開に成功した本体から、元ソースの検査結果と同じ呼び出し先を取り出す。
+    #[verifier::opaque]
+    spec fn expanded_slots_result(
+        &self, scope: &FuncProjection, selected: Seq<ResolvedTemplateCall>, bindings: Seq<NorBinding>,
+        arguments: Seq<ProjectedCallArgument>, slots: Vec<CheckedBitDefinition>, layout_limit: usize, gate_limit: usize,
+        result: Result<ExpandedBody, ExpandedBodyError>,
+    ) -> bool {
+        let drivers = scope.wiring.drivers.outputs@;
+        &&& forall|i: int| 0 <= i < bindings.len() ==> nor_binding_fits_body(
+            #[trigger] bindings[i], scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots@, scope.limit)
+        &&& match result {
+            Err(ExpandedBodyError::Output(error)) => output_width_failure(
+                &scope.wiring.drivers.signature, scope.inputs@, scope.outputs@, slots@, drivers, error),
+            Ok(value) => output_widths_before(scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
+                && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
+                    drivers, scope.parsed.syntax.forms@, selected, bindings, arguments, layout_limit, gate_limit, Ok(value.circuit)),
+            Err(ExpandedBodyError::Lowering(error)) => output_widths_before(
+                scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
+                && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
+                    drivers, scope.parsed.syntax.forms@, selected, bindings, arguments, layout_limit, gate_limit, Err(error)),
+            _ => false,
+        }
+    }
+
+    /// 根 NOR の選択と定義列の変換結果を、本体の診断または成功結果に対応付ける。
+    #[verifier::spinoff_prover]
+    proof fn expanded_definition_result_intro(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>, rows: Seq<NorDefinition>, bindings: Seq<NorBinding>,
+        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
+    )
+        requires
+            self.projection_context(scope),
+            self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings),
+            self.expanded_bound_definitions_result(scope, prepared, selected, rows, bindings, layout_limit, gate_limit, result),
+        ensures self.expanded_definition_lowering_result(scope, plan, table, prepared, selected, layout_limit, gate_limit, result),
+    {
+        reveal(UseAliases::expanded_definition_lowering_result);
+    }
+
+    /// ポートの検査に続く変換結果を、展開全体の契約に結び付ける。
+    #[verifier::spinoff_prover]
+    proof fn expanded_body_result_from_ports(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, ports: &PreparedBitFuncPorts, selected: Seq<ResolvedTemplateCall>,
+        layout_limit: usize, gate_limit: usize, result: Result<ExpandedBody, ExpandedBodyError>,
+    )
+        requires
+            self.expansion_selection_matches(plan, table, caller, prepared, selected),
+            self.expanded_routine_ports_result(caller.0, caller.1, caller.2, &prepared.typed.literals.wiring->Checked_0,
+                prepared.projections.layouts, selected, Ok(*ports)),
+            self.expanded_definition_lowering_result(&self.expanded_projection_scope(caller, prepared, ports),
+                plan, table, prepared, selected, layout_limit, gate_limit, result),
+            !(result matches Err(ExpandedBodyError::Ports(_))),
+            result matches Ok(expanded) ==> expanded.ports == *ports
+                && (expanded.has_structure_ports <==>
+                    has_structure_port(prepared.typed.literals.wiring->Checked_0.drivers.signature.inputs@)
+                    || has_structure_port(prepared.typed.literals.wiring->Checked_0.drivers.signature.outputs@)),
+        ensures self.expanded_body_lowering_result(plan, table, caller, prepared, layout_limit, gate_limit, result),
+    {
+        reveal(UseAliases::expanded_body_lowering_result);
+    }
+
+    /// 変換に使った NOR の束縛が、元の定義と同じ出力スロットを指すことを示す。
+    #[verifier::spinoff_prover]
+    proof fn expanded_nor_binding_evidence(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, rows: Seq<NorDefinition>, bindings: Seq<NorBinding>, i: int,
+    )
+        requires
+            self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings),
+            0 <= i < bindings.len(),
+        ensures ({
+            let binding = bindings[i];
+            &&& binding.selected.prepared.output_slot == rows[i].root.output_slot
+            &&& !call_covers(prepared.calls@, binding.selected.prepared.output_slot as int)
+            &&& binding.candidate < prepared.nor_roots@.len()
+            &&& *binding.selected.prepared == prepared.nor_roots@[binding.candidate as int]
+            &&& binding.selected.prepared.definition < scope.parsed.definitions@.len()
+            &&& *binding.references == scope.parsed.definitions@[binding.selected.prepared.definition as int].references
+            &&& nor_definition_determined(binding.selected.prepared, prepared.projections.call_arguments.arguments@)
+            &&& self.nor_binding_context(plan, table, scope.limit, prepared.projections.call_arguments.arguments@, binding)
+        }),
+    {
+        let row = rows[i];
+        let binding = bindings[i];
+        let arguments = prepared.projections.call_arguments.arguments@;
+        assert(0 <= i < rows.len() && self.body_nor_slots_match(
+            scope, prepared.calls@, rows, prepared.projections.concats@)) by {
+            reveal(UseAliases::nor_expansion_selection_matches);
+        };
+        assert(row.index < prepared.nor_roots@.len() && *row.root == prepared.nor_roots@[row.index as int]
+            && self.nor_binding_matches(plan, table, scope.limit, scope.parsed, arguments, row, binding)) by {
+            reveal(UseAliases::nor_expansion_selection_matches);
+            reveal(nor_selection_prefix);
+        };
+        assert(!call_covers(prepared.calls@, row.root.output_slot as int)) by {
+            reveal(UseAliases::body_nor_slots_match);
+        };
+        reveal(UseAliases::nor_binding_matches);
+    }
+
+    #[verifier::opaque]
+    pub(super) open spec fn expanded_body_nor_bindings(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates, prepared: &PreparedExpansionBody,
+        rows: Seq<NorDefinition>, bindings: Seq<NorBinding>, slots: Seq<CheckedBitDefinition>,
+    ) -> bool {
+        &&& rows.len() == bindings.len()
+        &&& forall|i: int| 0 <= i < bindings.len() ==> {
+            let binding = #[trigger] bindings[i];
+            &&& binding.selected.prepared.output_slot == rows[i].root.output_slot
+            &&& binding.selected.prepared.output_slot < slots.len()
+            &&& !call_covers(prepared.calls@, binding.selected.prepared.output_slot as int)
+            &&& binding.candidate < prepared.nor_roots@.len()
+            &&& *binding.selected.prepared == prepared.nor_roots@[binding.candidate as int]
+            &&& binding.selected.prepared.root.expression.source == scope.source
+            &&& binding.selected.prepared.definition < scope.parsed.definitions@.len()
+            &&& *binding.references == scope.parsed.definitions@[binding.selected.prepared.definition as int].references
+            &&& nor_definition_determined(binding.selected.prepared, prepared.projections.call_arguments.arguments@)
+            &&& self.nor_binding_context(plan, table, scope.limit, prepared.projections.call_arguments.arguments@, binding)
+            &&& nor_binding_fits_body(binding, scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots, scope.limit)
+        }
+        &&& forall|i: int, j: int| 0 <= i < j < bindings.len() ==>
+            (#[trigger] bindings[i]).selected.prepared.output_slot < (#[trigger] bindings[j]).selected.prepared.output_slot
+        &&& forall|i: int| #[trigger] nor_binding_covers(bindings, i) <==> nor_covers(rows, i)
+    }
+
+    /// 変換で使った根 NOR の束縛と出力スロットを、参照評価が使う形にまとめる。
+    #[verifier::spinoff_prover]
+    proof fn expanded_body_nor_bindings_intro(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, rows: Seq<NorDefinition>, bindings: Seq<NorBinding>, slots: Seq<CheckedBitDefinition>,
+    )
+        requires
+            self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings),
+            forall|i: int| 0 <= i < bindings.len() ==> nor_binding_fits_body(
+                #[trigger] bindings[i], scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots, scope.limit),
+        ensures self.expanded_body_nor_bindings(scope, plan, table, prepared, rows, bindings, slots),
+    {
+        let arguments = prepared.projections.call_arguments.arguments@;
+        assert(self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings));
+        assert(rows.len() == bindings.len()) by { reveal(UseAliases::nor_expansion_selection_matches); };
+        assert forall|i: int| 0 <= i < bindings.len() implies {
+            let binding = #[trigger] bindings[i];
+            &&& binding.selected.prepared.output_slot == rows[i].root.output_slot
+            &&& binding.selected.prepared.output_slot < slots.len()
+            &&& !call_covers(prepared.calls@, binding.selected.prepared.output_slot as int)
+            &&& binding.candidate < prepared.nor_roots@.len()
+            &&& *binding.selected.prepared == prepared.nor_roots@[binding.candidate as int]
+            &&& binding.selected.prepared.root.expression.source == scope.source
+            &&& binding.selected.prepared.definition < scope.parsed.definitions@.len()
+            &&& *binding.references == scope.parsed.definitions@[binding.selected.prepared.definition as int].references
+            &&& nor_definition_determined(binding.selected.prepared, arguments)
+            &&& self.nor_binding_context(plan, table, scope.limit, arguments, binding)
+            &&& nor_binding_fits_body(binding, scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots, scope.limit)
+        } by {
+            let binding = bindings[i];
+            assert(nor_binding_fits_body(binding, scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots, scope.limit));
+            self.expanded_nor_binding_evidence(scope, plan, table, prepared, rows, bindings, i);
+        };
+        assert forall|i: int, j: int| 0 <= i < j < bindings.len() implies
+            (#[trigger] bindings[i]).selected.prepared.output_slot < (#[trigger] bindings[j]).selected.prepared.output_slot by {
+            reveal(UseAliases::nor_expansion_selection_matches);
+        };
+        assert forall|i: int| #[trigger] nor_binding_covers(bindings, i) <==> nor_covers(rows, i) by {
+            if nor_binding_covers(bindings, i) {
+                let j = choose|j: int| 0 <= j < bindings.len() && (#[trigger] bindings[j]).selected.prepared.output_slot == i;
+                assert(rows[j].root.output_slot == i);
+            }
+            if nor_covers(rows, i) {
+                let j = choose|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).root.output_slot == i;
+                assert(bindings[j].selected.prepared.output_slot == i);
+            }
+        };
+        reveal(UseAliases::expanded_body_nor_bindings);
+    }
+
+    /// ポートの準備と定義の変換が参照した呼び出し先を、依存順に取り出す。
+    #[verifier::spinoff_prover]
+    proof fn expanded_success_call_selection<'w>(
+        &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
+        prepared: &'w PreparedExpansionBody<'p, 'a>, bit_limit: usize, gate_limit: usize, value: &'w ExpandedBody<'p, 'a>,
+    ) -> (selected: Seq<ResolvedTemplateCall<'w, 'p, 'a>>)
+        requires self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
+        ensures
+            self.expansion_selection_matches(plan, table, caller, prepared, selected),
+            self.expanded_routine_ports_result(caller.0, caller.1, caller.2, &prepared.typed.literals.wiring->Checked_0,
+                prepared.projections.layouts, selected, Ok(value.ports)),
+            self.expanded_definition_lowering_result(&self.expanded_projection_scope(caller, prepared, &value.ports),
+                plan, table, prepared, selected, bit_limit, gate_limit, Ok(*value)),
+            value.has_structure_ports <==> has_structure_port(prepared.typed.literals.wiring->Checked_0.drivers.signature.inputs@)
+                || has_structure_port(prepared.typed.literals.wiring->Checked_0.drivers.signature.outputs@),
+    {
+        let (file, entry, limit) = caller;
+        let ports = &value.ports;
+        let scope = self.expanded_projection_scope(caller, prepared, ports);
+        let wiring = scope.wiring;
+        reveal(UseAliases::expanded_body_lowering_result);
+        let selected = choose|rows: Seq<ResolvedTemplateCall<'w, 'p, 'a>>|
+            #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, rows)
+            && self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, rows, Ok(*ports))
+            && self.expanded_definition_lowering_result(&scope, plan, table, prepared, rows, bit_limit, gate_limit, Ok(*value));
+        selected
+    }
+
+    /// 展開結果から、その変換に使った定義列と NOR の束縛を取り出す。
+    #[verifier::spinoff_prover]
+    proof fn expanded_success_definition_selection<'w>(
+        &self, scope: &FuncProjection<'w, 'p, 'a>, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>,
+        prepared: &'w PreparedExpansionBody<'p, 'a>, selected: Seq<ResolvedTemplateCall<'w, 'p, 'a>>,
+        bit_limit: usize, gate_limit: usize, value: &ExpandedBody<'p, 'a>,
+    ) -> (witness: (Seq<NorDefinition<'w, 'p, 'a>>, Seq<NorBinding<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>))
+        requires self.expanded_definition_lowering_result(scope, plan, table, prepared, selected, bit_limit, gate_limit, Ok(*value)),
+        ensures ({
+            let (rows, bindings, slots) = witness;
+            &&& self.projection_context(scope)
+            &&& self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings)
+            &&& self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(slots))
+            &&& self.expanded_slots_result(scope, selected, bindings, prepared.projections.call_arguments.arguments@,
+                slots, bit_limit, gate_limit, Ok(*value))
+        }),
+    {
+        let (rows, bindings) = choose|rows: Seq<NorDefinition<'w, 'p, 'a>>, bindings: Seq<NorBinding<'w, 'p, 'a>>|
+            #[trigger] self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings)
+            && self.expanded_bound_definitions_result(scope, prepared, selected, rows, bindings, bit_limit, gate_limit, Ok(*value));
+        assert(self.projection_context(scope)
+            && self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings)
+            && self.expanded_bound_definitions_result(scope, prepared, selected, rows, bindings, bit_limit, gate_limit, Ok(*value))) by {
+            reveal(UseAliases::expanded_definition_lowering_result);
+        };
+        let arguments = prepared.projections.call_arguments.arguments@;
+        let slots = choose|slots: Vec<CheckedBitDefinition>|
+            #[trigger] self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(slots))
+            && self.expanded_slots_result(scope, selected, bindings, arguments, slots, bit_limit, gate_limit, Ok(*value));
+        assert(self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(slots))
+            && self.expanded_slots_result(scope, selected, bindings, arguments, slots, bit_limit, gate_limit, Ok(*value))) by {
+            reveal(UseAliases::expanded_bound_definitions_result);
+        };
+        (rows, bindings, slots)
+    }
+
+    /// 展開結果から、元の宣言に対応するポートと、各定義の変換に使った呼び出しや出力スロットを取り出す。
+    #[verifier::spinoff_prover]
     pub(super) proof fn expanded_body_success<'w>(
         &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
         prepared: &'w PreparedExpansionBody<'p, 'a>, bit_limit: usize, gate_limit: usize, value: &'w ExpandedBody<'p, 'a>,
-    ) -> (witness: (FuncProjection<'w, 'p, 'a>, Seq<ResolvedTemplateCall<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>))
+    ) -> (witness: (FuncProjection<'w, 'p, 'a>, Seq<ResolvedTemplateCall<'w, 'p, 'a>>,
+        Seq<NorDefinition<'w, 'p, 'a>>, Seq<NorBinding<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>))
         requires self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
         ensures ({
-            let (scope, selected, slots) = witness;
+            let (scope, selected, rows, bindings, slots) = witness;
             let (file, entry, limit) = caller;
             let project = self.targets.project_model();
             let wiring = &prepared.typed.literals.wiring->Checked_0;
             let ports = &value.ports;
             let drivers = wiring.drivers.outputs@;
-            &&& scope == (FuncProjection { file, entry, limit, source: &project.sources_model()[file as int],
+            &&& scope == (FuncProjection {
+                file, entry, limit, source: &project.sources_model()[file as int],
                 parsed: &project.circuits_model()[file as int], wiring, inputs: &ports.inputs, outputs: &ports.outputs,
                 layouts: match &ports.layouts { Some(table) => Some(table), None => None },
-                types: &prepared.typed.types, structures: &prepared.projections.entries })
+                types: &prepared.typed.types, structures: &prepared.projections.entries,
+            })
             &&& self.projection_context(&scope)
             &&& self.projection_port_widths_match(&scope)
             &&& self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
                 ==> self.projection_structures_match(&scope)
             &&& self.expansion_selection_matches(plan, table, caller, prepared, selected)
             &&& self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, selected, Ok(*ports))
-            &&& self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
+            &&& self.prepared_definition_result(&scope, prepared.calls@, selected, rows, Ok(slots))
+            &&& self.expanded_body_nor_bindings(&scope, plan, table, prepared, rows, bindings, slots@)
+            &&& form_spans_valid(scope.source.text, scope.parsed.syntax.forms@, scope.source.text.spec_bytes().len() as int)
             &&& output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
             &&& projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
-                selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit))
+                selected, bindings, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit))
             &&& value.has_structure_ports <==> has_structure_port(wiring.drivers.signature.inputs@)
                 || has_structure_port(wiring.drivers.signature.outputs@)
         }),
     {
         let (file, entry, limit) = caller;
-        let project = self.targets.project_model();
-        let source = &project.sources_model()[file as int];
-        let parsed = &project.circuits_model()[file as int];
-        let wiring = &prepared.typed.literals.wiring->Checked_0;
         let ports = &value.ports;
-        let scope = FuncProjection {
-            file, entry, limit, source, parsed, wiring, inputs: &ports.inputs, outputs: &ports.outputs,
-            layouts: match &ports.layouts { Some(table) => Some(table), None => None },
-            types: &prepared.typed.types, structures: &prepared.projections.entries,
+        let scope = self.expanded_projection_scope(caller, prepared, ports);
+        let wiring = scope.wiring;
+        let parsed = scope.parsed;
+        let selected = self.expanded_success_call_selection(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let (rows, bindings, slots) = self.expanded_success_definition_selection(
+            &scope, plan, table, prepared, selected, bit_limit, gate_limit, value);
+        let arguments = prepared.projections.call_arguments.arguments@;
+        assert forall|i: int| 0 <= i < bindings.len() implies nor_binding_fits_body(
+            #[trigger] bindings[i], scope.source, scope.parsed.syntax.forms@, scope.inputs@, slots@, limit) by {
+            reveal(UseAliases::expanded_slots_result);
         };
-        let selected = choose|rows: Seq<ResolvedTemplateCall<'w, 'p, 'a>>|
-            #[trigger] self.expansion_selection_matches(plan, table, caller, prepared, rows)
-            && self.expanded_routine_ports_result(file, entry, limit, wiring, prepared.projections.layouts, rows, Ok(*ports))
-            && self.expanded_definition_lowering_result(&scope, prepared.calls@, rows, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(*value));
         let drivers = wiring.drivers.outputs@;
-        let slots = choose|slots: Vec<CheckedBitDefinition>|
-            #[trigger] self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
-            && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
-            && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
-                parsed.syntax.forms@, selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit));
+        assert(output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
+            && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers, parsed.syntax.forms@,
+                selected, bindings, arguments, bit_limit, gate_limit, Ok(value.circuit))) by {
+            reveal(UseAliases::expanded_slots_result);
+        };
+        assert(form_spans_valid(scope.source.text, scope.parsed.syntax.forms@, scope.source.text.spec_bytes().len() as int)) by {
+            reveal(UseAliases::prepared_definition_result);
+        };
+        self.expanded_body_nor_bindings_intro(&scope, plan, table, prepared, rows, bindings, slots@);
         reveal(UseAliases::routine_ports_result);
         assert(self.projection_port_widths_match(&scope));
         assert(self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
@@ -1971,7 +2238,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> prepared.projections.entries@.len() == 0);
             }
         };
-        (scope, selected, slots)
+        (scope, selected, rows, bindings, slots)
     }
 
     /// 展開した本体のポート幅とビット配置を、元の宣言の署名に結び付ける。
@@ -1993,7 +2260,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }),
     {
         let (file, entry, limit) = caller;
-        let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let (scope, selected, _, bindings, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
         let wiring = scope.wiring;
         let ports = &value.ports;
         let drivers = wiring.drivers.outputs@;
@@ -2001,7 +2268,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::routine_ports_result);
         reveal(UseAliases::template_port_widths_match);
         projected_lowering_ports(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, &value.circuit);
+            selected, bindings, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, &value.circuit);
     }
 
     /// 展開後の評価結果を、ソースが出力ポートごとに指定した駆動元の値に結び付ける。
@@ -2021,12 +2288,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 port_values(value.circuit.input_layout_model(), input), expanded_definition_values(&value.circuit, input, gates),
                 port_values(value.circuit.output_layout_model(), output)),
     {
-        let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let (scope, selected, _, bindings, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
         let circuit = &value.circuit;
         let netlist = circuit.netlist_model();
         let drivers = scope.wiring.drivers.outputs@;
         projected_lowering_ports(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit);
+            selected, bindings, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit);
         reveal(UseAliases::routine_ports_result);
         reveal(nor_evaluation);
         vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
@@ -2034,7 +2301,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && gates.len() == netlist.gates@.len() && output_values_match(input, gates, netlist.outputs@, output);
         reveal(UseAliases::template_port_widths_match);
         projected_lowering_output_values(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit, input, gates, output);
+            selected, bindings, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit, input, gates, output);
         let incoming = port_values(circuit.input_layout_model(), input);
         let values = expanded_definition_values(circuit, input, gates);
         let outgoing = port_values(circuit.output_layout_model(), output);
@@ -2094,7 +2361,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
         }),
     {
-        let (scope, selected, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let (scope, selected, rows, bindings, slots) = self.expanded_body_success(plan, table, caller, prepared, bit_limit, gate_limit, value);
         let call = selected[index];
         let root = prepared.projections.calls@[index];
         let forms = scope.parsed.syntax.forms@;
@@ -2104,8 +2371,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::routine_ports_result);
         reveal(UseAliases::template_port_widths_match);
         reveal(UseAliases::prepared_definition_result);
+        assert(!nor_binding_covers(bindings, call.group.outputs.start as int)) by {
+            reveal(UseAliases::expanded_body_nor_bindings);
+            assert(self.expanded_body_nor_bindings(&scope, plan, table, prepared, rows, bindings, slots@));
+            let at = call.group.outputs.start as int;
+            if nor_binding_covers(bindings, at) {
+                let i = choose|i: int| 0 <= i < bindings.len() && (#[trigger] bindings[i]).selected.prepared.output_slot == at;
+                assert(call.group.outputs.start < call.group.outputs.end);
+                assert(*call.group == prepared.calls@[index]);
+                assert(call_covers(prepared.calls@, at));
+                assert(!call_covers(prepared.calls@, bindings[i].selected.prepared.output_slot as int));
+            }
+        };
         let evidence = projected_lowering_call_evaluation(self, plan, caller, prepared, scope.inputs@,
-            slots@, scope.outputs@, drivers, forms, selected, Seq::empty(), index, bit_limit, gate_limit, &value.circuit, input, gates);
+            slots@, scope.outputs@, drivers, forms, selected, bindings, index, bit_limit, gate_limit, &value.circuit, input, gates);
         if let MixedCallEvaluation::Flat(arguments, outputs) = evidence {
             let callee = call.template.circuit_model();
             assert(evaluated_flat_call_matches(self, caller, prepared, index, call,
@@ -2118,11 +2397,218 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         (call, evidence)
     }
 
+    /// 型検査を済ませた定義に対応する根 NOR の入力と出力を、配線の契約に結び付ける。
+    #[verifier::spinoff_prover]
+    proof fn prepared_nor_bindings_fit_slots(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>, rows: Seq<NorDefinition>, bindings: Seq<NorBinding>,
+        definitions: Vec<CheckedBitDefinition>,
+    )
+        requires
+            self.projection_context(scope), self.projection_port_widths_match(scope),
+            self.structure_layout_for_ports(scope.limit, scope.layouts),
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings),
+            self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(definitions)),
+        ensures
+            forall|i: int| 0 <= i < bindings.len() ==> nor_binding_fits_body(
+                #[trigger] bindings[i], scope.source, scope.parsed.syntax.forms@, scope.inputs@, definitions@, scope.limit),
+            forall|at: int| 0 <= at < definitions@.len() && !nor_binding_covers(bindings, at) && !call_covers(prepared.calls@, at) ==>
+                bit_definition_matches(scope.inputs@, definitions@.take(at), #[trigger] definitions@[at]),
+    {
+        let slots = definitions@;
+        assert(slots.len() == scope.wiring.drivers.definitions@.len()
+            && self.expansion_definition_prefix(scope, prepared.calls@, rows, slots)
+            && self.definition_widths_match(scope, slots)) by {
+            reveal(UseAliases::prepared_definition_result);
+        };
+        assert(self.body_nor_slots_match(scope, prepared.calls@, rows, prepared.projections.concats@)
+            && rows.len() == bindings.len()) by {
+            reveal(UseAliases::nor_expansion_selection_matches);
+        };
+        assert forall|i: int| 0 <= i < rows.len() implies {
+            let row = #[trigger] rows[i];
+            row.index < prepared.nor_roots@.len() && *row.root == prepared.nor_roots@[row.index as int]
+        } by {
+            reveal(UseAliases::nor_expansion_selection_matches);
+            reveal(nor_selection_prefix);
+        };
+        assert forall|i: int| 0 <= i < bindings.len() implies self.nor_binding_matches(plan, table, scope.limit, scope.parsed,
+            prepared.projections.call_arguments.arguments@, rows[i], #[trigger] bindings[i]) by {
+            reveal(UseAliases::nor_expansion_selection_matches);
+            assert(i < rows.len());
+            assert(rows[i].index < prepared.nor_roots@.len());
+        };
+        self.nor_bindings_fit_projection(scope, plan, table, prepared, rows, bindings, slots);
+        assert forall|at: int| 0 <= at < slots.len()
+            && !nor_binding_covers(bindings, at) && !call_covers(prepared.calls@, at) implies
+            bit_definition_matches(scope.inputs@, slots.take(at), #[trigger] slots[at]) by {
+            let definition = slots[at];
+            assert((definition.rhs is NorCallOutput) == nor_binding_covers(bindings, at));
+            assert(bit_definition_matches(scope.inputs@, slots.take(at), definition));
+        };
+    }
+
+    /// 展開できる根 NOR がすべて選ばれ、一つずつ対応する束縛を持つことを示す。
+    #[verifier::spinoff_prover]
+    proof fn nor_expansion_selection_intro(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, rows: Seq<NorDefinition>, bindings: Seq<NorBinding>,
+    )
+        requires
+            rows.len() == bindings.len(),
+            self.body_nor_slots_match(scope, prepared.calls@, rows, prepared.projections.concats@),
+            nor_selection_prefix(prepared, prepared.nor_roots@.len() as int, rows),
+            forall|i: int| 0 <= i < bindings.len() ==> self.nor_binding_matches(plan, table, scope.limit, scope.parsed,
+                prepared.projections.call_arguments.arguments@, rows[i], #[trigger] bindings[i]),
+            nor_selection_covers(prepared, prepared.nor_roots@.len() as int, nor_selection_indices(rows)),
+            forall|i: int, j: int| 0 <= i < j < bindings.len() ==>
+                (#[trigger] bindings[i]).selected.prepared.output_slot < (#[trigger] bindings[j]).selected.prepared.output_slot,
+        ensures self.nor_expansion_selection_matches(scope, plan, table, prepared, rows, bindings),
+    {
+        reveal(UseAliases::nor_expansion_selection_matches);
+    }
+
+    /// 展開できる根 NOR を選び、厳格解析で得た呼び出し元の位置と依存先を確定する。
+    #[verifier::spinoff_prover]
+    fn select_expansion_nor_bindings<'s>(
+        &self, scope: &FuncProjection<'_, 'p, 'a>, plan: &FunctionExpansionOrder<'p, 'a>,
+        table: &'s FunctionTemplates<'p, 'a>, candidates: &'s [PreparedNorRoot<'p, 'a>],
+        arguments: &'s [ProjectedCallArgument], Ghost(prepared): Ghost<&PreparedExpansionBody<'p, 'a>>,
+    ) -> (selection: (Vec<NorDefinition<'s, 'p, 'a>>, Vec<NorBinding<'s, 'p, 'a>>))
+        requires
+            self.projection_context(scope), self.projection_structures_match(scope),
+            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.function_templates_match(plan, scope.limit, table),
+            plan.position_model(table.next_rank() as int) == Some((scope.file, scope.entry)),
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
+            prepared.typed.literals.wiring == FuncWiringResult::Checked(*scope.wiring),
+            prepared.typed.types@ == scope.types@,
+            candidates@ == prepared.nor_roots@,
+            arguments@ == prepared.projections.call_arguments.arguments@,
+        ensures
+            self.body_nor_slots_match(scope, prepared.calls@, selection.0@, prepared.projections.concats@),
+            self.nor_expansion_selection_matches(scope, plan, table, prepared, selection.0@, selection.1@),
+            forall|i: int, j: int| 0 <= i < j < selection.1@.len() ==>
+                (#[trigger] selection.1@[i]).selected.prepared.output_slot < (#[trigger] selection.1@[j]).selected.prepared.output_slot,
+    {
+        let ghost caller = (scope.file, scope.entry, scope.limit);
+        let rows = self.select_nor_definitions(candidates, arguments, Ghost(prepared), Ghost(*plan), Ghost(caller));
+        let bindings = self.resolve_selected_nor_roots(plan, table, arguments, rows.as_slice(), scope.parsed,
+            Ghost(prepared), Ghost(caller));
+        proof {
+            self.prepared_nor_slots_fit_body(scope, *plan, prepared, rows@);
+            self.nor_expansion_selection_intro(scope, plan, table, prepared, rows@, bindings@);
+        }
+        (rows, bindings)
+    }
+
+    /// 検査済みの定義に対し、出力幅を確認してからネットリストを組み立てる。
+    ///
+    /// # Errors
+    ///
+    /// 出力幅に不一致があれば、その診断を返す。
+    /// 幅が一致した場合は、ビット範囲の割り当てや配線変換に失敗したときに診断を返す。
+    #[verifier::spinoff_prover]
+    fn lower_expanded_slots<'w>(
+        &self, scope: &FuncProjection<'w, 'p, 'a>, ports: &'w PreparedBitFuncPorts<'p, 'a>,
+        selected: &[ResolvedTemplateCall<'w, 'p, 'a>], roots: &[NorBinding<'w, 'p, 'a>],
+        definitions: &Vec<CheckedBitDefinition<'p, 'a>>, layout_limit: usize, gate_limit: usize,
+        Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, &FunctionTemplates<'p, 'a>, (usize, usize, u64),
+            &PreparedExpansionBody<'p, 'a>, Seq<NorDefinition<'w, 'p, 'a>>)>,
+    ) -> (result: Result<LoweredBitFunc, ExpandedBodyError<'p, 'a>>)
+        requires ({
+            let (plan, templates, caller, prepared, rows) = context;
+            &&& self.projection_context(scope)
+            &&& self.projection_port_widths_match(scope)
+            &&& *scope == self.expanded_projection_scope(caller, prepared, ports)
+            &&& self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared)
+            &&& self.expansion_selection_matches(plan, templates, caller, prepared, selected@)
+            &&& self.nor_expansion_selection_matches(scope, plan, templates, prepared, rows, roots@)
+            &&& self.prepared_definition_result(scope, prepared.calls@, selected@, rows, Ok(*definitions))
+            &&& forall|i: int| 0 <= i < roots@.len() ==> nor_binding_fits_body(
+                #[trigger] roots@[i], scope.source, scope.parsed.syntax.forms@, scope.inputs@, definitions@, scope.limit)
+            &&& forall|a: int, b: int| 0 <= a < b < roots@.len() ==>
+                (#[trigger] roots@[a]).selected.prepared.output_slot < (#[trigger] roots@[b]).selected.prepared.output_slot
+            &&& forall|slot: int| 0 <= slot < definitions@.len() && !call_covers(prepared.calls@, slot)
+                && !nor_binding_covers(roots@, slot) ==>
+                    bit_definition_matches(scope.inputs@, definitions@.take(slot), #[trigger] definitions@[slot])
+        }),
+        ensures result matches Err(error) ==> error is Output || error is Lowering,
+        ({
+            let prepared = context.3;
+            let wiring = scope.wiring;
+            let has_structures = has_structure_port(wiring.drivers.signature.inputs@)
+                || has_structure_port(wiring.drivers.signature.outputs@);
+            let expanded = match result {
+                Ok(circuit) => Ok(ExpandedBody { circuit, ports: *ports, has_structure_ports: has_structures }),
+                Err(error) => Err(error),
+            };
+            self.expanded_slots_result(scope, selected@, roots@, prepared.projections.call_arguments.arguments@,
+                *definitions, layout_limit, gate_limit, expanded)
+        }),
+    {
+        let ghost (plan, templates, caller, prepared, rows) = context;
+        let ghost limit = scope.limit;
+        let ghost arguments = prepared.projections.call_arguments.arguments@;
+        let wiring = scope.wiring;
+        let ghost source = scope.source;
+        let ghost has_structures = has_structure_port(wiring.drivers.signature.inputs@)
+            || has_structure_port(wiring.drivers.signature.outputs@);
+        assert(form_spans_valid(source.text, scope.parsed.syntax.forms@, source.text.spec_bytes().len() as int)) by {
+            reveal(UseAliases::prepared_definition_result);
+        };
+        proof { reveal(UseAliases::prepared_definition_result); }
+        if let Err(error) = check_output_widths(wiring, ports.inputs.as_slice(), ports.outputs.as_slice(), definitions.as_slice()) {
+            let diagnostic = ExpandedBodyError::Output(error);
+            assert(self.expanded_slots_result(scope, selected@, roots@, arguments, *definitions,
+                layout_limit, gate_limit, Err(diagnostic))) by { reveal(UseAliases::expanded_slots_result); };
+            return Err(diagnostic);
+        }
+        let forms = scope.parsed.syntax.forms.as_slice();
+        proof {
+            assert forall|g: int| 0 <= g < selected@.len() implies
+                resolved_call_fits_body(#[trigger] selected@[g], ports.inputs@, definitions@, forms@, limit) by {
+                assert(*selected@[g].group.expression.source == *source);
+            };
+        }
+        assert forall|i: int| 0 <= i < roots@.len() implies {
+            let binding = #[trigger] roots@[i];
+            let origin = binding.selected.prepared.root.expression.source;
+            &&& !call_covers(prepared.calls@, binding.selected.prepared.output_slot as int)
+            &&& nor_binding_fits_body(binding, origin, forms@, ports.inputs@, definitions@, limit)
+            &&& self.nor_binding_context(plan, templates, limit, arguments, binding)
+            &&& form_spans_valid(origin.text, forms@, origin.text.spec_bytes().len() as int)
+        } by {
+            let binding = roots@[i];
+            assert(nor_binding_fits_body(binding, source, forms@, ports.inputs@, definitions@, limit));
+            self.expanded_nor_binding_evidence(scope, plan, templates, prepared, rows, roots@, i);
+        };
+        let lowered = lower_projected_expansion(self, ports.inputs.as_slice(), definitions.as_slice(),
+            ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected, roots,
+            layout_limit, gate_limit, Ghost((plan, caller, prepared)), Ghost(templates));
+        let result = match lowered {
+            Ok(circuit) => Ok(circuit),
+            Err(error) => Err(ExpandedBodyError::Lowering(error)),
+        };
+        assert(self.expanded_slots_result(scope, selected@, roots@, arguments, *definitions,
+            layout_limit, gate_limit, match result {
+                Ok(circuit) => Ok(ExpandedBody { circuit, ports: *ports, has_structure_ports: has_structures }),
+                Err(error) => Err(error),
+            })) by {
+            reveal(UseAliases::expanded_slots_result);
+        };
+        result
+    }
+
     /// 厳格解析と型検査を終えた本体を、先行する関数のネットリストを使って配線へ変換する。
     ///
     /// # Errors
     ///
     /// ポート、定義の右辺、出力幅、ビット範囲と配線の順に検査し、失敗した段階の診断を返す。
+    #[verifier::spinoff_prover]
     pub(in crate::project::use_aliases::bit_func) fn lower_expanded_body(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, templates: &FunctionTemplates<'p, 'a>,
         caller: (usize, usize, u64), prepared: PreparedExpansionBody<'p, 'a>, layout_limit: usize, gate_limit: usize,
@@ -2155,8 +2641,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             prepared.projections.layouts, selected.as_slice());
         let ports = match port_result {
             Ok(ports) => ports,
-            Err(error) => return Err(ExpandedBodyError::Ports(error)),
+            Err(error) => {
+                let result = Err(ExpandedBodyError::Ports(error));
+                assert(self.expanded_body_lowering_result(plan, templates, caller, &original, layout_limit, gate_limit, result)) by {
+                    reveal(UseAliases::expanded_body_lowering_result);
+                };
+                return result;
+            },
         };
+        let ghost checked_ports = ports;
         let _layout_ref = ports.layouts.as_ref();
         let scope = FuncProjection { file, entry, limit, source, parsed, wiring,
             inputs: &ports.inputs, outputs: &ports.outputs,
@@ -2167,6 +2660,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             structures: &prepared.projections.entries,
         };
         proof {
+            assert(scope == self.expanded_projection_scope(caller, &original, &checked_ports));
+            assert(self.projection_context(&scope));
             reveal(UseAliases::routine_ports_result);
             assert(self.projection_port_widths_match(&scope));
             assert(self.projection_structures_match(&scope)) by {
@@ -2186,43 +2681,48 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
             };
         }
+        let (nor_rows, roots) = self.select_expansion_nor_bindings(&scope, plan, templates, prepared.nor_roots.as_slice(),
+            prepared.projections.call_arguments.arguments.as_slice(), Ghost(&original));
         let definitions = match self.project_prepared_definition_body(&scope, prepared.calls.as_slice(),
-            selected.as_slice(), prepared.typed.literals.widths.as_slice(), prepared.projections.concats,
+            selected.as_slice(), nor_rows.as_slice(), prepared.typed.literals.widths.as_slice(), prepared.projections.concats,
             Ghost(*plan), Ghost(original), Ghost(templates)) {
             Ok(definitions) => definitions,
             Err(error) => {
                 let result = Err(ExpandedBodyError::Definition(error));
-                assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
-                    original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
+                assert(self.expanded_bound_definitions_result(&scope, &original, selected@, nor_rows@, roots@,
+                    layout_limit, gate_limit, result)) by {
+                    reveal(UseAliases::expanded_bound_definitions_result);
+                };
+                proof {
+                    self.expanded_definition_result_intro(&scope, plan, templates, &original, selected@, nor_rows@, roots@,
+                        layout_limit, gate_limit, result);
+                    self.expanded_body_result_from_ports(plan, templates, caller, &original, &checked_ports, selected@,
+                        layout_limit, gate_limit, result);
+                }
                 return result;
             },
         };
-        if let Err(error) = check_output_widths(wiring, ports.inputs.as_slice(), ports.outputs.as_slice(), definitions.as_slice()) {
-            let result = Err(ExpandedBodyError::Output(error));
-            assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
-                original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
-            return result;
-        }
-        let forms = parsed.syntax.forms.as_slice();
         proof {
-            assert forall|g: int| 0 <= g < selected@.len() implies
-                resolved_call_fits_body(#[trigger] selected@[g], ports.inputs@, definitions@, forms@, limit) by {
-                assert(*selected@[g].group.expression.source == *source);
-            };
+            self.prepared_nor_bindings_fit_slots(&scope, plan, templates, &original, selected@, nor_rows@, roots@, definitions);
         }
-        let roots: &[NorBinding] = &[];
-        assert(roots@ =~= Seq::empty());
-        let lowered = lower_projected_expansion(self, ports.inputs.as_slice(), definitions.as_slice(),
-            ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected.as_slice(), roots,
-            layout_limit, gate_limit, Ghost((plan, caller, &original)), Ghost(templates));
+        let lowered = self.lower_expanded_slots(&scope, &ports, selected.as_slice(), roots.as_slice(), &definitions,
+            layout_limit, gate_limit, Ghost((plan, templates, caller, &original, nor_rows@)));
         let has_structure_ports = contains_structure_port(wiring.drivers.signature.inputs.as_slice())
             || contains_structure_port(wiring.drivers.signature.outputs.as_slice());
         let result = match lowered {
             Ok(circuit) => Ok(ExpandedBody { circuit, ports, has_structure_ports }),
-            Err(error) => Err(ExpandedBodyError::Lowering(error)),
+            Err(error) => Err(error),
         };
-        assert(self.expanded_definition_lowering_result(&scope, original.calls@, selected@,
-            original.projections.call_arguments.arguments@, layout_limit, gate_limit, result));
+        assert(self.expanded_bound_definitions_result(&scope, &original, selected@, nor_rows@, roots@,
+            layout_limit, gate_limit, result)) by {
+            reveal(UseAliases::expanded_bound_definitions_result);
+        };
+        proof {
+            self.expanded_definition_result_intro(&scope, plan, templates, &original, selected@, nor_rows@, roots@,
+                layout_limit, gate_limit, result);
+            self.expanded_body_result_from_ports(plan, templates, caller, &original, &checked_ports, selected@,
+                layout_limit, gate_limit, result);
+        }
         result
     }
 }
@@ -2251,7 +2751,8 @@ fn projects_ready_nor_roots_and_preserves_unsupported_definition_order() {
         let scope = FuncProjection { file: 0, entry, limit: 8, source: &project.sources()[0],
             parsed: &project.circuits()[0], wiring, inputs: &ports.inputs, outputs: &ports.outputs,
             structures: &prepared.projections.entries };
-        let roots = aliases.select_nor_definitions(&prepared, Ghost(plan), Ghost((0usize, entry, 8u64)));
+        let roots = aliases.select_nor_definitions(&prepared.nor_roots, &prepared.projections.call_arguments.arguments,
+            Ghost(&prepared), Ghost(plan), Ghost((0usize, entry, 8u64)));
         let [row] = roots.as_slice() else { panic!("expected one ready root"); };
         let widths: &[&[u64]] = if entry == 2 { &[&[1]] } else { &[] };
         let result = aliases.project_definition_body(&scope, &prepared.calls, &roots, widths,
@@ -2263,8 +2764,8 @@ fn projects_ready_nor_roots_and_preserves_unsupported_definition_order() {
             let template = aliases.standalone_function_template(id, 8, checked, circuit, 8);
             let mut templates = aliases.new_function_templates(&plan, Ghost(8u64));
             aliases.insert_function_template(&plan, &mut templates, template, Ghost(8u64));
-            let bindings = aliases.resolve_selected_nor_roots(&plan, &templates, &prepared, &roots,
-                scope.parsed, Ghost((0usize, entry, 8u64)));
+            let bindings = aliases.resolve_selected_nor_roots(&plan, &templates, &prepared.projections.call_arguments.arguments, &roots,
+                scope.parsed, Ghost(&prepared), Ghost((0usize, entry, 8u64)));
             let [binding] = bindings.as_slice() else { panic!("expected one resolved root"); };
             assert_eq!(binding.candidate, row.index);
             assert_eq!(binding.selected.prepared.output_slot, row.root.output_slot);

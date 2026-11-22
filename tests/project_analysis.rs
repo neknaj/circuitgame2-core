@@ -282,6 +282,16 @@ fn locates_nested_gate_capacity_at_the_call_that_fails() {
              (func run (in a) (out y) (def y (inv (nor a a))))",
             1, "(inv (nor a a))",
         ),
+        (
+            "(using nor) (func id (in a) (out a))
+             (func run (in a) (out y) (def y (nor (id a) (nor a a))))",
+            0, "(nor a a)",
+        ),
+        (
+            "(using nor) (func id (in a) (out a))
+             (func run (in a) (out y) (def y (nor (id a) (nor a a))))",
+            1, "(nor (id a) (nor a a))",
+        ),
     ];
     for (text, limit, expression) in cases {
         let project = parse_circuit_project(&[SourceSnapshot {

@@ -7,7 +7,7 @@ use super::*;
 use self::expressions::{NestedSourceArguments, source_expression_scope};
 use crate::project::FunctionExpansionOrder;
 use crate::netlist::nor_evaluation;
-use crate::project::use_aliases::bit_func::lowering::MixedCallEvaluation;
+use crate::project::use_aliases::bit_func::lowering::{MixedCallEvaluation, projected_lowering_nor_evaluation};
 use crate::project::use_aliases::bit_func::templates::{FunctionTemplate, FunctionTemplates};
 use core::ops::Range;
 
@@ -353,6 +353,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         invocation
     }
 
+    #[verifier::spinoff_prover]
     proof fn completed_template_source_frame(
         &self, plan: &FunctionExpansionOrder, width_limit: u64, bit_limit: usize, gate_limit: usize,
         table: &FunctionTemplates, invocation: SourceInvocation, input: Seq<bool>, output: Seq<bool>,
@@ -372,7 +373,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let (file, entry) = plan.position_model(rank)->Some_0;
         let caller = (file, entry, width_limit);
         let gates = self.expanded_body_output_values(plan, &prior, caller, &prepared, bit_limit, gate_limit, &body, input, output);
-        let (scope, selected, slots) =
+        let (scope, selected, roots, bindings, slots) =
             self.expanded_body_success(plan, &prior, caller, &prepared, bit_limit, gate_limit, &body);
         let circuit = template.circuit_model();
         let incoming = port_values(circuit.input_layout_model(), input);
@@ -386,10 +387,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert forall|g: int| 0 <= g < selected.len() implies *(#[trigger] selected[g]).group == calls[g] by {
             assert(self.resolved_template_call_matches(plan, caller, &prepared, g, selected[g]));
         };
-        self.projected_ordinary_definitions_preserve_source_values(&scope, calls, selected, slots,
+        assert forall|i: int| #[trigger] nor_binding_covers(bindings, i) <==> nor_covers(roots, i) by {
+            reveal(UseAliases::expanded_body_nor_bindings);
+        };
+        self.projected_ordinary_definitions_preserve_source_values(&scope, calls, selected, roots, bindings, slots,
             prepared.projections.call_arguments.arguments@, bit_limit,
             gate_limit, circuit, input, gates);
-        self.prepared_definition_width_evidence(&scope, calls, selected, slots);
+        self.prepared_definition_width_evidence(&scope, calls, selected, roots, slots);
         self.checked_wiring_is_func(file, entry, width_limit, *scope.wiring);
 
         assert forall|i: int| 0 <= i < values.len() implies
@@ -424,6 +428,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 } else { site };
                 assert(self.source_call_matches_slot(plan, caller, rank, scope.wiring, incoming, values, i, site, derivation));
                 self.source_call_slot_intro(plan, caller, rank, derivation, scope.wiring, incoming, values, i, site);
+            } else if nor_binding_covers(bindings, i) {
+                let index = choose|index: int| 0 <= index < bindings.len()
+                    && (#[trigger] bindings[index]).selected.prepared.output_slot == i;
+                let binding = &bindings[index];
+                reveal(UseAliases::expanded_body_nor_bindings);
+                let evaluation = projected_lowering_nor_evaluation(self, plan, &prior, caller, &prepared, scope.inputs@,
+                    slots@, scope.outputs@, scope.wiring.drivers.outputs@, scope.parsed.syntax.forms@,
+                    selected, bindings, index, bit_limit, gate_limit, circuit, input, gates);
+                self.source_nested_nor_slot_from_wiring(&context, plan, rank, &prior, table, &prepared, binding,
+                    layouts, incoming, values, evaluation);
             } else {
                 assert(self.source_definition_value(&context, layout_ref, prepared.typed.types@, incoming, values, i));
             }
