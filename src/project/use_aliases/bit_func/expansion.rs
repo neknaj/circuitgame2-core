@@ -443,7 +443,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text,
                 parsed.syntax.forms@, row.expression.start as int, row.expression.end as int)
             &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(signature)))
-            &&& signature.call.target is Function
+            &&& signature.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, .. }
+            &&& (target_file, target_entry) == target
         }),
     {
         reveal(UseAliases::source_function_call_site);

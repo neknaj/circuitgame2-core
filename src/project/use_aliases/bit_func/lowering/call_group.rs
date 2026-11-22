@@ -14,7 +14,7 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
-use super::call_arguments::{argument_prefix_wires, argument_wires_ready, builtin_nor_evaluation, layout_argument_ready};
+use super::call_arguments::{argument_prefix_wires, argument_wires_ready, builtin_nor_call_matches, builtin_nor_evaluation, layout_argument_ready};
 #[cfg(verus_only)]
 use super::call_arguments::child_calls::{
     ChildCall, NestedRootEvaluation, bound_template_arguments_ready, child_call_abi, child_call_binding, child_call_ready, child_value_flows_to_root,
@@ -423,7 +423,8 @@ pub(super) open spec fn call_gate_wiring_matches(
     }
 }
 
-closed spec fn bound_call_gate_matches(
+#[verifier::opaque]
+pub(super) open spec fn bound_call_gate_matches(
     row: CallGateWiring, children: Seq<ResolvedExpressionCall>, references: Range<usize>,
     builtin: &(NorNetlist, PortBitLayout), root_template: Option<&FunctionTemplate>,
     root: &NorNetlist, layout: &PortBitLayout, args: Seq<ProjectedCallArgument>,
@@ -467,6 +468,7 @@ proof fn bound_call_gate<'s, 'p, 'a>(
         bound_call_gate_matches(row, children, references, builtin, root_template, root, layout, args,
             before, after, input_bits, gate),
 {
+    reveal(bound_call_gate_matches);
     let (index, prior, inputs) = nested_gate_instance_at(&caller, calls, (references.end - references.start) as usize,
         args, layout, root, before, after, input_bits, outputs, gate);
     if index == calls.len() {
@@ -481,7 +483,8 @@ proof fn bound_call_gate<'s, 'p, 'a>(
     }
 }
 
-pub(super) closed spec fn nested_call_group_gate_matches(
+#[verifier::opaque]
+pub(super) open spec fn nested_call_group_gate_matches(
     row: CallGateWiring, selected: &ResolvedTemplateCall, forms: Seq<Form>, caller: &Layouts,
     builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView, gate: int,
 ) -> bool {
@@ -507,6 +510,7 @@ pub(super) proof fn nested_call_group_gate<'s, 'p, 'a>(
         call_gate_wiring_matches(row, before.gates, after.gates, gate),
         nested_call_group_gate_matches(row, selected, forms, caller, builtin, before, after, gate),
 {
+    reveal(nested_call_group_gate_matches);
     reveal(nested_call_group_result);
     reveal(nested_root_wiring_result);
     reveal(nested_group_invocation_matches);
@@ -838,10 +842,12 @@ pub(super) closed spec fn nor_call_group_result(
     }
 }
 
-pub(super) closed spec fn nor_call_group_gate_matches(
+#[verifier::opaque]
+pub(super) open spec fn nor_call_group_gate_matches(
     row: CallGateWiring, selected: &ResolvedNorRoot, references: Range<usize>, forms: Seq<Form>,
     caller: &Layouts, builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView, gate: int,
 ) -> bool {
+    &&& builtin_nor_call_matches(builtin)
     &&& call_gate_wiring_matches(row, before.gates, after.gates, gate)
     &&& row.nested matches Some((calls, _))
     &&& nor_group_invocation_matches(selected, forms, caller, before, row.invocation)
@@ -864,6 +870,7 @@ pub(super) proof fn nor_call_group_gate<'s, 'p, 'a>(
         call_gate_wiring_matches(row, before.gates, after.gates, gate),
         nor_call_group_gate_matches(row, selected, references, forms, caller, builtin, before, after, gate),
 {
+    reveal(nor_call_group_gate_matches);
     reveal(nor_call_group_result);
     reveal(nor_root_wiring_result);
     reveal(nor_root_children_bound);

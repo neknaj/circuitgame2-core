@@ -13,6 +13,7 @@ use super::super::lowering::{
     expanded_definition_values, projected_lowering_output_values, projected_lowering_view, resolved_call_fits_body,
     evaluated_flat_call_matches, evaluated_nested_call_matches, MixedCallEvaluation,
     projected_lowering_call_evaluation, projected_lowering_ports, port_values,
+    FuncGateExpression, FuncGateOrigin, projected_lowering_gate_origin, projected_gate_origin_link,
 };
 #[cfg(verus_only)]
 use super::source_evaluation::{source_outputs_from_driver_values, source_outputs_match};
@@ -1312,6 +1313,35 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::expansion_definition_prefix);
     }
 
+    /// 出力スロットを駆動する基底 NOR の定義番号と型付き署名を取り出す。
+    proof fn local_nor_source_site(
+        &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
+        roots: Seq<NorDefinition>, definitions: Vec<CheckedBitDefinition>, slot: int,
+    ) -> (site: (crate::project::DefinitionPosition, TypedFuncCall<'p, 'a>))
+        requires
+            self.projection_context(scope),
+            self.prepared_definition_result(scope, calls, selected, roots, Ok(definitions)),
+            0 <= slot < definitions@.len(),
+            !call_covers(calls, slot), !nor_covers(roots, slot),
+            definitions@[slot].rhs is Nor,
+        ensures
+            site.0.file == scope.file && site.0.entry == scope.entry && site.0.reference == 0,
+            scope.parsed.entry_ranges@[scope.entry as int].definitions.start + site.0.definition
+                == scope.wiring.drivers.definitions@[slot].definition,
+            self.func_call_signature_evidence(scope.file, scope.entry, site.0.definition, 0, scope.limit, Ok(Some(site.1))),
+            site.1.call.target is Nor,
+    {
+        self.prepared_ordinary_definition_evidence(scope, calls, selected, roots, definitions, slot);
+        let definition = scope.wiring.drivers.definitions@[slot].definition;
+        let frame = scope.parsed.entry_ranges@[scope.entry as int].definitions;
+        let local = (definition - frame.start) as usize;
+        let row = scope.parsed.definitions@[definition as int];
+        let call = choose|call: TypedFuncCall|
+            #[trigger] self.func_call_signature_evidence(scope.file, scope.entry, local, 0, scope.limit, Ok(Some(call)))
+            && call.call.call.form == row.expression.start && call.call.call.arguments == 2 && call.call.target is Nor;
+        (crate::project::DefinitionPosition { file: scope.file, entry: scope.entry, definition: local, reference: 0 }, call)
+    }
+
     /// 展開準備で確定した呼び出しと実際の出力幅から、関数本体を定義順に取り出す。
     ///
     /// # Errors
@@ -2239,6 +2269,227 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
         };
         (scope, selected, rows, bindings, slots)
+    }
+
+    pub(in crate::project::use_aliases::bit_func) closed spec fn expanded_gate_origin_link(
+        &self, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
+        prepared: &PreparedExpansionBody, bit_limit: usize, gate_limit: usize, value: &ExpandedBody,
+        gate: int, origin: FuncGateOrigin,
+    ) -> bool {
+        let parsed = self.targets.project_model().circuits_model()[caller.0 as int];
+        let wiring = prepared.typed.literals.wiring->Checked_0;
+        let ports = &value.ports;
+        let forms = parsed.syntax.forms@;
+        let arguments = prepared.projections.call_arguments.arguments@;
+        exists|scope: FuncProjection, selected: Seq<ResolvedTemplateCall>, rows: Seq<NorDefinition>,
+            bindings: Seq<NorBinding>, slots: Vec<CheckedBitDefinition>|
+            #![trigger self.prepared_definition_result(&scope, prepared.calls@, selected, rows, Ok(slots)),
+                projected_gate_origin_link(ports.inputs@, slots@, ports.outputs@, wiring.drivers.outputs@,
+                    forms, selected, bindings, arguments, bit_limit, gate_limit, &value.circuit, gate, origin)]
+            scope == self.expanded_projection_scope(caller, prepared, ports) && self.projection_context(&scope)
+            && self.prepared_definition_result(&scope, prepared.calls@, selected, rows, Ok(slots))
+            && self.expansion_selection_matches(plan, table, caller, prepared, selected)
+            && self.expanded_body_nor_bindings(&scope, plan, table, prepared, rows, bindings, slots@)
+            && projected_gate_origin_link(ports.inputs@, slots@, ports.outputs@, wiring.drivers.outputs@,
+                forms, selected, bindings, arguments, bit_limit, gate_limit, &value.circuit, gate, origin)
+    }
+
+    spec fn gate_template_matches(
+        plan: &FunctionExpansionOrder, table: &FunctionTemplates, target: FuncCallTarget,
+        template: Option<&super::super::templates::FunctionTemplate>, rank: Option<int>,
+    ) -> bool {
+        match (rank, template, target) {
+            (None, None, FuncCallTarget::Nor) => true,
+            (Some(r), Some(value), FuncCallTarget::Function { file, entry, .. }) => {
+                &&& 0 <= r < table.next_rank() && r < plan.order_model().len()
+                &&& plan.position_model(r) == Some((file, entry))
+                &&& plan.order_model()[r] < table.slots_model().len()
+                &&& table.slots_model()[plan.order_model()[r] as int] == Some(*value)
+            },
+            _ => false,
+        }
+    }
+
+    /// 展開したゲートに対応する厳格索引の呼び出し位置と、通常関数の展開順位を得る。
+    #[verifier::spinoff_prover]
+    pub(in crate::project::use_aliases::bit_func) proof fn expanded_body_gate_source<'w>(
+        &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
+        prepared: &'w PreparedExpansionBody<'p, 'a>, bit_limit: usize, gate_limit: usize,
+        value: &'w ExpandedBody<'p, 'a>, gate: int,
+    ) -> (result: (crate::project::DefinitionPosition, TypedFuncCall<'p, 'a>, Option<int>, FuncGateOrigin<'w, 'p, 'a>))
+        requires
+            self.can_resolve(), self.function_template_plan(*plan),
+            plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
+            table.slots_model().len() == plan.order_model().len(),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+            self.expanded_body_lowering_result(plan, table, caller, prepared, bit_limit, gate_limit, Ok(*value)),
+            0 <= gate < value.circuit.netlist_model().gates@.len(),
+        ensures
+            self.expanded_gate_origin_link(plan, table, caller, prepared, bit_limit, gate_limit, value, gate, result.3),
+            ({
+                let (site, signature, _, origin) = result;
+                let parsed = self.targets.project_model().circuits_model()[caller.0 as int];
+                let wiring = prepared.typed.literals.wiring->Checked_0;
+                &&& site.file == caller.0 && site.entry == caller.1 && site.reference == origin.reference
+                &&& origin.slot < wiring.drivers.definitions@.len()
+                &&& parsed.entry_ranges@[caller.1 as int].definitions.start + site.definition
+                    == wiring.drivers.definitions@[origin.slot as int].definition
+                &&& self.func_call_signature_evidence(site.file, site.entry, site.definition, site.reference, caller.2, Ok(Some(signature)))
+            }),
+            ({
+                let (_, signature, rank, origin) = result;
+                match (rank, origin.template, signature.call.target) {
+                    (None, None, FuncCallTarget::Nor) => gate == origin.base,
+                    (Some(r), Some(template), FuncCallTarget::Function { file, entry, .. }) => {
+                        let callee = template.circuit_model().netlist_model();
+                        let parent = value.circuit.netlist_model().gates@;
+                        let end = origin.base + callee.gates@.len();
+                        &&& 0 <= r < table.next_rank() && r < plan.order_model().len()
+                        &&& plan.position_model(r) == Some((file, entry))
+                        &&& plan.order_model()[r] < table.slots_model().len()
+                        &&& table.slots_model()[plan.order_model()[r] as int] == Some(*template)
+                        &&& origin.base <= gate < end <= parent.len()
+                        &&& crate::netlist::instances::instance_gates_match(parent.take(origin.base as int),
+                            callee.gates@, origin.inputs, parent.take(end as int))
+                    },
+                    _ => false,
+                }
+            }),
+    {
+        self.function_template_indices(*plan);
+        let (scope, selected, rows, bindings, slots) = self.expanded_body_success(
+            plan, table, caller, prepared, bit_limit, gate_limit, value);
+        let (file, entry, limit) = caller;
+        let parsed = scope.parsed;
+        let ports = &value.ports;
+        let arguments = prepared.projections.call_arguments.arguments@;
+        let origin = projected_lowering_gate_origin(ports.inputs@, slots@, ports.outputs@, scope.wiring.drivers.outputs@,
+            parsed.syntax.forms@, selected, bindings, arguments, bit_limit, gate_limit, &value.circuit, gate);
+        reveal(UseAliases::expanded_body_nor_bindings);
+        assert(self.expanded_gate_origin_link(plan, table, caller, prepared, bit_limit, gate_limit, value, gate, origin));
+        assert(self.expansion_selection_matches(plan, table, caller, prepared, selected));
+        self.prepared_definition_width_evidence(&scope, prepared.calls@, selected, rows, slots);
+        let slot = origin.slot as int;
+        let absolute = scope.wiring.drivers.definitions@[slot].definition;
+        let frame = parsed.entry_ranges@[entry as int].definitions;
+        let definition = (absolute - frame.start) as usize;
+        let site = crate::project::DefinitionPosition { file, entry, definition, reference: origin.reference };
+        let (signature, rank) = match origin.expression {
+            FuncGateExpression::Local => {
+                assert(!call_covers(prepared.calls@, slot)) by {
+                    if call_covers(prepared.calls@, slot) {
+                        let group = choose|g: int| 0 <= g < prepared.calls@.len()
+                            && (#[trigger] prepared.calls@[g]).outputs.start <= slot < prepared.calls@[g].outputs.end;
+                        assert(*selected[group].group == prepared.calls@[group]);
+                    }
+                };
+                let local = self.local_nor_source_site(&scope, prepared.calls@, selected, rows, slots, slot);
+                assert(local.0 == site);
+                assert(Self::gate_template_matches(plan, table, local.1.call.target, origin.template, None));
+                (local.1, None)
+            },
+            FuncGateExpression::Function { group, child } => {
+                let root = prepared.projections.calls@[group];
+                let checked = prepared.calls@[group];
+                let chosen = selected[group];
+                assert(0 <= group < selected.len() == prepared.calls@.len());
+                assert(*chosen.group == checked);
+                assert(origin.slot == checked.outputs.start);
+                self.expansion_callee_template_evidence(*plan, caller, prepared, group);
+                assert(checked.outputs.start <= slot < checked.outputs.end);
+                self.prepared_call_matches_source_site(plan, caller, prepared, group);
+                self.source_function_call_site_evidence(caller, scope.wiring, slot, root.definition,
+                    checked._signature@, checked.outputs, (root.target_file, root.target_entry));
+                assert(absolute == root.definition);
+                if let Some(index) = child {
+                    let expanded = chosen.children@[index];
+                    assert(checked.postorder.is_some());
+                    let children = checked.postorder->Some_0@;
+                    assert(self.resolved_expression_calls_match(plan, table, limit, checked.postorder, arguments, chosen.children@));
+                    assert(0 <= index < chosen.children@.len() == children.len());
+                    let piece = children[index];
+                    assert(self.resolved_expression_call_matches(plan, table, limit, arguments, piece, expanded));
+                    self.expansion_child_template_evidence(*plan, caller, prepared, group, index);
+                    assert(expanded.child.reference == chosen.group.references.start + origin.reference);
+                    assert(*expanded.child == piece) by { reveal(UseAliases::resolved_expression_call_matches); };
+                    assert(piece.reference == checked.references.start + origin.reference);
+                    assert(origin.template == expanded.template);
+                    assert(match piece._signature@.call.target {
+                        FuncCallTarget::Nor => piece._rank@.is_none(),
+                        FuncCallTarget::Function { file, entry, .. } =>
+                            piece._rank@ matches Some(rank) && plan.position_model(rank) == Some((file, entry)),
+                    });
+                    assert(Self::gate_template_matches(plan, table, piece._signature@.call.target, origin.template, piece._rank@)) by {
+                        reveal(UseAliases::resolved_expression_call_matches);
+                    };
+                    (piece._signature@, piece._rank@)
+                } else {
+                    self.function_template_rank_at(*plan, (file, entry), checked._order@.1, table.next_rank() as int);
+                    assert(plan.order_model()[checked._order@.0] == checked.vertex);
+                    assert(Self::gate_template_matches(plan, table, checked._signature@.call.target, origin.template,
+                        Some(checked._order@.0)));
+                    (checked._signature@, Some(checked._order@.0))
+                }
+            },
+            FuncGateExpression::Nor { binding, index } => {
+                let binding = bindings[binding];
+                let candidate = binding.candidate as int;
+                let root = prepared.nor_roots@[candidate];
+                assert(*binding.selected.prepared == root);
+                self.prepared_nor_output_evidence(*plan, caller, prepared, candidate);
+                self.nor_root_template_evidence(*plan, caller, prepared, candidate);
+                assert(absolute == root.definition);
+                let children = root.postorder@;
+                assert(self.nor_binding_context(plan, table, limit, arguments, binding));
+                assert(self.resolved_expression_calls_match(plan, table, limit, Some(root.postorder), arguments, binding.selected.children@));
+                assert(binding.selected.children@.len() == children.len());
+                self.prepared_nor_arguments_in_source_order(*plan, caller, prepared, candidate, index);
+                if index == children.len() {
+                    assert(Self::gate_template_matches(plan, table, root.root._signature@.call.target, origin.template, None));
+                    (root.root._signature@, None)
+                } else {
+                    let expanded = binding.selected.children@[index];
+                    let piece = children[index];
+                    assert(self.resolved_expression_call_matches(plan, table, limit, arguments, piece, expanded));
+                    assert(*expanded.child == piece) by { reveal(UseAliases::resolved_expression_call_matches); };
+                    assert(piece.reference == binding.references.start + origin.reference);
+                    assert(origin.template == expanded.template);
+                    assert(match piece._signature@.call.target {
+                        FuncCallTarget::Nor => piece._rank@.is_none(),
+                        FuncCallTarget::Function { file, entry, .. } =>
+                            piece._rank@ matches Some(rank) && plan.position_model(rank) == Some((file, entry)),
+                    });
+                    assert(Self::gate_template_matches(plan, table, piece._signature@.call.target, origin.template, piece._rank@)) by {
+                        reveal(UseAliases::resolved_expression_call_matches);
+                    };
+                    (piece._signature@, piece._rank@)
+                }
+            },
+        };
+        assert(self.func_call_signature_evidence(site.file, site.entry, site.definition, site.reference, limit, Ok(Some(signature))));
+        self.typed_call_arguments_ready(site.file, site.entry, site.definition, site.reference, limit, signature);
+        assert(Self::gate_template_matches(plan, table, signature.call.target, origin.template, rank));
+        if let Some(r) = rank {
+            assert(origin.template.is_some());
+            let template = origin.template->Some_0;
+            assert(signature.call.target is Function);
+            assert(0 <= r < table.next_rank());
+            assert(r < plan.order_model().len());
+            assert(plan.position_model(r) == Some((signature.call.target->Function_file, signature.call.target->Function_entry)));
+            assert(plan.order_model()[r] < table.slots_model().len());
+            assert(table.slots_model()[plan.order_model()[r] as int] == Some(*template));
+            let callee = template.circuit_model().netlist_model();
+            let parent = value.circuit.netlist_model().gates@;
+            let end = origin.base + callee.gates@.len();
+            assert(origin.base <= gate < end <= parent.len());
+            assert(crate::netlist::instances::instance_gates_match(parent.take(origin.base as int),
+                callee.gates@, origin.inputs, parent.take(end as int)));
+        } else {
+            assert(origin.template.is_none());
+            assert(signature.call.target is Nor);
+            assert(gate == origin.base);
+        }
+        (site, signature, rank, origin)
     }
 
     /// 展開した本体のポート幅とビット配置を、元の宣言の署名に結び付ける。

@@ -40,7 +40,7 @@ use super::call_group::{
     nested_call_group_frame, nested_call_group_result, nor_call_group_evaluation_matches, nor_call_group_frame,
     nor_call_group_result, nor_call_group_values, CallGateWiring, call_gate_wiring_matches, flat_call_group_gate,
     nested_call_group_gate, nor_call_group_gate, flat_call_group_gate_matches, nested_call_group_gate_matches,
-    nor_call_group_gate_matches,
+    nor_call_group_gate_matches, bound_call_gate_matches,
 };
 #[cfg(verus_only)]
 use super::super::instances::{instance_gates_match, instance_wire_values};
@@ -797,6 +797,7 @@ pub(super) closed spec fn rooted_gate_step_origin(
             })
         } else {
             &&& step.from < body.definitions@.len()
+            &&& !binding_covers(bindings, step.from as int) && !nor_binding_covers(roots, step.from as int)
             &&& body.definitions@[step.from as int].rhs is Nor
             &&& rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
                 step.before.definitions, body.definitions@[step.from as int].rhs) == Some(final_wiring.gates[gate])
@@ -925,6 +926,192 @@ pub(super) proof fn rooted_trace_gate_call<'s, 'p, 'a>(
         assert(final_wiring.gates.take(end) =~= step.after.gates.take(end));
     }
     (at, call)
+}
+
+/// 定義のどの式が展開後のゲートを追加したかを表す。
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) enum FuncGateExpression {
+    /// 入れ子を持たない基底 NOR。
+    Local,
+    /// 通常呼び出しの根、またはその実引数にある子。
+    Function { group: int, child: Option<int> },
+    /// 基底 NOR の根、またはその実引数にある子。子の個数と等しい添字は根を指す。
+    Nor { binding: int, index: int },
+}
+
+/// 最終ゲートを追加した出力スロットと、選んだ呼び出しの配線区間。
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) struct FuncGateOrigin<'s, 'p, 'a> {
+    pub(in crate::project::use_aliases::bit_func) slot: usize,
+    pub(in crate::project::use_aliases::bit_func) reference: usize,
+    pub(in crate::project::use_aliases::bit_func) expression: FuncGateExpression,
+    pub(in crate::project::use_aliases::bit_func) template: Option<&'s super::super::templates::FunctionTemplate<'p, 'a>>,
+    pub(in crate::project::use_aliases::bit_func) base: nat,
+    pub(in crate::project::use_aliases::bit_func) inputs: Seq<Wire>,
+}
+
+pub(in crate::project::use_aliases::bit_func) open spec fn func_gate_origin_matches(
+    origin: FuncGateOrigin, definitions: Seq<CheckedBitDefinition>, selected: Seq<ResolvedTemplateCall>,
+    roots: Seq<NorBinding>, gates: Seq<NorGate>, gate: int,
+) -> bool {
+    &&& origin.slot < definitions.len()
+    &&& 0 <= origin.base <= gate < gates.len()
+    &&& match origin.expression {
+        FuncGateExpression::Local => {
+            &&& !(exists|g: int| 0 <= g < selected.len()
+                && (#[trigger] selected[g]).group.outputs.start <= origin.slot < selected[g].group.outputs.end)
+            &&& !nor_binding_covers(roots, origin.slot as int)
+            &&& definitions[origin.slot as int].rhs is Nor
+            &&& origin.template.is_none() && origin.reference == 0
+        },
+        FuncGateExpression::Function { group, child } => {
+            &&& 0 <= group < selected.len()
+            &&& origin.slot == selected[group].group.outputs.start
+            &&& match child {
+                None => origin.reference == 0 && origin.template == Some(selected[group].template),
+                Some(i) => 0 <= i < selected[group].children@.len()
+                    && selected[group].children@[i].child.reference == selected[group].group.references.start + origin.reference
+                    && origin.template == selected[group].children@[i].template,
+            }
+        },
+        FuncGateExpression::Nor { binding, index } => {
+            &&& 0 <= binding < roots.len()
+            &&& origin.slot == roots[binding].selected.prepared.output_slot
+            &&& 0 <= index <= roots[binding].selected.children@.len()
+            &&& if index == roots[binding].selected.children@.len() {
+                origin.reference == 0 && origin.template.is_none()
+            } else {
+                &&& roots[binding].selected.children@[index].child.reference == roots[binding].references.start + origin.reference
+                &&& origin.template == roots[binding].selected.children@[index].template
+            }
+        },
+    }
+    &&& match origin.template {
+        Some(template) => {
+            let callee = template.circuit_model().netlist_model();
+            let end = origin.base + callee.gates@.len();
+            &&& gate < end <= gates.len()
+            &&& instance_gates_match(gates.take(origin.base as int), callee.gates@, origin.inputs, gates.take(end as int))
+        },
+        None => gate == origin.base,
+    }
+}
+
+pub(super) closed spec fn mixed_gate_origin_link(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, function: &LoweredBitFunc, steps: Seq<WiringStep>, gate: int, origin: FuncGateOrigin,
+) -> bool {
+    let final_wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    exists|at: int, call: Option<CallGateWiring>|
+        #![trigger rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, at),
+            gate_call_in_definition(layouts, forms, bindings, roots, steps[at], final_wiring, gate, call)]
+    {
+        &&& rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, at)
+        &&& gate_call_in_definition(layouts, forms, bindings, roots, steps[at], final_wiring, gate, call)
+        &&& {
+            let step = steps[at];
+            &&& origin.slot == step.from
+            &&& match call {
+                None => origin.expression is Local && origin.reference == 0 && origin.template.is_none()
+                    && origin.base == step.before.gates.len() && origin.inputs.len() == 0,
+                Some(row) => {
+                    &&& origin.reference == row.reference && origin.template == row.template
+                    &&& origin.base == row.prior.len() && origin.inputs == row.inputs
+                    &&& if step.nor_before != step.nor_after {
+                        origin.expression == FuncGateExpression::Nor { binding: step.nor_before as int, index: row.nested->Some_0.1 }
+                    } else {
+                        let child = match row.nested {
+                            None => None,
+                            Some((calls, index)) => if index == calls.len() { None } else { Some(index) },
+                        };
+                        origin.expression == FuncGateExpression::Function { group: step.group_before as int, child }
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// 実際の関数展開から、各ゲートに対応する型検査済みの式を取り出す。
+pub(super) proof fn mixed_function_gate_origin<'s, 'p, 'a>(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding<'s, 'p, 'a>>,
+    selected: Seq<ResolvedTemplateCall<'s, 'p, 'a>>, roots: Seq<NorBinding<'s, 'p, 'a>>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, limit: usize, function: &LoweredBitFunc, steps: Seq<WiringStep>, gate: int,
+) -> (origin: FuncGateOrigin<'s, 'p, 'a>)
+    requires
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps),
+        bindings_match_calls(bindings, selected),
+        0 <= gate < function.netlist_model().gates@.len(),
+    ensures
+        func_gate_origin_matches(origin, body.definitions@, selected, roots, function.netlist_model().gates@, gate),
+        mixed_gate_origin_link(body, layouts, forms, bindings, roots, limit, function, steps, gate, origin),
+{
+    vstd::slice::axiom_spec_len(body.definitions);
+    let final_wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    assert forall|i: int| 0 <= i < bindings.len() implies
+        binding_matches_selection(#[trigger] bindings[i], bindings[i]._selection@) by {
+        assert(binding_matches_selection(bindings[i], selected[i]));
+    };
+    let (at, call) = rooted_trace_gate_call(body, layouts, forms, bindings, roots, limit, steps,
+        body.definitions@.len() as usize, bindings.len() as usize, roots.len() as usize, final_wiring, gate);
+    let step = steps[at];
+    assert(step.from < body.definitions@.len()) by {
+        reveal(rooted_mixed_trace);
+        reveal(wiring_step_valid);
+        reveal(nor_wiring_step_valid);
+    };
+    if call.is_none() {
+        assert forall|i: int| 0 <= i < selected.len() implies
+            !((#[trigger] selected[i]).group.outputs.start <= step.from < selected[i].group.outputs.end) by {
+            assert(bindings[i].group == selected[i].group);
+        };
+        return FuncGateOrigin { slot: step.from, reference: 0, expression: FuncGateExpression::Local,
+            template: None, base: step.before.gates.len(), inputs: Seq::empty() };
+    }
+    let row = call->Some_0;
+    reveal(nor_call_group_gate_matches);
+    reveal(nested_call_group_gate_matches);
+    reveal(bound_call_gate_matches);
+    let expression = if step.nor_before != step.nor_after {
+        let nested = step.nested->Some_0;
+        assert(builtin_nor_call_matches(&nested.builtin));
+        if row.template.is_none() {
+            assert(row.target.gates@.len() == 1);
+        }
+        FuncGateExpression::Nor { binding: step.nor_before as int, index: row.nested->Some_0.1 }
+    } else {
+        let group = step.group_before as int;
+        assert(binding_matches_selection(bindings[group], selected[group]));
+        if let Some(nested) = step.nested {
+            let (calls, index) = row.nested->Some_0;
+            if row.template.is_none() {
+                reveal(rooted_mixed_trace);
+                reveal(wiring_step_valid);
+                assert(builtin_nor_call_matches(&nested.builtin));
+                assert(row.target.gates@.len() == 1);
+            }
+            FuncGateExpression::Function { group, child: if index == calls.len() { None } else { Some(index) } }
+        } else {
+            FuncGateExpression::Function { group, child: None }
+        }
+    };
+    assert(call_gate_wiring_matches(row, step.before.gates, final_wiring.gates, gate));
+    let end = row.prior.len() + row.target.gates@.len();
+    assert(final_wiring.gates.take(end as int).take(row.prior.len() as int) =~= final_wiring.gates.take(row.prior.len() as int));
+    assert(row.prior == final_wiring.gates.take(row.prior.len() as int));
+    if let Some(template) = row.template {
+        let callee = template.circuit_model().netlist_model();
+        assert(row.target == *callee && gate < row.prior.len() + callee.gates@.len());
+    } else {
+        assert(row.target.gates@.len() == 1);
+        assert(gate == row.prior.len());
+    }
+    let origin = FuncGateOrigin { slot: step.from, reference: row.reference, expression, template: row.template,
+        base: row.prior.len(), inputs: row.inputs };
+    assert(func_gate_origin_matches(origin, body.definitions@, selected, roots, final_wiring.gates, gate));
+    origin
 }
 
 /// 本体に展開した根 NOR の配線状態と、同じ配線を評価した値。

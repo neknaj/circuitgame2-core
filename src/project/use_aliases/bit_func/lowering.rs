@@ -29,7 +29,9 @@ use crate::syntax::form_spans_valid;
 #[cfg(verus_only)]
 use mixed::{CallBinding, WiringStep, binding_covers, bindings_match_calls, bindings_preserve_definition_order,
     mixed_function_call_evaluation, mixed_function_local_value, mixed_function_result, nor_source_binding_matches,
-    rooted_nor_source_arguments};
+    rooted_nor_source_arguments, mixed_function_gate_origin, mixed_gate_origin_link};
+#[cfg(verus_only)]
+pub(super) use mixed::{FuncGateExpression, FuncGateOrigin, func_gate_origin_matches};
 #[cfg(verus_only)]
 use super::super::call_arity::ProjectedCallArgument;
 #[cfg(verus_only)]
@@ -246,6 +248,41 @@ proof fn projected_lowering_success<'s, 'p, 'a>(
     let steps = choose|steps: Ghost<Seq<WiringStep>>|
         #[trigger] mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, gate_limit, Ok((*value, steps)));
     (body, layouts, bindings, steps)
+}
+
+pub(super) closed spec fn projected_gate_origin_link(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>,
+    arguments: Seq<ProjectedCallArgument>, bit_limit: usize, gate_limit: usize, value: &LoweredBitFunc, gate: int,
+    origin: FuncGateOrigin,
+) -> bool {
+    exists|body: LoweringBody, layouts: Layouts, bindings: Seq<CallBinding>, steps: Ghost<Seq<WiringStep>>|
+        #![trigger mixed_gate_origin_link(&body, &layouts, forms, bindings, roots, gate_limit, value, steps@, gate, origin)]
+        body.input_widths@ == inputs && body.definitions@ == definitions
+        && body_layouts_result(inputs, definitions, outputs, bit_limit, Ok(layouts))
+        && bindings_match_calls(bindings, selected)
+        && mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, gate_limit, Ok((*value, steps)))
+        && mixed_gate_origin_link(&body, &layouts, forms, bindings, roots, gate_limit, value, steps@, gate, origin)
+}
+
+/// 変換したゲートに対応する展開前の式と、呼び出した回路内での位置を得る。
+pub(super) proof fn projected_lowering_gate_origin<'s, 'p, 'a>(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition<'p, 'a>>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall<'s, 'p, 'a>>, roots: Seq<NorBinding<'s, 'p, 'a>>,
+    arguments: Seq<ProjectedCallArgument>, bit_limit: usize, gate_limit: usize, value: &LoweredBitFunc, gate: int,
+) -> (origin: FuncGateOrigin<'s, 'p, 'a>)
+    requires
+        projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, roots, arguments, bit_limit, gate_limit, Ok(*value)),
+        0 <= gate < value.netlist_model().gates@.len(),
+    ensures
+        func_gate_origin_matches(origin, definitions, selected, roots, value.netlist_model().gates@, gate),
+        projected_gate_origin_link(inputs, definitions, outputs, drivers, forms, selected, roots, arguments,
+            bit_limit, gate_limit, value, gate, origin),
+{
+    let (body, layouts, bindings, steps) = projected_lowering_success(inputs, definitions, outputs, drivers,
+        forms, selected, roots, arguments, bit_limit, gate_limit, value);
+    mixed_function_gate_origin(&body, &layouts, forms, bindings, selected, roots, outputs, drivers,
+        gate_limit, value, steps@, gate)
 }
 
 /// 展開した回路の入力・出力の配置と、評価に必要な配線の条件を取り出す。
