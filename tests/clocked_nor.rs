@@ -1,5 +1,5 @@
 use circuitgame2_core::netlist::{ClockedNor, NorGate, NorNetlist, Wire};
-use circuitgame2_core::project::{ClockedPlanError, ClockedWireDriver, ModuleBodyPosition, SourceSnapshot,
+use circuitgame2_core::project::{ClockedModuleError, ClockedPlanError, ClockedWireDriver, ModuleBodyPosition, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project, plan_clocked_links};
 
 #[test]
@@ -157,4 +157,42 @@ fn resolves_a_forward_output_alias_before_appending_clocked_instances() {
     }
     let cycle = plan_clocked_links(&[0], &[Alias(0)], 0, 0).unwrap_err();
     assert_eq!(cycle, ClockedPlanError::AliasCycle(vec![0]));
+}
+
+#[test]
+fn lowers_a_parent_and_its_child_calls_from_source() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "parent.ncg2", revision: 2,
+            text: "(using nor) (module root (in i) (out passed x y) (def (passed x) (child y)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 3,
+            text: "(module child (in a) (out a q) (def q (nor a a)))
+                   (module-part root (def (echo y) (child i)))" },
+    ]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let parts = targets.collect_module_parts().unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let circuit = aliases.lower_clocked_module(parts[0].module_position, 8, 2).unwrap().unwrap();
+    let mut frame = circuit.reset();
+    for (input, expected) in [(false, [true, true, true]), (true, [false, false, false]), (true, [false, true, false])] {
+        frame = circuit.step(&frame.gates, &[input]).unwrap();
+        assert_eq!(frame.outputs, expected);
+    }
+}
+
+#[test]
+fn identifies_the_source_output_in_a_child_passthrough_cycle() {
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "loop.ncg2", revision: 7,
+        text: "(using nor) (module root (in) (out z) (def (z n) (child z)))
+               (module child (in a) (out a q) (def q (nor a a)))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ClockedModuleError::AliasCycle(sites)) =
+        aliases.lower_clocked_module(ModuleBodyPosition { file: 0, entry: 1 }, 8, 2)
+    else { panic!("the direct output is a zero-delay cycle"); };
+    let [output] = sites.as_slice() else { panic!("the cycle should contain the direct output only"); };
+    assert_eq!(output.source.revision, 7);
+    let start = output.source.text.find("(def (z n)").unwrap() + "(def (".len();
+    assert_eq!(output.span, start..start + 1);
 }

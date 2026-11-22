@@ -41,7 +41,7 @@ pub enum PrimitiveModuleError<'p, 'a> {
     Argument(LocatedName<'p, 'a>),
 }
 
-spec fn one_bit_ports(ports: Seq<TypedPort>, end: int) -> bool {
+pub(super) open spec fn one_bit_ports(ports: Seq<TypedPort>, end: int) -> bool {
     &&& 0 <= end <= ports.len()
     &&& forall|i: int| 0 <= i < end ==> (#[trigger] ports[i]).ty == ResolvedPortType::Bits(1)
 }
@@ -51,7 +51,7 @@ spec fn first_unsupported_port(ports: Seq<TypedPort>, site: LocatedName) -> bool
         && (#[trigger] ports[i]).ty != ResolvedPortType::Bits(1) && ports[i].annotation == site
 }
 
-fn unsupported_port(ports: &[TypedPort]) -> (bad: Option<usize>)
+pub(super) fn unsupported_port(ports: &[TypedPort]) -> (bad: Option<usize>)
     ensures match bad {
         None => one_bit_ports(ports@, ports@.len() as int),
         Some(i) => i < ports@.len() && one_bit_ports(ports@, i as int) && ports@[i as int].ty != ResolvedPortType::Bits(1),

@@ -162,6 +162,19 @@ fn reserve_regions(counts: &[usize], limit: usize) -> (result: Result<(Vec<Range
     Ok((regions, end))
 }
 
+pub(super) fn clocked_reserve(counts: &[usize], limit: usize) -> (result: Result<(Vec<Range<usize>>, usize), usize>)
+    ensures result matches Ok((regions, total)) ==> clocked_regions_cover(counts@, regions@, total) && total <= limit,
+        result matches Err(index) ==> index < counts@.len(),
+{
+    match reserve_regions(counts, limit) {
+        Ok((regions, total)) => {
+            proof { reserved_regions_cover(counts@, regions@, limit, total); }
+            Ok((regions, total))
+        },
+        Err(index) => Err(index),
+    }
+}
+
 spec fn wire_valid(driver: ClockedWireDriver, inputs: usize, gates: usize, size: nat) -> bool {
     match driver {
         ClockedWireDriver::Terminal(wire) => wire_available(wire, inputs as nat, gates as nat),
@@ -392,6 +405,46 @@ fn cycle_driver_positions(_drivers: &[ClockedWireDriver], _graph: &[Vec<Option<u
     positions
 }
 
+pub(super) closed spec fn clocked_resolution_result(drivers: Seq<ClockedWireDriver>, inputs: usize, gates: usize,
+    result: Result<Vec<Wire>, ClockedPlanError>,
+) -> bool {
+    match result {
+        Ok(wires) => clocked_wires_match(drivers, wires@)
+            && (forall|i: int| 0 <= i < wires@.len() ==> wire_available(#[trigger] wires@[i], inputs as nat, gates as nat)),
+        Err(ClockedPlanError::Wire(i)) => i < drivers.len() && valid_drivers_prefix(drivers, inputs, gates, i as int)
+            && !wire_valid(drivers[i as int], inputs, gates, drivers.len()),
+        Err(ClockedPlanError::AliasCycle(cycle)) => valid_drivers_prefix(drivers, inputs, gates, drivers.len() as int)
+            && clocked_wire_cycle(drivers, cycle@),
+        Err(ClockedPlanError::GateCapacity(_)) => false,
+    }
+}
+
+pub(super) fn clocked_resolve(drivers: &[ClockedWireDriver], inputs: usize, gates: usize)
+    -> (result: Result<Vec<Wire>, ClockedPlanError>)
+    ensures
+        clocked_resolution_result(drivers@, inputs, gates, result),
+        result matches Ok(wires) ==> wires@.len() == drivers@.len() && clocked_wires_match(drivers@, wires@)
+            && (forall|i: int| 0 <= i < wires@.len() ==> wire_available(#[trigger] wires@[i], inputs as nat, gates as nat)),
+        result matches Err(ClockedPlanError::AliasCycle(cycle)) ==> clocked_wire_cycle(drivers@, cycle@),
+        result matches Err(ClockedPlanError::AliasCycle(cycle)) ==>
+            forall|i: int| 0 <= i < cycle@.len() ==> #[trigger] cycle@[i] < drivers@.len(),
+        result matches Err(ClockedPlanError::Wire(i)) ==> i < drivers@.len(),
+        !(result matches Err(ClockedPlanError::GateCapacity(_))),
+{
+    let graph = match build_driver_graph(drivers, inputs, gates) {
+        Ok(graph) => graph,
+        Err(i) => return Err(ClockedPlanError::Wire(i)),
+    };
+    let order = match check_dependency_order(graph.as_slice(), true) {
+        Ok(order) => order,
+        Err(edges) => {
+            let cycle = cycle_driver_positions(drivers, graph.as_slice(), edges.as_slice());
+            return Err(ClockedPlanError::AliasCycle(cycle));
+        },
+    };
+    Ok(resolve_driver_wires(drivers, graph.as_slice(), order.as_slice(), inputs, gates))
+}
+
 /// 予約区間と配線、または先に見つかった範囲外参照や直結の閉路を定める。
 pub closed spec fn clocked_link_plan_result(
     counts: Seq<usize>, drivers: Seq<ClockedWireDriver>, inputs: usize, limit: usize,
@@ -436,15 +489,10 @@ pub fn plan_clocked_links(counts: &[usize], drivers: &[ClockedWireDriver], input
         Ok(plan) => plan,
         Err(i) => return Err(ClockedPlanError::GateCapacity(i)),
     };
-    let graph = match build_driver_graph(drivers, inputs, gate_count) {
-        Ok(graph) => graph,
-        Err(i) => return Err(ClockedPlanError::Wire(i)),
+    let wires = match clocked_resolve(drivers, inputs, gate_count) {
+        Ok(wires) => wires,
+        Err(error) => return Err(error),
     };
-    let order = match check_dependency_order(graph.as_slice(), true) {
-        Ok(order) => order,
-        Err(edges) => return Err(ClockedPlanError::AliasCycle(cycle_driver_positions(drivers, graph.as_slice(), edges.as_slice()))),
-    };
-    let wires = resolve_driver_wires(drivers, graph.as_slice(), order.as_slice(), inputs, gate_count);
     proof { reserved_regions_cover(counts@, regions@, limit, gate_count); }
     Ok(ClockedLinkPlan { regions, gate_count, wires })
 }

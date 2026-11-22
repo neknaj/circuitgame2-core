@@ -299,6 +299,14 @@ impl ClockedNor {
         clocked_wiring_valid(&self.netlist)
     }
 
+    /// 子回路の配置に使う検査済みの配線を返す。
+    pub(crate) fn checked_netlist(&self) -> (netlist: &NorNetlist)
+        ensures *netlist == self.netlist_model(), clocked_wiring_valid(netlist),
+    {
+        proof { use_type_invariant(self); }
+        &self.netlist
+    }
+
     /// 配線の仕様から参照する、検査済みのネットリスト。
     pub closed spec fn netlist_model(&self) -> NorNetlist {
         self.netlist

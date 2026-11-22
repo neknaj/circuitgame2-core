@@ -3,6 +3,8 @@
 mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod clocked_plan;
+mod clocked_source;
+pub use clocked_source::ClockedModuleError;
 pub use clocked_plan::{ClockedLinkPlan, ClockedPlanError, ClockedWireDriver, plan_clocked_links};
 #[cfg(verus_only)]
 pub use clocked_plan::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,
