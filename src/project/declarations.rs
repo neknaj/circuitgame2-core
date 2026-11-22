@@ -328,6 +328,7 @@ pub(super) proof fn declaration_key_evidence(
 )
     requires table.declaration_at(key, source, form),
     ensures key_view(form_key(*form)) == key_view(key),
+        !(form.head is Namespace),
         table.declaration_at(form_key(*form), source, form),
 {
 }

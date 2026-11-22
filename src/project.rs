@@ -8,6 +8,7 @@ mod concatenation;
 mod declarations;
 mod exports;
 mod literal_width;
+mod module_parts;
 mod name_keys;
 mod path;
 mod resolution;
@@ -72,6 +73,7 @@ pub use exports::{ExportError, ExportTable, index_exports};
 #[cfg(verus_only)]
 pub use exports::{export_error_evidence, export_table_matches, project_exports_valid};
 pub use name_keys::NameKey;
+pub use module_parts::{ModuleBodyPosition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
