@@ -501,6 +501,17 @@ pub open spec fn definition_target_range(forms: Seq<Form>, row: BuildDefinition)
     else { (start, row.expression.start as int) }
 }
 
+/// 厳格索引の定義には、少なくとも一つの左辺名がある。
+pub proof fn definition_target_range_nonempty(forms: Seq<Form>, row: BuildDefinition)
+    requires definition_targets_match(forms, row),
+    ensures ({
+        let (start, end) = definition_target_range(forms, row);
+        0 <= start < end <= forms.len()
+    }),
+{
+    reveal(definition_targets_match);
+}
+
 /// ビルド用索引の一行から、左辺の名前が並ぶ構文木の範囲を返す。
 ///
 /// `forms` と `row` には、同じ厳格解析で得た構文木と定義行を渡す。

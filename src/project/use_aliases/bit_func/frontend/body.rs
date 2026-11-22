@@ -14,6 +14,8 @@ use super::super::lowering::{
     evaluated_flat_call_matches, evaluated_nested_call_matches, MixedCallEvaluation,
     projected_lowering_call_evaluation, projected_lowering_ports, port_values,
     FuncGateExpression, FuncGateOrigin, SourceStepTarget, projected_lowering_gate_origin, projected_gate_origin_link,
+    projected_definition_history, projected_definition_partition, projected_definition_steps, rooted_source_step_ranges,
+    source_slot_partition, source_step_range_matches, source_step_slots, source_step_target,
 };
 #[cfg(verus_only)]
 use super::source_evaluation::{source_outputs_from_driver_values, source_outputs_match};
@@ -26,6 +28,8 @@ use super::super::expansion::{ExpansionSlot, PreparedExpansionBody, PreparedNorR
 #[cfg(verus_only)]
 use super::super::expansion::{PreparedExpressionCall, prepared_nested_output_matches};
 use super::super::super::FunctionExpansionOrder;
+#[cfg(verus_only)]
+use super::super::super::function_wiring::strict_definition_slots;
 #[cfg(verus_only)]
 use super::super::super::function_atoms::{
     concat_projection_positions, concat_projections_match, ordinary_call_excludes_structure_projection,
@@ -1410,6 +1414,112 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         crate::project::DefinitionPosition {
             file: scope.file, entry: scope.entry, definition: (absolute - frame.start) as usize, reference: 0,
         }
+    }
+
+    /// 成功した一段の左辺区間を、同じ厳格定義から決めた区間に照合する。
+    #[verifier::spinoff_prover]
+    proof fn expanded_step_matches_strict_range(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>, rows: Seq<NorDefinition>,
+        roots: Seq<NorBinding>, slots: Vec<CheckedBitDefinition>, step: super::super::lowering::WiringStep,
+    )
+        requires
+            self.projection_context(scope),
+            prepared.typed.literals.wiring matches FuncWiringResult::Checked(wiring) && *scope.wiring == wiring,
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
+            self.expansion_selection_matches(plan, table, (scope.file, scope.entry, scope.limit), prepared, selected),
+            self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(slots)),
+            self.expanded_body_nor_bindings(scope, plan, table, prepared, rows, roots, slots@),
+            source_step_range_matches(step, selected, roots, slots@.len()),
+        ensures strict_definition_slots(scope.parsed, scope.entry, scope.wiring).contains(source_step_slots(step)),
+    {
+        let caller = (scope.file, scope.entry, scope.limit);
+        let frame = scope.parsed.entry_ranges@[scope.entry as int].definitions;
+        let wiring = scope.wiring;
+        let expected = strict_definition_slots(scope.parsed, scope.entry, wiring);
+        let range = source_step_slots(step);
+        let target = source_step_target(step);
+        assert(source_step_range_matches(step, selected, roots, slots@.len()));
+        match target {
+            SourceStepTarget::Local => {
+                assert(!nor_covers(rows, range.start as int)) by {
+                    reveal(UseAliases::expanded_body_nor_bindings);
+                    assert(!nor_binding_covers(roots, range.start as int));
+                    assert(nor_binding_covers(roots, range.start as int) == nor_covers(rows, range.start as int));
+                };
+                let calls = Seq::new(selected.len(), |j: int| *selected[j].group);
+                assert(calls =~= prepared.calls@) by {
+                    assert forall|j: int| 0 <= j < selected.len() implies #[trigger] calls[j] == prepared.calls@[j] by {
+                        assert(self.resolved_template_call_matches(plan, caller, prepared, j, selected[j]));
+                    };
+                };
+            },
+            SourceStepTarget::Function(group) => {
+                assert(self.resolved_template_call_matches(plan, caller, prepared, group, selected[group]));
+            },
+            SourceStepTarget::Nor(_) => {},
+        }
+        let site = self.expanded_strict_definition_site(scope, plan, table, prepared, selected, rows, roots, slots, range, target);
+        let j = site.definition as int;
+        self.strict_definition_slot_at(scope.file, scope.entry, scope.limit, wiring, j);
+        let driver = wiring.drivers.definitions@[range.start as int];
+        assert(driver.definition == frame.start + j && driver.result_index == 0);
+        assert(expected[j].start == range.start && expected[j].end == range.end);
+        assert(expected.contains(expected[j]));
+    }
+
+    /// 一つの関数の成功履歴が、厳格索引の各定義を先頭から一度ずつ変換したことを示す。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn expanded_body_strict_steps<'w>(
+        &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
+        prepared: &'w PreparedExpansionBody<'p, 'a>, capacity: usize, limit: usize, value: &'w ExpandedBody<'p, 'a>,
+    ) -> (witness: (FuncProjection<'w, 'p, 'a>, Seq<ResolvedTemplateCall<'w, 'p, 'a>>,
+        Seq<NorBinding<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>, Seq<super::super::lowering::WiringStep>))
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
+            self.expanded_body_lowering_result(plan, table, caller, prepared, capacity, limit, Ok(*value)),
+        ensures ({
+            let (scope, selected, roots, slots, steps) = witness;
+            let project = self.targets.project_model();
+            let parsed = &project.circuits_model()[caller.0 as int];
+            let wiring = &prepared.typed.literals.wiring->Checked_0;
+            &&& scope.file == caller.0 && scope.entry == caller.1 && scope.limit == caller.2
+            &&& scope.source == &project.sources_model()[caller.0 as int] && scope.parsed == parsed && scope.wiring == wiring
+            &&& self.expansion_selection_matches(plan, table, caller, prepared, selected)
+            &&& slots@.len() == wiring.drivers.definitions@.len()
+            &&& rooted_source_step_ranges(steps) == strict_definition_slots(parsed, caller.1, wiring)
+            &&& forall|i: int| 0 <= i < steps.len() ==> source_step_range_matches(#[trigger] steps[i], selected, roots, slots@.len())
+            &&& projected_definition_history(value.ports.inputs@, slots@, value.ports.outputs@, wiring.drivers.outputs@,
+                parsed.syntax.forms@, selected, roots, prepared.projections.call_arguments.arguments@, capacity, limit, &value.circuit, steps)
+        }),
+    {
+        let (scope, selected, rows, roots, slots) = self.expanded_body_success(plan, table, caller, prepared, capacity, limit, value);
+        self.prepared_definition_width_evidence(&scope, prepared.calls@, selected, rows, slots);
+        let inputs = value.ports.inputs@;
+        let outputs = value.ports.outputs@;
+        let wiring = scope.wiring;
+        let drivers = wiring.drivers.outputs@;
+        let forms = scope.parsed.syntax.forms@;
+        let arguments = prepared.projections.call_arguments.arguments@;
+        let steps = projected_definition_steps(inputs, slots@, outputs, drivers, forms, selected, roots, arguments,
+            capacity, limit, &value.circuit);
+        self.strict_definition_slot_partition(scope.file, scope.entry, scope.limit, wiring);
+        vstd::std_specs::vec::axiom_spec_len(&slots);
+        let expected = strict_definition_slots(scope.parsed, scope.entry, wiring);
+        assert(source_slot_partition(expected, slots@.len() as usize)) by {
+            assert forall|i: int| 0 <= i < expected.len() implies {
+                let end = #[trigger] expected[i].end;
+                &&& expected[i].start < end <= slots@.len()
+                &&& end == if i + 1 < expected.len() { expected[i + 1].start } else { slots@.len() as usize }
+            } by {};
+        };
+        assert forall|i: int| 0 <= i < steps.len() implies #[trigger] expected.contains(source_step_slots(steps[i])) by {
+            self.expanded_step_matches_strict_range(&scope, plan, table, prepared, selected, rows, roots, slots, steps[i]);
+        };
+        projected_definition_partition(inputs, slots@, outputs, drivers, forms, selected, roots, arguments,
+            capacity, limit, &value.circuit, steps, expected);
+        (scope, selected, roots, slots, steps)
     }
 
     /// 出力スロットを駆動する基底 NOR の定義番号と型付き署名を取り出す。

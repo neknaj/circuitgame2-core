@@ -1,6 +1,7 @@
 //! コンパイラの配線履歴を、定義単位のソース配線の証明に渡す。
 
 pub(super) mod body;
+pub(in crate::project::use_aliases::bit_func) mod ranges;
 
 use super::*;
 use super::super::call_arguments::source_wires::{
@@ -47,7 +48,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_st
 }
 
 /// 展開履歴のスロット区間を、型検査で選んだ右辺に対応付ける。
-pub(in crate::project::use_aliases::bit_func) closed spec fn source_step_range_matches(
+pub(in crate::project::use_aliases::bit_func) open spec fn source_step_range_matches(
     step: WiringStep, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, count: nat,
 ) -> bool {
     let slots = source_step_slots(step);

@@ -5,9 +5,15 @@ mod source_arguments;
 #[cfg(verus_only)]
 mod source_layout;
 #[cfg(verus_only)]
-pub(in crate::project::use_aliases::bit_func) use source_layout::{SourceStepTarget, source_step_slots, source_step_target};
+pub(in crate::project::use_aliases::bit_func) use source_layout::{
+    SourceStepTarget, source_step_range_matches, source_step_slots, source_step_target,
+};
 #[cfg(verus_only)]
-pub(super) use source_layout::rooted_source_step;
+pub(in crate::project::use_aliases::bit_func) use source_layout::ranges::{rooted_source_step_ranges, source_slot_partition};
+#[cfg(verus_only)]
+pub(super) use source_layout::{rooted_source_step, rooted_source_step_range};
+#[cfg(verus_only)]
+pub(super) use source_layout::ranges::rooted_source_step_ranges_match;
 #[cfg(verus_only)]
 pub(super) use source_arguments::{mixed_function_call_evaluation, nor_source_binding_matches, rooted_nor_source_arguments};
 #[cfg(verus_only)]

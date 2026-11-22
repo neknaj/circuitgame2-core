@@ -31,13 +31,17 @@ use super::frontend::{call_covers, nor_binding_covers, nor_binding_fits_body, no
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
 #[cfg(verus_only)]
-use mixed::{CallBinding, WiringStep, binding_covers, bindings_match_calls, bindings_preserve_definition_order,
+use mixed::{CallBinding, binding_covers, bindings_match_calls, bindings_preserve_definition_order,
     mixed_function_call_evaluation, mixed_function_local_value, mixed_function_result, nor_source_binding_matches,
     rooted_nor_source_arguments, mixed_function_gate_origin, mixed_gate_origin_link};
 #[cfg(verus_only)]
 pub(super) use mixed::{FuncGateExpression, FuncGateOrigin, func_gate_origin_matches};
 #[cfg(verus_only)]
-pub(super) use mixed::{SourceStepTarget, source_step_slots, source_step_target};
+pub(super) use mixed::{
+    SourceStepTarget, WiringStep, rooted_source_step_ranges, source_slot_partition, source_step_range_matches, source_step_slots, source_step_target,
+};
+#[cfg(verus_only)]
+use mixed::{rooted_source_step_range, rooted_source_step_ranges_match, rooted_mixed_function_success};
 #[cfg(verus_only)]
 use super::super::call_arity::ProjectedCallArgument;
 #[cfg(verus_only)]
@@ -254,6 +258,73 @@ proof fn projected_lowering_success<'s, 'p, 'a>(
     let steps = choose|steps: Ghost<Seq<WiringStep>>|
         #[trigger] mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, gate_limit, Ok((*value, steps)));
     (body, layouts, bindings, steps)
+}
+
+/// 同じ関数の変換結果が保持した配線履歴を表す。
+pub(super) closed spec fn projected_definition_history(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>,
+    capacity: usize, limit: usize, value: &LoweredBitFunc, steps: Seq<WiringStep>,
+) -> bool {
+    exists|body: LoweringBody, layouts: Layouts, bindings: Seq<CallBinding>|
+        #[trigger] rooted_mixed_function_success(&body, &layouts, forms, bindings, roots, outputs, drivers, limit, value, steps)
+        && body.input_widths@ == inputs && body.definitions@ == definitions
+        && body_layouts_result(inputs, definitions, outputs, capacity, Ok(layouts))
+        && bindings_match_calls(bindings, selected)
+        && mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, limit, Ok((*value, Ghost(steps))))
+}
+
+/// ゲート数にかかわらず、成功した変換が各定義に割り当てた左辺区間を取り出す。
+pub(super) proof fn projected_definition_steps(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>,
+    capacity: usize, limit: usize, value: &LoweredBitFunc,
+) -> (steps: Seq<WiringStep>)
+    requires projected_lowering_view(inputs, definitions, outputs, drivers, forms, selected, roots, arguments, capacity, limit, Ok(*value)),
+    ensures
+        projected_definition_history(inputs, definitions, outputs, drivers, forms, selected, roots, arguments,
+            capacity, limit, value, steps),
+        forall|i: int| 0 <= i < steps.len() ==>
+            source_step_range_matches(#[trigger] steps[i], selected, roots, definitions.len()),
+{
+    let (body, layouts, bindings, steps) = projected_lowering_success(inputs, definitions, outputs, drivers,
+        forms, selected, roots, arguments, capacity, limit, value);
+    vstd::slice::axiom_spec_len(body.definitions);
+    let final_wiring = call_group::WiringView { definitions: value.definition_wires@, gates: value.netlist.gates@,
+        origins: value.gate_definitions@ };
+    assert(rooted_mixed_function_success(&body, &layouts, forms, bindings, roots, outputs, drivers, limit, value, steps@));
+    assert forall|i: int| 0 <= i < steps@.len() implies
+        source_step_range_matches(#[trigger] steps@[i], selected, roots, definitions.len()) by {
+        rooted_source_step_range(&body, &layouts, forms, bindings, selected, roots, limit, steps@,
+            definitions.len() as usize, bindings.len() as usize, roots.len() as usize, final_wiring, i);
+    };
+    steps@
+}
+
+/// 各ステップの左辺が厳格定義の区間に一致すれば、全区間が同じ順で現れることを示す。
+pub(super) proof fn projected_definition_partition(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>,
+    capacity: usize, limit: usize, value: &LoweredBitFunc, steps: Seq<WiringStep>, expected: Seq<Range<usize>>,
+)
+    requires
+        projected_definition_history(inputs, definitions, outputs, drivers, forms, selected, roots, arguments, capacity, limit, value, steps),
+        definitions.len() <= usize::MAX,
+        source_slot_partition(expected, definitions.len() as usize),
+        forall|i: int| 0 <= i < steps.len() ==> #[trigger] expected.contains(source_step_slots(steps[i])),
+    ensures rooted_source_step_ranges(steps) == expected,
+{
+    reveal(projected_definition_history);
+    let (body, layouts, bindings) = choose|body: LoweringBody, layouts: Layouts, bindings: Seq<CallBinding>|
+        #[trigger] rooted_mixed_function_success(&body, &layouts, forms, bindings, roots, outputs, drivers, limit, value, steps)
+        && body.input_widths@ == inputs && body.definitions@ == definitions
+        && body_layouts_result(inputs, definitions, outputs, capacity, Ok(layouts))
+        && bindings_match_calls(bindings, selected)
+        && mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, limit, Ok((*value, Ghost(steps))));
+    let final_wiring = call_group::WiringView { definitions: value.definition_wires@, gates: value.netlist.gates@,
+        origins: value.gate_definitions@ };
+    rooted_source_step_ranges_match(&body, &layouts, forms, bindings, roots, limit, steps, definitions.len() as usize,
+        bindings.len() as usize, roots.len() as usize, final_wiring, expected);
 }
 
 pub(super) closed spec fn projected_gate_origin_link(

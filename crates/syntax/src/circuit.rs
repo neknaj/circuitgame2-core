@@ -75,7 +75,7 @@ pub use build::{
     build_entry_ranges_evidence, build_index_matches,
     build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
     definition_expression_region, definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
-    definition_targets_match,
+    definition_target_range_nonempty, definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
