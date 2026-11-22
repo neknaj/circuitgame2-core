@@ -1,6 +1,6 @@
 //! ソース上のゲートをインスタンス経路で識別する tick の参照意味論。
 
-use super::{NorNetlist, TickFrame, Wire, clocked_wiring_valid, nor_trace, reset_matches, tick_matches, wire_available, wire_value};
+use super::{NorGate, NorNetlist, TickFrame, Wire, clocked_wiring_valid, nor_trace, reset_matches, tick_matches, wire_available, wire_value};
 use crate::project::DefinitionPosition;
 use vstd::prelude::*;
 
@@ -45,6 +45,44 @@ pub struct SourceTickCircuit {
     pub gates: Map<SourceGateId, SourceNor>,
     /// 宣言順かつ各ポート内は下位ビット順の公開出力。
     pub outputs: Seq<SourceWire>,
+}
+
+/// 入力2本を一つの NOR へ渡し、そのゲートを唯一の出力とする配線を表す。
+pub(crate) open spec fn builtin_nor_template(netlist: &NorNetlist) -> bool {
+    &&& netlist.input_count == 2
+    &&& netlist.gates@ == seq![NorGate { left: Wire::Input(0), right: Wire::Input(1) }]
+    &&& netlist.outputs@ == seq![Wire::Gate(0)]
+}
+
+/// 基底 NOR のソース回路と、ゲート番号と識別子の対応を返す。
+///
+/// 識別子には呼び出しのソース位置を使う。外側のインスタンス経路は呼び出し元で付ける。
+pub(crate) open spec fn builtin_nor_source(at: DefinitionPosition)
+    -> (SourceTickCircuit, Seq<SourceGateId>, Map<SourceGateId, int>)
+{
+    let site = SourceGateId { instance: Seq::empty(), gate: at };
+    (
+        SourceTickCircuit {
+            input_count: 2,
+            gates: Map::empty().insert(site, SourceNor { left: SourceWire::Input(0), right: SourceWire::Input(1) }),
+            outputs: seq![SourceWire::Gate(site)],
+        },
+        seq![site],
+        Map::empty().insert(site, 0int),
+    )
+}
+
+/// 基底 NOR のソース回路と単一ゲートのネットリストで、入力配線と出力が対応することを示す。
+pub(crate) proof fn builtin_nor_source_layout(at: DefinitionPosition, netlist: &NorNetlist)
+    requires builtin_nor_template(netlist),
+    ensures ({
+        let (source, order, index) = builtin_nor_source(at);
+        source_clocked_layout(&source, netlist, order, index)
+    }),
+{
+    let (source, order, index) = builtin_nor_source(at);
+    assert(source_output_pair_at(&source, netlist, order, 0));
+    source_clocked_layout_from_pairs(&source, netlist, order, index);
 }
 
 /// ソース上の全ゲートの状態と、公開ポートの観測値。

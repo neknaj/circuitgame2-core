@@ -3,11 +3,11 @@
 use super::{ChildSourceLayout, all_child_source_placements, child_source_placement, instance_for_gate,
     instance_owns_gate, source_gate_under};
 use super::reference::SourceLayer;
-use super::super::{SourceInstance, assembled_gate_prefix, assembled_outputs, builtin_nor_template, child_drivers_match,
+use super::super::{SourceInstance, assembled_gate_prefix, assembled_outputs, child_drivers_match,
     instance_counts_match, instance_output_slots, source_assembly_matches};
 use super::super::super::clocked_plan::{ClockedWireDriver, clocked_regions_cover, clocked_wires_match};
-use crate::netlist::{ClockedNor, NorNetlist, SourceGateId, SourceNor, SourceTickCircuit, SourceWire, Wire,
-    source_clocked_layout, source_clocked_layout_from_pairs, source_gate_positions_distinct, source_output_pair_at, wire_available};
+use crate::netlist::{ClockedNor, NorNetlist, SourceGateId, SourceTickCircuit, Wire,
+    builtin_nor_source, builtin_nor_source_layout, source_clocked_layout, source_gate_positions_distinct, wire_available};
 use crate::project::{DefinitionPosition, ModuleBodyPosition, ModuleCallTarget, ModuleCalls, UseAliases};
 use core::ops::Range;
 use vstd::prelude::*;
@@ -42,30 +42,10 @@ pub(in crate::project::use_aliases::module_types::clocked_source) open spec fn c
         && prior_layout_at(templates, layouts, child as int, position)
 }
 
+/// 基底 NOR を、呼び出し経路を付けずに親へ配置する。
 pub(super) closed spec fn builtin_source(at: DefinitionPosition) -> ChildSourceLayout {
-    let site = SourceGateId { instance: Seq::empty(), gate: at };
-    ChildSourceLayout {
-        prefix: Seq::empty(),
-        circuit: SourceTickCircuit {
-            input_count: 2,
-            gates: Map::empty().insert(site, SourceNor { left: SourceWire::Input(0), right: SourceWire::Input(1) }),
-            outputs: seq![SourceWire::Gate(site)],
-        },
-        order: seq![site],
-        index: Map::empty().insert(site, 0int),
-    }
-}
-
-proof fn builtin_source_layout(at: DefinitionPosition, netlist: &NorNetlist)
-    requires builtin_nor_template(netlist),
-    ensures ({
-        let layout = builtin_source(at);
-        source_clocked_layout(&layout.circuit, netlist, layout.order, layout.index)
-    }),
-{
-    let layout = builtin_source(at);
-    assert(source_output_pair_at(&layout.circuit, netlist, layout.order, 0));
-    source_clocked_layout_from_pairs(&layout.circuit, netlist, layout.order, layout.index);
+    let (circuit, order, index) = builtin_nor_source(at);
+    ChildSourceLayout { prefix: Seq::empty(), circuit, order, index }
 }
 
 spec fn layout_for_call(checked: &ModuleCalls, edges: Seq<Option<usize>>, layouts: Seq<Option<ModuleSourceLayout>>, i: int)
@@ -245,7 +225,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, builtin));
             let model = instance.template.netlist_model();
             if call.inputs.ports.signature.target is Nor {
-                builtin_source_layout(call.at, &model);
+                builtin_nor_source_layout(call.at, &model);
             } else {
                 assert(edges[i].is_some());
                 assert(call_layout_is_ready(&call, edges[i], templates, prior));

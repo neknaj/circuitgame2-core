@@ -19,7 +19,7 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use crate::project::{DefinitionPosition, ModuleDrivers, circuits::parsed_index_evidence};
 #[cfg(verus_only)]
-use crate::netlist::{instance_gates_at, instance_gates_in_extension, wire_available};
+use crate::netlist::{builtin_nor_template, instance_gates_at, instance_gates_in_extension, wire_available};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence,
     call_argument_position_bounds, call_argument_position_is_direct};
@@ -130,12 +130,6 @@ fn resolve_driver(driver: ClockedWireDriver, wires: &[Wire]) -> (wire: Option<Wi
             if target < wires.len() { Some(wires[target]) } else { None }
         },
     }
-}
-
-spec fn builtin_nor_template(netlist: &NorNetlist) -> bool {
-    &&& netlist.input_count == 2
-    &&& netlist.gates@ == seq![NorGate { left: Wire::Input(0), right: Wire::Input(1) }]
-    &&& netlist.outputs@ == seq![Wire::Gate(0)]
 }
 
 fn builtin_instance() -> (result: Result<ClockedNor, ClockedNorError>)
