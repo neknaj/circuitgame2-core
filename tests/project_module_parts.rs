@@ -339,6 +339,52 @@ fn module_call_batch_checks_nested_calls_in_fragment_order() {
 }
 
 #[test]
+fn module_call_checks_child_output_type_without_reordering_child_diagnostics() {
+    for (arguments, reference, bad_argument, child_output) in [
+        ("(wide-pass wide) bit1", 0, "(wide-pass wide)", true),
+        ("(wide-pass) wide", 0, "wide", false),
+        ("(wide-pass) bit1", 1, "(wide-pass)", false),
+    ] {
+        let fragment = format!("(module-part root (def y (nor {arguments})))");
+        let input = [
+            SourceSnapshot { path: "owner.ncg2", revision: 2,
+                text: "(using nor) (func wide-pass (in (x (bits 2))) (out (x (bits 2))))
+                       (module root (in bit1 (wide (bits 2))) (out y))" },
+            SourceSnapshot { path: "fragment.ncg2", revision: 6, text: &fragment },
+        ];
+        let project = parse_circuit_project(&input).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let bindings = targets.collect_module_parts().unwrap();
+        let owner = bindings[0].module_position;
+        let part = bindings[0].part_position;
+        let aliases = check_use_aliases(&targets).unwrap();
+        let Err(ModuleCallsError::Call { at, reason }) = aliases.check_module_calls(owner, 16) else {
+            panic!("the parent or child must report a call error");
+        };
+        assert_eq!(at, DefinitionPosition { file: part.file, entry: part.entry, definition: 0, reference });
+        match reason {
+            ModuleCallInputsError::Argument { index, argument, reason: CallInputReason::SignalType(actual), .. } => {
+                assert_eq!(reference, 0);
+                assert_eq!(index, if child_output { 0 } else { 1 });
+                assert_eq!(&argument.source.text[argument.span], bad_argument);
+                assert!(matches!(actual.ty, ResolvedPortType::Bits(2)));
+                if child_output {
+                    assert_eq!(actual.origin.source.revision, 2);
+                    let output = "(out (x (bits ";
+                    let width = actual.origin.source.text.find(output).unwrap() + output.len();
+                    assert_eq!(actual.origin.span, width..width + 1);
+                }
+            },
+            ModuleCallInputsError::Ports(ModuleCallPortsError::InputCount { call, expected: 1, actual: 0, .. }) => {
+                assert_eq!(reference, 1);
+                assert_eq!(&call.source.text[call.span], bad_argument);
+            },
+            error => panic!("unexpected error: {error:?}"),
+        }
+    }
+}
+
+#[test]
 fn reports_selection_numeric_overflow_before_a_zero_count() {
     let input = [
         SourceSnapshot { path: "owner.ncg2", revision: 2,

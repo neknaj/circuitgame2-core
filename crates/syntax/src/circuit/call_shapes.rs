@@ -78,6 +78,17 @@ pub closed spec fn call_shape_matches(
     }
 }
 
+/// 呼び出しリストが、定義の右辺の範囲に収まることを示す。
+pub proof fn indexed_call_region(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference, shape: CallShape,
+)
+    requires reference.kind is Callee, call_shape_matches(source, forms, row, reference, Some(shape)),
+    ensures row.expression.start <= shape.form < forms[shape.form as int]->List_end <= row.expression.end,
+{
+    let root = shape.form as int;
+    super::expression_forest::ordinary_call_bounds(source, forms, root, row.expression.end as int);
+}
+
 /// 同じ呼び出し参照のリスト位置、範囲、引数数は一意に定まる。
 pub proof fn indexed_call_shapes_agree(
     source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference,

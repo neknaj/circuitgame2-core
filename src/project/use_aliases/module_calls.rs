@@ -161,6 +161,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     )
         requires self.module_call_signature_result(at, max_width, Ok(Some(signature))),
         ensures
+            self.module_call_at(at),
             self.position_exists(at.file, at.entry, at.definition, at.reference),
             location_in_source(LocatedName { source: signature.source, span: signature.call.span }),
             ({
@@ -171,11 +172,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& *signature.source == project.sources_model()[at.file as int]
                 &&& signature.call.form + 1 == indexed.form
                 &&& call_shape_matches(signature.source.text, parsed.syntax.forms@, row, indexed, Some(signature.call))
-                &&& call_arguments_match(parsed.syntax.forms@, signature.call)
+                    &&& call_arguments_match(parsed.syntax.forms@, signature.call)
+                    &&& row.expression.start <= signature.call.form
+                        < parsed.syntax.forms@[signature.call.form as int]->List_end <= row.expression.end
             }),
             signature.target matches ModuleCallTarget::Routine { position, signature: ports, .. } ==>
                 self.typed_signature_evidence(position.file, position.entry, max_width, Ok(Some(ports))),
     {
+        let parsed = self.targets.project_model().circuits_model()[at.file as int];
+        let row = parsed.definitions@[parsed.entry_ranges@[at.entry as int].definitions.start + at.definition];
+        let indexed = parsed.references@[row.references.start + at.reference];
+        crate::syntax::circuit::indexed_call_region(signature.source.text, parsed.syntax.forms@, row, indexed, signature.call);
         let resolved = choose|resolved: ResolvedDefinitionReference|
             #[trigger] self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, Ok(resolved))
                 && self.module_callee_matches(resolved.binding, max_width, signature.target);

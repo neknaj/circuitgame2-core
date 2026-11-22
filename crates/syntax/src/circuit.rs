@@ -58,7 +58,7 @@ pub use call_shapes::{
 };
 #[cfg(verus_only)]
 pub use call_shapes::{
-    call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index, indexed_call_shapes_agree,
+    call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index, indexed_call_region, indexed_call_shapes_agree,
     call_argument_containing_list, call_argument_position_bounds, call_argument_position_is_direct,
     call_argument_positions, call_argument_positions_agree,
     call_argument_positions_from_steps, call_form_bounds,

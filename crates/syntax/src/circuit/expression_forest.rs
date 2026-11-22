@@ -121,7 +121,7 @@ pub(super) proof fn ordinary_call_bounds(source: &str, forms: Seq<Form>, call: i
     requires ordinary_call_at(source, forms, call, stop),
     ensures 0 <= call < forms.len() && forms[call] is List
         && call < stop
-        && call + 2 <= forms[call]->List_end <= forms.len()
+        && call + 2 <= forms[call]->List_end <= stop <= forms.len()
         && forms[call + 1] is Atom,
 {
 }

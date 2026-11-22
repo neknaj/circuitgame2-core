@@ -2,6 +2,7 @@
 
 mod batch;
 pub use batch::{CheckedModuleCall, ModuleCalls, ModuleCallsError};
+mod nested;
 
 use super::{ModuleOutputTypes, ModuleOutputTypesError, UseAliases, aliases::lookup_member, selections::read_bound_type};
 use crate::project::{DefinitionPosition, ModuleBodyPosition, ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, SignalType};
@@ -29,7 +30,7 @@ pub enum ModuleInferredCallError<'p, 'a> {
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn inferred_argument_at(
-        &self, module: &ModuleOutputTypes, at: DefinitionPosition, member: usize, ports: &ModuleCallPorts,
+        &self, module: &ModuleOutputTypes, at: DefinitionPosition, limit: u64, member: usize, ports: &ModuleCallPorts,
         index: int, ty: Option<SignalType>,
     ) -> bool {
         let project = self.targets.project_model();
@@ -50,17 +51,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& bound.form == form
                     &&& ty == bound_type(&module.expressions.typed, module.expressions.types@, bound.driver)
                 }
+        } else if parsed.syntax.forms@[form as int] is List {
+            self.nested_argument_type(at, limit, form, ty)
         } else { ty.is_none() }
     }
 
     #[verifier::opaque]
     spec fn inferred_arguments_prefix(
-        &self, module: &ModuleOutputTypes, at: DefinitionPosition, member: usize, ports: &ModuleCallPorts,
+        &self, module: &ModuleOutputTypes, at: DefinitionPosition, limit: u64, member: usize, ports: &ModuleCallPorts,
         types: Seq<Option<SignalType>>,
     ) -> bool {
         &&& types.len() <= ports.arguments@.len()
         &&& forall|i: int| 0 <= i < types.len() ==>
-            self.inferred_argument_at(module, at, member, ports, i, #[trigger] types[i])
+            self.inferred_argument_at(module, at, limit, member, ports, i, #[trigger] types[i])
     }
 
     fn infer_call_arguments(&self, _owner: ModuleBodyPosition, limit: u64, module: &ModuleOutputTypes<'p, 'a>,
@@ -73,7 +76,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let members = module.expressions.typed.sources.roots.wiring.drivers.body.members@;
                 member < members.len() && members[member as int] == (ModuleBodyPosition { file: at.file, entry: at.entry })
             }),
-        ensures types@.len() == ports.arguments@.len(), self.inferred_arguments_prefix(module, at, member, ports, types@),
+        ensures types@.len() == ports.arguments@.len(), self.inferred_arguments_prefix(module, at, limit, member, ports, types@),
     {
         let expressions = &module.expressions;
         let typed = &expressions.typed;
@@ -101,7 +104,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let arguments = ports.arguments.as_slice();
         let mut types = Vec::new();
         let mut i = 0;
-        assert(self.inferred_arguments_prefix(module, at, member, ports, types@)) by { reveal(UseAliases::inferred_arguments_prefix); };
+        assert(self.inferred_arguments_prefix(module, at, limit, member, ports, types@)) by { reveal(UseAliases::inferred_arguments_prefix); };
         while i < arguments.len()
             invariant
                 self.can_resolve(), *project == self.targets.project_model(),
@@ -124,7 +127,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 forms@ == parsed.syntax.forms@, arguments@ == ports.arguments@,
                 call_argument_positions(forms@, ports.signature.call, arguments@),
                 i == types@.len() <= arguments@.len(),
-                self.inferred_arguments_prefix(module, at, member, ports, types@),
+                self.inferred_arguments_prefix(module, at, limit, member, ports, types@),
             decreases arguments@.len() - i,
         {
             proof {
@@ -141,16 +144,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 proof { self.module_signal_index_item(_owner, limit, *wiring, member as int, position as int); }
                 let binding = &wiring.signals[member][position - frame.signals.start];
                 let value = read_bound_type(typed, expressions.types.as_slice(), binding.driver);
-                assert(self.inferred_argument_at(module, at, member, ports, i as int, value));
+                assert(self.inferred_argument_at(module, at, limit, member, ports, i as int, value));
                 value
+            } else if matches!(forms[form], Form::List { .. }) {
+                self.read_nested_argument_type(at, limit, source, parsed, row, form)
             } else { None };
-            assert(self.inferred_argument_at(module, at, member, ports, i as int, ty));
+            assert(self.inferred_argument_at(module, at, limit, member, ports, i as int, ty));
             let ghost prior = types@;
             types.push(ty);
-            assert(self.inferred_arguments_prefix(module, at, member, ports, types@)) by {
+            assert(self.inferred_arguments_prefix(module, at, limit, member, ports, types@)) by {
                 reveal(UseAliases::inferred_arguments_prefix);
                 assert forall|j: int| 0 <= j < types@.len() implies
-                    self.inferred_argument_at(module, at, member, ports, j, #[trigger] types@[j]) by {
+                    self.inferred_argument_at(module, at, limit, member, ports, j, #[trigger] types@[j]) by {
                     if j < i { assert(types@[j] == prior[j]); }
                 };
             };
@@ -172,7 +177,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 _ => exists|ports: ModuleCallPorts, known: Seq<Option<SignalType>>, member: usize|
                     #[trigger] self.module_call_ports_result(at, limit, Ok(Some(ports)))
                     && member < members.len() && members[member as int] == owner
-                    && #[trigger] self.inferred_arguments_prefix(module, at, member, &ports, known)
+                    && #[trigger] self.inferred_arguments_prefix(module, at, limit, member, &ports, known)
                     && known.len() == ports.arguments@.len()
                     && self.module_inputs_from_plan_match(at, limit, &ports, known, result),
             }
@@ -223,7 +228,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => Err(error),
         };
         assert(!(result matches Err(ModuleCallInputsError::Ports(_))));
-        assert(self.inferred_arguments_prefix(module, at, member, &plan, known@));
+        assert(self.inferred_arguments_prefix(module, at, limit, member, &plan, known@));
         assert(self.module_inputs_from_plan_match(at, limit, &plan, known@, result));
         assert(self.inferred_call(module, at, limit, result));
         result
@@ -245,8 +250,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 指定した呼び出しの実引数を、モジュールの型表と参照先の署名で検査する。
     ///
     /// 直接の信号名は元の断片の束縛から型を得る。リテラルは入力ポートの型で検査する。
-    /// 型が未確定の信号と子式は保留する。指定した位置がモジュール内の呼び出しを指さなければ
-    /// `None` を返す。
+    /// 子の通常呼び出しには出力ポートの型を使う。子の署名や入出力数に違反がある場合や、
+    /// 引数の型が未確定の場合は、その引数の型の照合を保留する。指定位置がモジュール内の
+    /// 呼び出しを指さなければ `None` を返す。
+    /// 子の呼び出し自体の違反も調べる場合は [`Self::check_module_calls`] を使う。
     ///
     /// # Errors
     ///
