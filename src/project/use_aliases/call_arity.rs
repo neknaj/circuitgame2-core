@@ -6,6 +6,9 @@ mod outputs;
 mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
+pub(super) use inputs::check_leaf;
+#[cfg(verus_only)]
+pub(super) use inputs::leaf_result;
 pub(super) use inputs::CallArgumentProjections;
 pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument, RetainedCallTarget};
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};

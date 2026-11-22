@@ -2,6 +2,8 @@
 
 mod ports;
 pub use ports::{ModuleCallPorts, ModuleCallPortsError};
+mod inputs;
+pub use inputs::{ModuleCallInputs, ModuleCallInputsError};
 
 use super::{DefinitionBinding, DefinitionPosition, DefinitionReferenceError, TypedRoutineSignature, TypedSignatureError, UseAliases};
 #[cfg(verus_only)]

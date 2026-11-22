@@ -1,6 +1,7 @@
 use circuitgame2_core::project::{
-    DefinitionPosition, FuncDriverError, ModuleCallPortsError, ModuleCallSignatureError, ModuleCallTarget,
-    ModuleDriverError, ModulePartError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SourceSnapshot,
+    CallInputReason, DefinitionPosition, FuncDriverError, ModuleCallInputsError, ModuleCallPortsError,
+    ModuleCallSignatureError, ModuleCallTarget, ModuleDriverError, ModulePartError, ModuleWiringError,
+    OutputDriver, PortDirection, ResolvedPortType, SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
@@ -96,13 +97,16 @@ fn matches_direct_arguments_and_distinguishes_root_from_nested_outputs() {
             text: "(using nor) (module root (in a) (out y z))" },
         SourceSnapshot { path: "part.ncg2", revision: 7,
             text: "(module-part root (def (y z) (pair (nor a a) a))
-                  (def nested (nor (pair a a) a)) (def wrong (pair a)) (def single (pair a a)))" },
+                  (def nested (nor (pair a a) a)) (def wrong (pair a)) (def single (pair a a))
+                  (def (literal-a literal-b) (pair a #b1)))" },
         SourceSnapshot { path: "target.ncg2", revision: 11,
             text: "(func pair (in a (b (bits 2))) (out a (b (bits 2))))" },
     ];
     let project = parse_circuit_project(&input).unwrap();
     let targets = index_use_targets(&project).unwrap();
-    let part = targets.collect_module_parts().unwrap()[0].part_position;
+    let bindings = targets.collect_module_parts().unwrap();
+    let part = bindings[0].part_position;
+    let owner = bindings[0].module_position;
     let aliases = check_use_aliases(&targets).unwrap();
     let at = |definition, reference| DefinitionPosition { file: part.file, entry: part.entry, definition, reference };
     let ports = aliases.check_module_call_ports(at(0, 0), 16).unwrap().unwrap();
@@ -113,6 +117,20 @@ fn matches_direct_arguments_and_distinguishes_root_from_nested_outputs() {
     let required = ports.signature.target.port(PortDirection::Input, 1).unwrap();
     assert!(matches!(required.ty, ResolvedPortType::Bits(2)));
     assert_eq!(required.annotation.unwrap().source.revision, 11);
+    let signature = aliases.resolve_routine_signature(owner.file, owner.entry, 16).unwrap().unwrap();
+    let input = signature.inputs.into_iter().next().unwrap();
+    let known = [None, Some(SignalType { ty: input.ty, origin: input.annotation })];
+    let Err(ModuleCallInputsError::Argument { index: 1, argument, expected: ResolvedPortType::Bits(2),
+        required_at: Some(required), reason: CallInputReason::SignalType(actual) }) =
+        aliases.check_module_call_inputs(at(0, 0), 16, &known) else {
+        panic!("the known width of a must be checked against the second input port");
+    };
+    assert_eq!((argument.source.revision, required.source.revision, actual.origin.source.revision), (7, 11, 3));
+    assert_eq!(&argument.source.text[argument.span], "a");
+    let typed = aliases.check_module_call_inputs(at(4, 0), 16, &[None, None]).unwrap().unwrap();
+    let [None, Some(literal)] = typed.types.as_slice() else { panic!("the literal gets its contextual width"); };
+    assert!(matches!(literal.ty, ResolvedPortType::Bits(2)));
+    assert_eq!(&literal.origin.source.text[literal.origin.span.clone()], "#b1");
     let Err(ModuleCallPortsError::OutputCount { call, left: None, expected: 1, actual: 2, .. }) =
         aliases.check_module_call_ports(at(1, 1), 16) else { panic!("a nested call must return one value"); };
     assert_eq!(&call.source.text[call.span], "(pair a a)");

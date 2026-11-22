@@ -113,7 +113,15 @@ impl<'p, 'a> ModuleCallTarget<'p, 'a> {
 
     /// 指定した方向のポート型を宣言順の添字で参照する。範囲外や状態素子の場合は `None` を返す。
     pub fn port<'s>(&'s self, direction: PortDirection, index: usize) -> (port: Option<CallPortType<'s, 'p, 'a>>)
-        ensures self.port_matches(direction, index, port),
+        ensures
+            self.port_matches(direction, index, port),
+            port.is_some() == match self {
+                ModuleCallTarget::Nor => index < if direction is Input { 2usize } else { 1usize },
+                ModuleCallTarget::Routine { signature, .. } => index < if direction is Input {
+                    signature.inputs@.len()
+                } else { signature.outputs@.len() },
+                ModuleCallTarget::StateElement { .. } => false,
+            },
     {
         match self {
             Self::Nor => signature_port(None, direction, index),

@@ -134,7 +134,7 @@ pub enum CallInputError<'p, 'a> {
     },
 }
 
-spec fn leaf_result(
+pub(in crate::project::use_aliases) closed spec fn leaf_result(
     source: &ProjectSource, form: Form, port: &CallPortType, known: Option<SignalType>, limit: u64,
     result: Result<Option<SignalType>, CallInputReason>,
 ) -> bool {
@@ -160,7 +160,7 @@ spec fn leaf_result(
     }
 }
 
-fn check_leaf<'p, 'a>(
+pub(in crate::project::use_aliases) fn check_leaf<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], at: usize,
     port: &CallPortType<'_, 'p, 'a>, known: Option<SignalType<'p, 'a>>, limit: u64,
 ) -> (result: Result<Option<SignalType<'p, 'a>>, CallInputReason<'p, 'a>>)

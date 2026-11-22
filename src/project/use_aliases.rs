@@ -23,7 +23,8 @@ mod function_types;
 mod function_wiring;
 mod local_signal_index;
 mod module_calls;
-pub use module_calls::{ModuleCallPorts, ModuleCallPortsError, ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
+pub use module_calls::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
+    ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
 mod module_drivers;
 pub use module_drivers::{ModuleDriverError, ModuleDrivers};
 mod module_wiring;
