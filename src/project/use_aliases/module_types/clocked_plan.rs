@@ -287,6 +287,17 @@ pub proof fn clocked_wire_at(drivers: Seq<ClockedWireDriver>, wires: Seq<Wire>, 
     assert(wire_rank(drivers, rank));
 }
 
+/// 解決済み配線の各直結で、参照先の順位が参照元より低くなることを示す。
+pub(super) proof fn clocked_alias_ranks(drivers: Seq<ClockedWireDriver>, wires: Seq<Wire>) -> (rank: Seq<nat>)
+    requires clocked_wires_match(drivers, wires),
+    ensures rank.len() == drivers.len(),
+        forall|i: int| 0 <= i < drivers.len() ==>
+            ((#[trigger] drivers[i]) matches ClockedWireDriver::Alias(target)
+                ==> target < drivers.len() && rank[target as int] < rank[i]),
+{
+    choose|rank: Seq<nat>| #[trigger] wire_rank(drivers, rank)
+}
+
 proof fn graph_gives_wire_rank(drivers: Seq<ClockedWireDriver>, graph: Seq<Vec<Option<usize>>>, rank: Seq<nat>)
     requires driver_graph_prefix(drivers, graph), graph.len() == drivers.len(), dependencies_in_order(graph, rank),
         dependency_graph_valid(graph), drivers.len() <= usize::MAX,

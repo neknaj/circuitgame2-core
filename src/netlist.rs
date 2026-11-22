@@ -12,7 +12,7 @@ pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 pub use clocked::ClockedInstanceError;
 pub(crate) use clocked::wire_within;
 #[cfg(verus_only)]
-pub(crate) use clocked::clocked_wiring_from_endpoints;
+pub(crate) use clocked::{clocked_wiring_endpoints, clocked_wiring_from_endpoints};
 #[cfg(verus_only)]
 pub use clocked::{
     clocked_gate_updates, clocked_wiring_error, clocked_wiring_valid, nor_trace, nor_trace_from_reset, nor_trace_push_tick,
@@ -30,7 +30,10 @@ pub use source_trace::{
     source_trace_outputs_preserved, source_wiring_valid,
 };
 #[cfg(verus_only)]
-pub(crate) use source_trace::{source_clocked_layout_from_pairs, source_output_pair_at, source_output_pairs, source_wire_pair};
+pub(crate) use source_trace::{
+    source_clocked_layout_from_pairs, source_gate_wiring_pair, source_output_pair_at, source_output_pairs,
+    source_output_wiring_pair, source_wire_pair,
+};
 #[cfg(verus_only)]
 pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};
 #[cfg(verus_only)]

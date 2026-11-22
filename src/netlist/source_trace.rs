@@ -168,6 +168,34 @@ pub closed spec fn source_clocked_layout(
         endpoints_agree(source, order, #[trigger] source.outputs[i], netlist.outputs@[i])
 }
 
+/// 指定したゲートの左右の入力が、ソースとネットリストで対応する配線を指すことを示す。
+pub(crate) proof fn source_gate_wiring_pair(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>, gate: int,
+)
+    requires source_clocked_layout(source, netlist, order, index), 0 <= gate < order.len(),
+    ensures
+        order.len() == netlist.gates@.len(),
+        source.gates.dom().contains(order[gate]),
+        source_wire_pair(order, source.gates[order[gate]].left, netlist.gates@[gate].left),
+        source_wire_pair(order, source.gates[order[gate]].right, netlist.gates@[gate].right),
+        wire_available(netlist.gates@[gate].left, netlist.input_count as nat, order.len()),
+        wire_available(netlist.gates@[gate].right, netlist.input_count as nat, order.len()),
+{
+}
+
+/// 指定した公開出力が、ソースとネットリストで対応する配線を指すことを示す。
+pub(crate) proof fn source_output_wiring_pair(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>, port: int,
+)
+    requires source_clocked_layout(source, netlist, order, index), 0 <= port < netlist.outputs@.len(),
+    ensures port < source.outputs.len(), source_output_pair_at(source, netlist, order, port),
+{
+    let original = source.outputs[port];
+    let lowered = netlist.outputs@[port];
+    assert(endpoints_agree(source, order, original, lowered));
+    assert(wire_available(lowered, netlist.input_count as nat, order.len()));
+}
+
 /// 対応する配線の範囲とゲート番号の逆引きから、展開の対応を組み立てる。
 pub(crate) proof fn source_clocked_layout_from_pairs(
     source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>,

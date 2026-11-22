@@ -14,7 +14,7 @@ use crate::project::use_aliases::dependency_order::{
 #[cfg(verus_only)]
 use vstd::laws_cmp::obeys_cmp;
 #[cfg(verus_only)]
-use super::edge_templates_ready;
+use super::{builtin_nor_template, edge_templates_ready};
 
 verus! {
 
@@ -528,6 +528,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> rank[vertex] < order@.len() && order@[rank[vertex] as int] == vertex,
                 dependencies_in_order(checked.graph@, rank), graph_targets_loaded(checked.graph@, checked.modules@),
                 completed_templates(checked.modules@, rank, templates@, i as int),
+                builtin_nor_template(&builtin.netlist_model()),
                 i <= rank[0] < order@.len(), order@[rank[0] as int] == 0usize,
             decreases order@.len() - i,
         {
