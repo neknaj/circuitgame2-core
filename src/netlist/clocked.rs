@@ -68,6 +68,20 @@ pub closed spec fn clocked_wiring_valid(netlist: &NorNetlist) -> bool {
         netlist.outputs@.len() as int)
 }
 
+/// 各ゲートと出力の参照先が範囲内なら、ネットリスト全体が検査条件を満たす。
+pub(super) proof fn clocked_wiring_from_endpoints(netlist: &NorNetlist)
+    requires
+        forall|i: int| 0 <= i < netlist.gates@.len() ==> {
+            let gate = #[trigger] netlist.gates@[i];
+            wire_available(gate.left, netlist.input_count as nat, netlist.gates@.len())
+                && wire_available(gate.right, netlist.input_count as nat, netlist.gates@.len())
+        },
+        output_ports_available(netlist.outputs@, netlist.input_count as nat, netlist.gates@.len(),
+            netlist.outputs@.len() as int),
+    ensures clocked_wiring_valid(netlist),
+{
+}
+
 /// ゲート順と入力側、次いで公開出力の順で最初の配線違反を定める。
 pub closed spec fn clocked_wiring_error(netlist: &NorNetlist, error: ClockedNorError) -> bool {
     let count = netlist.gates@.len();

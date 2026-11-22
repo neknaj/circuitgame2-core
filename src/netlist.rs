@@ -4,6 +4,8 @@
 
 mod clocked;
 mod port_layout;
+#[cfg(verus_only)]
+mod source_trace;
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 #[cfg(verus_only)]
@@ -12,6 +14,12 @@ pub use clocked::{
     nor_traces_agree, reset_matches, tick_matches,
 };
 pub use port_layout::{PortBitLayout, PortBitLayoutError};
+#[cfg(verus_only)]
+pub use source_trace::{
+    SourceGateId, SourceNor, SourceTickCircuit, SourceTickFrame, SourceWire, source_clocked_layout, source_clocked_layout_valid,
+    source_reset_matches, source_step_matches, source_tick_trace, source_tick_traces_agree, source_trace_from_flat,
+    source_trace_outputs_preserved, source_wiring_valid,
+};
 #[cfg(verus_only)]
 pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};
 #[cfg(verus_only)]
