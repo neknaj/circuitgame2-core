@@ -6,7 +6,8 @@ use vstd::prelude::*;
 
 mod placement;
 pub(crate) use placement::{source_gate_under, source_instance_gate_agrees, source_instance_outputs_agree,
-    source_instance_order, source_instance_order_at, source_wire_in_parent};
+    source_instance_order, source_instance_order_at, source_wire_in_parent, source_gate_under_distinct,
+    source_gate_belongs_to_call, source_call_gate_order, source_call_order_appended, source_instance_order_appended};
 
 verus! {
 

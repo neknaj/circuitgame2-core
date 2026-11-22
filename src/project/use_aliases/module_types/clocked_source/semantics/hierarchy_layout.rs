@@ -12,6 +12,8 @@ use crate::project::{DefinitionPosition, ModuleBodyPosition, ModuleCallTarget, M
 use core::ops::Range;
 use vstd::prelude::*;
 
+use crate::netlist::{source_gate_belongs_to_call, source_gate_under_distinct};
+
 verus! {
 
 pub(in crate::project::use_aliases::module_types::clocked_source) struct ModuleSourceLayout {
@@ -121,6 +123,8 @@ proof fn different_calls_use_different_gate_ids(checked: &ModuleCalls, first: Ch
     } else {
         assert(right.instance.len() > 0 && right.instance[0] == checked.calls@[b].at);
     }
+    assert(source_gate_belongs_to_call(checked.calls@[a].at, left));
+    assert(source_gate_belongs_to_call(checked.calls@[b].at, right));
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -177,13 +181,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(regions[b].end - regions[b].start == second.order.len());
             if a == b {
                 source_gate_positions_distinct(&first.circuit, &first_model, first.order, first.index, u, v);
-                let left = source_gate_under(first.prefix, first.order[u]);
-                let right = source_gate_under(first.prefix, first.order[v]);
-                if left == right {
-                    assert(left.instance.skip(first.prefix.len() as int) =~= first.order[u].instance);
-                    assert(right.instance.skip(first.prefix.len() as int) =~= first.order[v].instance);
-                }
-                assert(left != right);
+                source_gate_under_distinct(first.prefix, first.order[u], first.order[v]);
             } else {
                 if a < b { self.module_call_sites_distinct(owner, limit, checked, a, b); }
                 else { self.module_call_sites_distinct(owner, limit, checked, b, a); }

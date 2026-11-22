@@ -71,6 +71,87 @@ pub(crate) proof fn source_instance_order_appended(
     };
 }
 
+/// この回路の基底 NOR または通常呼び出しから生じたゲートかどうかを表す。
+pub(crate) open spec fn source_gate_belongs_to_call(site: DefinitionPosition, gate: SourceGateId) -> bool {
+    if gate.instance.len() == 0 { gate.gate == site } else { gate.instance[0] == site }
+}
+
+/// 基底 NOR はその場のゲート一つ、通常呼び出しは子回路の全ゲートを順に配置する。
+pub(crate) open spec fn source_call_gate_order(site: DefinitionPosition, child: Option<Seq<SourceGateId>>) -> Seq<SourceGateId> {
+    match child {
+        None => seq![SourceGateId { instance: Seq::empty(), gate: site }],
+        Some(order) => source_instance_order(seq![site], order),
+    }
+}
+
+pub(crate) proof fn source_gate_under_distinct(prefix: Seq<DefinitionPosition>, a: SourceGateId, b: SourceGateId)
+    requires a != b,
+    ensures source_gate_under(prefix, a) != source_gate_under(prefix, b),
+{
+    let left = source_gate_under(prefix, a);
+    let right = source_gate_under(prefix, b);
+    assert(left.instance.skip(prefix.len() as int) =~= a.instance);
+    assert(right.instance.skip(prefix.len() as int) =~= b.instance);
+}
+
+/// 呼び出しが追加したゲートの所属と、呼び出し内での識別子の一意性を示す。
+pub(crate) proof fn source_call_gate_order_distinct(site: DefinitionPosition, child: Option<Seq<SourceGateId>>)
+    requires child matches Some(order) ==> order.no_duplicates(),
+    ensures
+        source_call_gate_order(site, child).no_duplicates(),
+        forall|i: int| 0 <= i < source_call_gate_order(site, child).len() ==>
+            source_gate_belongs_to_call(site, #[trigger] source_call_gate_order(site, child)[i]),
+{
+    let placed = source_call_gate_order(site, child);
+    if let Some(order) = child {
+        let prefix = seq![site];
+        assert forall|i: int| 0 <= i < placed.len() implies source_gate_belongs_to_call(site, #[trigger] placed[i]) by {
+            assert(placed[i] == source_gate_under(prefix, order[i]));
+            assert(placed[i].instance[0] == site);
+        };
+        assert forall|i: int, j: int| 0 <= i < placed.len() && 0 <= j < placed.len() && i != j
+            implies #[trigger] placed[i] != #[trigger] placed[j] by {
+            source_gate_under_distinct(prefix, order[i], order[j]);
+        };
+    }
+}
+
+/// 呼び出し位置が先行ゲートの所属と異なるとき、追加後も識別子の一意性を保つ。
+pub(crate) proof fn source_call_order_appended(
+    before: Seq<SourceGateId>, site: DefinitionPosition, child: Option<Seq<SourceGateId>>,
+)
+    requires
+        before.no_duplicates(),
+        child matches Some(order) ==> order.no_duplicates(),
+        forall|i: int| 0 <= i < before.len() ==> !source_gate_belongs_to_call(site, #[trigger] before[i]),
+    ensures
+        (before + source_call_gate_order(site, child)).no_duplicates(),
+        (before + source_call_gate_order(site, child)).take(before.len() as int) == before,
+        forall|i: int| before.len() <= i < (before + source_call_gate_order(site, child)).len() ==>
+            source_gate_belongs_to_call(site, #[trigger] (before + source_call_gate_order(site, child))[i]),
+{
+    source_call_gate_order_distinct(site, child);
+    let tail = source_call_gate_order(site, child);
+    let after = before + tail;
+    assert(after.take(before.len() as int) =~= before);
+    assert forall|i: int| before.len() <= i < after.len()
+        implies source_gate_belongs_to_call(site, #[trigger] after[i]) by {
+        assert(after[i] == tail[i - before.len()]);
+    };
+    assert forall|i: int, j: int| 0 <= i < after.len() && 0 <= j < after.len() && i != j
+        implies #[trigger] after[i] != #[trigger] after[j] by {
+        let (first, second) = if i < j { (i, j) } else { (j, i) };
+        if second < before.len() {
+            assert(before[first] != before[second]);
+        } else if before.len() <= first {
+            assert(tail[first - before.len()] != tail[second - before.len()]);
+        } else {
+            assert(!source_gate_belongs_to_call(site, before[first]));
+            assert(source_gate_belongs_to_call(site, tail[second - before.len()]));
+        }
+    };
+}
+
 /// 一つのゲートの左右が、子のソース配線を親で解釈した結果に対応することを示す。
 pub(crate) proof fn source_instance_gate_agrees(
     prefix: Seq<DefinitionPosition>, child: &SourceTickCircuit, netlist: &NorNetlist,
