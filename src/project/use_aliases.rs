@@ -29,6 +29,7 @@ mod module_drivers;
 pub use module_drivers::{ModuleDriverError, ModuleDrivers};
 mod module_types;
 pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
+    ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};

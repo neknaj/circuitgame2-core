@@ -1,6 +1,7 @@
 use circuitgame2_core::project::{
     CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
-    ModuleCallSignatureError, ModuleCallTarget, ModuleDriverError, ModulePartError, ModuleRootTypesError,
+    ConcatResultWidthError, ModuleCallSignatureError, ModuleCallTarget, ModuleConcatsError,
+    ModuleDriverError, ModulePartError, ModuleRootTypesError,
     ModuleSelectionsError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
     SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
@@ -212,6 +213,29 @@ fn reports_the_input_width_origin_of_a_failed_module_selection() {
     assert_eq!((site.source.revision, width_origin.source.revision), (6, 2));
     assert_eq!(&site.source.text[site.span], "2");
     assert_eq!(&width_origin.source.text[width_origin.span], "2");
+}
+
+#[test]
+fn checks_concat_width_and_operand_order_across_module_parts() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 2,
+            text: "(using nor) (module root (in (wide (bits 2))) (out (wide (bits 2))))" },
+        SourceSnapshot { path: "part.ncg2", revision: 6,
+            text: "(module-part root (def joined (concat later #b01)) (def later wide))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let checked = aliases.check_module_concats(owner, 16).unwrap().unwrap();
+    let concat = checked.concats[0].as_ref().unwrap();
+    assert!(matches!(concat.result.ty, ResolvedPortType::Bits(4)));
+    assert_eq!(&concat.result.origin.source.text[concat.result.origin.span.clone()], "(concat later #b01)");
+    let [low, high] = concat.operands.as_slice() else { panic!("there must be two operands"); };
+    assert_eq!((low.driver, low.width, high.driver, high.width), (Some(OutputDriver::Definition(1)), 2, None, 2));
+    let Err(ModuleConcatsError::Width { concat, reason: ConcatResultWidthError::ConfiguredLimit { limit: 3, actual: 4 } }) =
+        aliases.check_module_concats(owner, 3) else { panic!("the result exceeds the configured width limit"); };
+    assert_eq!((concat.source.revision, &concat.source.text[concat.span]), (6, "(concat later #b01)"));
 }
 
 #[test]

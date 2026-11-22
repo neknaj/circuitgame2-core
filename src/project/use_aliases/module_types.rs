@@ -2,6 +2,8 @@
 
 mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
+mod concats;
+pub use concats::{ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError};
 mod propagation;
 pub use propagation::{ModuleAliasCycleStep, ModuleAliasTypes, ModuleAliasTypesError};
 mod selections;

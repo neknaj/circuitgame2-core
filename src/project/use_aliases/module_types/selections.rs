@@ -61,13 +61,31 @@ pub enum ModuleSelectionsError<'p, 'a> {
     },
 }
 
-spec fn bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, driver: OutputDriver) -> Option<SignalType<'p, 'a>> {
+pub(super) open spec fn bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, driver: OutputDriver) -> Option<SignalType<'p, 'a>> {
     match driver {
         OutputDriver::Input(index) => {
             let port = typed.sources.roots.wiring.drivers.signature.inputs@[index as int];
             Some(SignalType { ty: port.ty, origin: port.annotation })
         },
         OutputDriver::Definition(index) => typed.types@[index as int],
+    }
+}
+
+/// 駆動元の型と根拠位置を取り出す。定義の型が未確定なら `None` を返す。
+pub(super) fn read_bound_type<'p, 'a>(typed: &ModuleAliasTypes<'p, 'a>, driver: OutputDriver)
+    -> (result: Option<SignalType<'p, 'a>>)
+    requires match driver {
+        OutputDriver::Input(index) => index < typed.sources.roots.wiring.drivers.signature.inputs@.len(),
+        OutputDriver::Definition(index) => index < typed.types@.len(),
+    },
+    ensures result == bound_type(typed, driver),
+{
+    match driver {
+        OutputDriver::Input(index) => {
+            let port = &typed.sources.roots.wiring.drivers.signature.inputs[index];
+            Some(SignalType { ty: port.ty, origin: copy_location(&port.annotation) })
+        },
+        OutputDriver::Definition(index) => copy_signal_type(&typed.types[index]),
     }
 }
 
@@ -170,15 +188,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let frame = &parsed.entry_ranges[at.entry].signals;
         let bound = &wiring.signals[member][row.signals.start - frame.start];
-        let actual = match bound.driver {
-            OutputDriver::Input(index) => {
-                let port = &wiring.drivers.signature.inputs[index];
-                Some(SignalType { ty: port.ty, origin: copy_location(&port.annotation) })
-            },
-            OutputDriver::Definition(index) => copy_signal_type(&typed.types[index]),
-        };
-        assert(actual == bound_type(typed, bound.driver));
-        let Some(actual) = actual else { return Ok(None); };
+        let Some(actual) = read_bound_type(typed, bound.driver) else { return Ok(None); };
         let ResolvedPortType::Bits(width) = actual.ty else {
             return Err(ModuleSelectionsError::InputType { input: form_location(source, forms, leaf), actual });
         };
