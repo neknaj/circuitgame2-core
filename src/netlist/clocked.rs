@@ -213,7 +213,7 @@ pub proof fn nor_traces_agree(netlist: &NorNetlist, inputs: Seq<Seq<bool>>, left
     };
 }
 
-fn wire_within(wire: Wire, inputs: usize, gates: usize) -> (valid: bool)
+pub(crate) fn wire_within(wire: Wire, inputs: usize, gates: usize) -> (valid: bool)
     ensures valid == wire_available(wire, inputs as nat, gates as nat),
 {
     match wire {

@@ -10,6 +10,7 @@ mod source_trace;
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 pub use clocked::ClockedInstanceError;
+pub(crate) use clocked::wire_within;
 #[cfg(verus_only)]
 pub(crate) use clocked::clocked_wiring_from_endpoints;
 #[cfg(verus_only)]

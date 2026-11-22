@@ -1,5 +1,6 @@
 use circuitgame2_core::netlist::{ClockedNor, NorGate, NorNetlist, Wire};
-use circuitgame2_core::project::{ModuleBodyPosition, SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project};
+use circuitgame2_core::project::{ClockedPlanError, ClockedWireDriver, ModuleBodyPosition, SourceSnapshot,
+    check_use_aliases, index_use_targets, parse_circuit_project, plan_clocked_links};
 
 #[test]
 fn oscillator_and_constant_are_observed_from_reset() {
@@ -131,4 +132,29 @@ fn two_expanded_module_instances_keep_separate_feedback_states() {
         frame = parent.step(&frame.gates, &input).unwrap();
         assert_eq!(frame.outputs, expected);
     }
+}
+
+#[test]
+fn resolves_a_forward_output_alias_before_appending_clocked_instances() {
+    use ClockedWireDriver::{Alias, Terminal};
+
+    let project = parse_circuit_project(&[SourceSnapshot { path: "branch.ncg2", revision: 1,
+        text: "(using nor) (module branch (in a) (out a q) (def q (nor a a)))" }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let child = aliases.lower_primitive_module(ModuleBodyPosition { file: 0, entry: 1 }, 8).unwrap().unwrap();
+    let plan = plan_clocked_links(&[1, 1],
+        &[Alias(3), Terminal(Wire::Gate(0)), Terminal(Wire::Input(0)), Terminal(Wire::Gate(1))], 1, 2).unwrap();
+
+    let mut gates = Vec::new();
+    let outputs = child.append_instance(&mut gates, &plan.wires[0..1], 1, plan.gate_count).unwrap();
+    child.append_instance(&mut gates, &plan.wires[2..3], 1, plan.gate_count).unwrap();
+    let parent = ClockedNor::check(NorNetlist { input_count: 1, gates, outputs }).unwrap();
+    let mut frame = parent.reset();
+    for (input, expected) in [(false, [true, true]), (true, [false, false]), (true, [false, true])] {
+        frame = parent.step(&frame.gates, &[input]).unwrap();
+        assert_eq!(frame.outputs, expected);
+    }
+    let cycle = plan_clocked_links(&[0], &[Alias(0)], 0, 0).unwrap_err();
+    assert_eq!(cycle, ClockedPlanError::AliasCycle(vec![0]));
 }

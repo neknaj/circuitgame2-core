@@ -2,6 +2,11 @@
 
 mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
+mod clocked_plan;
+pub use clocked_plan::{ClockedLinkPlan, ClockedPlanError, ClockedWireDriver, plan_clocked_links};
+#[cfg(verus_only)]
+pub use clocked_plan::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,
+    clocked_wire_solutions_agree, clocked_wires_match};
 mod calls;
 pub use calls::{CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError};
 mod concats;
