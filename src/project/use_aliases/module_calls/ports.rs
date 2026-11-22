@@ -301,6 +301,27 @@ fn plan_call_ports<'p, 'a>(forms: &[Form], row: &BuildDefinition, signature: Mod
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 呼び出し先のポート注釈が元の宣言内にあることを示す。
+    pub(in crate::project::use_aliases) proof fn module_call_port_location(
+        &self, at: DefinitionPosition, limit: u64, call: ModuleCallSignature,
+        direction: PortDirection, index: usize, port: CallPortType,
+    )
+        requires
+            self.module_call_signature_result(at, limit, Ok(Some(call))),
+            call.target.port_matches(direction, index, Some(port)),
+        ensures port.annotation matches Some(annotation) ==> location_in_source(*annotation),
+    {
+        self.module_call_site_evidence(at, limit, call);
+        if let ModuleCallTarget::Routine { position, signature, .. } = call.target {
+            self.typed_signature_sites(position.file, position.entry, limit, signature);
+            if direction is Input {
+                assert(signature.inputs@[index as int].annotation == *port.annotation->Some_0);
+            } else {
+                assert(signature.outputs@[index as int].annotation == *port.annotation->Some_0);
+            }
+        }
+    }
+
     /// 入出力数と実引数の順序、または最初の違反の根拠を定める。
     pub closed spec fn module_call_ports_result(
         &self, at: DefinitionPosition, max_width: u64, result: Result<Option<ModuleCallPorts>, ModuleCallPortsError>,

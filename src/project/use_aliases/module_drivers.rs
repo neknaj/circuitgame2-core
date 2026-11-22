@@ -265,6 +265,16 @@ proof fn extend_target_origins(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// モジュールの入力型を決めた注釈が、元のソース内にあることを示す。
+    pub(super) proof fn module_input_sites(&self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers)
+        requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),
+        ensures forall|i: int| 0 <= i < drivers.signature.inputs@.len() ==>
+            crate::project::location_in_source((#[trigger] drivers.signature.inputs@[i]).annotation),
+    {
+        assert(self.typed_signature_evidence(owner.file, owner.entry, limit, Ok(Some(drivers.signature))));
+        self.typed_signature_sites(owner.file, owner.entry, limit, drivers.signature);
+    }
+
     /// 各駆動元が、元の本体にある定義と左辺の出力順に対応することを取り出す。
     pub(super) proof fn module_driver_sites(
         &self, owner: ModuleBodyPosition, max_width: u64, drivers: ModuleDrivers, index: int,

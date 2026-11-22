@@ -2,6 +2,8 @@
 
 use super::{ModuleAliasSource, ModuleRootTypesError, ModuleTypeSources, UseAliases};
 use crate::project::{LocatedName, ModuleBodyPosition, OutputDriver, SignalType, TypedPort};
+#[cfg(verus_only)]
+use crate::project::location_in_source;
 use crate::project::use_aliases::{dependency_order::{DependencyEdge, check_dependency_order}, function_atoms::{copy_location, copy_signal_type}};
 #[cfg(verus_only)]
 use crate::project::use_aliases::dependency_order::{complete_dependency_order, completion_order_matches,
@@ -108,6 +110,10 @@ spec fn inherited_type<'p, 'a>(
     }
 }
 
+pub(super) open spec fn type_sites_valid(types: Seq<Option<SignalType>>) -> bool {
+    forall|i: int| 0 <= i < types.len() ==> ((#[trigger] types[i]) matches Some(ty) ==> location_in_source(ty.origin))
+}
+
 #[verifier::opaque]
 spec fn visited_types(
     inputs: Seq<TypedPort>, seeds: Seq<Option<SignalType>>, aliases: Seq<Option<ModuleAliasSource>>,
@@ -136,6 +142,8 @@ fn propagate_types<'p, 'a>(inputs: &[TypedPort<'p, 'a>], seeds: &[Option<SignalT
 ) -> (types: Vec<Option<SignalType<'p, 'a>>>)
     requires
         aliases@.len() == seeds@.len(),
+        type_sites_valid(seeds@),
+        forall|i: int| 0 <= i < inputs@.len() ==> location_in_source((#[trigger] inputs@[i]).annotation),
         graph_matches(aliases@, _graph@), _graph@.len() == aliases@.len(),
         complete_dependency_order(_graph@, order@),
         forall|i: int| 0 <= i < aliases@.len() ==>
@@ -145,6 +153,7 @@ fn propagate_types<'p, 'a>(inputs: &[TypedPort<'p, 'a>], seeds: &[Option<SignalT
             }),
     ensures
         types@.len() == seeds@.len(),
+        type_sites_valid(types@),
         forall|i: int| 0 <= i < types@.len() ==> #[trigger] types@[i] == inherited_type(inputs@, seeds@, aliases@, types@, i),
 {
     let ghost rank = choose|rank: Seq<nat>| #[trigger] dependencies_in_order(_graph@, rank)
@@ -153,10 +162,15 @@ fn propagate_types<'p, 'a>(inputs: &[TypedPort<'p, 'a>], seeds: &[Option<SignalT
     let mut types = Vec::new();
     let mut i = 0;
     while i < seeds.len()
-        invariant i == types@.len() <= seeds@.len(),
+        invariant i == types@.len() <= seeds@.len(), type_sites_valid(types@),
         decreases seeds@.len() - i,
     {
+        let ghost prior = types@;
         types.push(None);
+        assert forall|j: int| 0 <= j < types@.len() implies
+            ((#[trigger] types@[j]) matches Some(ty) ==> location_in_source(ty.origin)) by {
+            if j < i { assert(types@[j] == prior[j]); }
+        };
         i += 1;
     }
     assert(visited_types(inputs@, seeds@, aliases@, rank, 0, types@)) by { reveal(visited_types); };
@@ -166,6 +180,8 @@ fn propagate_types<'p, 'a>(inputs: &[TypedPort<'p, 'a>], seeds: &[Option<SignalT
             i <= order@.len() == aliases@.len() == types@.len() == seeds@.len(),
             graph_matches(aliases@, _graph@), _graph@.len() == aliases@.len(),
             dependencies_in_order(_graph@, rank), completion_order_matches(order@, rank),
+            type_sites_valid(types@), type_sites_valid(seeds@),
+            forall|j: int| 0 <= j < inputs@.len() ==> location_in_source((#[trigger] inputs@[j]).annotation),
             forall|node: int| #![trigger rank[node]] 0 <= node < aliases@.len()
                 ==> rank[node] < order@.len() && order@[rank[node] as int] == node,
             forall|j: int| 0 <= j < aliases@.len() ==>
@@ -188,9 +204,14 @@ fn propagate_types<'p, 'a>(inputs: &[TypedPort<'p, 'a>], seeds: &[Option<SignalT
                 OutputDriver::Definition(index) => copy_signal_type(&types[index]),
             },
         };
+        assert(ty matches Some(value) ==> location_in_source(value.origin));
         assert(ty == inherited_type(inputs@, seeds@, aliases@, types@, node as int));
         let ghost prior = types@;
         types.set(node, ty);
+        assert forall|j: int| 0 <= j < types@.len() implies
+            ((#[trigger] types@[j]) matches Some(ty) ==> location_in_source(ty.origin)) by {
+            if j != node { assert(types@[j] == prior[j]); }
+        };
         assert(visited_types(inputs@, seeds@, aliases@, rank, i + 1, types@)) by {
             reveal(visited_types);
             assert forall|j: int| 0 <= j < types@.len() && rank[j] <= i implies
@@ -282,6 +303,7 @@ spec fn alias_types_match(sources: ModuleTypeSources, types: Seq<Option<SignalTy
     let seeds = sources.roots.types@;
     let aliases = sources.aliases@;
     &&& types.len() == seeds.len() == aliases.len()
+    &&& type_sites_valid(types)
     &&& forall|i: int| 0 <= i < types.len() ==> #[trigger] types[i] == inherited_type(inputs, seeds, aliases, types, i)
     &&& exists|graph: Vec<Vec<Option<usize>>>| #[trigger] graph_matches(aliases, graph@)
         && graph@.len() == aliases.len() && !graph_has_cycle(graph@)
@@ -303,6 +325,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 型と根拠位置を元の配線に結び付け、選択範囲の検査に渡す。
+    pub(super) proof fn module_alias_types_evidence(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleAliasTypes)
+        requires self.module_alias_types_result(owner, limit, Ok(Some(checked))),
+        ensures
+            self.module_wiring_result(owner, limit, Ok(Some(checked.sources.roots.wiring))),
+            checked.types@.len() == checked.sources.roots.wiring.drivers.definitions@.len(),
+            type_sites_valid(checked.types@),
+    {
+        self.module_type_sources_bounds(owner, limit, checked.sources);
+        self.module_root_types_evidence(owner, limit, checked.sources.roots);
+    }
+
     /// 全断片で、裸の信号参照を介して入力や右辺から型を引き継ぐ。
     ///
     /// 型の根拠には、引き継ぐ前の宣言や式の範囲が残る。型が未確定の式は後段で扱う。
@@ -321,7 +355,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(None) => return Ok(None),
             Err(error) => return Err(ModuleAliasTypesError::Sources(error)),
         };
-        proof { self.module_type_sources_bounds(owner, limit, sources); }
+        proof {
+            self.module_type_sources_bounds(owner, limit, sources);
+            self.module_root_types_evidence(owner, limit, sources.roots);
+            self.module_wiring_keeps_drivers(owner, limit, sources.roots.wiring);
+            self.module_input_sites(owner, limit, sources.roots.wiring.drivers);
+        }
         let aliases = sources.aliases.as_slice();
         let graph = alias_graph(aliases);
         let order = match check_dependency_order(graph.as_slice(), true) {

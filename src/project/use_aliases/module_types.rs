@@ -4,6 +4,8 @@ mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod propagation;
 pub use propagation::{ModuleAliasCycleStep, ModuleAliasTypes, ModuleAliasTypesError};
+mod selections;
+pub use selections::{ModuleSelection, ModuleSelections, ModuleSelectionsError};
 
 use super::{DefinitionDriver, DefinitionPosition, ModuleCallPortsError, ModuleWiring, ModuleWiringError, UseAliases};
 use super::function_atoms::copy_location;
@@ -14,7 +16,7 @@ use super::selection_arguments::selection_parameters_match;
 #[cfg(verus_only)]
 use super::{ModuleCallPorts, function_drivers::indexed_driver_site};
 #[cfg(verus_only)]
-use crate::project::{CircuitProject, circuits::{is_form_location, parsed_index_evidence}};
+use crate::project::{CircuitProject, location_in_source, circuits::{is_form_location, parsed_index_evidence}};
 use crate::syntax::{Form, circuit::{BuildDefinition, bit_selection_shape, definition_root_is_call, definition_target_atoms}};
 #[cfg(verus_only)]
 use crate::syntax::{form_spans_valid, circuit::{BitSelectionShape, bit_selection_shape_matches, build_definition_scope_evidence,
@@ -135,7 +137,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let start = parsed.entry_ranges@[at.entry as int].definitions.start;
         let reference = DefinitionPosition { file: at.file, entry: at.entry,
             definition: (driver.definition - start) as usize, reference: 0 };
-        if ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int) {
+        &&& (result matches Ok(Some(ty)) ==> location_in_source(ty.origin))
+        &&& if ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int) {
             match result {
                 Ok(Some(ty)) => exists|call: ModuleCallPorts|
                     #[trigger] self.module_call_ports_result(reference, max_width, Ok(Some(call)))
@@ -193,6 +196,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             proof { assert(false); }
             unreachable!()
         };
+        proof { self.module_call_port_location(reference, max_width, call.signature, PortDirection::Output, driver.result_index, port); }
         let origin = match port.annotation {
             Some(annotation) => copy_location(annotation),
             None => LocatedName { source, span: call.signature.call.span.start..call.signature.call.span.end },
@@ -236,7 +240,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures
             self.module_wiring_result(owner, max_width, Ok(Some(typed.wiring))),
             typed.types@.len() == typed.wiring.drivers.definitions@.len(),
+            forall|i: int| 0 <= i < typed.types@.len() ==>
+                ((#[trigger] typed.types@[i]) matches Some(ty) ==> location_in_source(ty.origin)),
     {
+        reveal(UseAliases::root_types_prefix);
     }
 
     /// 全断片の右辺全体を占める通常呼び出しやビット選択から、左辺の型を求める。

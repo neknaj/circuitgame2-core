@@ -32,7 +32,7 @@ pub struct ModuleTypeSources<'p, 'a> {
     pub aliases: Vec<Option<ModuleAliasSource<'p, 'a>>>,
 }
 
-fn find_member(members: &[ModuleBodyPosition], at: ModuleBodyPosition) -> (index: usize)
+pub(super) fn find_member(members: &[ModuleBodyPosition], at: ModuleBodyPosition) -> (index: usize)
     requires members@.contains(at),
     ensures index < members@.len() && members@[index as int] == at,
 {
@@ -151,6 +151,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn module_type_sources_bounds(&self, owner: ModuleBodyPosition, limit: u64, sources: ModuleTypeSources)
         requires self.module_type_sources_result(owner, limit, Ok(Some(sources))),
         ensures
+            self.module_root_types_result(owner, limit, Ok(Some(sources.roots))),
             sources.aliases@.len() == sources.roots.types@.len(),
             forall|i: int| 0 <= i < sources.aliases@.len() ==>
                 ((#[trigger] sources.aliases@[i]) matches Some(alias) ==> match alias.driver {

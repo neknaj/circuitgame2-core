@@ -1,7 +1,7 @@
 use circuitgame2_core::project::{
     CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
     ModuleCallSignatureError, ModuleCallTarget, ModuleDriverError, ModulePartError, ModuleRootTypesError,
-    ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
+    ModuleSelectionsError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
     SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
@@ -152,15 +152,17 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
                     (def (y z) (pair bridge wide)) (def bridge mid))" },
         SourceSnapshot { path: "part.ncg2", revision: 6,
             text: "(module-part root (def mid (nor (bit z 0) 0)) (def part-copy wide)
-                    (def sampled (slice later 0 1 18446744073709551615)) (def later wide))" },
+                    (def sampled (slice later 0 1 18446744073709551615)) (def later wide)
+                    (def selected (bit (slice later 0 2) 1)))" },
     ];
     let project = parse_circuit_project(&input).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let owner = targets.collect_module_parts().unwrap()[0].module_position;
     let aliases = check_use_aliases(&targets).unwrap();
-    let resolved = aliases.resolve_module_alias_types(owner, 16).unwrap().unwrap();
+    let selections = aliases.check_module_selections(owner, 16).unwrap().unwrap();
+    let resolved = &selections.typed;
     let checked = &resolved.sources;
-    let [Some(y), Some(z), None, Some(mid), None, Some(sampled), None] = checked.roots.types.as_slice() else {
+    let [Some(y), Some(z), None, Some(mid), None, Some(sampled), None, Some(_)] = checked.roots.types.as_slice() else {
         panic!("both calls must seed all their output types");
     };
     assert!(matches!(y.ty, ResolvedPortType::Bits(1)));
@@ -171,20 +173,45 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
     assert_eq!(&mid.origin.source.text[mid.origin.span.clone()], "(nor (bit z 0) 0)");
     assert!(matches!(sampled.ty, ResolvedPortType::Bits(1)));
     assert_eq!(&sampled.origin.source.text[sampled.origin.span.clone()], "(slice later 0 1 18446744073709551615)");
-    let [None, None, Some(bridge), None, Some(copy), None, Some(_)] = checked.aliases.as_slice() else {
+    let [None, None, Some(bridge), None, Some(copy), None, Some(_), None] = checked.aliases.as_slice() else {
         panic!("only bare signal references carry alias dependencies");
     };
     assert_eq!(bridge.driver, OutputDriver::Definition(3));
     assert_eq!(&bridge.reference.source.text[bridge.reference.span.clone()], "mid");
     assert_eq!(copy.driver, OutputDriver::Input(0));
     assert_eq!(copy.reference.source.revision, 6);
-    let [_, _, Some(bridge), _, Some(copy), _, Some(_)] = resolved.types.as_slice() else {
+    let [_, _, Some(bridge), _, Some(copy), _, Some(_), _] = resolved.types.as_slice() else {
         panic!("the aliases must inherit their types from the bound driver");
     };
     assert!(matches!(bridge.ty, ResolvedPortType::Bits(1)));
     assert_eq!((bridge.origin.source.revision, bridge.origin.span.clone()), (6, mid.origin.span.clone()));
     assert!(matches!(copy.ty, ResolvedPortType::Bits(2)));
     assert_eq!(copy.origin.source.revision, 2);
+    assert_eq!(selections.selections[5].as_ref().unwrap().projection.stride, u64::MAX);
+    let combined = selections.selections[7].as_ref().unwrap();
+    assert_eq!(combined.driver, OutputDriver::Definition(6));
+    assert_eq!((combined.projection.start, combined.projection.count, combined.projection.last), (1, 1, 1));
+}
+
+#[test]
+fn reports_the_input_width_origin_of_a_failed_module_selection() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 2,
+            text: "(using nor) (module root (in (wide (bits 2))) (out y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 6,
+            text: "(module-part root (def y (bit later 2)) (def later wide))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleSelectionsError::Argument(SelectionArgumentError::Outside { site, width_origin, input_width: 2, .. })) =
+        aliases.check_module_selections(owner, 16) else {
+        panic!("the selected bit is outside the width of the forward reference");
+    };
+    assert_eq!((site.source.revision, width_origin.source.revision), (6, 2));
+    assert_eq!(&site.source.text[site.span], "2");
+    assert_eq!(&width_origin.source.text[width_origin.span], "2");
 }
 
 #[test]

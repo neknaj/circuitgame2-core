@@ -29,7 +29,7 @@ mod module_drivers;
 pub use module_drivers::{ModuleDriverError, ModuleDrivers};
 mod module_types;
 pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
-    ModuleRootTypes, ModuleRootTypesError, ModuleTypeSources};
+    ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
@@ -60,7 +60,7 @@ pub use function_drivers::{
 };
 pub use function_literals::{FuncLiteralError, FuncLiteralWidths};
 pub use function_atoms::{FuncAtomTypeError, FuncAtomTypes, SignalType};
-pub use selection_arguments::{SelectionArgument, SelectionArgumentError};
+pub use selection_arguments::{CheckedBitSelection, SelectionArgument, SelectionArgumentError};
 pub use function_types::{FuncSignalTypeError, FuncSignalTypes};
 pub use single_bit_func::LoweredSingleBitFunc;
 #[cfg(verus_only)]

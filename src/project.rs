@@ -77,7 +77,7 @@ pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModuleP
 pub use use_aliases::{ModuleDriverError, ModuleDrivers};
 pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
-    ModuleRootTypes, ModuleRootTypesError, ModuleTypeSources};
+    ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
     ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
@@ -120,7 +120,7 @@ pub use use_aliases::{
 };
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
-pub use use_aliases::{SelectionArgument, SelectionArgumentError};
+pub use use_aliases::{CheckedBitSelection, SelectionArgument, SelectionArgumentError};
 pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
 pub use use_aliases::LoweredSingleBitFunc;
 pub use use_aliases::{
