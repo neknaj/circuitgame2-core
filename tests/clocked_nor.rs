@@ -165,7 +165,9 @@ fn lowers_a_parent_and_its_child_calls_from_source() {
         SourceSnapshot { path: "parent.ncg2", revision: 2,
             text: "(using nor) (module root (in i) (out passed x y) (def (passed x) (child y)))" },
         SourceSnapshot { path: "part.ncg2", revision: 3,
-            text: "(module child (in a) (out a q) (def q (nor a a)))
+            text: "(module child (in a) (out a q) (def q (leaf a)))
+                   (module leaf (in a) (out q) (def q (nor a a)))
+                   (module unused (in a) (out q) (def q (unused a)))
                    (module-part root (def (echo y) (child i)))" },
     ]).unwrap();
     let targets = index_use_targets(&project).unwrap();
@@ -177,6 +179,27 @@ fn lowers_a_parent_and_its_child_calls_from_source() {
         frame = circuit.step(&frame.gates, &[input]).unwrap();
         assert_eq!(frame.outputs, expected);
     }
+}
+
+#[test]
+fn rejects_reachable_module_recursion_at_the_original_calls() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "parent.ncg2", revision: 2,
+            text: "(using nor) (module root (in a) (out y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 3,
+            text: "(module-part root (def y (child a)))" },
+        SourceSnapshot { path: "child.ncg2", revision: 4,
+            text: "(module child (in a) (out y) (def y (root a)))" },
+    ]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let parts = targets.collect_module_parts().unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ClockedModuleError::Recursion(calls)) =
+        aliases.lower_clocked_module(parts[0].module_position, 8, 4)
+    else { panic!("reachable recursion must be rejected"); };
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[0].source.revision, &calls[0].source.text[calls[0].span.clone()]), (3, "(child a)"));
+    assert_eq!((calls[1].source.revision, &calls[1].source.text[calls[1].span.clone()]), (4, "(root a)"));
 }
 
 #[test]

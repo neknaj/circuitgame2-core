@@ -1,5 +1,7 @@
 //! 検査済みの親モジュールから子回路の配置と実引数の配線を求める。
 
+mod hierarchy;
+
 use super::{ModuleCalls, ModuleCallsError, PrimitiveModuleError, UseAliases, copy_location};
 use super::clocked_plan::{ClockedPlanError, ClockedWireDriver, clocked_reserve, clocked_resolve};
 use super::primitive_nor::unsupported_port;
@@ -36,17 +38,24 @@ pub enum ClockedModuleError<'p, 'a> {
     Capacity(LocatedName<'p, 'a>),
     /// 遅延のない配線だけで閉じる循環。順番は配線をたどる向き。
     AliasCycle(Vec<LocatedName<'p, 'a>>),
+    /// モジュール宣言間の再帰を構成する呼び出し。末尾の参照先は先頭の呼び出し元に戻る。
+    Recursion(Vec<LocatedName<'p, 'a>>),
     /// 配線の組み立て中に見つかった違反と、そのインスタンスの位置。
     Instance(LocatedName<'p, 'a>, ClockedInstanceError),
     /// 親回路全体の検査で見つかった配線の違反。
     Netlist(ClockedNorError),
 }
 
-struct SourceInstance<'p, 'a> {
-    template: ClockedNor,
+struct SourceInstance<'s, 'p, 'a> {
+    template: &'s ClockedNor,
     arguments: Vec<ClockedWireDriver>,
     output_sites: Vec<LocatedName<'p, 'a>>,
     site: LocatedName<'p, 'a>,
+}
+
+spec fn edge_templates_ready(edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>) -> bool {
+    forall|i: int| 0 <= i < edges.len() ==>
+        ((#[trigger] edges[i]) matches Some(child) ==> child < templates.len() && templates[child as int].is_some())
 }
 
 spec fn instance_counts_match(instances: Seq<SourceInstance>, counts: Seq<usize>) -> bool {
@@ -155,9 +164,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Err(form_location(source, forms, root))
     }
 
-    fn prepare_module_instances(&self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>)
-        -> (result: Result<(Vec<SourceInstance<'p, 'a>>, Vec<usize>), ClockedModuleError<'p, 'a>>)
+    fn prepare_module_instances<'s>(&self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>,
+        edges: &[Option<usize>], templates: &'s [Option<ClockedNor>], builtin: &'s ClockedNor,
+    ) -> (result: Result<(Vec<SourceInstance<'s, 'p, 'a>>, Vec<usize>), ClockedModuleError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
         ensures
             result matches Ok((instances, counts)) ==> instance_counts_match(instances@, counts@),
             !(result matches Err(ClockedModuleError::Parent(_))),
@@ -179,6 +190,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.module_drivers_result(owner, limit, Ok(Some(*drivers))),
                 *drivers == checked.module.expressions.typed.sources.roots.wiring.drivers,
                 *project == self.targets.project_model(),
+                edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
                 index <= checked.calls@.len(), index == counts@.len() == instances@.len(),
                 instance_counts_match(instances@, counts@),
                 driver <= drivers.definitions@.len(),
@@ -208,19 +220,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 return Err(ClockedModuleError::Unsupported(site));
             }
             let template = match &signature.target {
-                ModuleCallTarget::Nor => match builtin_instance() {
-                    Ok(circuit) => circuit,
-                    Err(error) => return Err(ClockedModuleError::Netlist(error)),
-                },
-                ModuleCallTarget::Routine { position, signature: typed, .. } => {
+                ModuleCallTarget::Nor => builtin,
+                ModuleCallTarget::Routine { signature: typed, .. } => {
                     if unsupported_port(typed.inputs.as_slice()).is_some() || unsupported_port(typed.outputs.as_slice()).is_some() {
                         return Err(ClockedModuleError::Unsupported(site));
                     }
-                    match self.lower_primitive_module(*position, limit) {
-                        Ok(Some(template)) => template,
-                        Ok(None) => return Err(ClockedModuleError::Unsupported(site)),
-                        Err(reason) => return Err(ClockedModuleError::Child { call: site, reason }),
-                    }
+                    let Some(child) = edges[index] else { return Err(ClockedModuleError::Unsupported(site)); };
+                    templates[child].as_ref().unwrap()
                 },
                 ModuleCallTarget::StateElement { .. } => return Err(ClockedModuleError::Unsupported(site)),
             };
@@ -285,33 +291,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ok((instances, counts))
     }
 
-    /// 親モジュールと、直接呼び出す基底 NOR モジュールをソースから変換する。
-    ///
-    /// 入出力は単一ビットで、親の各定義は信号名または定数を直接渡す呼び出しとする。
-    /// 指定位置にモジュールがなければ `None` を返す。
-    ///
-    /// # Errors
-    ///
-    /// 親と子の型や呼び出しの違反、ゲート数の上限、直結の循環を報告する。
-    pub fn lower_clocked_module(&self, owner: ModuleBodyPosition, width_limit: u64, gate_limit: usize)
-        -> (result: Result<Option<ClockedNor>, ClockedModuleError<'p, 'a>>)
-        requires self.can_resolve(),
+    fn lower_checked_module(&self, owner: ModuleBodyPosition, width_limit: u64, gate_limit: usize, checked: &ModuleCalls<'p, 'a>,
+        edges: &[Option<usize>], templates: &[Option<ClockedNor>], builtin: &ClockedNor,
+    ) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
+        requires self.can_resolve(), self.module_calls_result(owner, width_limit, Ok(Some(*checked))),
+            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
         ensures
-            result == Ok(None) ==> self.module_calls_result(owner, width_limit, Ok(None)),
-            result matches Err(ClockedModuleError::Parent(error)) ==>
-                self.module_calls_result(owner, width_limit, Err(error)),
-            result matches Ok(Some(circuit)) ==> circuit.netlist_model().gates@.len() <= gate_limit
+            !(result matches Err(ClockedModuleError::Parent(_))),
+            result matches Ok(circuit) ==> circuit.netlist_model().gates@.len() <= gate_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
                 && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model()),
     {
-        let checked = match self.check_module_calls(owner, width_limit) {
-            Ok(Some(checked)) => checked,
-            Ok(None) => return Ok(None),
-            Err(error) => return Err(ClockedModuleError::Parent(error)),
-        };
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
         proof {
-            self.module_calls_type_evidence(owner, width_limit, &checked);
+            self.module_calls_type_evidence(owner, width_limit, checked);
             self.module_output_types_evidence(owner, width_limit, checked.module);
             self.module_selections_evidence(owner, width_limit, checked.module.expressions);
             self.module_output_driver(owner, width_limit, *drivers, 0);
@@ -320,11 +313,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let outputs = drivers.signature.outputs.as_slice();
         if let Some(i) = unsupported_port(inputs) { return Err(ClockedModuleError::Unsupported(copy_location(&inputs[i].annotation))); }
         if let Some(i) = unsupported_port(outputs) { return Err(ClockedModuleError::Unsupported(copy_location(&outputs[i].annotation))); }
-        let (instances, counts) = self.prepare_module_instances(owner, width_limit, &checked)?;
-        match assemble_source_instances(&instances, &counts, inputs.len(), &drivers.outputs, gate_limit) {
-            Ok(circuit) => Ok(Some(circuit)),
-            Err(error) => Err(error),
-        }
+        let (instances, counts) = self.prepare_module_instances(owner, width_limit, checked, edges, templates, builtin)?;
+        assemble_source_instances(&instances, &counts, inputs.len(), &drivers.outputs, gate_limit)
     }
 
     /// 変換後の入出力ビット数が、検査済みの親モジュールのポート宣言と対応する。
@@ -339,7 +329,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 }
 
-fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'p, 'a>], counts: &[usize], inputs: usize,
+fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], counts: &[usize], inputs: usize,
     output_drivers: &[OutputDriver], limit: usize,
 ) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
     requires instance_counts_match(instances@, counts@),
