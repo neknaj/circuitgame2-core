@@ -9,6 +9,8 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::vertices::{function_position, project_function_set};
 #[cfg(verus_only)]
+use super::CallDependency;
+#[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
 #[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
@@ -325,6 +327,44 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         self.row_is_from_source(found[i], rows[i]@, j);
         assert(found.contains(found[i]));
+    }
+
+    pub(super) proof fn reachable_source_call_index(&self, root: Position, found: Seq<Position>,
+        rows: Seq<Vec<FunctionCallSite>>, i: int, site: FunctionCallSite,
+    ) -> (j: int)
+        requires
+            self.can_resolve(),
+            self.reachable_function_rows(root, found, rows),
+            0 <= i < found.len(),
+            found[i] == (site.position.file, site.position.entry),
+            self.function_call_site_matches(site),
+        ensures found.len() == rows.len(), 0 <= j < rows[i]@.len(), rows[i]@[j] == site,
+    {
+        reveal(UseAliases::function_call_site_matches);
+        reveal(UseAliases::scanned_function_calls);
+        let at = site.position;
+        let caller = (at.file, at.entry, at.definition, at.reference);
+        let parsed = self.targets.project_model().circuits_model()[at.file as int];
+        let range = parsed.entry_ranges@[at.entry as int].definitions;
+        let cursor = DefinitionPosition {
+            definition: (range.end - range.start) as usize, reference: 0, ..at
+        };
+        let sites = rows[i]@;
+        assert(self.scanned_function_calls(cursor, sites));
+        assert(self.func_call_at(at.file, at.entry, at.definition, at.reference));
+        assert(source_call_position(cursor, at.definition, at.reference) == at);
+        assert(before(source_call_position(cursor, at.definition, at.reference), cursor));
+        assert(self.scanned_callee(source_call_position(cursor, at.definition, at.reference), sites));
+        let edge = Some(CallDependency { target: site.target, reference: site.location });
+        if self.call_dependency_matches(caller, Ok(None)) {
+            self.call_dependencies_agree(caller, edge, None);
+        }
+        let j = choose|j: int| 0 <= j < sites.len() && (#[trigger] sites[j]).position == at;
+        self.row_is_from_source(found[i], sites, j);
+        let recorded = sites[j];
+        self.call_dependencies_agree(caller, edge,
+            Some(CallDependency { target: recorded.target, reference: recorded.location }));
+        j
     }
 
     pub(super) closed spec fn reachable_function_scan_failure(&self, root: Position, error: DefinitionBatchError) -> bool {

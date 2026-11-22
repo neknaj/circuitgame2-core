@@ -310,8 +310,17 @@ impl FunctionVertices {
 
     /// 頂点番号順に宣言位置を返す。
     pub(super) fn positions(&self) -> (positions: &[Position])
-        ensures positions@ == self.positions_model(),
+        ensures positions@ == self.positions_model(), positions@.no_duplicates(),
     {
+        proof {
+            use_type_invariant(self);
+            let model = self.positions_model();
+            assert forall|left: int, right: int| 0 <= left < model.len() && 0 <= right < model.len() && left != right
+                implies (#[trigger] model[left]) != (#[trigger] model[right]) by {
+                assert(self.by_position@[model[left]] == left);
+                assert(self.by_position@[model[right]] == right);
+            };
+        }
         self.positions.as_slice()
     }
 
