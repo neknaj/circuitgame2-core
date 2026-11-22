@@ -45,7 +45,7 @@ pub(super) open spec fn definition_values(rhs: BitFuncRhs, inputs: Seq<Seq<bool>
             Seq::new(selection.count as nat,
                 |i: int| driver_values(inputs, definitions, input)[selection.start + i * selection.stride]),
         BitFuncRhs::Concat | BitFuncRhs::BitVector => Seq::empty(),
-        BitFuncRhs::CallOutput { .. } => arbitrary(),
+        BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => arbitrary(),
     }
 }
 

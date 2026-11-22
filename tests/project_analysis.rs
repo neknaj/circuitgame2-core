@@ -245,3 +245,69 @@ fn expands_a_cross_file_call_with_struct_ports_and_multiple_outputs() {
         assert_eq!(output[8..], [input[2], input[4]]);
     }
 }
+
+#[test]
+fn expands_nested_calls_with_struct_values_and_no_gates() {
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "nested.ncg2",
+        revision: 8,
+        text: "(using nor)
+               (struct Word (width 2) (payload (bits 1) (at 0)))
+               (func run (in (a (bits 2))) (out (y (bits 2)))
+                 (def y (id (unpack (pack a)))))
+               (func id (in (a (bits 2))) (out (a (bits 2))))
+               (func pack (in (a (bits 2))) (out (w Word)) (def w (as Word a)))
+               (func unpack (in (w Word)) (out (a (bits 2))) (def a (raw w)))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let functions = aliases.expand_functions(2, 2, 0).unwrap();
+    let circuit = functions.get(0, 2).unwrap();
+    assert!(circuit.gate_definitions().is_empty());
+    assert_eq!(circuit.netlist().evaluate(&[false, true]).unwrap(), [false, true]);
+}
+
+#[test]
+fn locates_nested_gate_capacity_at_the_call_that_fails() {
+    use circuitgame2_core::project::{ExpandFunctionsError, FunctionBuildDiagnostic};
+
+    let cases = [
+        (
+            "(using nor) (func id (in a) (out a))
+             (func run (in a) (out y) (def y (id (nor a a))))",
+            0, "(nor a a)",
+        ),
+        (
+            "(using nor) (func inv (in a) (out y) (def y (nor a a)))
+             (func run (in a) (out y) (def y (inv (nor a a))))",
+            1, "(inv (nor a a))",
+        ),
+        (
+            "(using nor) (func id (in a) (out a))
+             (func run (in a) (out y) (def y (nor (id a) (nor a a))))",
+            0, "(nor a a)",
+        ),
+        (
+            "(using nor) (func id (in a) (out a))
+             (func run (in a) (out y) (def y (nor (id a) (nor a a))))",
+            1, "(nor (id a) (nor a a))",
+        ),
+    ];
+    for (text, limit, expression) in cases {
+        let project = parse_circuit_project(&[SourceSnapshot {
+            path: "nested.ncg2",
+            revision: 8,
+            text,
+        }]).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let aliases = check_use_aliases(&targets).unwrap();
+        let Err(ExpandFunctionsError::Function {
+            position: (0, 2),
+            diagnostic: FunctionBuildDiagnostic::CallGateCapacity(site),
+        }) = aliases.expand_functions(1, 1, limit) else {
+            panic!("expected the nested call to exceed the gate limit");
+        };
+        assert_eq!(site.source.revision, 8);
+        assert_eq!(&text[site.span], expression);
+    }
+}

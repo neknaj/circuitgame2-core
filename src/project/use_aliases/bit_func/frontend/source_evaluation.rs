@@ -28,7 +28,8 @@ use super::super::lowering::{
     expanded_definition_values, projected_lowering_local_values, projected_lowering_view,
 };
 use super::super::expansion::CheckedExpansionCall;
-use super::super::templates::ResolvedTemplateCall;
+use super::super::templates::{NorBinding, ResolvedTemplateCall};
+use super::body::{NorDefinition, nor_binding_covers, nor_covers};
 use crate::netlist::{NorEvaluationError, gate_values_match, nor_evaluation_result};
 use crate::syntax::{bit_literal_value_at, form_span};
 
@@ -339,15 +340,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 展開準備で確認した通常の定義を、元の構文に従う参照評価に対応付ける。
     proof fn prepared_slot_preserves_source_value(
         &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>,
-        selected: Seq<ResolvedTemplateCall>,
+        selected: Seq<ResolvedTemplateCall>, roots: Seq<NorDefinition>,
         definitions: Vec<CheckedBitDefinition>, inputs: Seq<Seq<bool>>, values: Seq<Seq<bool>>, i: int,
     )
         requires
             self.projection_context(scope),
             self.projection_structures_match(scope),
-            self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+            self.prepared_definition_result(scope, calls, selected, roots, Ok(definitions)),
             0 <= i < definitions@.len() == values.len(),
-            !super::body::call_covers(calls, i),
+            !super::body::call_covers(calls, i), !nor_covers(roots, i),
             inputs.len() == scope.inputs@.len(),
             forall|j: int| 0 <= j < inputs.len() ==> (#[trigger] inputs[j]).len() == scope.inputs@[j],
             forall|j: int| 0 <= j <= i ==> (#[trigger] values[j]).len() == definitions@[j].width,
@@ -358,7 +359,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             scope.layouts, scope.types@, inputs, values, i,
         ),
     {
-        self.prepared_ordinary_definition_evidence(scope, calls, selected, definitions, i);
+        self.prepared_ordinary_definition_evidence(scope, calls, selected, roots, definitions, i);
         self.checked_slot_preserves_source_value(scope, definitions@, inputs, values, i);
     }
 
@@ -375,16 +376,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 展開した関数の通常の定義が、元の構文に従う値を持つことを示す。
     proof fn projected_ordinary_definitions_preserve_source_values(
         &self, scope: &FuncProjection, calls: Seq<CheckedExpansionCall>, selected: Seq<ResolvedTemplateCall>,
-        definitions: Vec<CheckedBitDefinition>, layout_limit: usize, gate_limit: usize,
+        roots: Seq<NorDefinition>, bindings: Seq<NorBinding>, definitions: Vec<CheckedBitDefinition>, arguments: Seq<crate::project::use_aliases::call_arity::ProjectedCallArgument>, layout_limit: usize, gate_limit: usize,
         function: &LoweredBitFunc, inputs: Seq<bool>, gates: Seq<bool>,
     )
         requires
             self.projection_context(scope),
             self.projection_structures_match(scope),
             self.projection_port_widths_match(scope),
-            self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
+            self.prepared_definition_result(scope, calls, selected, roots, Ok(definitions)),
             projected_lowering_view(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
-                scope.parsed.syntax.forms@, selected, layout_limit, gate_limit, Ok(*function)),
+                scope.parsed.syntax.forms@, selected, bindings, arguments, layout_limit, gate_limit, Ok(*function)),
+            forall|i: int| #[trigger] nor_binding_covers(bindings, i) <==> nor_covers(roots, i),
             calls.len() == selected.len(),
             forall|g: int| 0 <= g < selected.len() ==> *(#[trigger] selected[g]).group == calls[g],
             forall|a: int, b: int| 0 <= a < b < calls.len()
@@ -401,20 +403,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& values.len() == definitions@.len()
             &&& forall|i: int| #![trigger values[i]] 0 <= i < values.len()
                 ==> self.source_value_has_type(scope.layouts, scope.types@, values, i)
-            &&& forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) ==>
+            &&& forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) && !nor_covers(roots, i) ==>
                 #[trigger] self.source_definition_value(&context, scope.layouts, scope.types@, incoming, values, i)
         }),
     {
-        assert forall|i: int| 0 <= i < definitions@.len() && !super::body::call_covers(calls, i) implies
+        assert forall|i: int| 0 <= i < definitions@.len() && !super::body::call_covers(calls, i) && !nor_covers(roots, i) implies
             bit_definition_matches(scope.inputs@, definitions@.take(i), #[trigger] definitions@[i]) by {
-            self.prepared_ordinary_definition_evidence(scope, calls, selected, definitions, i);
+            self.prepared_ordinary_definition_evidence(scope, calls, selected, roots, definitions, i);
         };
         projected_lowering_local_values(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
-            scope.parsed.syntax.forms@, selected, calls, layout_limit, gate_limit, function, inputs, gates);
+            scope.parsed.syntax.forms@, selected, bindings, calls, arguments, layout_limit, gate_limit, function, inputs, gates);
         let incoming = port_values(function.input_layout_model(), inputs);
         let values = expanded_definition_values(function, inputs, gates);
         assert(self.source_inputs_match(scope.wiring, scope.layouts, incoming));
-        self.prepared_definition_width_evidence(scope, calls, selected, definitions);
+        self.prepared_definition_width_evidence(scope, calls, selected, roots, definitions);
         assert(values.len() <= scope.types@.len()) by { reveal(UseAliases::definition_widths_match); };
         assert forall|i: int| #![trigger values[i]] 0 <= i < values.len() implies
             self.source_value_has_type(scope.layouts, scope.types@, values, i) by {
@@ -423,10 +425,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         let context = SourceFunc { file: scope.file, entry: scope.entry, limit: scope.limit,
             source: scope.source, parsed: scope.parsed, wiring: scope.wiring };
-        assert forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) implies
+        assert forall|i: int| 0 <= i < values.len() && !super::body::call_covers(calls, i) && !nor_covers(roots, i) implies
             #[trigger] self.source_definition_value(&context, scope.layouts, scope.types@, incoming, values, i) by {
             assert(values[i] == checked_definition_values(definitions@[i], incoming, values.take(i)));
-            self.prepared_slot_preserves_source_value(scope, calls, selected, definitions, incoming, values, i);
+            self.prepared_slot_preserves_source_value(scope, calls, selected, roots, definitions, incoming, values, i);
         };
     }
 
@@ -736,7 +738,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.bit_rhs_from_source(scope, definitions, index, checked.rhs, checked.operands@));
         assert(!(exists|j: int| 0 <= j < scope.structures@.len() && (#[trigger] scope.structures@[j]).target == index));
         match checked.rhs {
-            BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } => { assert(false); },
+            BitFuncRhs::BitVector | BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => { assert(false); },
             BitFuncRhs::Concat => {
                 let projection = choose|concat: ConcatProjection|
                     #[trigger] concat_projection_matches(scope.file, scope.entry, scope.limit, scope.source, scope.parsed,

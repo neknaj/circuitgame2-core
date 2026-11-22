@@ -3,8 +3,8 @@
 #[cfg(verus_only)]
 use super::expression_forest::{
     call_argument_signal_index, expression_callee_location, expression_forest, expression_references,
-    expression_region, expression_root_callee, expression_signals, expression_signals_in_order,
-    ordinary_call_at, signal_indices_in_order,
+    expression_references_in_order, expression_region, expression_root_callee, expression_signals,
+    expression_signals_in_order, ordinary_call_at, ordinary_call_in_reference_index, signal_indices_in_order,
 };
 #[cfg(verus_only)]
 use super::expressions::after_form;
@@ -164,6 +164,79 @@ pub proof fn call_argument_positions_from_steps(forms: Seq<Form>, call: CallShap
     };
 }
 
+/// 呼び出し形状は構文木内のリストを指す。引数が空の呼び出しにも適用できる。
+pub proof fn call_form_bounds(forms: Seq<Form>, call: CallShape)
+    requires call_arguments_match(forms, call),
+    ensures call.form < forms.len(), forms[call.form as int] is List,
+{}
+
+/// 引数の先頭は、その呼び出しリストの内部にある。
+pub proof fn call_argument_position_bounds(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, port: int)
+    requires call_argument_positions(forms, call, positions), 0 <= port < positions.len(),
+    ensures call.form + 2 <= positions[port] < forms[call.form as int]->List_end <= forms.len(),
+{}
+
+/// 呼び出し内のフォームを含む直接引数を見つける。フォーム自体が引数の先頭でもよい。
+proof fn call_argument_containing_form(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, form: int)
+    -> (port: int)
+    requires
+        call_argument_positions(forms, call, positions),
+        call.form + 2 <= form < forms[call.form as int]->List_end,
+    ensures
+        0 <= port < positions.len(),
+        call.form + 2 <= positions[port] <= form,
+        if forms[positions[port] as int] is List {
+            form < forms[positions[port] as int]->List_end <= forms[call.form as int]->List_end
+        } else { form == positions[port] },
+{
+    let last = positions.len() as int - 1;
+    assert(positions[last] == positions.last());
+    call_argument_in_prefix(forms, call, positions, form, last)
+}
+
+proof fn call_argument_in_prefix(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, form: int, last: int)
+    -> (port: int)
+    requires
+        call_argument_positions(forms, call, positions),
+        0 <= last < positions.len(),
+        call.form + 2 <= form < after_form(forms, positions[last] as int),
+    ensures
+        0 <= port <= last,
+        call.form + 2 <= positions[port] <= form < after_form(forms, positions[port] as int)
+            <= forms[call.form as int]->List_end,
+    decreases last,
+{
+    let start = positions[last] as int;
+    if start <= form {
+        last
+    } else {
+        assert(last > 0);
+        assert(start == after_form(forms, positions[last - 1] as int));
+        call_argument_in_prefix(forms, call, positions, form, last - 1)
+    }
+}
+
+/// 通常呼び出し内のリストは、いずれかの直接引数のリストに含まれる。
+pub proof fn call_argument_containing_list(
+    source: &str, forms: Seq<Form>, call: CallShape, positions: Seq<usize>, stop: int, descendant: int,
+) -> (port: int)
+    requires
+        ordinary_call_at(source, forms, call.form as int, stop),
+        call_argument_positions(forms, call, positions),
+        call.form < descendant < forms[call.form as int]->List_end <= forms.len(),
+        forms[descendant] is List,
+    ensures
+        0 <= port < positions.len(),
+        call.form + 2 <= positions[port] <= descendant,
+        forms[positions[port] as int] is List,
+        descendant < forms[positions[port] as int]->List_end <= forms[call.form as int]->List_end,
+{
+    super::expression_forest::ordinary_call_bounds(source, forms, call.form as int, stop);
+    let port = call_argument_containing_form(forms, call, positions, descendant);
+    assert(forms[positions[port] as int] is List);
+    port
+}
+
 /// 二つの列が同じ呼び出しの引数を列挙するなら、対応する引数の位置は等しい。
 pub proof fn call_argument_positions_agree(forms: Seq<Form>, call: CallShape, a: Seq<usize>, b: Seq<usize>)
     requires call_argument_positions(forms, call, a), call_argument_positions(forms, call, b),
@@ -194,6 +267,7 @@ pub proof fn indexed_call_arguments(
     ensures
         call_arguments_match(forms, call),
         ordinary_call_at(source, forms, call.form as int, row.expression.end as int),
+        row.expression.start <= call.form < row.expression.end,
 {
     super::expression_forest::ordinary_call_bounds(source, forms, reference.form - 1, row.expression.end as int);
 }
@@ -218,6 +292,21 @@ pub closed spec fn direct_call_argument(forms: Seq<Form>, call: CallShape, index
         && direct_form_in_range(forms, call.form + 2, forms[call.form as int]->List_end as int, index)
 }
 
+
+/// 直接の引数の部分木が、呼び出しリストの内部に収まることを示す。
+pub proof fn direct_call_argument_bounds(forms: Seq<Form>, call: CallShape, index: int)
+    requires direct_call_argument(forms, call, index), nested_list_indices(forms), complete_list_indices(forms),
+    ensures ({
+        let end = forms[call.form as int]->List_end as int;
+        let next = if forms[index] is List { forms[index]->List_end as int } else { index + 1 };
+        &&& call.form < forms.len() && forms[call.form as int] is List
+        &&& call.form + 2 <= index < next <= end <= forms.len()
+    }),
+{
+    reveal(direct_form_in_range);
+    reveal(nested_list_indices);
+    reveal(complete_list_indices);
+}
 
 /// 呼び出しの引数列が空でなければ、先頭を直接の引数として扱えることを示す。
 pub proof fn first_call_argument_evidence(forms: Seq<Form>, call: CallShape, range: Range<usize>)
@@ -461,6 +550,125 @@ pub fn definition_root_is_call(
     let first = &references[row.references.start];
     matches!(first.kind, ExpressionReferenceKind::Callee)
         && first.form == row.expression.start + 1
+}
+
+/// 定義の参照索引から、指定した通常呼び出しの参照を探す。
+///
+/// ソース、構文木、定義、参照配列は、同じ厳格解析の入力と結果から渡す。
+/// `form` は式の先頭を指す構文木添字。見つかった参照の添字はファイル全体の参照配列を基準とする。
+/// 専用フォームやアトムを指定した場合、または添字が定義の右辺の外にある場合は `None` を返す。
+/// 定義の参照範囲が配列に収まらない場合も `None` を返す。
+pub fn callee_reference_at_form(
+    _source: &str, _forms: &[Form], row: &BuildDefinition, references: &[ExpressionReference], form: usize,
+) -> (reference: Option<usize>)
+    requires definition_call_index(_source, _forms@, *row, references@),
+    ensures
+        reference.is_some() <==>
+            row.expression.start <= form < row.expression.end
+                && ordinary_call_at(_source, _forms@, form as int, row.expression.end as int),
+        row.expression.start <= form < row.expression.end ==>
+            (reference.is_some() <==> exists|i: int| row.references.start <= i < row.references.end
+                && (#[trigger] references@[i]).form == form + 1 && references@[i].kind is Callee),
+        reference matches Some(at) ==>
+            row.references.start <= at < row.references.end
+                && references@[at as int].form == form + 1
+                && references@[at as int].kind is Callee,
+{
+    if form < row.expression.start || form >= row.expression.end {
+        return None;
+    }
+    let first = row.references.start;
+    let end = row.references.end;
+    if first > end || end > references.len() {
+        proof { assert(false); }
+        return None;
+    }
+    let key = form + 1;
+    let _length = _forms.len();
+    proof {
+        callee_reference_search_evidence(_source, _forms@, *row, references@, form);
+    }
+    let mut lo = first;
+    let mut hi = end;
+    while lo < hi
+        invariant
+            row.expression.start <= form < row.expression.end,
+            key == form + 1,
+            first == row.references.start, end == row.references.end,
+            first <= lo <= hi <= end <= references@.len(),
+            forall|i: int, j: int| first <= i < j < end ==>
+                (#[trigger] references@[i]).form < (#[trigger] references@[j]).form,
+            forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key ==> lo <= i < hi,
+            ordinary_call_at(_source, _forms@, form as int, row.expression.end as int)
+                <==> exists|i: int| first <= i < end
+                    && (#[trigger] references@[i]).form == key && references@[i].kind is Callee,
+        decreases hi - lo,
+    {
+        let mid = lo + (hi - lo) / 2;
+        let item = &references[mid];
+        if item.form < key {
+            assert forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key
+                implies mid < i by { assert(references@[mid as int] == *item); };
+            lo = mid + 1;
+        } else if item.form > key {
+            assert forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key
+                implies i < mid by { assert(references@[mid as int] == *item); };
+            hi = mid;
+        } else {
+            assert(references@[mid as int] == *item);
+            if matches!(item.kind, ExpressionReferenceKind::Callee) {
+                assert(exists|i: int| first <= i < end
+                    && (#[trigger] references@[i]).form == key && references@[i].kind is Callee);
+                return Some(mid);
+            }
+            proof {
+                assert forall|i: int| first <= i < end && (#[trigger] references@[i]).form == key
+                    implies i == mid by {};
+            }
+            return None;
+        }
+    }
+    None
+}
+
+proof fn callee_reference_search_evidence(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, references: Seq<ExpressionReference>, form: usize,
+)
+    requires
+        forms.len() <= usize::MAX,
+        definition_call_index(source, forms, row, references),
+        row.expression.start <= form < row.expression.end,
+    ensures ({
+        let first = row.references.start as int;
+        let end = row.references.end as int;
+        &&& forall|i: int, j: int| first <= i < j < end ==>
+            (#[trigger] references[i]).form < (#[trigger] references[j]).form
+        &&& (ordinary_call_at(source, forms, form as int, row.expression.end as int)
+            <==> exists|i: int| first <= i < end
+                && (#[trigger] references[i]).form == form + 1 && references[i].kind is Callee)
+    }),
+{
+    let start = row.expression.start as int;
+    let stop = row.expression.end as int;
+    let first = row.references.start as int;
+    let end = row.references.end as int;
+    let refs = expression_references(source, forms, start, stop);
+    expression_references_in_order(source, forms, start, stop);
+    assert forall|i: int, j: int| first <= i < j < end implies
+        (#[trigger] references[i]).form < (#[trigger] references[j]).form by {
+        assert(references[i] == refs[i - first]);
+        assert(references[j] == refs[j - first]);
+    };
+    if ordinary_call_at(source, forms, form as int, stop) {
+        ordinary_call_in_reference_index(source, forms, start, stop, form as int, stop);
+        let i = choose|i: int| 0 <= i < refs.len() && (#[trigger] refs[i]).form == form + 1 && refs[i].kind is Callee;
+        assert(references[first + i] == refs[i]);
+    }
+    if exists|i: int| first <= i < end && (#[trigger] references[i]).form == form + 1 && references[i].kind is Callee {
+        let i = choose|i: int| first <= i < end && (#[trigger] references[i]).form == form + 1 && references[i].kind is Callee;
+        assert(references[i] == refs[i - first]);
+        expression_callee_location(source, forms, start, stop, i - first);
+    }
 }
 
 /// 検査済みの定義に属する参照から、通常呼び出しの形を取り出す。

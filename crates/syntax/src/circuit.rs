@@ -11,6 +11,7 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 mod body;
+mod call_order;
 mod call_shapes;
 mod build;
 mod clauses;
@@ -44,14 +45,23 @@ pub use concat_arguments::{
     strict_concat_has_argument_range,
 };
 use build::BuildRows;
+pub use call_order::postorder_call_references;
+#[cfg(verus_only)]
+pub use call_order::{
+    call_postorder_positions, call_postorder_reference, call_postorder_references_distinct,
+    call_references_in_postorder, definition_reference_form_unique,
+    nested_call_postorder_position, root_call_postorder_last, root_call_reference,
+};
 pub use call_shapes::{
-    CallShape, RoutineArity, call_argument_range, definition_root_is_call, indexed_call_shape,
+    CallShape, RoutineArity, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,
     indexed_call_signal, next_call_argument, routine_arity,
 };
 #[cfg(verus_only)]
 pub use call_shapes::{
     call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index, indexed_call_shapes_agree,
-    call_argument_positions, call_argument_positions_agree, call_argument_positions_from_steps, direct_call_argument, exhausted_call_arguments, first_call_argument_evidence, following_call_argument,
+    call_argument_containing_list, call_argument_position_bounds, call_argument_positions, call_argument_positions_agree,
+    call_argument_positions_from_steps, call_form_bounds,
+    direct_call_argument, direct_call_argument_bounds, exhausted_call_arguments, first_call_argument_evidence, following_call_argument,
     indexed_call_arguments, root_call_shape_location, routine_arity_matches, routine_arity_port_counts,
 };
 pub use build::{
@@ -60,7 +70,8 @@ pub use build::{
 };
 #[cfg(verus_only)]
 pub use build::{
-    build_bare_signal_position, build_definition_scope_evidence, build_entry_ranges_evidence, build_index_matches,
+    build_bare_signal_position, build_definition_reference_boundaries, build_definition_scope_evidence,
+    build_entry_ranges_evidence, build_index_matches,
     build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
     definition_expression_region, definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
     definition_targets_match,

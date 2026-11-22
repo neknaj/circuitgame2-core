@@ -58,8 +58,59 @@ fn finds_direct_signal_bindings_on_either_side_of_a_nested_call() {
     assert_eq!(inner.inputs.len(), 2);
     assert!(inner.inputs.iter().all(Option::is_some));
     let accepted = aliases.check_func_call_inputs(0, 1, 0, 0, 8).unwrap().unwrap();
-    assert!(accepted.inputs[0].is_none());
+    let nested = accepted.inputs[0].as_ref().unwrap();
+    assert!(matches!(nested.ty, ResolvedPortType::Bits(1)));
+    assert_eq!(&text[nested.origin.span.clone()], "(nor a a)");
     assert!(accepted.inputs[1].is_some());
+}
+
+#[test]
+fn reports_a_nested_call_output_type_from_the_callee_source() {
+    let caller = "(func f (in) (out y) (def y (nor (::lib::Wide) 0)))";
+    let library = "(namespace lib (export Wide) (func Wide (in) (out (out (bits 8))) (def out #x00)))";
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "main.ncg2", revision: 4, text: caller },
+        SourceSnapshot { path: "library.ncg2", revision: 9, text: library },
+    ])
+    .unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let error = aliases.check_all_func_call_inputs(0, 0, 8).unwrap_err();
+    let FuncCallInputsError::Call {
+        position,
+        error: CallInputError::Argument {
+            index: 0, argument, expected: ResolvedPortType::Bits(1), required_at: None,
+            reason: CallInputReason::SignalType(actual),
+        },
+    } = error else { panic!("expected a nested output type mismatch: {error:?}"); };
+    assert_eq!((position.definition, position.reference), (0, 0));
+    assert_eq!(&caller[argument.span], "(::lib::Wide)");
+    assert_eq!(argument.source.revision, 4);
+    assert!(matches!(actual.ty, ResolvedPortType::Bits(8)));
+    assert_eq!(&library[actual.origin.span], "8");
+    assert_eq!(actual.origin.source.revision, 9);
+}
+
+#[test]
+fn reports_a_nested_signature_error_at_the_child_reference() {
+    let text = concat!(
+        "(func f (in) (out y) (def y (nor (child) 0))) ",
+        "(func child (in) (out (y Missing)) (def y 0))",
+    );
+    let project = parse_circuit_project(&[SourceSnapshot { path: "main.ncg2", revision: 2, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let outer = aliases.check_func_call_inputs(0, 0, 0, 0, 8).unwrap().unwrap();
+    assert!(outer.inputs[0].is_none());
+    let error = aliases.check_all_func_call_inputs(0, 0, 8).unwrap_err();
+    let FuncCallInputsError::Call {
+        position,
+        error: CallInputError::Signature(
+            circuitgame2_core::project::FuncCallSignatureError::Signature { call, .. },
+        ),
+    } = error else { panic!("expected the child's signature diagnostic: {error:?}"); };
+    assert_eq!(position.reference, 1);
+    assert_eq!(&text[call.call.span], "(child)");
 }
 
 #[test]

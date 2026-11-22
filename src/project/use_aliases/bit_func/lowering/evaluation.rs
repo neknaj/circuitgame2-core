@@ -269,7 +269,7 @@ pub(super) proof fn slot_values_match_wiring(
             assert(value[0] == expected[0]);
             assert(value =~= expected);
         },
-        BitFuncRhs::CallOutput { .. } => { assert(false); },
+        BitFuncRhs::CallOutput { .. } | BitFuncRhs::NorCallOutput { .. } => { assert(false); },
         rhs @ (BitFuncRhs::Driver(_) | BitFuncRhs::Selection { .. }) => {
             let (driver, offset, stride) = match rhs {
                 BitFuncRhs::Driver(driver) => (driver, 0int, 1int),

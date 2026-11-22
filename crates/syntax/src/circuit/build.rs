@@ -1,7 +1,9 @@
 //! ビルドで使う定義と参照をファイル単位の配列に格納する。
 
 #[cfg(verus_only)]
-use super::body::{flat_body_matches, flat_body_row_evidence, flat_body_signal_cursor, targets_match};
+use super::body::{
+    flat_body_matches, flat_body_reference_boundaries, flat_body_row_evidence, flat_body_signal_cursor, targets_match,
+};
 use super::index::index_parsed_headers_into;
 #[cfg(verus_only)]
 use super::index::{build_rows_match, indexed_entry_evidence, reject_circuit_syntax};
@@ -162,6 +164,56 @@ pub proof fn build_entry_ranges_evidence(source: &str, index: &BuildCircuitIndex
 {
     indexed_build_entry_evidence(source, index, entry);
     reveal(build_entry_matches);
+}
+
+/// 各定義の参照区間を詰めて並べると、その項目全体の参照区間になることを示す。
+pub proof fn build_definition_reference_boundaries(source: &str, index: &BuildCircuitIndex, entry: int)
+    requires build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
+    ensures ({
+        let frame = index.entry_ranges@[entry];
+        let first = frame.definitions.start as int;
+        let last = frame.definitions.end as int;
+        &&& frame.references.end == if first == last {
+            frame.references.start
+        } else {
+            index.definitions@[last - 1].references.end
+        }
+        &&& forall|i: int| first <= i < last ==> {
+            let refs = (#[trigger] index.definitions@[i]).references;
+            refs.start == if i == first { frame.references.start } else { index.definitions@[i - 1].references.end }
+        }
+    }),
+{
+    indexed_build_entry_evidence(source, index, entry);
+    reveal(build_entry_matches);
+    let frame = index.entry_ranges@[entry];
+    let start = frame.definitions.start as int;
+    let stop = frame.definitions.end as int;
+    let rows = index.definitions@.subrange(start, stop);
+    let item = index.syntax.entries@[entry];
+    if item.head is Func || item.head is Module || item.head is ModulePart {
+        let forms = index.syntax.forms@;
+        let end = forms[item.form as int]->List_end as int;
+        let refs = index.references@.take(frame.references.end as int);
+        let signals = index.signals@.take(frame.signals.end as int);
+        let body = choose|body: int| #[trigger] routine_signature_matches(source, forms, item.form + 2, end, item.head, body)
+            && flat_body_matches(source, forms, body, end, end, rows, refs, signals,
+                frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int);
+        flat_body_reference_boundaries(source, forms, body, end, rows, refs, signals,
+            frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int);
+        if start < stop {
+            assert(rows.last() == index.definitions@[stop - 1]);
+        }
+        assert forall|i: int| start <= i < stop implies {
+            let refs = (#[trigger] index.definitions@[i]).references;
+            refs.start == if i == start { frame.references.start } else { index.definitions@[i - 1].references.end }
+        } by {
+            assert(index.definitions@[i] == rows[i - start]);
+            if i > start {
+                assert(index.definitions@[i - 1] == rows[i - start - 1]);
+            }
+        };
+    }
 }
 
 /// 定義の参照が、その索引項目の所属と元ソースの字句に対応することを示す。

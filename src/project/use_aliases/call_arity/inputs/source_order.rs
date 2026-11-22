@@ -16,7 +16,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.func_wiring_evidence(at.0, at.1, limit, Ok(FuncWiringResult::Checked(*wiring))),
             self.projected_input_arguments(at, limit, types, wiring, projected),
             self.func_call_signature_evidence(at.0, at.1, at.2, at.3, limit, Ok(Some(call))),
-            call.signature is Function,
         ensures call_argument_positions(self.targets.project_model().circuits_model()[at.0 as int].syntax.forms@,
             call.call.call, Seq::new(projected.len(), |i: int| projected[i].form)),
     {
@@ -43,7 +42,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(argument_projections_match);
         reveal(argument_projection_matches);
         assert forall|i: int| 0 <= i < visited.len() implies (#[trigger] projected[i]).form == visited[i] by {
-            assert(argument_projection_matches(projected[i], visited[i], forms, wiring, types, slots, start, values[i]));
+            assert(argument_projection_matches((self, file, entry, definition), projected[i], visited[i],
+                forms, wiring, types, slots, start, values[i]));
         };
         let positions = Seq::new(projected.len(), |i: int| projected[i].form);
         assert(positions =~= visited);

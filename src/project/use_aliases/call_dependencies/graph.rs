@@ -748,6 +748,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    /// 通常関数への依存辺の有無にかかわらず、検査済みの呼び出し元の順位を得る。
+    pub(in crate::project::use_aliases) proof fn checked_function_rank(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), wiring: super::super::FuncWiring,
+    ) -> (rank: int)
+        requires
+            self.can_resolve(), self.function_expansion_evidence(Ok(plan)),
+            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(super::super::FuncWiringResult::Checked(wiring))),
+        ensures 0 <= rank < plan.order_model().len(), plan.position_model(rank) == Some((caller.0, caller.1)),
+    {
+        self.checked_wiring_is_func(caller.0, caller.1, caller.2, wiring);
+        self.template_index_evidence(plan);
+        reveal(FunctionExpansionOrder::source_positions_complete);
+        let position = (caller.0, caller.1);
+        assert(function_position(plan.project_model().circuits_model(), position));
+        choose|rank: int| 0 <= rank < plan.order_model().len() && #[trigger] plan.position_model(rank) == Some(position)
+    }
+
     pub(in crate::project::use_aliases) proof fn template_rank_from_position(
         &self, plan: FunctionExpansionOrder, position: (usize, usize), first: int, other: int,
     )

@@ -7,7 +7,7 @@ mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
 pub(super) use inputs::CallArgumentProjections;
-pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument};
+pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument, RetainedCallTarget};
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
 pub(super) use outputs::RootFunctionCall;
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
@@ -24,7 +24,7 @@ use crate::project::{LocatedName, ProjectSource};
 #[cfg(verus_only)]
 use crate::project::{CircuitProject, location_in_source};
 use crate::syntax::circuit::{
-    CallShape, Head, RoutineArity, indexed_call_shape, named_build_entry, routine_arity,
+    CallShape, Head, RoutineArity, callee_reference_at_form, indexed_call_shape, named_build_entry, routine_arity,
 };
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
@@ -112,6 +112,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && parsed.syntax.entries@[entry as int].head is Func && indexed.kind is Callee
     }
 
+    pub(super) open spec fn func_call_form_reference(
+        &self, file: usize, entry: usize, definition: usize, form: usize, reference: usize,
+    ) -> bool {
+        let parsed = self.targets.project_model().circuits_model()[file as int];
+        let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+        &&& self.func_call_at(file, entry, definition, reference)
+        &&& row.expression.start <= form < row.expression.end
+        &&& parsed.references@[row.references.start + reference].form == form + 1
+    }
+
+    /// 構文木上の呼び出し位置を、同じ定義内の相対参照添字に変換する。
+    pub(super) fn func_call_reference_at_form(
+        &self, file: usize, entry: usize, definition: usize, form: usize,
+    ) -> (found: Option<usize>)
+        requires self.can_resolve(),
+        ensures match found {
+            Some(reference) => self.func_call_form_reference(file, entry, definition, form, reference),
+            None => forall|reference: usize| !#[trigger] self.func_call_form_reference(file, entry, definition, form, reference),
+        },
+    {
+        let project = self.targets.project();
+        let circuits = project.circuits();
+        if file >= circuits.len() { return None; }
+        let parsed = &circuits[file];
+        if entry >= parsed.syntax.entries.len() || !matches!(parsed.syntax.entries[entry].head, Head::Func) {
+            return None;
+        }
+        let source = &project.sources()[file];
+        let ghost model = parsed.build_model();
+        proof {
+            parsed_index_evidence(*source, *parsed);
+            build_entry_ranges_evidence(source.text, &model, entry as int);
+        }
+        let defs = &parsed.entry_ranges[entry].definitions;
+        if definition >= defs.end - defs.start { return None; }
+        let def = defs.start + definition;
+        proof { build_definition_scope_evidence(source.text, &model, entry as int, def as int); }
+        let row = &parsed.definitions[def];
+        let found = callee_reference_at_form(source.text, &parsed.syntax.forms, row, &parsed.references, form);
+        match found {
+            Some(absolute) => {
+                let reference = absolute - row.references.start;
+                assert(self.func_call_form_reference(file, entry, definition, form, reference));
+                Some(reference)
+            },
+            None => {
+                assert forall|reference: usize| !#[trigger] self.func_call_form_reference(file, entry, definition, form, reference) by {
+                    if self.func_call_form_reference(file, entry, definition, form, reference) {
+                        let absolute = row.references.start + reference;
+                        assert(row.references.start <= absolute < row.references.end);
+                        assert(parsed.references@[absolute].form == form + 1);
+                        assert(parsed.references@[absolute].kind is Callee);
+                        assert(exists|i: int| row.references.start <= i < row.references.end
+                            && (#[trigger] parsed.references@[i]).form == form + 1 && parsed.references@[i].kind is Callee);
+                    }
+                };
+                None
+            },
+        }
+    }
+
     pub(super) open spec fn func_position_matches(
         &self, binding: DefinitionBinding, position: Option<(usize, usize)>,
     ) -> bool {
@@ -195,6 +256,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Ok(None) => false,
             }
         }
+    }
+
+    /// 元フォームから選んだ参照と、解決した呼び出しが同じ位置を指すことを示す。
+    pub(super) proof fn call_form_matches_reference(
+        &self, file: usize, entry: usize, definition: usize, form: usize, reference: usize, call: FuncCallArity,
+    )
+        requires
+            self.func_call_form_reference(file, entry, definition, form, reference),
+            self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(call))),
+        ensures call.call.form == form,
+    {
+    }
+
+    /// 呼び出しのリスト位置と、参照が指す直後の呼び出し名の位置を対応付ける。
+    pub(super) proof fn resolved_call_reference_form(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, call: FuncCallArity,
+    )
+        requires
+            self.can_resolve(),
+            self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(call))),
+        ensures ({
+            let parsed = self.targets.project_model().circuits_model()[file as int];
+            let row = parsed.definitions@[parsed.entry_ranges@[entry as int].definitions.start + definition];
+            &&& reference < row.references.end - row.references.start
+            &&& row.references.start + reference < parsed.references@.len()
+            &&& parsed.references@[row.references.start + reference].form == call.call.form + 1
+        }),
+    {
+        self.targets.parsed_project_model();
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[file as int];
+        let source = project.sources_model()[file as int];
+        let absolute = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        parsed_index_evidence(source, parsed);
+        build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute);
     }
 
     proof fn resolved_arity_excludes_no_call(

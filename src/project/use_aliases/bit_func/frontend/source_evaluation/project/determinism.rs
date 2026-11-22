@@ -151,7 +151,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             reveal(UseAliases::source_slot_evaluates);
             let a_ordinary = self.source_definition_value(ac, al, types, inputs, a, i);
             let b_ordinary = self.source_definition_value(bc, bl, types, inputs, b, i);
-            if a_ordinary && b_ordinary {
+            let a_nor = self.source_nested_nor_slot_evaluates(plan, rank, left_derivation, ac, types, inputs, a, i);
+            let b_nor = self.source_nested_nor_slot_evaluates(plan, rank, right_derivation, bc, types, inputs, b, i);
+            if a_nor && b_nor {
+                self.source_nested_nor_slots_agree(plan, rank, left_derivation, right_derivation, ac, bc, types, inputs, a, b, i);
+            } else if a_nor {
+                self.source_nested_nor_excludes_other_slot(plan, caller, rank, left_derivation, right_derivation,
+                    ac, bc, bl, types, inputs, a, b, i);
+            } else if b_nor {
+                self.source_nested_nor_excludes_other_slot(plan, caller, rank, right_derivation, left_derivation,
+                    bc, ac, al, types, inputs, b, a, i);
+            } else if a_ordinary && b_ordinary {
                 reveal(UseAliases::source_definition_value);
                 self.source_rhs_values_agree(ac, bc, al, bl, types, inputs, a.take(i), a[i], b[i]);
             } else if a_ordinary {
@@ -168,6 +178,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(x.outputs == y.outputs);
             }
             assert(a.take(end as int) =~= b.take(end as int));
+        }
+    }
+
+    /// 型検査済みの根 NOR を、平坦な右辺や通常関数の呼び出しとして評価することはできない。
+    #[verifier::spinoff_prover]
+    proof fn source_nested_nor_excludes_other_slot(
+        &self, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), rank: int,
+        nor_derivation: ISet<SourceInvocation>, other_derivation: ISet<SourceInvocation>,
+        nor: &SourceFunc, other: &SourceFunc, layouts: Option<&StructureLayouts>,
+        types: Seq<Option<SignalType>>, inputs: Seq<Seq<bool>>, a: Seq<Seq<bool>>, b: Seq<Seq<bool>>, slot: int,
+    )
+        requires
+            same_source_bindings(nor, other),
+            (nor.file, nor.entry, nor.limit) == caller,
+            0 <= slot < b.len(),
+            self.source_nested_nor_slot_evaluates(plan, rank, nor_derivation, nor, types, inputs, a, slot),
+            self.source_definition_value(other, layouts, types, inputs, b, slot)
+                || self.source_call_slot_evaluates(plan, caller, rank, other_derivation, other.wiring, inputs, b, slot),
+        ensures false,
+    {
+        let (call, list) = self.source_nested_nor_slot_evidence(plan, rank, nor_derivation, nor, types, inputs, a, slot);
+        let driver = nor.wiring.drivers.definitions@[slot];
+        assert(same_definition_driver(driver, other.wiring.drivers.definitions@[slot]));
+        if self.source_definition_value(other, layouts, types, inputs, b, slot) {
+            self.source_rhs_excludes_list_argument(other, layouts, types, inputs, b, slot, list);
+        } else {
+            reveal(UseAliases::source_call_slot_evaluates);
+            let site = choose|site: SourceCallEvaluation|
+                #[trigger] self.source_call_matches_slot(plan, caller, rank, other.wiring, inputs, b, slot, site, other_derivation)
+                && other_derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
+            self.source_project_call_values_evidence(plan, caller, rank, other.wiring, inputs, b, slot, site, other_derivation);
+            let target = plan.position_model(site.rank)->Some_0;
+            self.source_function_call_site_evidence(caller, other.wiring, slot, site.definition, site.signature, site.outputs, target);
+            let base = nor.parsed.entry_ranges@[nor.entry as int].definitions.start;
+            self.resolved_nor_call_agrees(nor.file, nor.entry, (driver.definition - base) as usize,
+                0, nor.limit, call, Some(site.signature));
         }
     }
 
@@ -189,11 +235,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(UseAliases::source_call_slot_evaluates);
         let site = choose|site: SourceCallEvaluation|
-            #[trigger] self.source_call_matches_slot(plan, caller, rank, call.wiring, inputs, b, slot, site)
+            #[trigger] self.source_call_matches_slot(plan, caller, rank, call.wiring, inputs, b, slot, site, derivation)
             && derivation.contains(SourceInvocation { rank: site.rank, inputs: site.arguments, outputs: site.results });
         let target = plan.position_model(site.rank)->Some_0;
-        self.source_function_call_values_evidence(caller, call.wiring, site.definition, site.signature, site.outputs,
-            target, inputs, b, site.widths, site.arguments, site.results);
+        self.source_project_call_values_evidence(plan, caller, rank, call.wiring, inputs, b, slot, site, derivation);
         self.source_rhs_excludes_function_call(ordinary, call, layouts, types, inputs, a, slot,
             site.definition, site.signature, site.outputs, target);
     }

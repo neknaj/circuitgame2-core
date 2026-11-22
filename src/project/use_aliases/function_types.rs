@@ -310,7 +310,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& builtin.call.call.form == parsed.definitions@[driver.definition as int].expression.start
                 &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(builtin)))
             }),
-        ensures typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+        ensures
+            typed.types@[index] matches Some(ty) && ty.ty == ResolvedPortType::Bits(1),
+            wiring.drivers.definitions@[index].result_index == 0,
     {
         let roots = self.successful_type_roots(file, entry, limit, typed, wiring);
         self.call_outputs_fit_wiring(file, entry, limit, &roots, &wiring);
@@ -534,8 +536,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& typed.types@.len() == wiring.drivers.definitions@.len()
                     &&& retain_calls ==> self.root_function_calls_match((file, entry, max_width), &wiring.drivers,
                         projections.calls@, typed.types@.len())
-                    &&& self.projected_roots_match((file, entry, max_width), typed.types@, &wiring, projections.calls@,
-                        projections.call_arguments.ranges@, projections.call_arguments.arguments@)
+                    &&& (retain_calls ==> self.projected_references_match((file, entry, max_width), typed.types@, &wiring,
+                        &projections.call_arguments, projections.calls@))
                     &&& concat_projections_match(file, entry, max_width,
                         &self.targets.project_model().sources_model()[file as int],
                         &self.targets.project_model().circuits_model()[file as int], &wiring, typed.types@, projections.concats@)
@@ -613,7 +615,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let mut call_arguments = CallArgumentProjections::new();
         let checked = self.check_all_inputs_with_types(file, entry, max_width, type_slice, scope, &mut signatures,
-            calls.as_slice(), &mut call_arguments);
+            calls.as_slice(), &mut call_arguments, retain_calls);
         match checked {
             Ok(()) => {
                 proof {

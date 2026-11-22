@@ -517,6 +517,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    /// 定義の最初の左辺を、結線検査で保持した駆動元一覧に対応付ける。
+    pub(super) proof fn checked_wiring_first_definition_driver(
+        &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring, definition: usize,
+    ) -> (first: int)
+        requires
+            self.can_resolve(), self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let frame = parsed.entry_ranges@[entry as int].definitions;
+                let (start, end) = definition_target_range(parsed.syntax.forms@, parsed.definitions@[definition as int]);
+                &&& frame.start <= definition < frame.end <= parsed.definitions@.len()
+                &&& start < end
+            }),
+        ensures
+            0 <= first < wiring.drivers.definitions@.len(),
+            wiring.drivers.definitions@[first].definition == definition,
+            wiring.drivers.definitions@[first].result_index == 0,
+    {
+        self.checked_first_definition_driver(file, entry, limit, wiring.drivers, definition)
+    }
+
     pub(super) proof fn checked_wiring_output_group(
         &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring, first: int,
     ) -> (count: nat)

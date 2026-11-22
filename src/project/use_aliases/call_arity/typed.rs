@@ -341,7 +341,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires
             self.can_resolve(),
             self.func_call_signature_evidence(file, entry, definition, reference, max_width, Ok(Some(typed))),
-        ensures self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(typed.call))), ({
+        ensures self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(typed.call))),
+            self.func_call_at(file, entry, definition, reference), ({
             let project = self.targets.project_model();
             let parsed = project.circuits_model()[file as int];
             let forms = parsed.syntax.forms@;
@@ -417,6 +418,86 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
         };
         Ok(Some(TypedFuncCall { call, signature }))
+    }
+
+    /// 構文木の添字で `func` の呼び出しを選び、参照先の型付き署名を返す。
+    ///
+    /// `file`、`entry`、`definition` と `max_width` は
+    /// [`Self::resolve_func_call_signature`] と同じ。`form` には、指定した定義の右辺にある
+    /// 呼び出しリストの先頭の添字を渡す。右辺全体と子式のどちらの呼び出しも指定できる。
+    /// 対象外の添字や専用フォームには `None` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 名前解決の違反を先に返す。参照先の署名に違反があれば、宣言側の診断と呼び出し位置を返す。
+    pub fn resolve_func_call_signature_at_form(
+        &self, file: usize, entry: usize, definition: usize, form: usize, max_width: u64,
+    ) -> (result: Result<Option<TypedFuncCall<'p, 'a>>, FuncCallSignatureError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures
+            self.func_call_signature_at_form_evidence(file, entry, definition, form, max_width, result),
+            result matches Ok(Some(call)) ==>
+                call.call.call.form == form
+                && (call.signature matches FuncCallSignature::Function(signature) ==>
+                    signature.outputs@.len() == call.call.target.port_counts().outputs),
+    {
+        let (_, result) = self.resolve_func_call_signature_with_reference(file, entry, definition, form, max_width);
+        result
+    }
+
+    /// 型付き署名を解決したときの定義内参照添字も返す。
+    pub(super) fn resolve_func_call_signature_with_reference(
+        &self, file: usize, entry: usize, definition: usize, form: usize, max_width: u64,
+    ) -> (resolved: (Option<usize>, Result<Option<TypedFuncCall<'p, 'a>>, FuncCallSignatureError<'p, 'a>>))
+        requires self.can_resolve(),
+        ensures
+            self.func_call_signature_at_form_evidence(file, entry, definition, form, max_width, resolved.1),
+            resolved.0 matches Some(reference) ==> self.func_call_form_reference(file, entry, definition, form, reference)
+                && self.func_call_signature_evidence(file, entry, definition, reference, max_width, resolved.1),
+            resolved.1 matches Ok(Some(call)) ==> resolved.0.is_some() && call.call.call.form == form
+                && (call.signature matches FuncCallSignature::Function(signature) ==>
+                    signature.outputs@.len() == call.call.target.port_counts().outputs),
+    {
+        let Some(reference) = self.func_call_reference_at_form(file, entry, definition, form) else {
+            return (None, Ok(None));
+        };
+        let result = self.resolve_func_call_signature(file, entry, definition, reference, max_width);
+        proof {
+            self.call_has_signature_result(file, entry, definition, reference, max_width, result);
+            if let Ok(Some(call)) = &result {
+                self.typed_call_arguments_ready(file, entry, definition, reference, max_width, *call);
+            }
+            assert(exists|r: usize| #[trigger] self.func_call_form_reference(file, entry, definition, form, r)
+                && self.func_call_signature_evidence(file, entry, definition, r, max_width, result));
+        }
+        (Some(reference), result)
+    }
+
+    /// 構文木上で選んだ呼び出しと、同じ位置の参照から解決した署名または診断が対応することを表す。
+    pub closed spec fn func_call_signature_at_form_evidence(
+        &self, file: usize, entry: usize, definition: usize, form: usize, max_width: u64,
+        result: Result<Option<TypedFuncCall>, FuncCallSignatureError>,
+    ) -> bool {
+        if result == Ok(None) {
+            forall|r: usize| !#[trigger] self.func_call_form_reference(file, entry, definition, form, r)
+        } else {
+            exists|r: usize| #[trigger] self.func_call_form_reference(file, entry, definition, form, r)
+                && self.func_call_signature_evidence(file, entry, definition, r, max_width, result)
+        }
+    }
+
+    /// 成功した型付き署名が指す定義内の参照添字を取り出す。
+    pub(super) proof fn call_signature_at_form_reference(
+        &self, caller: (usize, usize, usize), form: usize, limit: u64, call: TypedFuncCall,
+    ) -> (reference: usize)
+        requires self.func_call_signature_at_form_evidence(caller.0, caller.1, caller.2, form, limit, Ok(Some(call))),
+        ensures
+            self.func_call_form_reference(caller.0, caller.1, caller.2, form, reference),
+            self.func_call_signature_evidence(caller.0, caller.1, caller.2, reference, limit, Ok(Some(call))),
+    {
+        let (file, entry, definition) = caller;
+        choose|r: usize| #[trigger] self.func_call_form_reference(file, entry, definition, form, r)
+            && self.func_call_signature_evidence(file, entry, definition, r, limit, Ok(Some(call)))
     }
 
     /// 呼び出し先を解決し、関数の型付き署名を必要なときだけ登録する。
