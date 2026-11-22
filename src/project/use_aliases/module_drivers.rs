@@ -213,6 +213,25 @@ spec fn target_origins_match(
     &&& forall|j: int| 0 <= j < rows.len() ==> #[trigger] target_origin_matches(sources, circuits, rows[j], origins[j])
 }
 
+proof fn joined_origin_is_member(
+    members: Seq<ModuleBodyPosition>, groups: Seq<Seq<DefinitionDriver>>, count: nat, index: int,
+)
+    requires count <= members.len() && count <= groups.len(), 0 <= index < joined_origins(members, groups, count).len(),
+    ensures members.contains(joined_origins(members, groups, count)[index]),
+    decreases count,
+{
+    reveal(joined_origins);
+    assert(count > 0);
+    let prior = joined_origins(members, groups, (count - 1) as nat);
+    if index < prior.len() {
+        joined_origin_is_member(members, groups, (count - 1) as nat, index);
+    } else {
+        let i = (count - 1) as int;
+        assert(joined_origins(members, groups, count)[index] == members[i]);
+        assert(members.contains(members[i]));
+    }
+}
+
 proof fn extend_target_origins(
     sources: Seq<ProjectSource>, circuits: Seq<NamedBuildCircuit>, earlier: Seq<DefinitionDriver>,
     prior_origins: Seq<ModuleBodyPosition>, position: ModuleBodyPosition, next: Seq<DefinitionDriver>,
@@ -253,6 +272,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.module_drivers_result(owner, max_width, Ok(Some(drivers))), 0 <= index < drivers.definitions@.len(),
         ensures
             drivers.origins@.len() == drivers.definitions@.len(),
+            drivers.body.members@.contains(drivers.origins@[index]),
             ({
                 let row = drivers.definitions@[index];
                 let at = drivers.origins@[index];
@@ -270,6 +290,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let at = drivers.origins@[index];
         assert(target_origin_matches(project.sources_model(), project.circuits_model(), drivers.definitions@[index], at));
         reveal(target_origin_matches);
+        let groups = choose|groups: Seq<Seq<DefinitionDriver>>|
+            groups.len() == drivers.body.members@.len()
+            && drivers.origins@ == joined_origins(drivers.body.members@, groups, groups.len());
+        joined_origin_is_member(drivers.body.members@, groups, groups.len(), index);
     }
 
     /// 署名と本体の定義から駆動元を取り出す処理の結果を表す。
@@ -394,6 +418,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_drivers_result(owner, max_width, Ok(Some(prepared.drivers))),
             self.targets.module_body_result(owner, Ok(Some(prepared.drivers.body))),
             prepared.drivers.body.owner == owner,
+            prepared.inputs@.len() == prepared.drivers.signature.inputs@.len(),
             optional_local_index(match &prepared.index { Some(index) => Some(index), None => None },
                 prepared.inputs@, prepared.drivers.definitions@, prepared.drivers.definitions@.len() as int),
     {

@@ -1,5 +1,8 @@
 //! モジュールで右辺全体を占める呼び出しから、左辺の信号に型を割り当てる。
 
+mod aliases;
+pub use aliases::{ModuleAliasSource, ModuleTypeSources};
+
 use super::{DefinitionDriver, DefinitionPosition, ModuleCallPortsError, ModuleWiring, ModuleWiringError, UseAliases};
 use super::function_atoms::copy_location;
 use crate::project::{LocatedName, ModuleBodyPosition, PortDirection, SignalType};
@@ -142,6 +145,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && self.root_type(wiring.drivers.origins@[before.len() as int], wiring.drivers.definitions@[before.len() as int],
                     max_width, Err(error)),
         }
+    }
+
+    /// 型伝播に使う左辺の型と、元の配線検査の対応を取り出す。
+    pub(super) proof fn module_root_types_evidence(
+        &self, owner: ModuleBodyPosition, max_width: u64, typed: ModuleRootTypes,
+    )
+        requires self.module_root_types_result(owner, max_width, Ok(Some(typed))),
+        ensures
+            self.module_wiring_result(owner, max_width, Ok(Some(typed.wiring))),
+            typed.types@.len() == typed.wiring.drivers.definitions@.len(),
+    {
     }
 
     /// 全断片の右辺全体を占める通常呼び出しから、左辺の型を求める。

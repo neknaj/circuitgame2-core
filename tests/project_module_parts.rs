@@ -148,16 +148,16 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
         SourceSnapshot { path: "owner.ncg2", revision: 2,
             text: "(using nor) (func pair (in a (b (bits 2))) (out a (b (bits 2))))
                   (module root (in (wide (bits 2))) (out y (z (bits 2)))
-                    (def (y z) (pair mid wide)))" },
+                    (def (y z) (pair bridge wide)) (def bridge mid))" },
         SourceSnapshot { path: "part.ncg2", revision: 6,
-            text: "(module-part root (def mid (nor (bit z 0) 0)))" },
+            text: "(module-part root (def mid (nor (bit z 0) 0)) (def part-copy wide))" },
     ];
     let project = parse_circuit_project(&input).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let owner = targets.collect_module_parts().unwrap()[0].module_position;
     let aliases = check_use_aliases(&targets).unwrap();
-    let checked = aliases.check_module_root_types(owner, 16).unwrap().unwrap();
-    let [Some(y), Some(z), Some(mid)] = checked.types.as_slice() else {
+    let checked = aliases.check_module_type_sources(owner, 16).unwrap().unwrap();
+    let [Some(y), Some(z), None, Some(mid), None] = checked.roots.types.as_slice() else {
         panic!("both calls must seed all their output types");
     };
     assert!(matches!(y.ty, ResolvedPortType::Bits(1)));
@@ -166,6 +166,13 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
     assert_eq!(&z.origin.source.text[z.origin.span.clone()], "2");
     assert_eq!(mid.origin.source.revision, 6);
     assert_eq!(&mid.origin.source.text[mid.origin.span.clone()], "(nor (bit z 0) 0)");
+    let [None, None, Some(bridge), None, Some(copy)] = checked.aliases.as_slice() else {
+        panic!("only bare signal references carry alias dependencies");
+    };
+    assert_eq!(bridge.driver, OutputDriver::Definition(3));
+    assert_eq!(&bridge.reference.source.text[bridge.reference.span.clone()], "mid");
+    assert_eq!(copy.driver, OutputDriver::Input(0));
+    assert_eq!(copy.reference.source.revision, 6);
 }
 
 #[test]

@@ -218,6 +218,58 @@ spec fn module_signals_prefix(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 束縛列の量と項目が、元の本体にある信号索引に対応することを示す。
+    pub(super) proof fn module_signal_index_item(
+        &self, owner: ModuleBodyPosition, limit: u64, wiring: ModuleWiring, member: int, position: int,
+    )
+        requires
+            self.module_wiring_result(owner, limit, Ok(Some(wiring))),
+            0 <= member < wiring.drivers.body.members@.len(),
+        ensures
+            wiring.signals@.len() == wiring.drivers.body.members@.len(),
+            ({
+                let project = self.targets.project_model();
+                let at = wiring.drivers.body.members@[member];
+                let circuit = project.circuits_model()[at.file as int];
+                let range = circuit.entry_ranges@[at.entry as int].signals;
+                let group = wiring.signals@[member];
+                &&& range.start <= range.end && group@.len() == range.end - range.start
+                &&& (range.start <= position < range.end ==> {
+                    let bound = group@[position - range.start];
+                    &&& bound.definition.body == at && bound.form == circuit.signals@[position]
+                    &&& match bound.driver {
+                        OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
+                        OutputDriver::Definition(i) => i < wiring.drivers.definitions@.len(),
+                    }
+                })
+            }),
+    {
+        let project = self.targets.project_model();
+        let prepared = choose|prepared: IndexedModuleDrivers|
+            #[trigger] self.indexed_module_drivers_result(owner, limit, Ok(Some(prepared)))
+            && wiring.drivers == prepared.drivers && wiring.signals@.len() == prepared.drivers.body.members@.len()
+            && module_signals_prefix(&project, &prepared, wiring.signals@);
+        self.indexed_module_drivers_evidence(owner, limit, &prepared);
+        reveal(module_signals_prefix);
+        let at = wiring.drivers.body.members@[member];
+        let source = &project.sources_model()[at.file as int];
+        let circuit = &project.circuits_model()[at.file as int];
+        let range = circuit.entry_ranges@[at.entry as int].signals;
+        let group = wiring.signals@[member];
+        assert(member_signal_result(source, circuit, at, &prepared, Ok(group)));
+        reveal(bound_signals_before);
+        if range.start <= position < range.end {
+            let bound = group@[position - range.start];
+            assert(member_signal_matches(source, circuit, at, position, &prepared, bound));
+            let absolute = circuit.entry_ranges@[at.entry as int].definitions.start as int + bound.definition.local as int;
+            let name = choose|name: NameSite|
+                #[trigger] signal_site(source, circuit, at.entry as int, position, absolute as usize, name)
+                && is_location(source, name, bound.site)
+                && local_lookup_matches(prepared.inputs@, prepared.drivers.definitions@, prepared.drivers.definitions@.len() as int,
+                    name.word.spec_bytes(), Some(bound.driver));
+        }
+    }
+
     /// 型検査が使う駆動元を、配線検査の成功結果から取り出す。
     pub(super) proof fn module_wiring_keeps_drivers(&self, owner: ModuleBodyPosition, max_width: u64, wiring: ModuleWiring)
         requires self.module_wiring_result(owner, max_width, Ok(Some(wiring))),
