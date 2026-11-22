@@ -125,6 +125,12 @@ spec fn driver_site(source: &str, forms: Seq<Form>, definitions: Seq<BuildDefini
 pub(super) open spec fn indexed_driver_site(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, driver: DefinitionDriver,
 ) -> bool {
+    indexed_driver_site_from_text(source.text, parsed, entry, driver)
+}
+
+pub(super) open spec fn indexed_driver_site_from_text(
+    source: &str, parsed: &NamedBuildCircuit, entry: int, driver: DefinitionDriver,
+) -> bool {
     let frame = parsed.entry_ranges@[entry].definitions;
     let forms = parsed.syntax.forms@;
     let (start, end) = definition_target_range(forms, parsed.definitions@[driver.definition as int]);
@@ -132,10 +138,10 @@ pub(super) open spec fn indexed_driver_site(
     &&& driver.result_index < end - start
     &&& 0 <= start + driver.result_index < forms.len()
     &&& driver.name.span == form_span(forms[start + driver.result_index])
-    &&& name_in_source(source.text, driver.name)
+    &&& name_in_source(source, driver.name)
 }
 
-spec fn drivers_before(
+pub(super) closed spec fn drivers_before(
     source: &str, forms: Seq<Form>, definitions: Seq<BuildDefinition>, first: int, end: int,
     def: int, result: int, drivers: Seq<DefinitionDriver>,
 ) -> bool {
@@ -309,7 +315,7 @@ proof fn record_driver(
     };
 }
 
-fn collect_drivers<'a>(source: &'a str, parsed: &NamedBuildCircuit<'a>, entry: usize)
+pub(super) fn collect_drivers<'a>(source: &'a str, parsed: &NamedBuildCircuit<'a>, entry: usize)
     -> (drivers: Vec<DefinitionDriver<'a>>)
     requires
         build_index_matches(source, parsed.build_model()),
@@ -320,6 +326,8 @@ fn collect_drivers<'a>(source: &'a str, parsed: &NamedBuildCircuit<'a>, entry: u
         let range = parsed.entry_ranges@[entry as int].definitions;
         drivers_before(source, parsed.syntax.forms@, parsed.definitions@, range.start as int,
             range.end as int, range.end as int, 0, drivers@)
+            && forall|i: int| 0 <= i < drivers@.len() ==>
+                indexed_driver_site_from_text(source, parsed, entry as int, #[trigger] drivers@[i])
     }),
 {
     let range = &parsed.entry_ranges[entry].definitions;
@@ -366,6 +374,8 @@ fn collect_drivers<'a>(source: &'a str, parsed: &NamedBuildCircuit<'a>, entry: u
         }
         def += 1;
     }
+    assert forall|i: int| 0 <= i < drivers@.len() implies
+        indexed_driver_site_from_text(source, parsed, entry as int, #[trigger] drivers@[i]) by {};
     drivers
 }
 
@@ -526,7 +536,7 @@ pub(super) fn lookup_local_name(
     }
 }
 
-spec fn single_drivers_before(inputs: Seq<NameSite>, drivers: Seq<DefinitionDriver>, stop: int) -> bool {
+pub(super) open spec fn single_drivers_before(inputs: Seq<NameSite>, drivers: Seq<DefinitionDriver>, stop: int) -> bool {
     &&& forall|i: int| 0 <= i < stop ==> disjoint_input(inputs, (#[trigger] drivers[i]).name)
     &&& forall|i: int, j: int| 0 <= i < j < stop
         ==> !same_word((#[trigger] drivers[i]).name, (#[trigger] drivers[j]).name)
@@ -614,6 +624,49 @@ fn check_definitions<'p, 'a>(
         Err(error) => drive_error(source, inputs@, drivers@, error),
     },
 {
+    match check_definition_bindings(inputs, drivers, indexed) {
+        Ok(index) => Ok(index),
+        Err(conflict) => {
+            let name = &drivers[conflict.at].name;
+            let error = match conflict.previous {
+                OutputDriver::Input(input) => FuncDriverError::DrivesInput {
+                    target: name_location(source, name), input: name_location(source, &inputs[input]),
+                },
+                OutputDriver::Definition(first) => FuncDriverError::MultipleDrivers {
+                    later: name_location(source, name), first: name_location(source, &drivers[first].name),
+                },
+            };
+            assert(drive_error(source, inputs@, drivers@, error));
+            Err(error)
+        },
+    }
+}
+
+pub(super) struct DriverConflict {
+    pub(super) at: usize,
+    pub(super) previous: OutputDriver,
+}
+
+pub(super) open spec fn definition_binding_conflict(
+    inputs: Seq<NameSite>, drivers: Seq<DefinitionDriver>, conflict: DriverConflict,
+) -> bool {
+    let at = conflict.at as int;
+    &&& at < drivers.len()
+    &&& single_drivers_before(inputs, drivers, at)
+    &&& local_lookup_matches(inputs, drivers, at, drivers[at].name.word.spec_bytes(), Some(conflict.previous))
+}
+
+/// 左辺の名前を検査し、競合した場合は位置を組み立てるための添字を返す。
+pub(super) fn check_definition_bindings(
+    inputs: &[NameSite], drivers: &[DefinitionDriver], indexed: bool,
+) -> (result: Result<Option<LocalSignalIndex>, DriverConflict>)
+    ensures match result {
+        Ok(index) => single_drivers_before(inputs@, drivers@, drivers@.len() as int)
+            && (index matches Some(index) ==> local_names_indexed(
+                &index, inputs@, inputs@.len() as int, drivers@, drivers@.len() as int)),
+        Err(conflict) => definition_binding_conflict(inputs@, drivers@, conflict),
+    },
+{
     let mut index = index_local_inputs(inputs, indexed);
     proof {
         reveal(local_names_indexed);
@@ -623,8 +676,6 @@ fn check_definitions<'p, 'a>(
     while at < drivers.len()
         invariant
             at <= drivers@.len(),
-            forall|i: int| 0 <= i < inputs@.len() ==> name_in_source(source.text, #[trigger] inputs@[i]),
-            forall|i: int| 0 <= i < drivers@.len() ==> name_in_source(source.text, (#[trigger] drivers@[i]).name),
             single_drivers_before(inputs@, drivers@, at as int),
             index matches Some(names) ==> local_names_indexed(&names, inputs@, inputs@.len() as int, drivers@, at as int),
         decreases drivers@.len() - at,
@@ -632,16 +683,7 @@ fn check_definitions<'p, 'a>(
         let name = &drivers[at].name;
         let found = lookup_local_name(index.as_ref(), inputs, drivers, at, name.word);
         if let Some(previous) = found {
-            let error = match previous {
-                OutputDriver::Input(input) => FuncDriverError::DrivesInput {
-                    target: name_location(source, name), input: name_location(source, &inputs[input]),
-                },
-                OutputDriver::Definition(first) => FuncDriverError::MultipleDrivers {
-                    later: name_location(source, name), first: name_location(source, &drivers[first].name),
-                },
-            };
-            assert(drive_error(source, inputs@, drivers@, error));
-            return Err(error);
+            return Err(DriverConflict { at, previous });
         }
         if let Some(ref mut names) = index {
             proof { reveal(local_names_indexed); }
@@ -674,7 +716,7 @@ fn check_definitions<'p, 'a>(
     Ok(index)
 }
 
-spec fn output_drivers_before(
+pub(super) open spec fn output_drivers_before(
     shared: Seq<Option<usize>>, outputs: Seq<NameSite>, definitions: Seq<DefinitionDriver>, drivers: Seq<OutputDriver>,
 ) -> bool {
     &&& drivers.len() <= outputs.len() == shared.len()
@@ -685,7 +727,7 @@ spec fn output_drivers_before(
     }
 }
 
-spec fn missing_output_error(
+pub(super) open spec fn missing_output_error(
     source: &ProjectSource, shared: Seq<Option<usize>>, outputs: Seq<NameSite>,
     definitions: Seq<DefinitionDriver>, error: FuncDriverError,
 ) -> bool {
@@ -700,7 +742,7 @@ spec fn missing_output_error(
                 ==> !same_word(outputs[at], (#[trigger] definitions[i]).name)
 }
 
-fn check_outputs<'p, 'a>(
+pub(super) fn check_outputs<'p, 'a>(
     source: &'p ProjectSource<'a>, shared: &[Option<usize>], outputs: &[NameSite], definitions: &[DefinitionDriver],
     _inputs: &[NameSite], index: Option<&LocalSignalIndex>,
 ) -> (result: Result<Vec<OutputDriver>, FuncDriverError<'p, 'a>>)

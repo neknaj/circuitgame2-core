@@ -558,12 +558,62 @@ spec fn expansion_at(source: &str, forms: Seq<Form>, start: int, end: int, item:
 }
 
 /// 展開待ちの範囲が、指定された本体の最初の展開フォームに対応することを表す。
+spec fn expansion_body_region_matches(
+    source: &str, syntax: &CircuitForms, entry: int, region: Option<(usize, usize)>,
+) -> bool {
+    let entries = syntax.entries@;
+    let forms = syntax.forms@;
+    &&& region matches Some((start, end)) ==>
+        start <= end <= forms.len() && body_items_before(source, forms, start as int, end as int, end as int)
+    &&& if 0 <= entry < entries.len() && entries[entry].head is ModulePart {
+        let form = entries[entry].form as int;
+        region matches Some((start, end)) && start == form + 3 && forms[form] is List
+            && end == forms[form]->List_end
+    } else {
+        (region.is_none() && routine_layout_matches(source, syntax, entry, None))
+            || exists|layout: RoutineLayout| #[trigger] routine_layout_matches(source, syntax, entry, Some(layout))
+                && region == Some((layout.body, layout.end))
+    }
+}
+
+fn expansion_body_region(source: &str, syntax: &CircuitForms, entry: usize) -> (region: Option<(usize, usize)>)
+    requires circuit_index_matches(source, syntax.forms@, syntax.entries@),
+        complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
+    ensures expansion_body_region_matches(source, syntax, entry as int, region),
+{
+    if entry < syntax.entries.len() && matches!(syntax.entries[entry].head, Head::ModulePart) {
+        let form = syntax.entries[entry].form;
+        let forms = syntax.forms.as_slice();
+        proof {
+            indexed_entry_evidence(source, forms@, syntax.entries@, entry as int);
+            reveal(super::form_has_head);
+            reveal(header_arguments_match);
+        }
+        let Form::List { end: stop, .. } = &forms[form] else { proof { assert(false); } return None; };
+        proof {
+            let after = choose|after: int| #[trigger] routine_signature_matches(source, forms@, form + 2, *stop as int, Head::ModulePart, after)
+                && body_items_before(source, forms@, after, *stop as int, *stop as int);
+            reveal(body_items_before);
+            assert(after == form + 3);
+        }
+        Some((form + 3, *stop))
+    } else {
+        match routine_layout(source, syntax, entry) {
+            Some(layout) => {
+                proof { reveal(body_items_before); }
+                Some((layout.body, layout.end))
+            },
+            None => None,
+        }
+    }
+}
+
 pub closed spec fn routine_expansion_evidence(source: &str, syntax: &CircuitForms, entry: int, span: Option<Range<usize>>) -> bool {
     let forms = syntax.forms@;
-    (routine_layout_matches(source, syntax, entry, None) && span.is_none())
-        || exists|layout: RoutineLayout| #[trigger] routine_layout_matches(source, syntax, entry, Some(layout)) && {
-            let start = layout.body as int;
-            let end = layout.end as int;
+    (expansion_body_region_matches(source, syntax, entry, None) && span.is_none())
+        || exists|start: usize, end: usize| #[trigger] expansion_body_region_matches(source, syntax, entry, Some((start, end))) && {
+            let start = start as int;
+            let end = end as int;
             match span {
                 Some(span) => exists|item: int| #[trigger] expansion_at(source, forms, start, end, item)
                     && span == form_span(forms[item])
@@ -573,7 +623,7 @@ pub closed spec fn routine_expansion_evidence(source: &str, syntax: &CircuitForm
         }
 }
 
-/// `func` または `module` の本体から、最初の `expand` の元ソース範囲を返す。
+/// `func`、`module`、`module-part` の本体から、最初の `expand` の元ソース範囲を返す。
 ///
 /// `syntax` には同じ `source` から得た厳格索引を渡す。他の種別や範囲外の項目では `None`。
 /// 本体項目だけをたどる。定義の右辺やマクロの引数は走査しない。
@@ -591,19 +641,19 @@ pub fn first_routine_expansion(source: &str, syntax: &CircuitForms, entry: usize
             && is_char_boundary(source.spec_bytes(), span.start as int)
             && is_char_boundary(source.spec_bytes(), span.end as int),
 {
-    let Some(layout) = routine_layout(source, syntax, entry) else { return None; };
+    let Some((start, stop)) = expansion_body_region(source, syntax, entry) else { return None; };
     let forms = syntax.forms.as_slice();
-    let start = layout.body;
-    let stop = layout.end;
     let mut at = start;
     proof {
+        assert(body_items_before(source, forms@, start as int, stop as int, stop as int));
+        reveal(body_items_before);
         reveal(direct_form_in_range);
         assert(at < stop ==> direct_form_in_range(forms@, start as int, stop as int, at as int));
     }
     while at < stop
         invariant
-            routine_layout_matches(source, syntax, entry as int, Some(layout)),
-            start == layout.body, stop == layout.end,
+            expansion_body_region_matches(source, syntax, entry as int, Some((start, stop))),
+            body_items_before(source, forms@, start as int, stop as int, stop as int),
             forms@ == syntax.forms@, start <= at <= stop <= forms@.len(),
             at < stop ==> direct_form_in_range(forms@, start as int, stop as int, at as int),
             complete_list_indices(forms@), nested_list_indices(forms@),

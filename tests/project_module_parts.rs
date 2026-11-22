@@ -1,5 +1,6 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, ModulePartError, SourceSnapshot, check_use_aliases, index_use_targets, parse_circuit_project,
+    DefinitionBinding, FuncDriverError, ModuleDriverError, ModulePartError, OutputDriver, SourceSnapshot,
+    check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
 
@@ -33,6 +34,10 @@ fn resolves_the_owner_across_files_and_preserves_the_part_location() {
     let entry = binding.part_position;
     assert_eq!(project.circuits()[entry.file].syntax.entries[entry.entry].form, binding.part.form);
     let aliases = check_use_aliases(&targets).unwrap();
+    let assembly = aliases.check_module_drivers(binding.module_position, 16).unwrap().unwrap();
+    assert_eq!(assembly.body.members, [binding.module_position, binding.part_position]);
+    assert_eq!(assembly.origins, assembly.body.members);
+    assert_eq!(assembly.outputs, [OutputDriver::Definition(1)]);
     for (position, expected) in [(binding.module_position, "invert"), (binding.part_position, "pass")] {
         let resolved = aliases.resolve_definition_reference(position.file, position.entry, 0, 0).unwrap();
         let DefinitionBinding::Declaration { form, .. } = resolved.binding else {
@@ -40,6 +45,47 @@ fn resolves_the_owner_across_files_and_preserves_the_part_location() {
         };
         assert_eq!(form.name.word, expected);
     }
+}
+
+#[test]
+fn reports_conflicting_drivers_at_both_source_revisions() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 4,
+            text: "(using nor) (module main (in a) (out y) (def y a))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9,
+            text: "(module-part main (def y (nor a a)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.resolve_module_part(1, 0).unwrap().module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleDriverError::Signals(FuncDriverError::MultipleDrivers { later, first })) =
+        aliases.check_module_drivers(owner, 16) else {
+        panic!("the two bodies must share the same signal namespace");
+    };
+    assert_eq!(first.source.revision, 4);
+    assert_eq!(later.source.revision, 9);
+    assert_eq!(&first.source.text[first.span], "y");
+    assert_eq!(&later.source.text[later.span], "y");
+}
+
+#[test]
+fn reports_an_unexpanded_macro_in_a_fragment() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 1,
+            text: "(using nor) (module main (in a) (out y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 2,
+            text: "(module-part main (def other a) (expand make y a))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.resolve_module_part(1, 0).unwrap().module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleDriverError::NeedsExpansion(site)) = aliases.check_module_drivers(owner, 16) else {
+        panic!("module-part expansion must be detected before searching for undriven outputs");
+    };
+    assert_eq!(site.source.revision, 2);
+    assert_eq!(&site.source.text[site.span], "(expand make y a)");
 }
 
 #[test]

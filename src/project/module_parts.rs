@@ -1,5 +1,8 @@
 //! モジュール断片の対象と、断片が元から属する位置を対応付ける。
 
+mod body;
+pub use body::{ModuleBody, ModuleDefinition};
+
 use super::{AbsoluteTarget, LocatedName, ProjectSource, UseTargets, declarations::key_of};
 use crate::syntax::circuit::{Head, NamedForm, named_build_entry};
 #[cfg(verus_only)]

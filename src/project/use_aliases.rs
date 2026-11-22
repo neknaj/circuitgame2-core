@@ -22,6 +22,8 @@ mod function_literals;
 mod function_types;
 mod function_wiring;
 mod local_signal_index;
+mod module_drivers;
+pub use module_drivers::{ModuleDriverError, ModuleDrivers};
 mod port_types;
 mod relative;
 mod selection_arguments;
