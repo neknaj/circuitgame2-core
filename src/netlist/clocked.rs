@@ -1,5 +1,10 @@
 //! NOR ゲートの出力を tick ごとに同時更新する。
 
+mod instances;
+pub use instances::ClockedInstanceError;
+#[cfg(verus_only)]
+pub use instances::{clocked_instance_inputs, clocked_instance_outputs_match, clocked_instance_result, clocked_instance_steps_match};
+
 use super::{GateInput, NorNetlist, Wire, read_wire};
 #[cfg(verus_only)]
 use super::{NorGate, output_ports_available, output_values_match, wire_available, wire_value};

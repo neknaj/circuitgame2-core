@@ -3,11 +3,13 @@
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
 mod clocked;
+pub(crate) mod instances;
 mod port_layout;
 #[cfg(verus_only)]
 mod source_trace;
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
+pub use clocked::ClockedInstanceError;
 #[cfg(verus_only)]
 pub(crate) use clocked::clocked_wiring_from_endpoints;
 #[cfg(verus_only)]
@@ -15,6 +17,10 @@ pub use clocked::{
     clocked_gate_updates, clocked_wiring_error, clocked_wiring_valid, nor_trace, nor_trace_from_reset, nor_trace_push_tick,
     nor_traces_agree, reset_matches, tick_matches,
 };
+#[cfg(verus_only)]
+pub use clocked::{clocked_instance_inputs, clocked_instance_outputs_match, clocked_instance_result, clocked_instance_steps_match};
+#[cfg(verus_only)]
+pub use instances::{instance_gates_at, instance_gates_in_extension, instance_outputs_match, instance_wire};
 pub use port_layout::{PortBitLayout, PortBitLayoutError};
 #[cfg(verus_only)]
 pub use source_trace::{

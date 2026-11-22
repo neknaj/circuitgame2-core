@@ -2,6 +2,9 @@
 
 use alloc::vec::Vec;
 use crate::netlist::{NorGate, NorNetlist, PortBitLayout, Wire};
+use crate::netlist::instances::instantiate_wire;
+#[cfg(verus_only)]
+pub(super) use crate::netlist::instances::{instance_gates_match, instance_outputs_match, instance_wire};
 #[cfg(verus_only)]
 use crate::netlist::{
     gate_values_match, gates_available, nor_evaluation, nor_evaluation_ready, output_ports_available,
@@ -11,30 +14,6 @@ use crate::netlist::{
 use vstd::prelude::*;
 
 verus! {
-
-/// 呼び出し先の入力を実引数で置き換え、ゲート番号を追加位置から数え直す。
-pub(super) open spec fn instance_wire(wire: Wire, arguments: Seq<Wire>, base: usize) -> Wire {
-    match wire {
-        Wire::Input(index) => arguments[index as int],
-        Wire::Constant(value) => Wire::Constant(value),
-        Wire::Gate(index) => Wire::Gate((base + index) as usize),
-    }
-}
-
-/// 呼び出し先の1ビット分の配線を、呼び出し元の配線に変換する。
-pub(super) fn instantiate_wire(wire: Wire, arguments: &[Wire], base: usize)
-    -> (mapped: Wire)
-    requires
-        wire matches Wire::Input(index) ==> index < arguments@.len(),
-        wire matches Wire::Gate(index) ==> base + index <= usize::MAX,
-    ensures mapped == instance_wire(wire, arguments@, base),
-{
-    match wire {
-        Wire::Input(index) => arguments[index],
-        Wire::Constant(value) => Wire::Constant(value),
-        Wire::Gate(index) => Wire::Gate(base + index),
-    }
-}
 
 /// 呼び出し先で参照できる配線は、番号を変換しても参照できる。
 pub(super) proof fn instance_wire_available(
@@ -84,19 +63,6 @@ pub(super) proof fn instance_wire_preserves_value(
         Wire::Gate(index) => {
             assert(gates[base + index] == callee_gates[index as int]);
         },
-    }
-}
-
-pub(super) open spec fn instance_gates_match(
-    before: Seq<NorGate>, callee: Seq<NorGate>, arguments: Seq<Wire>, added: Seq<NorGate>,
-) -> bool {
-    &&& added.len() == before.len() + callee.len()
-    &&& added.take(before.len() as int) == before
-    &&& forall|i: int| 0 <= i < callee.len() ==> {
-        let original = callee[i];
-        let next = #[trigger] added[before.len() + i];
-        &&& next.left == instance_wire(original.left, arguments, before.len() as usize)
-        &&& next.right == instance_wire(original.right, arguments, before.len() as usize)
     }
 }
 
@@ -166,13 +132,6 @@ pub(super) fn append_instance_gates(
     }
     assert(callee@.take(i as int) =~= callee@);
     true
-}
-
-pub(super) open spec fn instance_outputs_match(
-    callee: Seq<Wire>, arguments: Seq<Wire>, base: usize, mapped: Seq<Wire>,
-) -> bool {
-    &&& mapped.len() == callee.len()
-    &&& forall|i: int| 0 <= i < mapped.len() ==> (#[trigger] mapped[i]) == instance_wire(callee[i], arguments, base)
 }
 
 /// 呼び出し先を一度追加し、出力をポートの宣言順・ポート内のビット順で返す。
