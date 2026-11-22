@@ -1493,6 +1493,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let wiring = &prepared.typed.literals.wiring->Checked_0;
             &&& scope.file == caller.0 && scope.entry == caller.1 && scope.limit == caller.2
             &&& scope.source == &project.sources_model()[caller.0 as int] && scope.parsed == parsed && scope.wiring == wiring
+            &&& scope.inputs == &value.ports.inputs && scope.outputs == &value.ports.outputs
+            &&& scope.types == &prepared.typed.types && scope.structures == &prepared.projections.entries
+            &&& self.projection_context(&scope)
+            &&& self.projection_port_widths_match(&scope)
+            &&& self.projection_structures_match(&scope)
+            &&& value.ports.outputs@.len() == wiring.drivers.outputs@.len()
+            &&& output_widths_before(value.ports.inputs@, value.ports.outputs@, slots@, wiring.drivers.outputs@,
+                wiring.drivers.outputs@.len() as int)
             &&& self.expansion_selection_matches(plan, table, caller, prepared, selected)
             &&& self.expanded_body_nor_bindings(&scope, plan, table, prepared, rows, roots, slots@)
             &&& slots@.len() == wiring.drivers.definitions@.len()
@@ -1555,6 +1563,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.expanded_call_step_ready(plan, table, caller, prepared, inputs, slots@, outputs, drivers, forms,
                     selected, roots, capacity, limit, &value.circuit, steps, i, index);
             }
+        };
+        assert(outputs.len() == drivers.len()) by {
+            assert(self.projection_port_widths_match(&scope));
+            assert(expected_output_context(scope.source, scope.parsed, scope.entry as int, scope.wiring.drivers));
         };
         (scope, selected, roots, slots, steps, rows)
     }

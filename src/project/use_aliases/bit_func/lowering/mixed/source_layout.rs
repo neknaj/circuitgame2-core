@@ -1,6 +1,6 @@
 //! コンパイラの配線履歴を、定義単位のソース配線の証明に渡す。
 
-pub(super) mod body;
+pub(in crate::project::use_aliases::bit_func::lowering) mod body;
 pub(in crate::project::use_aliases::bit_func) mod call_mode;
 pub(in crate::project::use_aliases::bit_func) mod ranges;
 
@@ -95,15 +95,35 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_s
     }
 }
 
+/// 宣言順に幅を足し、各出力ポートが占めるビット範囲を求める。
+spec fn source_port_ranges(widths: Seq<u64>) -> Seq<Range<usize>> {
+    Seq::new(widths.len(), |port: int|
+        (preceding_port_bits(widths, port as nat) as usize)..
+            (preceding_port_bits(widths, (port + 1) as nat) as usize))
+}
+
+/// 配線変換が割り当てた出力範囲を、宣言幅から求めた範囲と照合する。
+proof fn source_port_ranges_match(widths: Seq<u64>, capacity: usize, layout: PortBitLayout)
+    requires port_bit_layout_result(widths, capacity, Ok(layout)),
+    ensures source_port_ranges(widths) == layout.ranges_model(),
+{
+    port_bit_layout_size(widths, capacity, &layout);
+    let ports = source_port_ranges(widths);
+    assert forall|i: int| 0 <= i < widths.len() implies #[trigger] ports[i] == layout.ranges_model()[i] by {
+        port_bit_layout_port(widths, capacity, layout, i as usize);
+    };
+    assert(ports =~= layout.ranges_model());
+}
+
 /// 型付きの右辺と先行するソース配線から、この定義が追加する配線を求める。
 pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_step_layout(
-    context: &SourceArguments, body: &LoweringBody, target: SourceStepTarget,
+    context: &SourceArguments, slots: Seq<CheckedBitDefinition>, target: SourceStepTarget,
     selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, definition: DefinitionPosition,
     prior: Seq<SourceGateId>, ordinary: Option<SourceChildModel>, children: Seq<Option<SourceChildModel>>,
 ) -> Option<(Seq<SourceGateId>, Seq<SourceNor>, Seq<Seq<SourceWire>>)> {
     match target {
         SourceStepTarget::Local => {
-            let slot = body.definitions@[context.definitions.len() as int];
+            let slot = slots[context.definitions.len() as int];
             let gate = SourceGateId { instance: Seq::empty(), gate: source_child_site(definition, 0) };
             if let Some(wires) = source_local_wires(context.input_widths, context.definitions, slot, gate) {
                 let (order, gates) = match slot.rhs {
@@ -117,7 +137,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_st
         SourceStepTarget::Function(index) => {
             let call = selected[index];
             let template = call.template;
-            let ports = template.circuit_model().output_layout_model().ranges_model();
+            let ports = source_port_ranges(template.output_widths_model());
             if let Some((order, gates, wires)) = source_call_definition_wiring(context, definition,
                 call.group.references.start, prior, call.children@, children, ordinary, call.arguments@, template.input_widths_model())
             {
@@ -136,20 +156,19 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_st
 }
 
 /// 型付きの右辺と呼び出し先のソース回路が、同じ入力幅と参照位置を使うことを表す。
-pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_step_ready(
-    source: &crate::project::ProjectSource, forms: Seq<Form>, body: &LoweringBody, width_limit: u64,
+pub(in crate::project::use_aliases::bit_func) open spec fn source_step_ready(
+    source: &crate::project::ProjectSource, forms: Seq<Form>, input_widths: Seq<u64>,
+    slots: Seq<CheckedBitDefinition>, width_limit: u64,
     target: SourceStepTarget, first: usize, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>,
     ordinary: Option<SourceChildModel>, children: Seq<Option<SourceChildModel>>,
 ) -> bool {
     match target {
-        SourceStepTarget::Local => first < body.definitions@.len()
-            && bit_definition_matches(body.input_widths@, body.definitions@.take(first as int),
-                body.definitions@[first as int]),
+        SourceStepTarget::Local => first < slots.len() && bit_definition_matches(input_widths, slots.take(first as int), slots[first as int]),
         SourceStepTarget::Function(index) => 0 <= index < selected.len() && {
             let call = selected[index];
             let template = call.template.circuit_model();
             &&& source == call.group.expression.source
-            &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, forms, width_limit)
+            &&& resolved_call_fits_body(call, input_widths, slots, forms, width_limit)
             &&& source_models_match_calls(call.children@, children, call.group.references)
             &&& (call.children@.len() > 0 ==> nested_arguments_ready(&call))
             &&& ordinary matches Some(model)
@@ -157,7 +176,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_st
         },
         SourceStepTarget::Nor(index) => 0 <= index < roots.len() && {
             let root = roots[index];
-            &&& nor_binding_fits_body(root, source, forms, body.input_widths@, body.definitions@, width_limit)
+            &&& nor_binding_fits_body(root, source, forms, input_widths, slots, width_limit)
             &&& source_models_match_calls(root.selected.children@, children, *root.references)
         },
     }
@@ -178,13 +197,13 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_s
         bindings_match_calls(bindings, selected),
         0 <= at < steps.len(),
         source_definition_start(context, body, layouts, capacity, source_step_before(steps[at]), source_step_slots(steps[at]).start, definition, prior),
-        source_step_ready(context.source, context.forms, body, width_limit, source_step_target(steps[at]),
+        source_step_ready(context.source, context.forms, body.input_widths@, body.definitions@, width_limit, source_step_target(steps[at]),
             source_step_slots(steps[at]).start, selected, roots, ordinary, children),
     ensures ({
         let step = steps[at];
         let (order, gates, definitions) = result;
         &&& source_step_range_matches(step, selected, roots, body.definitions@.len())
-        &&& source_step_layout(context, body, source_step_target(step), selected, roots, definition, prior, ordinary, children) == Some(result)
+        &&& source_step_layout(context, body.definitions@, source_step_target(step), selected, roots, definition, prior, ordinary, children) == Some(result)
         &&& order.take(prior.len() as int) == prior
         &&& order.len() == source_step_after(step).gates.len() == prior.len() + gates.len()
         &&& order.no_duplicates()
@@ -230,6 +249,11 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_s
             reveal(binding_ready);
             assert(nor_evaluation_ready(call.template.circuit_model().netlist_model(),
                 call.template.circuit_model().input_layout_model().total_bits_model() as nat));
+            let template = call.template;
+            assert(port_bit_layout_result(template.output_widths_model(), template.bit_limit_model(),
+                Ok(*template.circuit_model().output_layout_model())));
+            source_port_ranges_match(template.output_widths_model(), template.bit_limit_model(),
+                *template.circuit_model().output_layout_model());
             let model = ordinary->Some_0;
             if let Some(nested) = step.nested {
                 nested_definition_source_wiring(context, body, layouts, capacity, width_limit, &call, &nested.builtin,

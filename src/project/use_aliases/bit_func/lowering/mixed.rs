@@ -11,6 +11,14 @@ pub(in crate::project::use_aliases::bit_func) use source_layout::{
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_layout::ranges::{rooted_source_step_ranges, source_slot_partition};
 #[cfg(verus_only)]
+pub(super) use source_layout::body::rooted_function_source_layout;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::body::{
+    SourceBodyDefinition, source_body_matches_steps, source_body_wires,
+};
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::source_step_ready;
+#[cfg(verus_only)]
 pub(super) use source_layout::{rooted_source_step, rooted_source_step_range};
 #[cfg(verus_only)]
 pub(super) use source_layout::ranges::rooted_source_step_ranges_match;

@@ -7,17 +7,18 @@ use crate::project::ProjectSource;
 verus! {
 
 /// 厳格な定義の位置と、型検査で決まった左辺と呼び出し先。
-pub(in crate::project::use_aliases::bit_func::lowering) struct SourceBodyDefinition {
-    pub(in crate::project::use_aliases::bit_func::lowering) site: DefinitionPosition,
-    pub(in crate::project::use_aliases::bit_func::lowering) slots: Range<usize>,
-    pub(in crate::project::use_aliases::bit_func::lowering) target: SourceStepTarget,
-    pub(in crate::project::use_aliases::bit_func::lowering) ordinary: Option<SourceChildModel>,
-    pub(in crate::project::use_aliases::bit_func::lowering) children: Seq<Option<SourceChildModel>>,
+pub(in crate::project::use_aliases::bit_func) struct SourceBodyDefinition {
+    pub(in crate::project::use_aliases::bit_func) site: DefinitionPosition,
+    pub(in crate::project::use_aliases::bit_func) slots: Range<usize>,
+    pub(in crate::project::use_aliases::bit_func) target: SourceStepTarget,
+    pub(in crate::project::use_aliases::bit_func) ordinary: Option<SourceChildModel>,
+    pub(in crate::project::use_aliases::bit_func) children: Seq<Option<SourceChildModel>>,
 }
 
 /// コンパイラの配線履歴を参照せず、先行定義から順に各右辺を解釈する。
-pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_body_wires(
-    source: &ProjectSource, forms: Seq<Form>, body: &LoweringBody, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>,
+pub(in crate::project::use_aliases::bit_func) closed spec fn source_body_wires(
+    source: &ProjectSource, forms: Seq<Form>, input_widths: Seq<u64>, checked: Seq<CheckedBitDefinition>,
+    selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>,
     definitions: Seq<SourceBodyDefinition>, count: nat,
 ) -> Option<(Seq<SourceGateId>, Seq<SourceNor>, Seq<Seq<SourceWire>>)>
     decreases count,
@@ -27,13 +28,13 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_bo
     } else if count <= definitions.len() {
         let row = definitions[count - 1];
         if let Some((prior, gates, slots)) =
-            source_body_wires(source, forms, body, selected, roots, definitions, (count - 1) as nat)
+            source_body_wires(source, forms, input_widths, checked, selected, roots, definitions, (count - 1) as nat)
         {
             if row.slots.start != slots.len() { None } else {
                 let context = SourceArguments {
-                    source, forms, input_widths: body.input_widths@, definitions: slots, children: Map::empty(),
+                    source, forms, input_widths, definitions: slots, children: Map::empty(),
                 };
-                if let Some((order, added, next)) = source_step_layout(&context, body, row.target, selected, roots,
+                if let Some((order, added, next)) = source_step_layout(&context, checked, row.target, selected, roots,
                     row.site, prior, row.ordinary, row.children)
                 {
                     if next.len() == row.slots.end { Some((order, gates + added, next)) } else { None }
@@ -49,8 +50,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn gate_defi
 }
 
 /// 型付きの定義列と、変換の各段が同じ左辺を同じ順で処理することを表す。
-pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_body_matches_steps(
-    source: &ProjectSource, forms: Seq<Form>, body: &LoweringBody, width_limit: u64,
+pub(in crate::project::use_aliases::bit_func) open spec fn source_body_matches_steps(
+    source: &ProjectSource, forms: Seq<Form>, input_widths: Seq<u64>, checked: Seq<CheckedBitDefinition>, width_limit: u64,
     selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, definitions: Seq<SourceBodyDefinition>,
     steps: Seq<WiringStep>,
 ) -> bool {
@@ -59,7 +60,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_bo
         let row = #[trigger] definitions[i];
         &&& row.slots == source_step_slots(steps[i])
         &&& row.target == source_step_target(steps[i])
-        &&& source_step_ready(source, forms, body, width_limit, row.target, row.slots.start,
+        &&& source_step_ready(source, forms, input_widths, checked, width_limit, row.target, row.slots.start,
             selected, roots, row.ordinary, row.children)
     }
     &&& forall|i: int, j: int| 0 <= i < j < definitions.len() ==>
@@ -80,10 +81,10 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_b
         resolved_mixed_trace(bindings, roots, arguments, steps),
         bindings_match_calls(bindings, selected),
         count <= definitions.len(),
-        source_body_matches_steps(source, forms, body, width_limit, selected, roots, definitions, steps),
+        source_body_matches_steps(source, forms, body.input_widths@, body.definitions@, width_limit, selected, roots, definitions, steps),
     ensures ({
         let (order, gates, slots) = result;
-        &&& source_body_wires(source, forms, body, selected, roots, definitions, count) == Some(result)
+        &&& source_body_wires(source, forms, body.input_widths@, body.definitions@, selected, roots, definitions, count) == Some(result)
         &&& order.len() == gates.len()
         &&& order.no_duplicates()
         &&& if count == 0 {
@@ -176,7 +177,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_b
             reveal(source_gate_in_definition);
         }
     };
-    assert(source_body_wires(source, forms, body, selected, roots, definitions, count) == Some((order, all, next))) by {
+    assert(source_body_wires(source, forms, body.input_widths@, body.definitions@, selected, roots, definitions, count) == Some((order, all, next))) by {
         reveal_with_fuel(source_body_wires, 2);
     };
     (order, all, next)
@@ -198,10 +199,10 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_function
             bit_driver_width(body.input_widths@, body.definitions@, #[trigger] drivers[port]) == Some(widths[port]),
         mixed_function_result(body, layouts, forms, bindings, roots, widths, drivers, arguments, limit, Ok((*function, steps))),
         bindings_match_calls(bindings, selected),
-        source_body_matches_steps(source, forms, body, width_limit, selected, roots, definitions, steps@),
+        source_body_matches_steps(source, forms, body.input_widths@, body.definitions@, width_limit, selected, roots, definitions, steps@),
     ensures
         source_clocked_layout(&model.circuit, function.netlist_model(), model.order, model.index),
-        source_body_wires(source, forms, body, selected, roots, definitions, definitions.len()) matches Some((order, gates, slots))
+        source_body_wires(source, forms, body.input_widths@, body.definitions@, selected, roots, definitions, definitions.len()) matches Some((order, gates, slots))
             && model.order == order
             && model.circuit == function_source_circuit(layouts.inputs.total_bits_model(), order, gates,
                 source_output_wires(body.input_widths@, slots, widths, drivers)),

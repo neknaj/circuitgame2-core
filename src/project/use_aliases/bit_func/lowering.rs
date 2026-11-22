@@ -43,6 +43,10 @@ pub(super) use mixed::{
     SourceStepTarget, WiringStep, rooted_source_step_ranges, source_slot_partition, source_step_range_matches, source_step_slots, source_step_target,
 };
 #[cfg(verus_only)]
+pub(super) use mixed::{SourceBodyDefinition, source_body_matches_steps, source_step_ready};
+#[cfg(verus_only)]
+use mixed::{rooted_function_source_layout, source_body_wires};
+#[cfg(verus_only)]
 use mixed::{rooted_source_call_mode, rooted_source_step_range, rooted_source_step_ranges_match, rooted_mixed_function_success};
 #[cfg(verus_only)]
 pub(super) use mixed::nested_arguments_ready;
@@ -329,6 +333,53 @@ pub(super) proof fn projected_definition_partition(
         origins: value.gate_definitions@ };
     rooted_source_step_ranges_match(&body, &layouts, forms, bindings, roots, limit, steps, definitions.len() as usize,
         bindings.len() as usize, roots.len() as usize, final_wiring, expected);
+}
+
+/// 型付き定義の配線と公開ポートの駆動元から、関数のソース回路を求める。
+pub(super) closed spec fn function_body_source_circuit(
+    source: &crate::project::ProjectSource,
+    inputs: Seq<u64>, slots: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, definitions: Seq<SourceBodyDefinition>,
+) -> Option<(crate::netlist::SourceTickCircuit, Seq<crate::netlist::SourceGateId>)> {
+    match source_body_wires(source, forms, inputs, slots, selected, roots, definitions, definitions.len()) {
+        Some((order, gates, wires)) => Some((source_calls::final_layout::function_source_circuit(
+            preceding_port_bits(inputs, inputs.len()) as usize, order, gates,
+            source_wires::source_output_wires(inputs, wires, outputs, drivers),
+        ), order)),
+        None => None,
+    }
+}
+
+/// 厳格定義の配線を、関数の変換が使った履歴と照合し、公開出力を含むソース回路を得る。
+#[verifier::spinoff_prover]
+pub(super) proof fn projected_function_source_layout(
+    source: &crate::project::ProjectSource,
+    inputs: Seq<u64>, slots: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>,
+    capacity: usize, width_limit: u64, limit: usize, value: &LoweredBitFunc, steps: Seq<WiringStep>,
+    definitions: Seq<SourceBodyDefinition>,
+) -> (model: SourceChildModel)
+    requires
+        projected_definition_history(inputs, slots, outputs, drivers, forms, selected, roots, arguments, capacity, limit, value, steps),
+        outputs.len() == drivers.len(),
+        forall|port: int| 0 <= port < outputs.len() ==>
+            bit_driver_width(inputs, slots, #[trigger] drivers[port]) == Some(outputs[port]),
+        source_body_matches_steps(source, forms, inputs, slots, width_limit, selected, roots, definitions, steps),
+    ensures
+        crate::netlist::source_clocked_layout(&model.circuit, value.netlist_model(), model.order, model.index),
+        function_body_source_circuit(source, inputs, slots, outputs, drivers, forms, selected, roots, definitions)
+            == Some((model.circuit, model.order)),
+{
+    reveal(projected_definition_history);
+    let (body, layouts, bindings) = choose|body: LoweringBody, layouts: Layouts, bindings: Seq<CallBinding>|
+        #[trigger] rooted_mixed_function_success(&body, &layouts, forms, bindings, roots, outputs, drivers, limit, value, steps)
+        && body.input_widths@ == inputs && body.definitions@ == slots
+        && body_layouts_result(inputs, slots, outputs, capacity, Ok(layouts))
+        && bindings_match_calls(bindings, selected)
+        && mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, limit, Ok((*value, Ghost(steps))));
+    port_bit_layout_size(inputs, capacity, &layouts.inputs);
+    rooted_function_source_layout(source, forms, &body, &layouts, capacity, width_limit, bindings, selected,
+        roots, limit, outputs, drivers, arguments, value, definitions, Ghost(steps))
 }
 
 /// 成功履歴から、根を直接配線できるか、根とすべての子の引数が確定していたことを得る。
