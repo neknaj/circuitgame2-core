@@ -61,6 +61,12 @@ spec fn mismatch_at(expressions: &ModuleSelections, index: usize, expected: Sign
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 出力検査の結果から、実引数の照合に使う式の検査結果を取り出す。
+    pub(super) proof fn module_output_types_evidence(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleOutputTypes)
+        requires self.module_output_types_result(owner, limit, Ok(Some(checked))),
+        ensures self.module_selections_result(owner, limit, Ok(Some(checked.expressions))),
+    {
+    }
     /// 出力の照合結果と、宣言順で最初に見つかる不一致を定める。
     pub closed spec fn module_output_types_result(&self, owner: ModuleBodyPosition, limit: u64,
         result: Result<Option<ModuleOutputTypes>, ModuleOutputTypesError>) -> bool {

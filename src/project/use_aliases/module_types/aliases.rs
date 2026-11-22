@@ -32,28 +32,38 @@ pub struct ModuleTypeSources<'p, 'a> {
     pub aliases: Vec<Option<ModuleAliasSource<'p, 'a>>>,
 }
 
-pub(super) fn find_member(members: &[ModuleBodyPosition], at: ModuleBodyPosition) -> (index: usize)
-    requires members@.contains(at),
-    ensures index < members@.len() && members@[index as int] == at,
+pub(super) fn lookup_member(members: &[ModuleBodyPosition], at: ModuleBodyPosition) -> (result: Option<usize>)
+    ensures
+        result.is_some() <==> members@.contains(at),
+        result matches Some(index) ==> index < members@.len() && members@[index as int] == at,
 {
     let mut i = 0;
     while i < members.len()
         invariant
-            members@.contains(at), i <= members@.len(),
+            i <= members@.len(),
             forall|j: int| 0 <= j < i ==> #[trigger] members@[j] != at,
         decreases members@.len() - i,
     {
         let current = members[i];
         if current.file == at.file && current.entry == at.entry {
-            return i;
+            return Some(i);
         }
         i += 1;
     }
-    proof {
-        let index = choose|j: int| 0 <= j < members@.len() && members@[j] == at;
-        assert(false);
+    None
+}
+
+pub(super) fn find_member(members: &[ModuleBodyPosition], at: ModuleBodyPosition) -> (index: usize)
+    requires members@.contains(at),
+    ensures index < members@.len() && members@[index as int] == at,
+{
+    match lookup_member(members, at) {
+        Some(index) => index,
+        None => {
+            proof { assert(false); }
+            unreachable!()
+        },
     }
-    unreachable!()
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {

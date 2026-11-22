@@ -176,6 +176,24 @@ pub proof fn call_argument_position_bounds(forms: Seq<Form>, call: CallShape, po
     ensures call.form + 2 <= positions[port] < forms[call.form as int]->List_end <= forms.len(),
 {}
 
+/// 引数列の添字が、入れ子の内部ではなく呼び出し直下の式を指すことを示す。
+pub proof fn call_argument_position_is_direct(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, port: int)
+    requires call_argument_positions(forms, call, positions), nested_list_indices(forms), 0 <= port < positions.len(),
+    ensures direct_call_argument(forms, call, positions[port] as int),
+    decreases port,
+{
+    let end = forms[call.form as int]->List_end;
+    if port == 0 {
+        first_call_argument_evidence(forms, call, positions[0]..end);
+    } else {
+        call_argument_position_is_direct(forms, call, positions, port - 1);
+        let previous = positions[port - 1] as int;
+        let next = positions[port] as int;
+        assert(next == after_form(forms, previous));
+        following_call_argument(forms, call, previous, next);
+    }
+}
+
 /// 呼び出し内のフォームを含む直接引数を見つける。フォーム自体が引数の先頭でもよい。
 proof fn call_argument_containing_form(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, form: int)
     -> (port: int)

@@ -242,6 +242,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn module_selections_evidence(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections)
         requires self.module_selections_result(owner, limit, Ok(Some(checked))),
         ensures
+            self.module_wiring_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring))),
             self.module_drivers_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring.drivers))),
             checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
             type_sites_valid(checked.types@),

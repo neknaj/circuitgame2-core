@@ -1,7 +1,7 @@
 use circuitgame2_core::project::{
     CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
     ConcatResultWidthError, ModuleCallSignatureError, ModuleCallTarget, ModuleConcatsError,
-    ModuleDriverError, ModuleOutputTypesError, ModulePartError, ModuleRootTypesError,
+    ModuleDriverError, ModuleInferredCallError, ModuleOutputTypesError, ModulePartError, ModuleRootTypesError,
     ModuleSelectionsError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
     SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
@@ -271,6 +271,37 @@ fn module_output_type_check_reports_distinct_layout_names_after_a_pending_port()
     };
     assert_eq!(&expected.origin.source.text[expected.origin.span], "Right");
     assert_eq!(&actual.origin.source.text[actual.origin.span], "Left");
+}
+
+#[test]
+fn module_call_checks_the_type_of_a_bound_forward_signal() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 2,
+            text: "(using nor) (module root (in a) (out y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 6,
+            text: "(module-part root (def y (nor bus 0)) (def correct (nor a 0)))" },
+        SourceSnapshot { path: "signals.ncg2", revision: 9,
+            text: "(module-part root (def bus (concat a a)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let bindings = targets.collect_module_parts().unwrap();
+    let owner = bindings[0].module_position;
+    let part = bindings[0].part_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let at = |definition| DefinitionPosition { file: part.file, entry: part.entry, definition, reference: 0 };
+    let Err(ModuleInferredCallError::Call(ModuleCallInputsError::Argument {
+        index: 0, argument, expected: ResolvedPortType::Bits(1), required_at: None, reason: CallInputReason::SignalType(actual),
+    })) = aliases.check_module_call_with_inferred_types(owner, at(0), 16) else {
+        panic!("the forward reference to bus supplies two bits");
+    };
+    assert!(matches!(actual.ty, ResolvedPortType::Bits(2)));
+    assert_eq!((argument.source.revision, actual.origin.source.revision), (6, 9));
+    assert_eq!(&argument.source.text[argument.span], "bus");
+    assert_eq!(&actual.origin.source.text[actual.origin.span], "(concat a a)");
+    let call = aliases.check_module_call_with_inferred_types(owner, at(1), 16).unwrap().unwrap();
+    let [Some(signal), Some(literal)] = call.types.as_slice() else { panic!("both input types should agree"); };
+    assert_eq!((signal.origin.source.revision, literal.origin.source.revision), (2, 6));
 }
 
 #[test]

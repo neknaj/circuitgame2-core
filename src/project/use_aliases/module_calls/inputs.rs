@@ -183,6 +183,46 @@ fn check_inputs<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(in crate::project::use_aliases) closed spec fn module_inputs_from_plan_match(
+        &self, at: DefinitionPosition, max_width: u64, ports: &ModuleCallPorts, known: Seq<Option<SignalType>>,
+        result: Result<Option<ModuleCallInputs>, ModuleCallInputsError>,
+    ) -> bool {
+        let forms = self.targets.project_model().circuits_model()[at.file as int].syntax.forms@;
+        match result {
+            Ok(Some(checked)) => checked.ports == *ports
+                && checked_input_types(forms, ports, max_width, known, Ok(checked.types)),
+            Err(error) => checked_input_types(forms, ports, max_width, known, Err(error)),
+            Ok(None) => false,
+        }
+    }
+
+    /// 入出力数を検査済みの署名に、直接の引数の型を照合する。
+    pub(in crate::project::use_aliases) fn check_module_inputs_from_plan(
+        &self, at: DefinitionPosition, max_width: u64, ports: ModuleCallPorts<'p, 'a>, known: &[Option<SignalType<'p, 'a>>],
+    ) -> (result: Result<ModuleCallInputs<'p, 'a>, ModuleCallInputsError<'p, 'a>>)
+        requires self.can_resolve(), self.module_call_ports_result(at, max_width, Ok(Some(ports))),
+        ensures
+            self.module_inputs_from_plan_match(at, max_width, &ports, known@, match result {
+                Ok(checked) => Ok(Some(checked)), Err(error) => Err(error),
+            }),
+            self.module_call_inputs_result(at, max_width, known@, match result {
+                Ok(checked) => Ok(Some(checked)), Err(error) => Err(error),
+            }),
+            !(result matches Err(ModuleCallInputsError::Ports(_))),
+            known@.len() == ports.arguments@.len() ==> !(result matches Err(ModuleCallInputsError::TypeCount { .. })),
+    {
+        proof {
+            self.module_call_ports_evidence(at, max_width, ports);
+            self.module_call_site_evidence(at, max_width, ports.signature);
+        }
+        let project = self.targets.project();
+        let parsed = &project.circuits()[at.file];
+        proof { parsed_index_evidence(*ports.signature.source, *parsed); }
+        let forms = parsed.syntax.forms.as_slice();
+        let types = check_inputs(forms, &ports, max_width, known)?;
+        Ok(ModuleCallInputs { ports, types })
+    }
+
     /// 照合結果を元の呼び出し、供給された型、引数順の診断に対応付ける。
     pub closed spec fn module_call_inputs_result(
         &self, at: DefinitionPosition, max_width: u64, known: Seq<Option<SignalType>>,
@@ -218,16 +258,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(None) => return Ok(None),
             Err(error) => return Err(ModuleCallInputsError::Ports(error)),
         };
-        proof {
-            self.module_call_ports_evidence(at, max_width, ports);
-            self.module_call_site_evidence(at, max_width, ports.signature);
-        }
-        let project = self.targets.project();
-        let parsed = &project.circuits()[at.file];
-        proof { parsed_index_evidence(*ports.signature.source, *parsed); }
-        let forms = parsed.syntax.forms.as_slice();
-        let types = check_inputs(forms, &ports, max_width, known)?;
-        Ok(Some(ModuleCallInputs { ports, types }))
+        let checked = self.check_module_inputs_from_plan(at, max_width, ports, known)?;
+        Ok(Some(checked))
     }
 }
 
