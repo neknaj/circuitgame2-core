@@ -4,7 +4,10 @@ use super::{RelativeResolutionError, RelativeTarget, UnqualifiedTarget, UseAlias
 #[cfg(verus_only)]
 use crate::project::absolute_resolution_evidence;
 #[cfg(verus_only)]
-use crate::project::declarations::{declaration_key_evidence, declaration_sites_agree, form_key, same_declaration_key};
+use crate::project::declarations::{declaration_key_evidence, declaration_location_evidence, declaration_sites_agree, form_key, same_declaration_key};
+use crate::project::declarations::key_of;
+#[cfg(verus_only)]
+use crate::project::circuits::parsed_circuit_matches;
 #[cfg(verus_only)]
 use crate::project::resolution::absolute_declaration_evidence;
 #[cfg(verus_only)]
@@ -21,7 +24,7 @@ use crate::project::circuits::read_indexed_atom;
 use crate::project::{AbsoluteResolutionError, AbsoluteTarget, LocatedName, ProjectSource};
 #[cfg(verus_only)]
 use crate::syntax::{absolute_path_parts, absolute_path_parts_agree, bare_atom_kind};
-use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite, NamedForm};
+use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite, NamedForm, named_build_entry};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence,
@@ -854,6 +857,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 解決済みの参照から、宣言表にある参照先と、その用途に合う宣言種別を得る。
+    pub(super) proof fn resolved_definition_declaration(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        result: ResolvedDefinitionReference, source: &ProjectSource, form: &NamedForm,
+    )
+        requires
+            self.definition_resolution_evidence(file, entry, definition, reference, Ok(result)),
+            result.binding == (DefinitionBinding::Declaration { source, form }),
+        ensures
+            self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+            result.site.role is Callee ==> accepts_declaration(ReferenceUse::Callee(result.site.owner), form.head),
+            ({
+                let parsed = self.targets.project_model().circuits_model()[file as int];
+                let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                &&& result.site.owner == parsed.syntax.entries@[entry as int].head
+                &&& result.site.role == parsed.references@[parsed.definitions@[def].references.start + reference].kind
+            }),
+    {
+        let parsed = self.targets.project_model().circuits_model()[file as int];
+        let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        let indexed = parsed.references@[parsed.definitions@[def].references.start + reference];
+        let kind = parsed.syntax.forms@[indexed.form as int]->Atom_kind;
+        let request = result.site.request_model();
+        let from = choose|from: Option<&str>| #[trigger] self.scope_matches(file, result.site.block, Ok(from))
+            && self.binding_evidence(file, request, from, kind, Ok(result.binding));
+        self.binding_declaration_origin(file, request, from, kind, source, form);
+    }
+
+    /// 宣言表で確定した参照先を、元ファイルの厳格索引の添字に変換する。
+    pub(super) fn indexed_declaration_position(
+        &self, source: &ProjectSource<'a>, form: &NamedForm<'a>,
+    ) -> (position: (usize, usize))
+        requires
+            self.can_resolve(),
+            self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
+        ensures ({
+            let project = self.targets.project_model();
+            let circuits = project.circuits_model();
+            let (file, entry) = position;
+            &&& file < circuits.len() && file < project.sources_model().len()
+            &&& *source == project.sources_model()[file as int]
+            &&& entry < circuits[file as int].syntax.entries@.len()
+            &&& circuits[file as int].syntax.entries@[entry as int].head == form.head
+            &&& circuits[file as int].syntax.entries@[entry as int].form == form.form
+            &&& crate::project::location_in_source(LocatedName { source, span: form.name.span })
+        }),
+    {
+        let project = self.targets.project();
+        proof { self.targets.declarations_cover_project(); }
+        let table = self.targets.exports().declarations();
+        let key = key_of(form);
+        let (file, name) = table.selected_declaration_position(key, Ghost(*project), Ghost(*source), Ghost(*form));
+        proof { declaration_location_evidence(table, key, source, form); }
+        let circuit = &project.circuits()[file];
+        proof {
+            assert(parsed_circuit_matches(*source, *circuit));
+            parsed_index_evidence(*source, *circuit);
+        }
+        (file, named_build_entry(source.text, circuit, name))
+    }
+
     pub(super) proof fn resolved_func_declaration(
         &self, file: usize, entry: usize, definition: usize, reference: usize,
         result: ResolvedDefinitionReference, source: &ProjectSource, form: &NamedForm,
@@ -871,14 +935,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             form.head is Func,
             self.targets.exports_model().declarations_model().declaration_at(form_key(*form), source, form),
     {
-        let project = self.targets.project_model();
-        let parsed = project.circuits_model()[file as int];
-        let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
-        let indexed = parsed.references@[parsed.definitions@[def].references.start + reference];
-        let kind = parsed.syntax.forms@[indexed.form as int]->Atom_kind;
-        let from = choose|from: Option<&str>| #[trigger] self.scope_matches(file, result.site.block, Ok(from))
-            && self.binding_evidence(file, result.site.request_model(), from, kind, Ok(result.binding));
-        self.binding_declaration_origin(file, result.site.request_model(), from, kind, source, form);
+        self.resolved_definition_declaration(file, entry, definition, reference, result, source, form);
     }
 
     /// `as` の型参照が解決したとき、参照先は共有宣言表にある構造体である。

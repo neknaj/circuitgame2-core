@@ -1,5 +1,6 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, FuncDriverError, ModuleDriverError, ModulePartError, ModuleWiringError, OutputDriver, SourceSnapshot,
+    DefinitionPosition, FuncDriverError, ModuleCallSignatureError, ModuleCallTarget,
+    ModuleDriverError, ModulePartError, ModuleWiringError, OutputDriver, ResolvedPortType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
@@ -45,12 +46,46 @@ fn resolves_the_owner_across_files_and_preserves_the_part_location() {
     assert_eq!(&forward.site.source.text[forward.site.span.clone()], "mid");
     assert_eq!(wiring.signals[1][0].driver, OutputDriver::Input(0));
     for (position, expected) in [(binding.module_position, "invert"), (binding.part_position, "pass")] {
-        let resolved = aliases.resolve_definition_reference(position.file, position.entry, 0, 0).unwrap();
-        let DefinitionBinding::Declaration { form, .. } = resolved.binding else {
+        let call = aliases.resolve_module_call_signature(DefinitionPosition {
+            file: position.file, entry: position.entry, definition: 0, reference: 0,
+        }, 16).unwrap().unwrap();
+        assert_eq!(call.source.revision, project.sources()[position.file].revision);
+        let ModuleCallTarget::Routine { declaration, signature, .. } = call.target else {
             panic!("the call must resolve in its own file and namespace block");
         };
-        assert_eq!(form.name.word, expected);
+        assert_eq!(&declaration.source.text[declaration.span], expected);
+        assert_eq!(signature.inputs.len(), 1);
     }
+}
+
+#[test]
+fn reported_signature_violation_keeps_both_call_and_declaration_locations() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 3,
+            text: "(using nor) (module root (in a) (out y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 7,
+            text: "(module-part root (def y (child a)))" },
+        SourceSnapshot { path: "target.ncg2", revision: 11,
+            text: "(module child (in (a (bits 2))) (out (a (bits 2))))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let part = targets.collect_module_parts().unwrap()[0].part_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let at = DefinitionPosition { file: part.file, entry: part.entry, definition: 0, reference: 0 };
+    let call = aliases.resolve_module_call_signature(at, 16).unwrap().unwrap();
+    let ModuleCallTarget::Routine { position, signature, .. } = call.target else {
+        panic!("the part must resolve a module as its callee");
+    };
+    assert_eq!(project.circuits()[position.file].syntax.entries[position.entry].head, Head::Module);
+    assert!(matches!(signature.inputs[0].ty, ResolvedPortType::Bits(2)));
+    let Err(ModuleCallSignatureError::Signature { reference, declaration, .. }) =
+        aliases.resolve_module_call_signature(at, 1) else {
+        panic!("an invalid target signature must report the call and declaration sites");
+    };
+    assert_eq!((reference.source.revision, declaration.source.revision), (7, 11));
+    assert_eq!(&reference.source.text[reference.span], "child");
+    assert_eq!(&declaration.source.text[declaration.span], "child");
 }
 
 #[test]
