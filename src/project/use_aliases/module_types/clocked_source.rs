@@ -4,7 +4,9 @@ mod hierarchy;
 
 use super::{ModuleCalls, ModuleCallsError, PrimitiveModuleError, UseAliases, copy_location};
 use super::clocked_plan::{ClockedPlanError, ClockedWireDriver, clocked_reserve, clocked_resolve};
-use super::primitive_nor::unsupported_port;
+use super::primitive_nor::{read_literal_bit, unsupported_port};
+#[cfg(verus_only)]
+use super::primitive_nor::{PrimitiveOperand, literal_bit, literal_value_fits};
 use crate::project::use_aliases::function_drivers::name_location;
 use crate::netlist::{ClockedInstanceError, ClockedNor, ClockedNorError, NorGate, NorNetlist, Wire};
 use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, OutputDriver,
@@ -19,6 +21,8 @@ use crate::netlist::{instance_gates_at, instance_gates_in_extension};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence,
     call_argument_position_bounds, call_argument_position_is_direct};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -114,6 +118,52 @@ fn builtin_instance() -> (result: Result<ClockedNor, ClockedNorError>) {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    spec fn source_argument_matches(&self, checked: &ModuleCalls, index: int, arg: int, driver: ClockedWireDriver) -> bool {
+        exists|operand: PrimitiveOperand| #[trigger] self.primitive_operand_resolves(checked, index, arg, operand)
+            && driver == match operand {
+                PrimitiveOperand::Driver(output) => symbolic_output(output),
+                PrimitiveOperand::Literal(bit) => ClockedWireDriver::Terminal(Wire::Constant(bit)),
+            }
+    }
+
+    spec fn source_arguments_match(&self, checked: &ModuleCalls, index: int, arguments: Seq<ClockedWireDriver>) -> bool {
+        &&& arguments.len() == checked.calls@[index].inputs.ports.arguments@.len()
+        &&& forall|arg: int| 0 <= arg < arguments.len() ==>
+            self.source_argument_matches(checked, index, arg, #[trigger] arguments[arg])
+    }
+
+    spec fn instance_matches_source_call(&self, checked: &ModuleCalls, index: int, instance: SourceInstance,
+        edge: Option<usize>, templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor) -> bool
+    {
+        &&& self.source_arguments_match(checked, index, instance.arguments@)
+        &&& match checked.calls@[index].inputs.ports.signature.target {
+            ModuleCallTarget::Nor => *instance.template == *builtin,
+            ModuleCallTarget::Routine { .. } => edge matches Some(child) && child < templates.len()
+                && templates[child as int] == Some(*instance.template),
+            ModuleCallTarget::StateElement { .. } => false,
+        }
+    }
+
+    spec fn instances_match_source_calls(&self, checked: &ModuleCalls, instances: Seq<SourceInstance>,
+        edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor) -> bool
+    {
+        &&& instances.len() <= checked.calls@.len() == edges.len()
+        &&& forall|i: int| 0 <= i < instances.len() ==> #[trigger]
+            self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, builtin)
+    }
+
+    spec fn clocked_checked_assembly_matches(&self, checked: &ModuleCalls, edges: Seq<Option<usize>>,
+        templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor, netlist: NorNetlist) -> bool
+    {
+        let drivers = checked.module.expressions.typed.sources.roots.wiring.drivers;
+        exists|instances: Seq<SourceInstance>, counts: Seq<usize>|
+            #![trigger self.instances_match_source_calls(checked, instances, edges, templates, builtin),
+                source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)]
+            instances.len() == checked.calls@.len()
+            && self.instances_match_source_calls(checked, instances, edges, templates, builtin)
+            && source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)
+    }
+
     fn source_driver_location(&self, _owner: ModuleBodyPosition, _limit: u64, drivers: &crate::project::ModuleDrivers<'p, 'a>, index: usize)
         -> (site: LocatedName<'p, 'a>)
         requires self.can_resolve(), self.module_drivers_result(_owner, _limit, Ok(Some(*drivers))),
@@ -134,6 +184,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> (driver: Result<ClockedWireDriver, LocatedName<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(_owner, limit, Ok(Some(*checked))),
             index < checked.calls@.len(), arg < checked.calls@[index as int].inputs.ports.arguments@.len(),
+        ensures driver matches Ok(wire) ==> self.source_argument_matches(checked, index as int, arg as int, wire),
     {
         let call = &checked.calls[index];
         let ports = &call.inputs.ports;
@@ -170,15 +221,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let position = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), reference,
                 &ports.signature.call, parsed.signals.as_slice(), root);
             proof { self.module_signal_index_item(_owner, limit, *wiring, call.member as int, position as int); }
-            return Ok(symbolic_driver(wiring.signals[call.member][position - frame.signals.start].driver));
+            let driver = wiring.signals[call.member][position - frame.signals.start].driver;
+            assert(self.primitive_name_resolves(checked, index as int, root, position as int, PrimitiveOperand::Driver(driver)));
+            assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Driver(driver)));
+            return Ok(symbolic_driver(driver));
         }
-        if matches!(forms[root], Form::Atom { kind: AtomKind::Natural | AtomKind::Binary | AtomKind::Hexadecimal, .. }) {
+        if matches!(forms[root], Form::Atom { kind: AtomKind::Natural, .. }) {
+            if let Some(bit) = read_literal_bit(source.text, forms, root) {
+                assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Literal(bit)));
+                return Ok(ClockedWireDriver::Terminal(Wire::Constant(bit)));
+            }
+        } else if matches!(forms[root], Form::Atom { kind: AtomKind::Binary | AtomKind::Hexadecimal, .. }) {
             let (word, _) = read_indexed_atom(source.text, forms, root);
-            if word == "0" { return Ok(ClockedWireDriver::Terminal(Wire::Constant(false))); }
-            if word == "1" { return Ok(ClockedWireDriver::Terminal(Wire::Constant(true))); }
             if let Some(literal) = read_bit_literal(word) {
-                if crate::project::check_circuit_literal_width(word, Some(1), limit).is_ok() {
-                    return Ok(ClockedWireDriver::Terminal(Wire::Constant(literal.bit(0))));
+                if let Ok(_) = crate::project::check_circuit_literal_width(word, Some(1), limit) {
+                    proof { crate::syntax::bit_literal_kind_has_digits(word.spec_bytes()); }
+                    let bit = literal.bit(0);
+                    assert(literal_bit(source.text, forms@[root as int], bit) && literal_value_fits(source.text, forms@[root as int]));
+                    assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Literal(bit)));
+                    return Ok(ClockedWireDriver::Terminal(Wire::Constant(bit)));
                 }
             }
         }
@@ -191,7 +252,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
             edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
         ensures
-            result matches Ok((instances, counts)) ==> instance_counts_match(instances@, counts@),
+            result matches Ok((instances, counts)) ==> instance_counts_match(instances@, counts@)
+                && instances@.len() == checked.calls@.len()
+                && self.instances_match_source_calls(checked, instances@, edges@, templates@, builtin),
             !(result matches Err(ClockedModuleError::Parent(_))),
     {
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
@@ -214,6 +277,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
                 index <= checked.calls@.len(), index == counts@.len() == instances@.len(),
                 instance_counts_match(instances@, counts@),
+                self.instances_match_source_calls(checked, instances@, edges@, templates@, builtin),
                 driver <= drivers.definitions@.len(),
             decreases checked.calls@.len() - index,
         {
@@ -277,19 +341,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 driver += 1;
                 output += 1;
             }
-            let mut arguments = Vec::new();
+            let mut arguments: Vec<ClockedWireDriver> = Vec::new();
             let mut arg = 0;
             while arg < call.inputs.ports.arguments.len()
                 invariant self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
                     index < checked.calls@.len(), *call == checked.calls@[index as int],
                     arg == arguments@.len() <= call.inputs.ports.arguments@.len(),
+                    forall|k: int| 0 <= k < arg ==>
+                        self.source_argument_matches(checked, index as int, k, #[trigger] arguments@[k]),
                 decreases call.inputs.ports.arguments@.len() - arg,
             {
                 let value = match self.clocked_source_argument(owner, limit, checked, index, arg) {
                     Ok(value) => value,
                     Err(location) => return Err(ClockedModuleError::Unsupported(location)),
                 };
+                let ghost before = arguments@;
                 arguments.push(value);
+                assert forall|k: int| 0 <= k < arguments@.len() implies
+                    self.source_argument_matches(checked, index as int, k, #[trigger] arguments@[k]) by {
+                    if k < arg { assert(arguments@[k] == before[k]); }
+                };
                 arg += 1;
             }
             let ghost before_instances = instances@;
@@ -303,6 +374,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& instances@[j].output_sites@.len() == model.outputs@.len()
             } by {
                 if j < index { assert(instances@[j] == before_instances[j] && counts@[j] == before_counts[j]); }
+            };
+            assert(self.instance_matches_source_call(checked, index as int, instances@[index as int],
+                edges@[index as int], templates@, builtin));
+            assert forall|j: int| 0 <= j < instances@.len() implies #[trigger]
+                self.instance_matches_source_call(checked, j, instances@[j], edges@[j], templates@, builtin) by {
+                if j < index {
+                    assert(instances@[j] == before_instances[j]);
+                    assert(self.instance_matches_source_call(checked, j, before_instances[j], edges@[j], templates@, builtin));
+                }
             };
             index += 1;
         }
@@ -321,7 +401,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             !(result matches Err(ClockedModuleError::Parent(_))),
             result matches Ok(circuit) ==> circuit.netlist_model().gates@.len() <= gate_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
-                && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model()),
+                && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
+                && self.clocked_checked_assembly_matches(checked, edges@, templates@, builtin, circuit.netlist_model()),
     {
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
         proof {
@@ -335,7 +416,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if let Some(i) = unsupported_port(inputs) { return Err(ClockedModuleError::Unsupported(copy_location(&inputs[i].annotation))); }
         if let Some(i) = unsupported_port(outputs) { return Err(ClockedModuleError::Unsupported(copy_location(&outputs[i].annotation))); }
         let (instances, counts) = self.prepare_module_instances(owner, width_limit, checked, edges, templates, builtin)?;
-        assemble_source_instances(&instances, &counts, inputs.len(), &drivers.outputs, gate_limit)
+        let circuit = assemble_source_instances(&instances, &counts, inputs.len(), &drivers.outputs, gate_limit)?;
+        assert(instances@.len() == checked.calls@.len());
+        assert(self.clocked_checked_assembly_matches(checked, edges@, templates@, builtin, circuit.netlist_model())) by {
+            let input_count = checked.module.expressions.typed.sources.roots.wiring.drivers.signature.inputs@.len() as usize;
+            assert(input_count == inputs.len());
+            assert(self.instances_match_source_calls(checked, instances@, edges@, templates@, builtin));
+            assert(source_assembly_matches(instances@, counts@, input_count, drivers.outputs@, circuit.netlist_model()));
+        };
+        Ok(circuit)
     }
 
     /// 変換後の入出力ビット数が、検査済みの親モジュールのポート宣言と対応する。

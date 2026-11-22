@@ -43,10 +43,10 @@ fn cross_coupled_nor_updates_from_the_same_old_state() {
 #[test]
 fn lowers_a_source_oscillator_with_a_direct_output() {
     let project = parse_circuit_project(&[SourceSnapshot { path: "oscillator.ncg2", revision: 1,
-        text: "(using nor) (module oscillator (in pin) (out q pin) (def q (nor q #x0)))" }]).unwrap();
+        text: "(using nor) (module oscillator (in pin) (out q pin) (def q (nor q 0)))" }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
-    let circuit = aliases.lower_primitive_module(ModuleBodyPosition { file: 0, entry: 1 }, 16).unwrap().unwrap();
+    let circuit = aliases.lower_clocked_module(ModuleBodyPosition { file: 0, entry: 1 }, 16, 1).unwrap().unwrap();
     let mut frame = circuit.reset();
     assert_eq!(frame.outputs, [false, false]);
     for (pin, q) in [(true, true), (false, false), (true, true)] {
@@ -66,7 +66,7 @@ fn lowers_a_source_sr_latch_across_module_parts() {
     let targets = index_use_targets(&project).unwrap();
     let parts = targets.collect_module_parts().unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
-    let circuit = aliases.lower_primitive_module(parts[0].module_position, 16).unwrap().unwrap();
+    let circuit = aliases.lower_clocked_module(parts[0].module_position, 16, 2).unwrap().unwrap();
     let mut frame = circuit.reset();
     assert_eq!(frame.outputs, [false, false]);
     for (input, expected) in [
@@ -166,7 +166,7 @@ fn lowers_a_parent_and_its_child_calls_from_source() {
             text: "(using nor) (module root (in i) (out passed x y) (def (passed x) (child y)))" },
         SourceSnapshot { path: "part.ncg2", revision: 3,
             text: "(module child (in a) (out a q) (def q (leaf a)))
-                   (module leaf (in a) (out q) (def q (nor a a)))
+                   (module leaf (in a) (out q) (def q (nor a #x0)))
                    (module unused (in a) (out q) (def q (unused a)))
                    (module-part root (def (echo y) (child i)))" },
     ]).unwrap();

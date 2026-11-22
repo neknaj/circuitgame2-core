@@ -23,7 +23,7 @@ use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
 verus! {
 
 #[cfg(verus_only)]
-enum PrimitiveOperand {
+pub(super) enum PrimitiveOperand {
     Driver(OutputDriver),
     Literal(bool),
 }
@@ -84,7 +84,7 @@ fn map_driver(driver: OutputDriver) -> (wire: Wire)
     }
 }
 
-spec fn literal_bit(source: &str, form: Form, bit: bool) -> bool {
+pub(super) open spec fn literal_bit(source: &str, form: Form, bit: bool) -> bool {
     let span = form_span(form);
     let bytes = source.spec_bytes()[span.start as int..span.end as int];
     &&& form is Atom
@@ -95,14 +95,14 @@ spec fn literal_bit(source: &str, form: Form, bit: bool) -> bool {
     }
 }
 
-spec fn literal_value_fits(source: &str, form: Form) -> bool {
+pub(super) open spec fn literal_value_fits(source: &str, form: Form) -> bool {
     let span = form_span(form);
     let bytes = source.spec_bytes()[span.start as int..span.end as int];
     form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal) ==>
         forall|i: nat| i >= 1 ==> !#[trigger] bit_literal_value_at(bytes, i)
 }
 
-fn read_literal_bit(source: &str, forms: &[Form], root: usize) -> (bit: Option<bool>)
+pub(super) fn read_literal_bit(source: &str, forms: &[Form], root: usize) -> (bit: Option<bool>)
     requires root < forms@.len(), crate::syntax::form_spans_valid(source, forms@, source.spec_bytes().len() as int),
     ensures
         bit matches Some(value) ==> literal_bit(source, forms@[root as int], value),
@@ -141,7 +141,7 @@ fn read_literal_bit(source: &str, forms: &[Form], root: usize) -> (bit: Option<b
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn primitive_name_resolves(&self, checked: &ModuleCalls, index: int, root: usize,
+    pub(super) open spec fn primitive_name_resolves(&self, checked: &ModuleCalls, index: int, root: usize,
         position: int, operand: PrimitiveOperand,
     ) -> bool {
         let call = checked.calls@[index];
@@ -156,7 +156,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& operand == PrimitiveOperand::Driver(bound.driver)
     }
 
-    spec fn primitive_operand_resolves(&self, checked: &ModuleCalls, index: int, arg: int, operand: PrimitiveOperand) -> bool {
+    pub(super) open spec fn primitive_operand_resolves(&self, checked: &ModuleCalls, index: int, arg: int, operand: PrimitiveOperand) -> bool {
         let call = checked.calls@[index];
         let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
         let root = call.inputs.ports.arguments@[arg];
