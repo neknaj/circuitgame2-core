@@ -8,6 +8,8 @@ pub(super) use call_arguments::literal_argument_matches_width;
 mod call_group;
 mod mixed;
 #[cfg(verus_only)]
+mod source_wires;
+#[cfg(verus_only)]
 pub(super) use mixed::{EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluation, evaluated_flat_call_matches,
     evaluated_expression_child_matches, evaluated_nested_call_matches, evaluated_nor_call_matches,
     evaluated_nor_root_port_matches, nor_children_have_single_output};

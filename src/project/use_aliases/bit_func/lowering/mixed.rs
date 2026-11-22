@@ -53,6 +53,14 @@ use super::call_arguments::builtin_nor_call_matches;
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
 
+#[cfg(verus_only)]
+use super::source_wires::{
+    definition_wires_pair, local_slot_wires_pair, source_local_slot_agrees, source_output_wires, source_output_wires_agree,
+    source_wires_pair,
+};
+#[cfg(verus_only)]
+use crate::netlist::{SourceGateId, SourceWire};
+
 verus! {
 
 /// 先行する関数のネットリストと、呼び出し元の実引数。
@@ -1242,6 +1250,32 @@ proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
     result
 }
 
+proof fn mixed_trace_local_wiring(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView, at: int,
+)
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
+        steps[at].group_before == steps[at].group_after,
+        final_wiring.gates.len() == final_wiring.origins.len(),
+    ensures ({
+        let i = steps[at].from as int;
+        &&& 0 <= i < body.definitions@.len()
+        &&& !binding_covers(bindings, i) && !nor_binding_covers(roots, i)
+        &&& slot_wiring_matches(body.definitions@[i], layouts, final_wiring.definitions, final_wiring.gates, final_wiring.origins, i)
+    }),
+{
+    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    reveal(rooted_mixed_trace);
+    reveal(wiring_step_valid);
+    let step = steps[at];
+    let i = step.from as int;
+    slot_wiring_is_preserved(body.definitions@[i], layouts, i, step.after.definitions, final_wiring.definitions,
+        step.after.gates, final_wiring.gates, step.after.origins, final_wiring.origins);
+}
+
 /// 通常の定義を変換した箇所では、最終配線から読んだ値が型検査済みの右辺の値に一致する。
 proof fn mixed_trace_local_value(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
@@ -1270,15 +1304,107 @@ proof fn mixed_trace_local_value(
             definitions.take(i))
     }),
 {
-    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
-    reveal(rooted_mixed_trace);
-    reveal(wiring_step_valid);
+    mixed_trace_local_wiring(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
     let step = steps[at];
-    let i = step.from as int;
-    slot_wiring_is_preserved(body.definitions@[i], layouts, i, step.after.definitions, final_wiring.definitions,
-        step.after.gates, final_wiring.gates, step.after.origins, final_wiring.origins);
     slot_values_match_wiring(body.input_widths@, body.definitions@, layouts, final_wiring, layout_limit,
         step.from, inputs, gates);
+}
+
+proof fn mixed_function_local_step(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, limit: usize, function: &LoweredBitFunc, steps: Seq<WiringStep>, i: int,
+) -> (at: int)
+    requires
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps),
+        0 <= i < body.definitions@.len(),
+        !binding_covers(bindings, i), !nor_binding_covers(roots, i),
+    ensures
+        0 <= at < steps.len(),
+        steps[at].from == i,
+        steps[at].nor_before == steps[at].nor_after,
+        steps[at].group_before == steps[at].group_after,
+        ({
+            let wiring = WiringView { definitions: function.definition_wires@, gates: function.netlist.gates@,
+                origins: function.gate_definitions@ };
+            rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, body.definitions@.len() as usize,
+                bindings.len() as usize, roots.len() as usize, wiring)
+        }),
+{
+    let wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    let end = steps.len() as int - 1;
+    vstd::slice::axiom_spec_len(body.definitions);
+    let slot = body.definitions@.len() as usize;
+    let group = bindings.len() as usize;
+    let nor = roots.len() as usize;
+    assert(0 <= end && steps[end].to == slot) by { reveal(rooted_mixed_trace); };
+    let at = rooted_trace_definition_step(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, wiring, end, i);
+    reveal(wiring_step_valid);
+    let step = steps[at];
+    if step.group_before != step.group_after {
+        let binding = bindings[step.group_before as int];
+        assert(binding.group.outputs.start <= i < binding.group.outputs.end);
+        assert(binding_covers(bindings, i));
+    }
+    at
+}
+
+/// 成功した展開から、一つの通常定義の配線とソース側の対応を得る。
+pub(super) proof fn mixed_function_local_wires(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, capacity: usize, limit: usize, function: &LoweredBitFunc,
+    steps: Seq<WiringStep>, prior: Seq<Seq<SourceWire>>, order: Seq<SourceGateId>, gate: SourceGateId,
+)
+    requires
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps),
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        prior.len() < body.definitions@.len(),
+        !binding_covers(bindings, prior.len() as int), !nor_binding_covers(roots, prior.len() as int),
+        ({
+            let i = prior.len() as int;
+            let range = layouts.definitions.ranges_model()[i];
+            let wires = function.definition_wires@;
+            &&& bit_definition_matches(body.input_widths@, body.definitions@.take(i), body.definitions@[i])
+            &&& definition_wires_pair(order, prior, layouts.definitions.ranges_model(), wires.take(range.start as int))
+            &&& body.definitions@[i].rhs is Nor ==> (wires[range.start as int] matches Wire::Gate(g)
+                && g < order.len() && order[g as int] == gate)
+        }),
+    ensures ({
+        let i = prior.len() as int;
+        let range = layouts.definitions.ranges_model()[i];
+        local_slot_wires_pair(body.input_widths@, prior, body.definitions@[i], gate, order,
+            function.definition_wires@.subrange(range.start as int, range.end as int), function.netlist.gates@)
+    }),
+{
+    let i = prior.len() as int;
+    let wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    let at = mixed_function_local_step(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps, i);
+    mixed_trace_local_wiring(body, layouts, forms, bindings, roots, limit, steps, body.definitions@.len() as usize,
+        bindings.len() as usize, roots.len() as usize, wiring, at);
+    source_local_slot_agrees(body.input_widths@, body.definitions@, layouts, capacity, prior,
+        wiring.definitions, wiring.gates, wiring.origins, order, gate);
+}
+
+/// 検査済みの駆動元が指定する公開出力と、関数の最終出力配線を照合する。
+pub(super) proof fn mixed_function_output_wires(
+    body: &LoweringBody, layouts: &Layouts, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    capacity: usize, limit: usize, function: &LoweredBitFunc, prior: Seq<Seq<SourceWire>>, order: Seq<SourceGateId>,
+)
+    requires
+        mixed_function_outputs_match(layouts, outputs, drivers, limit, function),
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        widths_layout(outputs, capacity, &layouts.outputs),
+        prior.len() == body.definitions@.len(),
+        definition_wires_pair(order, prior, layouts.definitions.ranges_model(), function.definition_wires@),
+        outputs.len() == drivers.len(),
+        forall|port: int| 0 <= port < outputs.len() ==>
+            bit_driver_width(body.input_widths@, body.definitions@, #[trigger] drivers[port]) == Some(outputs[port]),
+    ensures source_wires_pair(order, source_output_wires(body.input_widths@, prior, outputs, drivers), function.netlist.outputs@),
+{
+    port_bit_layout_size(definition_widths(body.definitions@), capacity, &layouts.definitions);
+    source_output_wires_agree(body.input_widths@, body.definitions@, layouts, capacity, prior,
+        function.definition_wires@, order, outputs, drivers, function.netlist.outputs@);
 }
 
 /// 変換に成功した関数で、通常の定義の値を最終配線から求める。
@@ -1306,23 +1432,10 @@ pub(super) proof fn mixed_function_local_value(
 {
     let wiring = WiringView { definitions: function.definition_wires@,
         gates: function.netlist.gates@, origins: function.gate_definitions@ };
-    let end = steps@.len() as int - 1;
-    vstd::slice::axiom_spec_len(body.definitions);
+    let at = mixed_function_local_step(body, layouts, forms, bindings, roots, widths, drivers, gate_limit, function, steps@, i);
     let slot = body.definitions@.len() as usize;
     let group = bindings.len() as usize;
     let nor = roots.len() as usize;
-    assert(0 <= end && steps@[end].to == slot) by { reveal(rooted_mixed_trace); };
-    let at = rooted_trace_definition_step(body, layouts, forms, bindings, roots, gate_limit, steps@, slot, group, nor, wiring, end, i);
-    assert(steps@[at].from == i && steps@[at].group_before == steps@[at].group_after) by {
-        reveal(wiring_step_valid);
-        reveal(binding_covers);
-        let step = steps@[at];
-        if step.group_before != step.group_after {
-            assert(bindings[step.group_before as int].group.outputs.start <= i
-                < bindings[step.group_before as int].group.outputs.end);
-            assert(binding_covers(bindings, i));
-        }
-    };
     mixed_trace_local_value(body, layouts, forms, bindings, roots, gate_limit, layout_limit, steps@, slot, group, nor,
         wiring, at, inputs, gates);
 }
