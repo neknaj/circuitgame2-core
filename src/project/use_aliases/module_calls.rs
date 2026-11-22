@@ -1,5 +1,8 @@
 //! モジュール本体の呼び出し先を、呼び出し元の断片にある別名で解決する。
 
+mod ports;
+pub use ports::{ModuleCallPorts, ModuleCallPortsError};
+
 use super::{DefinitionBinding, DefinitionPosition, DefinitionReferenceError, TypedRoutineSignature, TypedSignatureError, UseAliases};
 #[cfg(verus_only)]
 use super::ResolvedDefinitionReference;
@@ -151,6 +154,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.module_call_signature_result(at, max_width, Ok(Some(signature))),
         ensures
             self.position_exists(at.file, at.entry, at.definition, at.reference),
+            location_in_source(LocatedName { source: signature.source, span: signature.call.span }),
             ({
                 let project = self.targets.project_model();
                 let parsed = &project.circuits_model()[at.file as int];

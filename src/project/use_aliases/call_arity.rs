@@ -11,6 +11,9 @@ pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument, RetainedCallT
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
 pub(super) use outputs::RootFunctionCall;
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
+pub(super) use typed::signature_port;
+#[cfg(verus_only)]
+pub(super) use typed::signature_port_matches;
 
 use super::{DefinitionBinding, DefinitionReferenceError, ResolvedDefinitionReference, UseAliases};
 #[cfg(verus_only)]

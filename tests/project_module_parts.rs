@@ -1,9 +1,10 @@
 use circuitgame2_core::project::{
-    DefinitionPosition, FuncDriverError, ModuleCallSignatureError, ModuleCallTarget,
-    ModuleDriverError, ModulePartError, ModuleWiringError, OutputDriver, ResolvedPortType, SourceSnapshot,
+    DefinitionPosition, FuncDriverError, ModuleCallPortsError, ModuleCallSignatureError, ModuleCallTarget,
+    ModuleDriverError, ModulePartError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
+use circuitgame2_core::syntax::Form;
 
 #[test]
 fn resolves_the_owner_across_files_and_preserves_the_part_location() {
@@ -86,6 +87,41 @@ fn reported_signature_violation_keeps_both_call_and_declaration_locations() {
     assert_eq!((reference.source.revision, declaration.source.revision), (7, 11));
     assert_eq!(&reference.source.text[reference.span], "child");
     assert_eq!(&declaration.source.text[declaration.span], "child");
+}
+
+#[test]
+fn matches_direct_arguments_and_distinguishes_root_from_nested_outputs() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 3,
+            text: "(using nor) (module root (in a) (out y z))" },
+        SourceSnapshot { path: "part.ncg2", revision: 7,
+            text: "(module-part root (def (y z) (pair (nor a a) a))
+                  (def nested (nor (pair a a) a)) (def wrong (pair a)) (def single (pair a a)))" },
+        SourceSnapshot { path: "target.ncg2", revision: 11,
+            text: "(func pair (in a (b (bits 2))) (out a (b (bits 2))))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let part = targets.collect_module_parts().unwrap()[0].part_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let at = |definition, reference| DefinitionPosition { file: part.file, entry: part.entry, definition, reference };
+    let ports = aliases.check_module_call_ports(at(0, 0), 16).unwrap().unwrap();
+    let forms = &project.circuits()[part.file].syntax.forms;
+    let [left, right] = ports.arguments[..] else { panic!("there are two direct arguments"); };
+    let Form::List { end, .. } = forms[left] else { panic!("the first argument is a nested call"); };
+    assert_eq!(right, end);
+    let required = ports.signature.target.port(PortDirection::Input, 1).unwrap();
+    assert!(matches!(required.ty, ResolvedPortType::Bits(2)));
+    assert_eq!(required.annotation.unwrap().source.revision, 11);
+    let Err(ModuleCallPortsError::OutputCount { call, left: None, expected: 1, actual: 2, .. }) =
+        aliases.check_module_call_ports(at(1, 1), 16) else { panic!("a nested call must return one value"); };
+    assert_eq!(&call.source.text[call.span], "(pair a a)");
+    let Err(ModuleCallPortsError::InputCount { call, declaration: Some(target), expected: 2, actual: 1 }) =
+        aliases.check_module_call_ports(at(2, 0), 16) else { panic!("input count takes precedence"); };
+    assert_eq!((call.source.revision, target.source.revision), (7, 11));
+    let Err(ModuleCallPortsError::OutputCount { left: Some(left), expected: 1, actual: 2, .. }) =
+        aliases.check_module_call_ports(at(3, 0), 16) else { panic!("the root call reports its left-hand side"); };
+    assert_eq!(&left.source.text[left.span], "single");
 }
 
 #[test]

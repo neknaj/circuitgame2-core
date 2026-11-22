@@ -66,7 +66,7 @@ pub open spec fn signature_port_matches(
 }
 
 /// 解決済みの署名からポートを借用する。`None` は基底 NOR の署名を表す。
-pub(super) fn signature_port<'s, 'p, 'a>(
+pub(in crate::project::use_aliases) fn signature_port<'s, 'p, 'a>(
     signature: Option<&'s TypedRoutineSignature<'p, 'a>>, direction: PortDirection, index: usize,
 ) -> (port: Option<CallPortType<'s, 'p, 'a>>)
     ensures signature_port_matches(match signature {
