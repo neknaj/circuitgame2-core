@@ -1,7 +1,7 @@
 use circuitgame2_core::project::{
     CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
     ConcatResultWidthError, ModuleCallSignatureError, ModuleCallTarget, ModuleConcatsError,
-    ModuleDriverError, ModuleInferredCallError, ModuleOutputTypesError, ModulePartError, ModuleRootTypesError,
+    ModuleCallsError, ModuleDriverError, ModuleInferredCallError, ModuleOutputTypesError, ModulePartError, ModuleRootTypesError,
     ModuleSelectionsError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
     SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
@@ -302,6 +302,40 @@ fn module_call_checks_the_type_of_a_bound_forward_signal() {
     let call = aliases.check_module_call_with_inferred_types(owner, at(1), 16).unwrap().unwrap();
     let [Some(signal), Some(literal)] = call.types.as_slice() else { panic!("both input types should agree"); };
     assert_eq!((signal.origin.source.revision, literal.origin.source.revision), (2, 6));
+}
+
+#[test]
+fn module_call_batch_checks_nested_calls_in_fragment_order() {
+    for (argument, expect_error) in [("wide", true), ("a", false)] {
+        let fragment = format!("(module-part root (def y (bit (nor a {argument}) 0)) (def z (nor a 0)))");
+        let input = [
+            SourceSnapshot { path: "owner.ncg2", revision: 2,
+                text: "(using nor) (module root (in a) (out y) (def wide (concat a a)) (def w (nor a 1)))" },
+            SourceSnapshot { path: "part.ncg2", revision: 6, text: &fragment },
+        ];
+        let project = parse_circuit_project(&input).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let bindings = targets.collect_module_parts().unwrap();
+        let owner = bindings[0].module_position;
+        let part = bindings[0].part_position;
+        let aliases = check_use_aliases(&targets).unwrap();
+        let at = |position: circuitgame2_core::project::ModuleBodyPosition, definition| DefinitionPosition {
+            file: position.file, entry: position.entry, definition, reference: 0,
+        };
+        let result = aliases.check_module_calls(owner, 16);
+        if expect_error {
+            let Err(ModuleCallsError::Call { at: location, reason: ModuleCallInputsError::Argument {
+                index: 1, argument, reason: CallInputReason::SignalType(origin), ..
+            } }) = result else { panic!("the nested NOR must reject the wide input"); };
+            assert_eq!(location, at(part, 0));
+            assert_eq!(&argument.source.text[argument.span], "wide");
+            assert_eq!(&origin.origin.source.text[origin.origin.span], "(concat a a)");
+        } else {
+            let checked = result.unwrap().unwrap();
+            let actual: Vec<_> = checked.calls.iter().map(|call| call.at).collect();
+            assert_eq!(actual, [at(owner, 1), at(part, 0), at(part, 1)]);
+        }
+    }
 }
 
 #[test]

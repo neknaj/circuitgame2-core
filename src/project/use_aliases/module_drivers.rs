@@ -265,6 +265,15 @@ proof fn extend_target_origins(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 駆動元の検査後も、本体と断片の所属関係が同じことを示す。
+    pub(super) proof fn checked_module_driver_body(&self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers)
+        requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),
+        ensures self.targets.module_body_result(drivers.body.owner, Ok(Some(drivers.body))), drivers.body.owner == owner,
+    {
+        assert(self.targets.module_body_result(owner, Ok(Some(drivers.body))));
+        self.targets.module_body_owner(owner, &drivers.body);
+    }
+
     /// 出力宣言と駆動元の並びが対応し、各添字が型表を参照できることを示す。
     pub(super) proof fn module_output_driver(&self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers, index: int)
         requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),

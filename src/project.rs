@@ -78,7 +78,7 @@ pub use use_aliases::{ModuleDriverError, ModuleDrivers};
 pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
     ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError,
-    ModuleInferredCallError,
+    CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError,
     ModuleOutputTypes, ModuleOutputTypesError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,

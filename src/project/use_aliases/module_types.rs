@@ -3,7 +3,7 @@
 mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod calls;
-pub use calls::ModuleInferredCallError;
+pub use calls::{CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError};
 mod concats;
 pub use concats::{ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError};
 mod outputs;

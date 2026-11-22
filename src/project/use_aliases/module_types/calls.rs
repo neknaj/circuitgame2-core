@@ -1,5 +1,8 @@
 //! 呼び出しの信号引数を、元の断片の束縛とモジュールの型表から検査する。
 
+mod batch;
+pub use batch::{CheckedModuleCall, ModuleCalls, ModuleCallsError};
+
 use super::{ModuleOutputTypes, ModuleOutputTypesError, UseAliases, aliases::lookup_member, selections::read_bound_type};
 use crate::project::{DefinitionPosition, ModuleBodyPosition, ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, SignalType};
 #[cfg(verus_only)]
@@ -186,9 +189,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let Some(member) = lookup_member(members, ModuleBodyPosition { file: at.file, entry: at.entry }) else {
             return Ok(None);
         };
+        self.check_inferred_call_in_member(owner, module, member, at, limit)
+    }
+
+    fn check_inferred_call_in_member(
+        &self, owner: ModuleBodyPosition, module: &ModuleOutputTypes<'p, 'a>, member: usize,
+        at: DefinitionPosition, limit: u64,
+    ) -> (result: Result<Option<ModuleCallInputs<'p, 'a>>, ModuleCallInputsError<'p, 'a>>)
+        requires
+            self.can_resolve(), self.module_output_types_result(owner, limit, Ok(Some(*module))),
+            ({
+                let members = module.expressions.typed.sources.roots.wiring.drivers.body.members@;
+                member < members.len() && members[member as int] == (ModuleBodyPosition { file: at.file, entry: at.entry })
+            }),
+        ensures
+            self.inferred_call(module, at, limit, result),
+            self.module_call_at(at) ==> result != Ok(None),
+    {
+        assert(module.expressions.typed.sources.roots.wiring.drivers.body.members@
+            .contains(ModuleBodyPosition { file: at.file, entry: at.entry }));
         let ports = match self.check_module_call_ports(at, limit) {
             Ok(Some(ports)) => ports,
-            Ok(None) => return Ok(None),
+            Ok(None) => {
+                proof { if self.module_call_at(at) { self.module_call_ports_present(at, limit); } }
+                return Ok(None);
+            },
             Err(error) => return Err(ModuleCallInputsError::Ports(error)),
         };
         let known = self.infer_call_arguments(owner, limit, module, at, member, &ports);
