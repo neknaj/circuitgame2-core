@@ -147,6 +147,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 型伝播で参照する添字が、対応する入力または左辺の範囲にあることを示す。
+    pub(super) proof fn module_type_sources_bounds(&self, owner: ModuleBodyPosition, limit: u64, sources: ModuleTypeSources)
+        requires self.module_type_sources_result(owner, limit, Ok(Some(sources))),
+        ensures
+            sources.aliases@.len() == sources.roots.types@.len(),
+            forall|i: int| 0 <= i < sources.aliases@.len() ==>
+                ((#[trigger] sources.aliases@[i]) matches Some(alias) ==> match alias.driver {
+                    OutputDriver::Input(index) => index < sources.roots.wiring.drivers.signature.inputs@.len(),
+                    OutputDriver::Definition(index) => index < sources.aliases@.len(),
+                }),
+    {
+        self.module_root_types_evidence(owner, limit, sources.roots);
+        reveal(UseAliases::alias_sources_prefix);
+    }
+
     /// 通常呼び出しが返す型と、裸の信号名が参照する駆動元を全断片から集める。
     ///
     /// 信号の型を伝播する前に、前方参照を含む依存先を確定する。

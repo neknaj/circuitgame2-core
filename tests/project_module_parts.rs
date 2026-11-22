@@ -1,5 +1,5 @@
 use circuitgame2_core::project::{
-    CallInputReason, DefinitionPosition, FuncDriverError, ModuleCallInputsError, ModuleCallPortsError,
+    CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
     ModuleCallSignatureError, ModuleCallTarget, ModuleDriverError, ModulePartError, ModuleWiringError,
     OutputDriver, PortDirection, ResolvedPortType, SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
@@ -156,7 +156,8 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
     let targets = index_use_targets(&project).unwrap();
     let owner = targets.collect_module_parts().unwrap()[0].module_position;
     let aliases = check_use_aliases(&targets).unwrap();
-    let checked = aliases.check_module_type_sources(owner, 16).unwrap().unwrap();
+    let resolved = aliases.resolve_module_alias_types(owner, 16).unwrap().unwrap();
+    let checked = &resolved.sources;
     let [Some(y), Some(z), None, Some(mid), None] = checked.roots.types.as_slice() else {
         panic!("both calls must seed all their output types");
     };
@@ -173,6 +174,35 @@ fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
     assert_eq!(&bridge.reference.source.text[bridge.reference.span.clone()], "mid");
     assert_eq!(copy.driver, OutputDriver::Input(0));
     assert_eq!(copy.reference.source.revision, 6);
+    let [_, _, Some(bridge), _, Some(copy)] = resolved.types.as_slice() else {
+        panic!("the aliases must inherit their types from the bound driver");
+    };
+    assert!(matches!(bridge.ty, ResolvedPortType::Bits(1)));
+    assert_eq!((bridge.origin.source.revision, bridge.origin.span.clone()), (6, mid.origin.span.clone()));
+    assert!(matches!(copy.ty, ResolvedPortType::Bits(2)));
+    assert_eq!(copy.origin.source.revision, 2);
+}
+
+#[test]
+fn reports_every_reference_in_a_bare_wire_cycle_across_files() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 4,
+            text: "(using nor) (module ring (in) (out x) (def x y))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9,
+            text: "(module-part ring (def y x))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleAliasTypesError::Cycle(steps)) = aliases.resolve_module_alias_types(owner, 16) else {
+        panic!("a cycle of wire aliases has no gate to advance a tick");
+    };
+    let mut sites: Vec<_> = steps.iter().map(|step| (
+        step.definition, step.reference.source.revision, &step.reference.source.text[step.reference.span.clone()],
+    )).collect();
+    sites.sort_unstable();
+    assert_eq!(sites, [(0, 4, "y"), (1, 9, "x")]);
 }
 
 #[test]

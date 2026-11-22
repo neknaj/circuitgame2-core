@@ -2,6 +2,8 @@
 
 mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
+mod propagation;
+pub use propagation::{ModuleAliasCycleStep, ModuleAliasTypes, ModuleAliasTypesError};
 
 use super::{DefinitionDriver, DefinitionPosition, ModuleCallPortsError, ModuleWiring, ModuleWiringError, UseAliases};
 use super::function_atoms::copy_location;
