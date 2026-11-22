@@ -1,5 +1,5 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, FuncDriverError, ModuleDriverError, ModulePartError, OutputDriver, SourceSnapshot,
+    DefinitionBinding, FuncDriverError, ModuleDriverError, ModulePartError, ModuleWiringError, OutputDriver, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
@@ -14,12 +14,12 @@ fn resolves_the_owner_across_files_and_preserves_the_part_location() {
                     (func invert (in a) (out b) (def b (nor a a)))
                     (func pass (in a) (out a)))
                   (namespace app (use ::lib::invert select)
-                    (module main (in a) (out y) (def mid (select a))))",
+                    (module main (in a) (out y) (def y (select mid))))",
         },
         SourceSnapshot {
             path: "part.ncg2", revision: 15,
             text: "(namespace app (use ::lib::pass select)
-                    (module-part main (def y (select mid))))",
+                    (module-part main (def mid (select a))))",
         },
     ];
     let project = parse_circuit_project(&input).unwrap();
@@ -34,10 +34,16 @@ fn resolves_the_owner_across_files_and_preserves_the_part_location() {
     let entry = binding.part_position;
     assert_eq!(project.circuits()[entry.file].syntax.entries[entry.entry].form, binding.part.form);
     let aliases = check_use_aliases(&targets).unwrap();
-    let assembly = aliases.check_module_drivers(binding.module_position, 16).unwrap().unwrap();
+    let wiring = aliases.check_module_wiring(binding.module_position, 16).unwrap().unwrap();
+    let assembly = &wiring.drivers;
     assert_eq!(assembly.body.members, [binding.module_position, binding.part_position]);
     assert_eq!(assembly.origins, assembly.body.members);
-    assert_eq!(assembly.outputs, [OutputDriver::Definition(1)]);
+    assert_eq!(assembly.outputs, [OutputDriver::Definition(0)]);
+    let forward = &wiring.signals[0][0];
+    assert_eq!(forward.driver, OutputDriver::Definition(1));
+    assert_eq!(forward.definition.body, binding.module_position);
+    assert_eq!(&forward.site.source.text[forward.site.span.clone()], "mid");
+    assert_eq!(wiring.signals[1][0].driver, OutputDriver::Input(0));
     for (position, expected) in [(binding.module_position, "invert"), (binding.part_position, "pass")] {
         let resolved = aliases.resolve_definition_reference(position.file, position.entry, 0, 0).unwrap();
         let DefinitionBinding::Declaration { form, .. } = resolved.binding else {
@@ -45,6 +51,25 @@ fn resolves_the_owner_across_files_and_preserves_the_part_location() {
         };
         assert_eq!(form.name.word, expected);
     }
+}
+
+#[test]
+fn reports_the_first_undefined_signal_at_its_fragment_location() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 4,
+            text: "(using nor) (module main (in a) (out y) (def mid a))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9,
+            text: "(module-part main (def y (nor missing another)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.resolve_module_part(1, 0).unwrap().module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleWiringError::Undefined(site)) = aliases.check_module_wiring(owner, 16) else {
+        panic!("an undefined right-hand signal must prevent module assembly");
+    };
+    assert_eq!(site.source.revision, 9);
+    assert_eq!(&site.source.text[site.span], "missing");
 }
 
 #[test]

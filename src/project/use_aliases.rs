@@ -24,6 +24,8 @@ mod function_wiring;
 mod local_signal_index;
 mod module_drivers;
 pub use module_drivers::{ModuleDriverError, ModuleDrivers};
+mod module_wiring;
+pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod relative;
 mod selection_arguments;

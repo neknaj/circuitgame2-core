@@ -1,13 +1,14 @@
 //! モジュールと全断片の左辺を集め、共有する局所信号を確定する。
 
 use super::{DefinitionDriver, FuncDriverError, OutputDriver, UseAliases};
+use super::local_signal_index::LocalSignalIndex;
 use super::function_drivers::{
     check_definition_bindings, check_outputs, collect_drivers, name_location, typed_port_names,
 };
 #[cfg(verus_only)]
 use super::function_drivers::{
     definition_binding_conflict, drivers_before, indexed_driver_site, is_location, missing_output_error,
-    names_match_ports, output_drivers_before, single_drivers_before,
+    names_match_ports, optional_local_index, output_drivers_before, single_drivers_before,
 };
 use crate::project::{
     LocatedName, ModuleBody, ModuleBodyPosition, ModulePartsError, TypedRoutineSignature,
@@ -36,6 +37,12 @@ pub struct ModuleDrivers<'p, 'a> {
     pub origins: Vec<ModuleBodyPosition>,
     /// 出力宣言順の駆動元。`Definition` の添字は `definitions` を指す。
     pub outputs: Vec<OutputDriver>,
+}
+
+pub(super) struct IndexedModuleDrivers<'p, 'a> {
+    pub(super) drivers: ModuleDrivers<'p, 'a>,
+    pub(super) inputs: Vec<NameSite<'a>>,
+    pub(super) index: Option<LocalSignalIndex>,
 }
 
 /// モジュールの駆動元を確定できなかった理由。
@@ -315,6 +322,56 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.module_drivers_result(owner, max_width, result),
     {
+        match self.index_module_drivers(owner, max_width) {
+            Ok(Some(prepared)) => Ok(Some(prepared.drivers)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) closed spec fn indexed_module_drivers_result(
+        &self, owner: ModuleBodyPosition, max_width: u64,
+        result: Result<Option<IndexedModuleDrivers<'p, 'a>>, ModuleDriverError<'p, 'a>>,
+    ) -> bool {
+        match result {
+            Ok(Some(prepared)) => {
+                let drivers = prepared.drivers;
+                let project = self.targets.project_model();
+                &&& self.module_drivers_result(owner, max_width, Ok(Some(drivers)))
+                &&& self.targets.module_body_result(owner, Ok(Some(drivers.body)))
+                &&& drivers.body.owner == owner
+                &&& prepared.inputs@.len() == drivers.signature.inputs@.len()
+                &&& names_match_ports(project.sources_model()[owner.file as int].text,
+                    project.circuits_model()[owner.file as int].syntax.forms@, drivers.signature.inputs@, prepared.inputs@)
+                &&& (prepared.index matches Some(index) ==> optional_local_index(
+                    Some(&index), prepared.inputs@, drivers.definitions@, drivers.definitions@.len() as int))
+                &&& target_origins_match(project.sources_model(), project.circuits_model(),
+                    drivers.definitions@, drivers.origins@)
+            },
+            Ok(None) => self.module_drivers_result(owner, max_width, Ok(None)),
+            Err(error) => self.module_drivers_result(owner, max_width, Err(error)),
+        }
+    }
+
+    /// 後続の右辺検査に、駆動元と元の本体の対応を渡す。
+    pub(super) proof fn indexed_module_drivers_evidence(
+        &self, owner: ModuleBodyPosition, max_width: u64, prepared: &IndexedModuleDrivers,
+    )
+        requires self.indexed_module_drivers_result(owner, max_width, Ok(Some(*prepared))),
+        ensures
+            self.module_drivers_result(owner, max_width, Ok(Some(prepared.drivers))),
+            self.targets.module_body_result(owner, Ok(Some(prepared.drivers.body))),
+            prepared.drivers.body.owner == owner,
+            optional_local_index(match &prepared.index { Some(index) => Some(index), None => None },
+                prepared.inputs@, prepared.drivers.definitions@, prepared.drivers.definitions@.len() as int),
+    {
+    }
+
+    pub(super) fn index_module_drivers(&self, owner: ModuleBodyPosition, max_width: u64)
+        -> (result: Result<Option<IndexedModuleDrivers<'p, 'a>>, ModuleDriverError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures self.indexed_module_drivers_result(owner, max_width, result),
+    {
         let body = match self.targets.module_body(owner) {
             Ok(Some(body)) => body,
             Ok(None) => return Ok(None),
@@ -437,7 +494,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(drivers) => drivers,
             Err(error) => return Err(ModuleDriverError::Signals(error)),
         };
-        Ok(Some(ModuleDrivers { body, signature, definitions: rows, origins, outputs: drivers }))
+        let drivers = ModuleDrivers { body, signature, definitions: rows, origins, outputs: drivers };
+        assert(self.module_drivers_result(owner, max_width, Ok(Some(drivers))));
+        Ok(Some(IndexedModuleDrivers { drivers, inputs, index }))
     }
 }
 

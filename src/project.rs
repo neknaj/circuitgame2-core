@@ -75,6 +75,7 @@ pub use exports::{export_error_evidence, export_table_matches, project_exports_v
 pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{ModuleDriverError, ModuleDrivers};
+pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};

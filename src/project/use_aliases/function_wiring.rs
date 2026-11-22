@@ -181,7 +181,7 @@ fn bind_signal<'p, 'a>(
     }
 }
 
-spec fn signal_site(
+pub(super) open spec fn signal_site(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, position: int,
     definition: usize, name: NameSite,
 ) -> bool {
