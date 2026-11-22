@@ -2,8 +2,15 @@
 //!
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
+mod clocked;
 mod port_layout;
 
+pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
+#[cfg(verus_only)]
+pub use clocked::{
+    clocked_gate_updates, clocked_wiring_error, clocked_wiring_valid, nor_trace, nor_trace_from_reset, nor_trace_push_tick,
+    nor_traces_agree, reset_matches, tick_matches,
+};
 pub use port_layout::{PortBitLayout, PortBitLayoutError};
 #[cfg(verus_only)]
 pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};
@@ -68,16 +75,16 @@ pub enum NorEvaluationError {
     },
 }
 
-/// 1ビット配線で構成する組み合わせネットリスト。
+/// 1ビット配線で構成する NOR ネットリスト。
 ///
-/// ゲートの入力から参照できるのは入力ビット、定数、配列内の先行ゲートである。
-/// 出力ビットはどのゲートも参照できる。入出力はポートの宣言順に並び、各ポート内は最下位ビットから並ぶ。
-/// 配線の参照先は [`Self::evaluate`] が検査する。
+/// 組み合わせ評価の [`Self::evaluate`] では、ゲート入力から参照できるゲートを配列内の先行ゲートに限る。
+/// tick 単位の [`ClockedNor::check`] では、同じ回路内の全ゲートを参照できる。
+/// 入出力はポートの宣言順に並び、各ポート内は最下位ビットから並ぶ。
 #[derive(Debug, Eq, PartialEq)]
 pub struct NorNetlist {
     /// 平坦な入力列のビット数。
     pub input_count: usize,
-    /// 参照先が参照元より先に現れる順のゲート列。
+    /// ゲート番号順の配列。組み合わせ評価では、参照先が参照元より先に現れる順に置く。
     pub gates: Vec<NorGate>,
     /// 平坦な出力列の各ビットを駆動する配線。
     pub outputs: Vec<Wire>,
