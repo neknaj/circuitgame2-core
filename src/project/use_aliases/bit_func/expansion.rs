@@ -432,8 +432,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let project = self.targets.project_model();
             let parsed = &project.circuits_model()[file as int];
             let row = parsed.definitions@[definition as int];
+            let (first, end) = crate::syntax::circuit::definition_target_range(parsed.syntax.forms@, row);
             let local = (definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
             &&& self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring)))
+            &&& outputs.end <= wiring.drivers.definitions@.len()
+            &&& outputs.end - outputs.start == end - first
             &&& slot < wiring.drivers.definitions@.len()
             &&& wiring.drivers.definitions@[slot].definition == definition
             &&& wiring.drivers.definitions@[slot].result_index == slot - outputs.start

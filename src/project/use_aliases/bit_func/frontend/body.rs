@@ -13,7 +13,7 @@ use super::super::lowering::{
     expanded_definition_values, projected_lowering_output_values, projected_lowering_view, resolved_call_fits_body,
     evaluated_flat_call_matches, evaluated_nested_call_matches, MixedCallEvaluation,
     projected_lowering_call_evaluation, projected_lowering_ports, port_values,
-    FuncGateExpression, FuncGateOrigin, projected_lowering_gate_origin, projected_gate_origin_link,
+    FuncGateExpression, FuncGateOrigin, SourceStepTarget, projected_lowering_gate_origin, projected_gate_origin_link,
 };
 #[cfg(verus_only)]
 use super::source_evaluation::{source_outputs_from_driver_values, source_outputs_match};
@@ -1311,6 +1311,105 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         reveal(UseAliases::prepared_definition_result);
         reveal(UseAliases::expansion_definition_prefix);
+    }
+
+    /// 一段の変換が書き込む左辺を、厳格索引の一つの定義に対応付ける。
+    ///
+    /// 複数出力の左辺は宣言順の連続したスロットに入る。先行スロットはすべて別の定義に属する。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn expanded_strict_definition_site(
+        &self, scope: &FuncProjection, plan: &FunctionExpansionOrder, table: &FunctionTemplates,
+        prepared: &PreparedExpansionBody, selected: Seq<ResolvedTemplateCall>, rows: Seq<NorDefinition>,
+        bindings: Seq<NorBinding>, slots: Vec<CheckedBitDefinition>, range: core::ops::Range<usize>, target: SourceStepTarget,
+    ) -> (site: crate::project::DefinitionPosition)
+        requires
+            self.projection_context(scope),
+            self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
+            *scope.wiring == prepared.typed.literals.wiring->Checked_0,
+            self.prepared_definition_result(scope, prepared.calls@, selected, rows, Ok(slots)),
+            self.expanded_body_nor_bindings(scope, plan, table, prepared, rows, bindings, slots@),
+            range.start < range.end <= slots@.len(),
+            match target {
+                SourceStepTarget::Function(index) => 0 <= index < prepared.calls@.len()
+                    && range == prepared.calls@[index].outputs,
+                SourceStepTarget::Nor(index) => 0 <= index < bindings.len()
+                    && range.start == bindings[index].selected.prepared.output_slot && range.end == range.start + 1,
+                SourceStepTarget::Local => range.end == range.start + 1
+                    && !call_covers(prepared.calls@, range.start as int) && !nor_covers(rows, range.start as int),
+            },
+        ensures ({
+            let drivers = scope.wiring.drivers.definitions@;
+            let frame = scope.parsed.entry_ranges@[scope.entry as int].definitions;
+            let absolute = frame.start + site.definition;
+            let row = scope.parsed.definitions@[absolute];
+            let (start, end) = definition_target_range(scope.parsed.syntax.forms@, row);
+            &&& site.file == scope.file && site.entry == scope.entry && site.reference == 0
+            &&& frame.start <= absolute < frame.end <= scope.parsed.definitions@.len()
+            &&& end - start == range.end - range.start
+            &&& range.end <= drivers.len()
+            &&& forall|i: int| range.start <= i < range.end ==> {
+                let driver = #[trigger] drivers[i];
+                &&& driver.definition == absolute && driver.result_index == i - range.start
+            }
+            &&& forall|i: int| 0 <= i < range.start ==> (#[trigger] drivers[i]).definition < absolute
+        }),
+    {
+        let caller = (scope.file, scope.entry, scope.limit);
+        let drivers = scope.wiring.drivers.definitions@;
+        let frame = scope.parsed.entry_ranges@[scope.entry as int].definitions;
+        self.prepared_definition_width_evidence(scope, prepared.calls@, selected, rows, slots);
+        self.checked_wiring_is_func(scope.file, scope.entry, scope.limit, *scope.wiring);
+        let first = drivers[range.start as int];
+        let absolute = first.definition;
+        let row = scope.parsed.definitions@[absolute as int];
+        let (start, end) = definition_target_range(scope.parsed.syntax.forms@, row);
+        match target {
+            SourceStepTarget::Function(index) => {
+                self.prepared_call_matches_source_site(plan, caller, prepared, index);
+                let group = prepared.calls@[index];
+                let root = prepared.projections.calls@[index];
+                self.source_function_call_site_evidence(caller, scope.wiring, range.start as int, root.definition,
+                    group._signature@, group.outputs, (root.target_file, root.target_entry));
+                assert forall|i: int| range.start <= i < range.end implies {
+                    let driver = #[trigger] drivers[i];
+                    &&& driver.definition == absolute && driver.result_index == i - range.start
+                } by {
+                    self.source_function_call_site_evidence(caller, scope.wiring, i, root.definition,
+                        group._signature@, group.outputs, (root.target_file, root.target_entry));
+                };
+            },
+            SourceStepTarget::Nor(index) => {
+                reveal(UseAliases::expanded_body_nor_bindings);
+                assert(0 <= index < bindings.len());
+                let binding = bindings[index];
+                assert(binding.candidate < prepared.nor_roots@.len());
+                assert(*binding.selected.prepared == prepared.nor_roots@[binding.candidate as int]);
+                let candidate = binding.candidate as int;
+                self.prepared_nor_output_evidence(*plan, caller, prepared, candidate);
+                assert(prepared.nor_roots@[candidate].output_slot == range.start);
+                assert(drivers == prepared.typed.literals.wiring->Checked_0.drivers.definitions@);
+                assert(first.definition == prepared.nor_roots@[candidate].definition && first.result_index == 0);
+                let count = self.checked_wiring_output_group(scope.file, scope.entry, scope.limit, *scope.wiring, range.start as int);
+                if count > 1 {
+                    assert(drivers[range.start + 1].definition == absolute);
+                    assert(false);
+                }
+            },
+            SourceStepTarget::Local => {
+                self.prepared_ordinary_definition_evidence(scope, prepared.calls@, selected, rows, slots, range.start as int);
+                assert(end - start == 1);
+                assert(crate::project::use_aliases::function_drivers::indexed_driver_site(
+                    scope.source, scope.parsed, scope.entry as int, first));
+            },
+        }
+        assert(first.result_index == 0);
+        assert forall|i: int| 0 <= i < range.start implies (#[trigger] drivers[i]).definition < absolute by {
+            assert(drivers[i].definition < first.definition
+                || (drivers[i].definition == first.definition && drivers[i].result_index < first.result_index));
+        };
+        crate::project::DefinitionPosition {
+            file: scope.file, entry: scope.entry, definition: (absolute - frame.start) as usize, reference: 0,
+        }
     }
 
     /// 出力スロットを駆動する基底 NOR の定義番号と型付き署名を取り出す。

@@ -3,6 +3,12 @@
 #[cfg(verus_only)]
 mod source_arguments;
 #[cfg(verus_only)]
+mod source_layout;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::{SourceStepTarget, source_step_slots, source_step_target};
+#[cfg(verus_only)]
+pub(super) use source_layout::rooted_source_step;
+#[cfg(verus_only)]
 pub(super) use source_arguments::{mixed_function_call_evaluation, nor_source_binding_matches, rooted_nor_source_arguments};
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_arguments::{
@@ -103,7 +109,7 @@ enum MixedBodyError<'p, 'a> {
     Nor(LocatedName<'p, 'a>, NestedCallWiringError<'p, 'a>),
 }
 
-pub(super) struct WiringStep {
+pub(in crate::project::use_aliases::bit_func) struct WiringStep {
     #[cfg(verus_only)]
     from: usize,
     #[cfg(verus_only)]
@@ -413,6 +419,8 @@ spec fn local_step(
     &&& step.group_before == step.group_after
     &&& slot_wiring_matches(definition, layouts, step.after.definitions, step.after.gates, step.after.origins, at)
     &&& step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions
+    &&& definition.rhs is Nor ==> step.after.definitions[step.before.definitions.len() as int]
+        == Wire::Gate(step.before.gates.len() as usize)
     &&& gate_step_matches(layouts, step.before.definitions, definition.rhs, step.from,
         step.before.gates, step.after.gates, step.before.origins, step.after.origins)
 }
@@ -1534,7 +1542,7 @@ pub(in crate::project::use_aliases::bit_func) fn arguments_are_determined_exec(a
 }
 
 #[verifier::opaque]
-spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
+pub(super) closed spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
     &&& call.children@.len() > 0
     &&& arguments_are_determined(call.arguments@)
     &&& forall|i: int| 0 <= i < call.children@.len() ==>

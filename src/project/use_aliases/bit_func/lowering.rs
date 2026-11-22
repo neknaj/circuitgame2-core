@@ -37,6 +37,8 @@ use mixed::{CallBinding, WiringStep, binding_covers, bindings_match_calls, bindi
 #[cfg(verus_only)]
 pub(super) use mixed::{FuncGateExpression, FuncGateOrigin, func_gate_origin_matches};
 #[cfg(verus_only)]
+pub(super) use mixed::{SourceStepTarget, source_step_slots, source_step_target};
+#[cfg(verus_only)]
 use super::super::call_arity::ProjectedCallArgument;
 #[cfg(verus_only)]
 use super::expansion::CheckedExpansionCall;
