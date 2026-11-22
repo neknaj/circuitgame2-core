@@ -1,6 +1,7 @@
 //! 通常呼び出しの解決先と、依存辺の根拠になる参照名の位置を求める。
 
 mod graph;
+mod roots;
 mod vertices;
 pub use graph::{FunctionCallSite, FunctionExpansionError, FunctionExpansionOrder};
 

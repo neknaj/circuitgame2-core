@@ -32,6 +32,54 @@ pub(super) open spec fn function_position(circuits: Seq<NamedBuildCircuit>, posi
     &&& circuits[position.0 as int].syntax.entries@[position.1 as int].head is Func
 }
 
+proof fn function_set_before(circuits: Seq<NamedBuildCircuit>, file: usize, entry: usize) -> (found: Set<Position>)
+    requires file <= circuits.len(), if file == circuits.len() { entry == 0 }
+        else { entry <= circuits[file as int].syntax.entries@.len() },
+    ensures forall|at: Position| #[trigger] found.contains(at) <==>
+        function_position(circuits, at) && before(at, (file, entry)),
+    decreases file, entry,
+{
+    if entry > 0 {
+        let next = (file, (entry - 1) as usize);
+        let old = function_set_before(circuits, next.0, next.1);
+        let found = if function_position(circuits, next) { old.insert(next) } else { old };
+        assert forall|at: Position| #[trigger] found.contains(at) <==>
+            function_position(circuits, at) && before(at, (file, entry)) by {
+            assert(old.contains(at) == (function_position(circuits, at) && before(at, next)));
+            if at != next { assert(before(at, next) == before(at, (file, entry))); }
+        };
+        found
+    } else if file > 0 {
+        let prior = (file - 1) as usize;
+        let entries = &circuits[prior as int].syntax.entries;
+        vstd::std_specs::vec::axiom_spec_len(entries);
+        let end = entries@.len() as usize;
+        let found = function_set_before(circuits, prior, end);
+        assert forall|at: Position| #[trigger] found.contains(at) <==>
+            function_position(circuits, at) && before(at, (file, entry)) by {
+            if function_position(circuits, at) {
+                assert(before(at, (prior, end)) == before(at, (file, entry)));
+            }
+        };
+        found
+    } else {
+        Set::empty()
+    }
+}
+
+/// 探索の減少量を定めるため、関数宣言の有限集合を証明内で作る。
+pub(super) proof fn project_function_set(project: &CircuitProject) -> (found: Set<Position>)
+    ensures forall|at: Position| #[trigger] found.contains(at) <==> function_position(project.circuits_model(), at),
+{
+    project.circuit_count_fits();
+    let circuits = project.circuits_model();
+    let found = function_set_before(circuits, circuits.len() as usize, 0);
+    assert forall|at: Position| #[trigger] found.contains(at) <==> function_position(circuits, at) by {
+        if function_position(circuits, at) { assert(before(at, (circuits.len() as usize, 0))); }
+    };
+    found
+}
+
 spec fn positions_before(circuits: Seq<NamedBuildCircuit>, positions: Seq<Position>, stop: Position) -> bool {
     &&& forall|i: int| 0 <= i < positions.len() ==> {
         let position = #[trigger] positions[i];
@@ -124,6 +172,39 @@ impl FunctionVertices {
     #[verifier::type_invariant]
     spec fn well_formed(&self) -> bool {
         index_matches(self.positions@, self.by_position@)
+    }
+
+    /// 頂点をまだ登録していない索引を作る。
+    pub(super) fn empty() -> (vertices: Self)
+        ensures vertices.positions_model().len() == 0,
+    {
+        Self { positions: Vec::new(), by_position: BTreeMap::new() }
+    }
+
+    /// 未登録の関数宣言を末尾に加え、既存の頂点番号を保つ。
+    pub(super) fn with_new(self, position: Position) -> (updated: Self)
+        requires !self.positions_model().contains(position),
+        ensures updated.positions_model() == self.positions_model().push(position),
+    {
+        proof {
+            use_type_invariant(&self);
+            broadcast use vstd::laws_cmp::group_laws_cmp;
+            assert(obeys_cmp::<Position>());
+            assert(!self.by_position@.contains_key(position)) by {
+                if self.by_position@.contains_key(position) {
+                    let found = self.by_position@[position] as int;
+                    assert(0 <= found < self.positions_model().len());
+                    assert(self.positions_model()[found] == position);
+                    assert(self.positions_model().contains(position));
+                }
+            };
+        }
+        let (mut positions, mut by_position) = (self.positions, self.by_position);
+        let vertex = positions.len();
+        proof { insert_position(positions@, by_position@, position, vertex); }
+        by_position.insert(position, vertex);
+        positions.push(position);
+        Self { positions, by_position }
     }
 
     /// 頂点番号順の宣言位置を表す。

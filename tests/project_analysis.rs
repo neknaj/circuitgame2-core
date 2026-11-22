@@ -32,6 +32,32 @@ fn prepares_nested_func_calls_in_dependency_order() {
 }
 
 #[test]
+fn reachable_function_expansion_ignores_unrelated_bodies() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "caller.ncg2", revision: 10,
+            text: "(func caller (in x) (out y) (def y (nor (::leaf x) x)))" },
+        SourceSnapshot { path: "library.ncg2", revision: 20,
+            text: "(using nor) (func leaf (in x) (out x))" },
+        SourceSnapshot { path: "unrelated.ncg2", revision: 30,
+            text: "(func broken (in x) (out y) (def y (::missing x)))
+                   (func recursive (in x) (out y) (def y (::recursive x)))" },
+    ]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+
+    let scoped = aliases.prepare_reachable_function_expansion((0, 0)).unwrap().unwrap();
+    assert_eq!(scoped.len(), 2);
+    assert_eq!(scoped.get(0), Some((1, 1)));
+    assert_eq!(scoped.get(1), Some((0, 0)));
+    assert!(matches!(aliases.prepare_function_expansion(), Err(FunctionExpansionError::Reference(_))));
+
+    let FunctionExpansionError::Cycle(cycle) = aliases.prepare_reachable_function_expansion((2, 1)).unwrap_err()
+        else { panic!("reachable recursion must be diagnosed"); };
+    assert_eq!(cycle.len(), 1);
+    assert_eq!(&cycle[0].location.source.text[cycle[0].location.span.clone()], "::recursive");
+}
+
+#[test]
 fn expansion_cycle_diagnostic_uses_the_nested_callee_name() {
     let caller = "; 呼び出し元\n(func caller (in x) (out y) (def y (nor (::callee x) x)))";
     let callee = "(using nor) (func callee (in x) (out y) (def y (::caller x)))";

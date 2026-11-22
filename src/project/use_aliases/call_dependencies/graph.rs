@@ -34,7 +34,7 @@ pub struct FunctionCallSite<'p, 'a> {
 /// 関数を展開する前の参照解決または循環検査で見つかった違反。
 #[derive(Debug)]
 pub enum FunctionExpansionError<'p, 'a> {
-    /// 元ソース順に調べて最初に解決できなかった定義参照。
+    /// 展開対象の走査で最初に解決できなかった参照。
     Reference(DefinitionBatchError<'p, 'a>),
     /// 先頭の呼び出し元へ戻る一つ以上の呼び出し。
     Cycle(Vec<FunctionCallSite<'p, 'a>>),
@@ -51,6 +51,18 @@ struct FunctionGraph<'p, 'a> {
     graph: Vec<Vec<Option<usize>>>,
     sites: Vec<Vec<usize>>,
     flat: Vec<IndexedFunctionCallSite<'p, 'a>>,
+}
+
+#[verifier::opaque]
+spec fn calls_in_row_order<'p, 'a>(rows: Seq<Vec<FunctionCallSite<'p, 'a>>>, end: int) -> Seq<FunctionCallSite<'p, 'a>>
+    decreases end,
+{
+    if end <= 0 { Seq::empty() }
+    else { calls_in_row_order(rows, end - 1) + rows[end - 1]@ }
+}
+
+spec fn flat_source_sites<'p, 'a>(flat: Seq<IndexedFunctionCallSite<'p, 'a>>) -> Seq<FunctionCallSite<'p, 'a>> {
+    Seq::new(flat.len(), |i: int| flat[i].site)
 }
 
 /// 呼び出し先を呼び出し元より先に並べた、プロジェクト内の関数の展開順。
@@ -75,7 +87,7 @@ impl<'p, 'a> FunctionExpansionOrder<'p, 'a> {
         ensures count == self.order_model().len(),
     { self.order.len() }
 
-    /// プロジェクト内に展開対象の関数がないかを返す。
+    /// 展開対象の関数がないかを返す。
     pub fn is_empty(&self) -> (empty: bool)
         ensures empty <==> self.order_model().len() == 0,
     { self.order.len() == 0 }
@@ -219,6 +231,61 @@ impl<'p, 'a> FunctionExpansionOrder<'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    fn flatten_reached_calls(&self, _root: (usize, usize), Ghost(positions): Ghost<Seq<(usize, usize)>>, rows: &[Vec<FunctionCallSite<'p, 'a>>])
+        -> (flat: Vec<IndexedFunctionCallSite<'p, 'a>>)
+        requires self.reachable_function_rows(_root, positions, rows@),
+        ensures self.function_graph_inputs(positions, flat@),
+            flat_source_sites(flat@) == calls_in_row_order(rows@, rows@.len() as int),
+    {
+        let mut flat: Vec<IndexedFunctionCallSite> = Vec::new();
+        let mut i = 0;
+        assert(flat_source_sites(flat@) == calls_in_row_order(rows@, 0)) by {
+            reveal(calls_in_row_order);
+            assert(flat_source_sites(flat@) =~= Seq::empty());
+        };
+        while i < rows.len()
+            invariant i <= rows@.len(), self.reachable_function_rows(_root, positions, rows@),
+                self.function_graph_inputs(positions, flat@),
+                flat_source_sites(flat@) == calls_in_row_order(rows@, i as int),
+            decreases rows@.len() - i,
+        {
+            let row = &rows[i];
+            let ghost prefix = calls_in_row_order(rows@, i as int);
+            let mut j = 0;
+            while j < row.len()
+                invariant j <= row@.len(), *row == rows@[i as int], i < rows@.len(),
+                    self.reachable_function_rows(_root, positions, rows@),
+                    self.function_graph_inputs(positions, flat@),
+                    flat_source_sites(flat@) == prefix + row@.take(j as int),
+                decreases row@.len() - j,
+            {
+                let site = &row[j];
+                proof { self.reachable_call_evidence(_root, positions, rows@, i as int, j as int); }
+                let ghost before = flat@;
+                flat.push(IndexedFunctionCallSite { _binding: Ghost(0), site: FunctionCallSite {
+                    position: site.position, target: site.target, location: copy_location(&site.location),
+                }});
+                assert forall|k: int| 0 <= k < flat@.len() implies {
+                    let call = (#[trigger] flat@[k]).site;
+                    &&& self.function_call_site_matches(call)
+                    &&& positions.contains((call.position.file, call.position.entry))
+                    &&& positions.contains(call.target)
+                } by {
+                    if k < before.len() { assert(flat@[k] == before[k]); }
+                    else { assert(flat@[k].site == *site); }
+                };
+                assert(flat_source_sites(flat@) =~= flat_source_sites(before).push(*site));
+                assert(row@.take(j as int).push(*site) =~= row@.take(j + 1));
+                assert(flat_source_sites(flat@) =~= prefix + row@.take(j + 1));
+                j += 1;
+            }
+            assert(row@.take(j as int) =~= row@);
+            assert(calls_in_row_order(rows@, i + 1) == prefix + row@) by { reveal(calls_in_row_order); };
+            i += 1;
+        }
+        flat
+    }
+
     #[verifier::opaque]
     spec fn is_function_dependency(&self, item: IndexedDefinitionBinding) -> bool {
         &&& item.resolved.site.owner is Func
@@ -237,7 +304,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& crate::project::location_in_source(site.location)
     }
 
-    proof fn function_call_endpoints(&self, site: FunctionCallSite)
+    pub(super) proof fn function_call_endpoints(&self, site: FunctionCallSite)
         requires self.function_call_site_matches(site),
         ensures ({
             let circuits = self.targets.project_model().circuits_model();
@@ -440,8 +507,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, vertices: &FunctionVertices, flat: Vec<IndexedFunctionCallSite<'p, 'a>>,
     ) -> (result: FunctionGraph<'p, 'a>)
         requires
-            vertices.matches(&self.targets.project_model()),
-            forall|i: int| 0 <= i < flat@.len() ==> self.function_call_site_matches((#[trigger] flat@[i]).site),
+            self.function_graph_inputs(vertices.positions_model(), flat@),
         ensures
             result.flat@ == flat@,
             self.function_graph_sites_match(vertices.positions_model(), result.graph@, flat@, result.sites@),
@@ -466,18 +532,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while i < flat.len()
             invariant
                 i <= flat@.len(), positions@ == vertices.positions_model(),
-                vertices.matches(&self.targets.project_model()),
-                forall|j: int| 0 <= j < flat@.len() ==> self.function_call_site_matches((#[trigger] flat@[j]).site),
+                self.function_graph_inputs(positions@, flat@),
                 self.function_graph_sites_match(positions@, graph@, flat@, sites@),
                 self.call_site_prefix_matches(i as int, sites@),
             decreases flat@.len() - i,
         {
             let site = &flat[i].site;
             let caller = (site.position.file, site.position.entry);
-            proof {
-                self.function_call_endpoints(*site);
-                vertices.project_evidence(&self.targets.project_model());
-            }
+            assert(positions@.contains(caller) && positions@.contains(site.target));
             let Some(from) = vertices.get(caller) else {
                 proof { assert(false); }
                 unreachable!()
@@ -513,6 +575,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             i += 1;
         }
         FunctionGraph { graph, sites, flat }
+    }
+
+    spec fn function_graph_inputs(&self, positions: Seq<(usize, usize)>, flat: Seq<IndexedFunctionCallSite>) -> bool {
+        forall|i: int| 0 <= i < flat.len() ==> {
+            let site = (#[trigger] flat[i]).site;
+            &&& self.function_call_site_matches(site)
+            &&& positions.contains((site.position.file, site.position.entry))
+            &&& positions.contains(site.target)
+        }
     }
 
     #[verifier::opaque]
@@ -660,8 +731,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let vertices = FunctionVertices::from_project(project);
         let flat = self.collect_function_call_sites(found);
         proof {
-            assert forall|i: int| 0 <= i < flat@.len() implies self.function_call_site_matches((#[trigger] flat@[i]).site) by {
+            vertices.project_evidence(&self.targets.project_model());
+            assert forall|i: int| 0 <= i < flat@.len() implies {
+                let site = (#[trigger] flat@[i]).site;
+                &&& self.function_call_site_matches(site)
+                &&& vertices.positions_model().contains((site.position.file, site.position.entry))
+                &&& vertices.positions_model().contains(site.target)
+            } by {
                 reveal(UseAliases::function_call_sites_match);
+                self.function_call_endpoints(flat@[i].site);
             };
         }
         let graph = self.materialize_function_graph(&vertices, flat);
@@ -940,6 +1018,75 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if let Ok(plan) = model {
                 assert(plan.source_positions_complete());
             }
+        };
+        result
+    }
+
+    /// 起点から到達した関数について、依存順または元の呼び出し位置を保証する。
+    pub closed spec fn reachable_function_expansion_evidence(
+        &self, root: (usize, usize), result: Result<Option<FunctionExpansionOrder>, FunctionExpansionError>,
+    ) -> bool {
+        if !function_position(self.targets.project_model().circuits_model(), root) {
+            result == Ok(None)
+        } else {
+            match result {
+                Err(FunctionExpansionError::Reference(error)) => self.reachable_function_scan_failure(root, error),
+                _ => exists|vertices: FunctionVertices, rows: Seq<Vec<FunctionCallSite>>, flat: Seq<IndexedFunctionCallSite>,
+                    graph: Seq<Vec<Option<usize>>>, sites: Seq<Vec<usize>>|
+                    #![trigger self.reachable_function_rows(root, vertices.positions_model(), rows),
+                        self.function_graph_sites_match(vertices.positions_model(), graph, flat, sites)]
+                    self.reachable_function_rows(root, vertices.positions_model(), rows)
+                    && flat_source_sites(flat) == calls_in_row_order(rows, rows.len() as int)
+                    && self.function_graph_sites_match(vertices.positions_model(), graph, flat, sites)
+                    && self.call_site_prefix_matches(flat.len() as int, sites)
+                    && match result {
+                        Ok(Some(plan)) => plan.project_model() == self.targets.project_model() && plan.vertices == vertices
+                            && complete_dependency_order(graph, plan.order@),
+                        Err(FunctionExpansionError::Cycle(references)) =>
+                            self.located_function_cycle(vertices.positions_model(), graph, flat, sites, references@),
+                        _ => false,
+                    },
+            }
+        }
+    }
+
+    /// 指定した関数と、その関数から呼び出せる関数を依存順に並べる。
+    ///
+    /// 起点はファイルと厳格索引項目の添字で指定する。関数を指さない位置には `None` を返す。
+    /// 同じ関数を複数の箇所から呼んでも、一度だけ計画に加える。
+    ///
+    /// # Errors
+    ///
+    /// 到達した関数を発見順に調べ、最初に解決できなかった呼び出しを返す。
+    /// 解決後に再帰を見つけた場合は、閉路を構成する呼び出しの元の範囲を返す。
+    pub fn prepare_reachable_function_expansion(&self, root: (usize, usize))
+        -> (result: Result<Option<FunctionExpansionOrder<'p, 'a>>, FunctionExpansionError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures self.reachable_function_expansion_evidence(root, result),
+    {
+        let project = self.targets.project();
+        let circuits = project.circuits();
+        if root.0 >= circuits.len() { return Ok(None); }
+        let entries = circuits[root.0].syntax.entries.as_slice();
+        if root.1 >= entries.len() || !matches!(entries[root.1].head, Head::Func) { return Ok(None); }
+        let reached = match self.discover_function_calls(root) {
+            Ok(reached) => reached,
+            Err(error) => return Err(FunctionExpansionError::Reference(error)),
+        };
+        let vertices = reached.vertices;
+        let rows = reached.rows;
+        let flat = self.flatten_reached_calls(root, Ghost(vertices.positions_model()), &rows);
+        let graph = self.materialize_function_graph(&vertices, flat);
+        let ghost model = vertices;
+        let ghost positions = vertices.positions_model();
+        let order = self.order_function_graph(Ghost(positions), &graph.graph, &graph.flat, &graph.sites);
+        let result = match order {
+            Ok(order) => Ok(Some(FunctionExpansionOrder { project, vertices, order })),
+            Err(cycle) => Err(FunctionExpansionError::Cycle(cycle)),
+        };
+        assert(self.reachable_function_expansion_evidence(root, result)) by {
+            assert(self.reachable_function_rows(root, model.positions_model(), rows@));
+            assert(self.function_graph_sites_match(model.positions_model(), graph.graph@, graph.flat@, graph.sites@));
         };
         result
     }
