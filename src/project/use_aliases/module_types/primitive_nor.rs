@@ -1,5 +1,8 @@
 //! 単一ビットの基底 NOR を、フィードバックを保ったまま tick 用の配線に変換する。
 
+#[cfg(verus_only)]
+mod semantics;
+
 use super::{ModuleCalls, ModuleCallsError, UseAliases, copy_location};
 use crate::netlist::{ClockedNor, NorGate, NorNetlist, Wire};
 use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, ModuleWiring, OutputDriver, ResolvedPortType,
@@ -18,6 +21,12 @@ use crate::syntax::{bit_literal_value_at, form_span, circuit::{build_definition_
 use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
 
 verus! {
+
+#[cfg(verus_only)]
+enum PrimitiveOperand {
+    Driver(OutputDriver),
+    Literal(bool),
+}
 
 /// 単一ビットの基底 NOR を変換する段階の診断。
 #[derive(Debug)]
@@ -132,25 +141,41 @@ fn read_literal_bit(source: &str, forms: &[Form], root: usize) -> (bit: Option<b
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn primitive_operand_matches(&self, checked: &ModuleCalls, index: int, arg: int, wire: Wire) -> bool {
+    spec fn primitive_name_resolves(&self, checked: &ModuleCalls, index: int, root: usize,
+        position: int, operand: PrimitiveOperand,
+    ) -> bool {
         let call = checked.calls@[index];
         let wiring = &checked.module.expressions.typed.sources.roots.wiring;
         let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
         let frame = parsed.entry_ranges@[call.at.entry as int];
         let definition = parsed.definitions@[frame.definitions.start + call.at.definition];
+        let bound = wiring.signals@[call.member as int]@[position - frame.signals.start];
+        &&& definition.signals.start <= position < definition.signals.end
+        &&& parsed.signals@[position] == root
+        &&& bound.form == root
+        &&& operand == PrimitiveOperand::Driver(bound.driver)
+    }
+
+    spec fn primitive_operand_resolves(&self, checked: &ModuleCalls, index: int, arg: int, operand: PrimitiveOperand) -> bool {
+        let call = checked.calls@[index];
+        let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
         let root = call.inputs.ports.arguments@[arg];
         let form = parsed.syntax.forms@[root as int];
-        if form is Atom && form->Atom_kind is Name {
-            exists|position: int| definition.signals.start <= position < definition.signals.end
-                && (#[trigger] parsed.signals@[position]) == root && {
-                    let bound = wiring.signals@[call.member as int]@[position - frame.signals.start];
-                    &&& bound.form == root
-                    &&& wire == driver_wire(bound.driver)
-                }
+        &&& 0 <= arg < call.inputs.ports.arguments@.len() && root < parsed.syntax.forms@.len()
+        &&& if form is Atom && form->Atom_kind is Name {
+            exists|position: int| #[trigger] self.primitive_name_resolves(checked, index, root, position, operand)
         } else {
-            wire matches Wire::Constant(value) && literal_bit(call.inputs.ports.signature.source.text, form, value)
+            operand matches PrimitiveOperand::Literal(value) && literal_bit(call.inputs.ports.signature.source.text, form, value)
                 && literal_value_fits(call.inputs.ports.signature.source.text, form)
         }
+    }
+
+    spec fn primitive_operand_matches(&self, checked: &ModuleCalls, index: int, arg: int, wire: Wire) -> bool {
+        exists|operand: PrimitiveOperand| #[trigger] self.primitive_operand_resolves(checked, index, arg, operand)
+            && wire == match operand {
+                PrimitiveOperand::Driver(driver) => driver_wire(driver),
+                PrimitiveOperand::Literal(bit) => Wire::Constant(bit),
+            }
     }
 
     spec fn primitive_definition_supported(&self, checked: &ModuleCalls, index: int) -> bool {
@@ -259,6 +284,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &ports.signature.call, parsed.signals.as_slice(), root);
             proof { self.module_signal_index_item(_owner, _limit, *wiring, call.member as int, position as int); }
             let bound = &wiring.signals[call.member][position - frame.signals.start];
+            assert(self.primitive_name_resolves(checked, index as int, root, position as int, PrimitiveOperand::Driver(bound.driver)));
+            assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Driver(bound.driver)));
             Ok(map_driver(bound.driver))
         } else if let Some(bit) = read_literal_bit(source.text, forms, root) {
             proof {
@@ -270,6 +297,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     crate::project::literal_width::circuit_bit_literal_boundary(bytes, Some(1), _limit, Ok(1));
                 }
             }
+            assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Literal(bit)));
             Ok(Wire::Constant(bit))
         } else {
             Err(PrimitiveModuleError::Argument(form_location(source, forms, root)))
@@ -350,6 +378,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    spec fn primitive_netlist_matches(&self, checked: &ModuleCalls, netlist: &NorNetlist) -> bool {
+        let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
+        &&& one_bit_ports(drivers.signature.inputs@, drivers.signature.inputs@.len() as int)
+        &&& one_bit_ports(drivers.signature.outputs@, drivers.signature.outputs@.len() as int)
+        &&& netlist.input_count == drivers.signature.inputs@.len()
+        &&& netlist.gates@.len() == drivers.definitions@.len()
+        &&& self.primitive_gate_prefix(checked, netlist.gates@)
+        &&& netlist.outputs@.len() == drivers.outputs@.len()
+        &&& forall|i: int| 0 <= i < netlist.outputs@.len() ==>
+            (#[trigger] netlist.outputs@[i]) == driver_wire(drivers.outputs@[i])
+    }
+
     /// 変換の成功結果と、検査済みソースの定義・ポート順・配線の対応を表す。
     pub closed spec fn primitive_module_result(&self, owner: ModuleBodyPosition, limit: u64,
         result: Result<Option<ClockedNor>, PrimitiveModuleError>,
@@ -361,18 +401,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] self.module_calls_result(owner, limit, Ok(Some(checked)))
                 && self.primitive_lowering_error(&checked, error),
             Ok(Some(circuit)) => exists|checked: ModuleCalls|
-                #[trigger] self.module_calls_result(owner, limit, Ok(Some(checked))) && {
-                    let netlist = circuit.netlist_model();
-                    let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
-                    &&& one_bit_ports(drivers.signature.inputs@, drivers.signature.inputs@.len() as int)
-                    &&& one_bit_ports(drivers.signature.outputs@, drivers.signature.outputs@.len() as int)
-                    &&& netlist.input_count == drivers.signature.inputs@.len()
-                    &&& netlist.gates@.len() == drivers.definitions@.len()
-                    &&& self.primitive_gate_prefix(&checked, netlist.gates@)
-                    &&& netlist.outputs@.len() == drivers.outputs@.len()
-                    &&& forall|i: int| 0 <= i < netlist.outputs@.len() ==>
-                        (#[trigger] netlist.outputs@[i]) == driver_wire(drivers.outputs@[i])
-                },
+                #[trigger] self.module_calls_result(owner, limit, Ok(Some(checked)))
+                && self.primitive_netlist_matches(&checked, &circuit.netlist_model()),
         }
     }
 

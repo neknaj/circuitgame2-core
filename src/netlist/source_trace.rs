@@ -118,14 +118,30 @@ pub open spec fn source_tick_trace(
         source_step_matches(source, frames[i - 1].gates, inputs[i - 1], #[trigger] frames[i])
 }
 
-spec fn endpoints_agree(source: &SourceTickCircuit, order: Seq<SourceGateId>, original: SourceWire, lowered: Wire) -> bool {
-    &&& source_wire_valid(source, original)
-    &&& match (original, lowered) {
+pub(crate) open spec fn source_wire_pair(order: Seq<SourceGateId>, original: SourceWire, lowered: Wire) -> bool {
+    match (original, lowered) {
         (SourceWire::Input(i), Wire::Input(j)) => i == j,
         (SourceWire::Constant(a), Wire::Constant(b)) => a == b,
         (SourceWire::Gate(site), Wire::Gate(i)) => i < order.len() && order[i as int] == site,
         _ => false,
     }
+}
+
+spec fn endpoints_agree(source: &SourceTickCircuit, order: Seq<SourceGateId>, original: SourceWire, lowered: Wire) -> bool {
+    source_wire_valid(source, original) && source_wire_pair(order, original, lowered)
+}
+
+pub(crate) open spec fn source_output_pair_at(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, i: int,
+) -> bool {
+    wire_available(netlist.outputs@[i], netlist.input_count as nat, order.len())
+        && source_wire_pair(order, source.outputs[i], netlist.outputs@[i])
+}
+
+pub(crate) open spec fn source_output_pairs(source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>) -> bool {
+    &&& source.outputs.len() == netlist.outputs@.len()
+    &&& forall|i: int| 0 <= i < source.outputs.len() ==>
+        #[trigger] source_output_pair_at(source, netlist, order, i)
 }
 
 /// ゲート番号とソース上の識別子の全単射、および全配線と公開出力の対応を表す。
@@ -150,6 +166,39 @@ pub closed spec fn source_clocked_layout(
     &&& source.outputs.len() == netlist.outputs@.len()
     &&& forall|i: int| 0 <= i < source.outputs.len() ==>
         endpoints_agree(source, order, #[trigger] source.outputs[i], netlist.outputs@[i])
+}
+
+/// 対応する配線の範囲とゲート番号の逆引きから、展開の対応を組み立てる。
+pub(crate) proof fn source_clocked_layout_from_pairs(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>,
+)
+    requires
+        source.input_count == netlist.input_count, order.len() == netlist.gates@.len(),
+        index.dom() == source.gates.dom(),
+        forall|site: SourceGateId| index.dom().contains(site) ==> 0 <= #[trigger] index[site] < order.len()
+            && order[index[site]] == site,
+        forall|i: int| 0 <= i < order.len() ==> {
+            let site = #[trigger] order[i];
+            let gate = netlist.gates@[i];
+            &&& index.dom().contains(site) && index[site] == i
+            &&& wire_available(gate.left, netlist.input_count as nat, order.len())
+            &&& wire_available(gate.right, netlist.input_count as nat, order.len())
+            &&& source_wire_pair(order, source.gates[site].left, gate.left)
+            &&& source_wire_pair(order, source.gates[site].right, gate.right)
+        },
+        source_output_pairs(source, netlist, order),
+    ensures source_clocked_layout(source, netlist, order, index),
+{
+    assert forall|i: int| 0 <= i < order.len() implies {
+        let site = #[trigger] order[i];
+        let gate = netlist.gates@[i];
+        endpoints_agree(source, order, source.gates[site].left, gate.left)
+            && endpoints_agree(source, order, source.gates[site].right, gate.right)
+    } by {};
+    assert forall|i: int| 0 <= i < source.outputs.len() implies
+        endpoints_agree(source, order, #[trigger] source.outputs[i], netlist.outputs@[i]) by {
+        assert(source_output_pair_at(source, netlist, order, i));
+    };
 }
 
 /// ゲートと配線の対応から、ソースとネットリスト双方の配線の妥当性を導く。

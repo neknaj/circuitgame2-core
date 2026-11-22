@@ -8,7 +8,7 @@ use super::function_drivers::{
 #[cfg(verus_only)]
 use super::function_drivers::{
     definition_binding_conflict, drivers_before, indexed_driver_site, is_location, missing_output_error,
-    names_match_ports, optional_local_index, output_drivers_before, single_drivers_before,
+    names_match_ports, optional_local_index, output_drivers_before, same_word, single_drivers_before,
 };
 use crate::project::{
     LocatedName, ModuleBody, ModuleBodyPosition, ModulePartsError, TypedRoutineSignature,
@@ -19,6 +19,8 @@ use crate::project::{CircuitProject, ProjectSource, circuits::parsed_index_evide
 use crate::syntax::circuit::{NameSite, first_routine_expansion};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{NamedBuildCircuit, routine_expansion_evidence};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -265,6 +267,34 @@ proof fn extend_target_origins(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 同じ断片の同じ定義出力は、駆動元の配列に一度だけ現れる。
+    pub(super) proof fn module_driver_origins_distinct(
+        &self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers, i: int, j: int,
+    )
+        requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),
+            0 <= i < j < drivers.definitions@.len(),
+        ensures drivers.origins@[i] != drivers.origins@[j]
+            || drivers.definitions@[i].definition != drivers.definitions@[j].definition
+            || drivers.definitions@[i].result_index != drivers.definitions@[j].result_index,
+    {
+        let first = drivers.definitions@[i];
+        let second = drivers.definitions@[j];
+        if drivers.origins@[i] == drivers.origins@[j]
+            && first.definition == second.definition && first.result_index == second.result_index
+        {
+            self.module_driver_sites(owner, limit, drivers, i);
+            self.module_driver_sites(owner, limit, drivers, j);
+            let origin = drivers.origins@[i];
+            let source = self.targets.project_model().sources_model()[origin.file as int];
+            assert(first.name.span == second.name.span);
+            assert(first.name.word.spec_bytes() == second.name.word.spec_bytes());
+            assert(same_word(first.name, second.name));
+            let inputs = choose|inputs: Seq<NameSite>|
+                #[trigger] single_drivers_before(inputs, drivers.definitions@, drivers.definitions@.len() as int);
+            assert(!same_word(first.name, second.name));
+        }
+    }
+
     /// 駆動元の検査後も、本体と断片の所属関係が同じことを示す。
     pub(super) proof fn checked_module_driver_body(&self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers)
         requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),

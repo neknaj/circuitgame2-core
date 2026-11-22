@@ -23,6 +23,8 @@ pub use source_trace::{
     source_trace_outputs_preserved, source_wiring_valid,
 };
 #[cfg(verus_only)]
+pub(crate) use source_trace::{source_clocked_layout_from_pairs, source_output_pair_at, source_output_pairs, source_wire_pair};
+#[cfg(verus_only)]
 pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};
 #[cfg(verus_only)]
 pub(crate) use port_layout::preceding_port_bits_grow;
