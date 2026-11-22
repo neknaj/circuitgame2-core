@@ -1,7 +1,7 @@
 use circuitgame2_core::project::{
     CallInputReason, DefinitionPosition, FuncDriverError, ModuleAliasTypesError, ModuleCallInputsError, ModuleCallPortsError,
     ConcatResultWidthError, ModuleCallSignatureError, ModuleCallTarget, ModuleConcatsError,
-    ModuleDriverError, ModulePartError, ModuleRootTypesError,
+    ModuleDriverError, ModuleOutputTypesError, ModulePartError, ModuleRootTypesError,
     ModuleSelectionsError, ModuleWiringError, OutputDriver, PortDirection, ResolvedPortType, SelectionArgument, SelectionArgumentError,
     SignalType, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
@@ -219,7 +219,7 @@ fn reports_the_input_width_origin_of_a_failed_module_selection() {
 fn checks_concat_width_and_operand_order_across_module_parts() {
     let input = [
         SourceSnapshot { path: "owner.ncg2", revision: 2,
-            text: "(using nor) (module root (in (wide (bits 2))) (out (wide (bits 2))))" },
+            text: "(using nor) (module root (in (wide (bits 2))) (out (wide (bits 2)) picked))" },
         SourceSnapshot { path: "part.ncg2", revision: 6,
             text: "(module-part root (def first (concat relay #b1)) (def relay joined)
                     (def joined (concat later #b01)) (def later wide)
@@ -240,15 +240,37 @@ fn checks_concat_width_and_operand_order_across_module_parts() {
     assert_eq!(&concat.result.origin.source.text[concat.result.origin.span.clone()], "(concat later #b01)");
     let [low, high] = concat.operands.as_slice() else { panic!("there must be two operands"); };
     assert_eq!((low.driver, low.width, high.driver, high.width), (Some(OutputDriver::Definition(3)), 2, None, 2));
-    let selections = aliases.check_module_selections(owner, 16).unwrap().unwrap();
-    let picked = selections.selections[5].as_ref().unwrap();
+    let outputs = aliases.check_module_output_types(owner, 16).unwrap().unwrap();
+    let picked = outputs.expressions.selections[5].as_ref().unwrap();
     assert_eq!((picked.driver, picked.projection.last), (OutputDriver::Definition(1), 3));
+    let [Some(direct), Some(selected)] = outputs.outputs.as_slice() else { panic!("both output types should agree"); };
+    assert_eq!((direct.origin.source.revision, selected.origin.source.revision), (2, 6));
     let Err(ModuleConcatsError::Width { concat, reason: ConcatResultWidthError::ConfiguredLimit { limit: 3, actual: 4 } }) =
         aliases.check_module_concats(owner, 3) else { panic!("the result exceeds the configured width limit"); };
     assert_eq!((concat.source.revision, &concat.source.text[concat.span]), (6, "(concat later #b01)"));
     let Err(ModuleConcatsError::Width { concat, reason: ConcatResultWidthError::ConfiguredLimit { limit: 4, actual: 5 } }) =
         aliases.check_module_concats(owner, 4) else { panic!("the later seed lets the earlier failure become visible"); };
     assert_eq!(&concat.source.text[concat.span], "(concat relay #b1)");
+}
+
+#[test]
+fn module_output_type_check_reports_distinct_layout_names_after_a_pending_port() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 2,
+            text: "(using nor) (struct Left (width 2)) (struct Right (width 2))
+                   (module root (in (a Left)) (out pending (y Right)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 6,
+            text: "(module-part root (def pending 0) (def y a))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleOutputTypesError::Mismatch { index: 1, expected, actual }) = aliases.check_module_output_types(owner, 16) else {
+        panic!("distinct structures of the same bit width must not agree");
+    };
+    assert_eq!(&expected.origin.source.text[expected.origin.span], "Right");
+    assert_eq!(&actual.origin.source.text[actual.origin.span], "Left");
 }
 
 #[test]

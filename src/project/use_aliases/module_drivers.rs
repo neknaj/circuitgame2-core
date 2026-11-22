@@ -265,6 +265,32 @@ proof fn extend_target_origins(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 出力宣言と駆動元の並びが対応し、各添字が型表を参照できることを示す。
+    pub(super) proof fn module_output_driver(&self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers, index: int)
+        requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),
+        ensures
+            drivers.outputs@.len() == drivers.signature.outputs@.len(),
+            0 <= index < drivers.outputs@.len() ==> {
+                let port = drivers.signature.outputs@[index];
+                &&& crate::project::location_in_source(port.annotation)
+                &&& match drivers.outputs@[index] {
+                    OutputDriver::Input(input) => input < drivers.signature.inputs@.len(),
+                    OutputDriver::Definition(definition) => definition < drivers.definitions@.len(),
+                }
+            },
+    {
+        assert(self.typed_signature_evidence(owner.file, owner.entry, limit, Ok(Some(drivers.signature))));
+        self.typed_signature_sites(owner.file, owner.entry, limit, drivers.signature);
+        let names = choose|names: Seq<NameSite>| names.len() == drivers.outputs@.len()
+            && #[trigger] output_drivers_before(drivers.signature.output_inputs@, names, drivers.definitions@, drivers.outputs@);
+        if 0 <= index < drivers.outputs@.len() {
+            let driver = drivers.outputs@[index];
+            if let OutputDriver::Input(input) = driver {
+                assert(drivers.signature.output_inputs@[index] == Some(input));
+            }
+        }
+    }
+
     /// モジュールの入力型を決めた注釈が、元のソース内にあることを示す。
     pub(super) proof fn module_input_sites(&self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers)
         requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),

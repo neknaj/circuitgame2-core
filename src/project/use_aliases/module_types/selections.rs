@@ -238,6 +238,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 完了した式検査から、出力の照合に使う型表と元の駆動元の契約を取り出す。
+    pub(super) proof fn module_selections_evidence(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections)
+        requires self.module_selections_result(owner, limit, Ok(Some(checked))),
+        ensures
+            self.module_drivers_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring.drivers))),
+            checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
+            type_sites_valid(checked.types@),
+    {
+        let inferred = ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats };
+        self.module_concats_evidence(owner, limit, inferred);
+        self.module_alias_types_evidence(owner, limit, checked.typed);
+        self.module_wiring_keeps_drivers(owner, limit, checked.typed.sources.roots.wiring);
+    }
+
     /// 右辺全体がビット選択で、選択をたどると型が判明した信号に行き着く定義を検査する。
     ///
     /// 選択を内側から検査し、元の信号のビット位置へ合成する。ほかの式の選択は後段で扱う。
