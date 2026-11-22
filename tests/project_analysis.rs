@@ -51,6 +51,12 @@ fn reachable_function_expansion_ignores_unrelated_bodies() {
     assert_eq!(scoped.get(1), Some((0, 0)));
     assert!(matches!(aliases.prepare_function_expansion(), Err(FunctionExpansionError::Reference(_))));
 
+    let circuit = aliases.expand_reachable_function((0, 0), 8, 16, 1).unwrap().unwrap();
+    assert_eq!(circuit.netlist().gates.len(), 1);
+    assert_eq!(circuit.netlist().evaluate(&[false]).unwrap(), [true]);
+    assert_eq!(circuit.netlist().evaluate(&[true]).unwrap(), [false]);
+    assert!(aliases.expand_reachable_function((1, 0), 8, 16, 1).unwrap().is_none());
+
     let FunctionExpansionError::Cycle(cycle) = aliases.prepare_reachable_function_expansion((2, 1)).unwrap_err()
         else { panic!("reachable recursion must be diagnosed"); };
     assert_eq!(cycle.len(), 1);

@@ -160,11 +160,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 型検査済みの呼び出しから、宣言順の出力型と展開順の添字を取り出す。
     pub(super) proof fn checked_root_call_for_expansion(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64),
-        typed: FuncSignalTypes, wiring: FuncWiring, rows: Seq<RootFunctionCall>, index: int,
+        typed: FuncSignalTypes, wiring: FuncWiring, rows: Seq<RootFunctionCall>, index: int, caller_rank: int,
     ) -> (selection: (TypedFuncCall<'p, 'a>, (int, int)))
         requires
             self.can_resolve(),
-            self.function_expansion_evidence(Ok(plan)),
+            self.function_template_plan(plan),
+            plan.position_model(caller_rank) == Some((caller.0, caller.1)),
             self.func_signal_types_evidence(caller.0, caller.1, caller.2, Ok(typed)),
             typed.literals.wiring == FuncWiringResult::Checked(wiring),
             typed.types@.len() == wiring.drivers.definitions@.len(),
@@ -186,6 +187,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             selection.0.call.target->Function_file == rows[index].target_file,
             selection.0.call.target->Function_entry == rows[index].target_entry,
             0 <= selection.1.0 < selection.1.1 < plan.order_model().len(),
+            selection.1.1 == caller_rank,
             plan.position_model(selection.1.0) == Some((rows[index].target_file, rows[index].target_entry)),
             plan.position_model(selection.1.1) == Some((caller.0, caller.1)),
             selection.0.signature is Function,
@@ -208,7 +210,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let local = (row.definition - start) as usize;
         self.typed_call_arguments_ready(file, entry, local, 0, limit, call);
         let site = self.expansion_site_for_call(DefinitionPosition { file, entry, definition: local, reference: 0 }, call.call);
-        let order = self.function_expansion_callee_precedes(plan, site);
+        let order = (self.template_callee_precedes(plan, caller_rank, site), caller_rank);
         assert(call.call.target->Function_file == row.target_file && call.call.target->Function_entry == row.target_entry);
         assert(0 <= order.0 < order.1 < plan.order_model().len());
         assert(site.target == (row.target_file, row.target_entry));

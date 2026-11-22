@@ -189,6 +189,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 指定した関数とその依存先の展開結果に、返した回路または診断を対応付ける。
+    pub closed spec fn expand_reachable_function_result(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize,
+        result: Result<Option<LoweredBitFunc>, ExpandFunctionsError>,
+    ) -> bool {
+        match result {
+            Ok(None) => self.reachable_function_expansion_evidence(root, Ok(None)),
+            Err(ExpandFunctionsError::Plan(error)) => self.reachable_function_expansion_evidence(root, Err(error)),
+            Err(error) => exists|plan: FunctionExpansionOrder, failure: FunctionTemplateBuildError|
+                #![trigger self.reachable_function_expansion_evidence(root, Ok(Some(plan))), expansion_diagnostic(failure)]
+                self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+                && self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Err(failure))
+                && expansion_diagnostic(failure) == error,
+            Ok(Some(circuit)) => exists|plan: FunctionExpansionOrder, table: FunctionTemplates, rank: int|
+                #![trigger self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Ok(table)),
+                    plan.position_model(rank)]
+            {
+                &&& self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+                &&& self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Ok(table))
+                &&& 0 <= rank < plan.order_model().len()
+                &&& plan.position_model(rank) == Some(root)
+                &&& plan.order_model()[rank] < table.slots_model().len()
+                &&& table.slots_model()[plan.order_model()[rank] as int] matches Some(template)
+                &&& circuit == *template.circuit_model()
+            },
+        }
+    }
+
     /// 指定した宣言をソースの規則で評価したとき、入出力の値が対応することを表す。
     pub closed spec fn expanded_function_source_evaluation(
         &self, expanded: &ExpandedFunctions, file: usize, entry: usize, width_limit: u64,
@@ -219,6 +247,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> expected == outputs
         },
     {
+        self.whole_function_template_plan(expanded.plan);
         self.completed_templates_ready(&expanded.plan, width_limit, bit_limit, gate_limit, &expanded.table);
         let rank = choose|rank: int| {
             &&& 0 <= rank < expanded.plan.order_model().len()
@@ -242,6 +271,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.template_rank_from_position(expanded.plan, (file, entry), rank, other);
             self.project_source_func_evaluations_agree(&expanded.plan, width_limit, rank, inputs, expected, outputs);
         };
+    }
+
+    /// 指定した `func` とその呼び出し先だけを展開し、指定した関数のネットリストを返す。
+    ///
+    /// ファイルと厳格索引項目の添字が関数を指さない場合は `None` を返す。
+    /// 上限の意味は [Self::expand_functions] と同じで、展開する各関数に適用する。
+    /// 構造体型を使う場合は、プロジェクトの型宣言も検査する。
+    ///
+    /// # Errors
+    ///
+    /// 到達した呼び出しを解決できないか、そこに循環がある場合は計画の診断を返す。
+    /// 計画ができた場合は、展開順で最初に変換できなかった関数の位置と診断を返す。
+    pub fn expand_reachable_function(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize,
+    ) -> (result: Result<Option<LoweredBitFunc>, ExpandFunctionsError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures
+            self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, result),
+            result matches Ok(Some(circuit)) ==> nor_evaluation_ready(
+                circuit.netlist_model(), circuit.input_layout_model().total_bits_model() as nat)
+                && circuit.netlist_model().outputs@.len() == circuit.output_layout_model().total_bits_model(),
+    {
+        let plan = match self.prepare_reachable_function_expansion(root) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(ExpandFunctionsError::Plan(error)),
+        };
+        let ghost rank = self.reachable_function_template_plan(root, plan);
+        let table = match self.expand_templates_in_order(&plan, width_limit, bit_limit, gate_limit) {
+            Ok(table) => table,
+            Err(error) => return Err(public_diagnostic(error)),
+        };
+        proof { self.completed_templates_ready(&plan, width_limit, bit_limit, gate_limit, &table); }
+        let vertex = plan.template_vertex(root);
+        proof { plan.template_vertex_at_position(root, rank, vertex); }
+        let Some(vertex) = vertex else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        let ghost built = table;
+        let circuit = table.into_circuit_at_vertex(vertex);
+        assert(0 <= rank < plan.order_model().len());
+        assert(built.slots_model()[vertex as int] matches Some(template) && circuit == Some(*template.circuit_model()));
+        Ok(circuit)
     }
 
     /// プロジェクト内のすべての `func` を依存順にネットリストへ展開する。
@@ -288,6 +361,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(plan) => plan,
             Err(error) => return Err(ExpandFunctionsError::Plan(error)),
         };
+        proof { self.whole_function_template_plan(plan); }
         let table = match self.expand_templates_in_order(&plan, width_limit, bit_limit, gate_limit) {
             Ok(table) => table,
             Err(error) => return Err(public_diagnostic(error)),

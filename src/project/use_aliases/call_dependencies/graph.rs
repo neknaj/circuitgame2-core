@@ -801,6 +801,79 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 関数の展開に必要な格納位置と、ソース上の呼び出し先の先行順を表す。
+    #[verifier::opaque]
+    pub(in crate::project::use_aliases) closed spec fn function_template_plan(&self, plan: FunctionExpansionOrder) -> bool {
+        let order = plan.order_model();
+        &&& plan.project_model() == self.targets.project_model()
+        &&& forall|i: int| 0 <= i < order.len() ==>
+            (#[trigger] order[i]) < order.len() && plan.position_model(i).is_some()
+        &&& forall|i: int, j: int| 0 <= i < j < order.len() ==>
+            (#[trigger] order[i]) != (#[trigger] order[j])
+        &&& forall|i: int, j: int| 0 <= i < j < order.len() ==>
+            (#[trigger] plan.position_model(i)) != (#[trigger] plan.position_model(j))
+        &&& forall|i: int, site: FunctionCallSite|
+            #[trigger] self.expansion_call_in_source(site)
+                && #[trigger] plan.position_model(i) == Some((site.position.file, site.position.entry))
+            ==> exists|j: int| 0 <= j < i && #[trigger] plan.position_model(j) == Some(site.target)
+    }
+
+    pub(in crate::project::use_aliases) proof fn whole_function_template_plan(&self, plan: FunctionExpansionOrder)
+        requires self.can_resolve(), self.function_expansion_evidence(Ok(plan)),
+        ensures self.function_template_plan(plan),
+    {
+        self.template_index_evidence(plan);
+        reveal(FunctionExpansionOrder::source_positions_complete);
+        assert forall|i: int, site: FunctionCallSite|
+            #[trigger] self.expansion_call_in_source(site)
+                && #[trigger] plan.position_model(i) == Some((site.position.file, site.position.entry))
+            implies exists|j: int| 0 <= j < i && #[trigger] plan.position_model(j) == Some(site.target) by {
+            let order = self.function_expansion_callee_precedes(plan, site);
+            self.template_rank_from_position(plan, (site.position.file, site.position.entry), order.1, i);
+            assert(plan.position_model(order.0) == Some(site.target));
+        };
+        reveal(UseAliases::function_template_plan);
+    }
+
+    pub(in crate::project::use_aliases) proof fn function_template_indices(&self, plan: FunctionExpansionOrder)
+        requires self.function_template_plan(plan),
+        ensures
+            plan.project_model() == self.targets.project_model(),
+            forall|rank: int| 0 <= rank < plan.order_model().len() ==>
+                (#[trigger] plan.order_model()[rank]) < plan.order_model().len() && plan.position_model(rank).is_some(),
+            forall|a: int, b: int| 0 <= a < b < plan.order_model().len() ==>
+                (#[trigger] plan.order_model()[a]) != (#[trigger] plan.order_model()[b]),
+    {
+        reveal(UseAliases::function_template_plan);
+    }
+
+    pub(in crate::project::use_aliases) proof fn function_template_rank_at(
+        &self, plan: FunctionExpansionOrder, position: (usize, usize), first: int, other: int,
+    )
+        requires
+            self.function_template_plan(plan),
+            plan.position_model(first) == Some(position),
+            plan.position_model(other) == Some(position),
+        ensures first == other,
+    {
+        reveal(UseAliases::function_template_plan);
+    }
+
+    pub(in crate::project::use_aliases) proof fn template_callee_precedes(
+        &self, plan: FunctionExpansionOrder, caller: int, site: FunctionCallSite,
+    ) -> (rank: int)
+        requires
+            self.function_template_plan(plan),
+            self.expansion_call_in_source(site),
+            plan.position_model(caller) == Some((site.position.file, site.position.entry)),
+        ensures
+            0 <= rank < caller < plan.order_model().len(),
+            plan.position_model(rank) == Some(site.target),
+    {
+        reveal(UseAliases::function_template_plan);
+        choose|rank: int| 0 <= rank < caller && #[trigger] plan.position_model(rank) == Some(site.target)
+    }
+
     /// 展開順の各頂点を重複のない格納先として使えることを示す。
     pub(in crate::project::use_aliases) proof fn template_index_evidence(&self, plan: FunctionExpansionOrder)
         requires self.function_expansion_evidence(Ok(plan)),
@@ -841,23 +914,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(order[i] < rank.len());
             assert(plan.position_model(i).is_some()) by { reveal(FunctionExpansionOrder::source_positions_complete); };
         };
-    }
-
-    /// 通常関数への依存辺の有無にかかわらず、検査済みの呼び出し元の順位を得る。
-    pub(in crate::project::use_aliases) proof fn checked_function_rank(
-        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), wiring: super::super::FuncWiring,
-    ) -> (rank: int)
-        requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(plan)),
-            self.func_wiring_evidence(caller.0, caller.1, caller.2, Ok(super::super::FuncWiringResult::Checked(wiring))),
-        ensures 0 <= rank < plan.order_model().len(), plan.position_model(rank) == Some((caller.0, caller.1)),
-    {
-        self.checked_wiring_is_func(caller.0, caller.1, caller.2, wiring);
-        self.template_index_evidence(plan);
-        reveal(FunctionExpansionOrder::source_positions_complete);
-        let position = (caller.0, caller.1);
-        assert(function_position(plan.project_model().circuits_model(), position));
-        choose|rank: int| 0 <= rank < plan.order_model().len() && #[trigger] plan.position_model(rank) == Some(position)
     }
 
     pub(in crate::project::use_aliases) proof fn template_rank_from_position(
@@ -1070,6 +1126,54 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(ranks[row] == caller_rank);
         assert(ranks[caller] == order.1);
         order
+    }
+
+    pub(in crate::project::use_aliases) proof fn reachable_function_template_plan(
+        &self, root: (usize, usize), plan: FunctionExpansionOrder,
+    ) -> (root_rank: int)
+        requires self.can_resolve(), self.reachable_function_expansion_evidence(root, Ok(Some(plan))),
+        ensures self.function_template_plan(plan), plan.position_model(root_rank) == Some(root),
+    {
+        let (vertices, source_rows, flat, graph, rows) = choose|
+            vertices: FunctionVertices, source_rows: Seq<Vec<FunctionCallSite>>,
+            flat: Seq<IndexedFunctionCallSite>, graph: Seq<Vec<Option<usize>>>, rows: Seq<Vec<usize>>|
+            #![trigger self.reachable_function_rows(root, vertices.positions_model(), source_rows),
+                self.function_graph_sites_match(vertices.positions_model(), graph, flat, rows)]
+            self.reachable_function_rows(root, vertices.positions_model(), source_rows)
+            && self.function_graph_sites_match(vertices.positions_model(), graph, flat, rows)
+            && plan.project_model() == self.targets.project_model()
+            && plan.vertices == vertices && vertices.positions_model().no_duplicates()
+            && complete_dependency_order(graph, plan.order@);
+        let order = plan.order@;
+        let ranks = choose|ranks: Seq<nat>| #[trigger] super::super::dependency_order::dependencies_in_order(graph, ranks)
+            && order.len() == graph.len() && super::super::dependency_order::completion_order_matches(order, ranks)
+            && (forall|node: int| #![trigger ranks[node]] 0 <= node < graph.len()
+                ==> ranks[node] < order.len() && order[ranks[node] as int] == node);
+        assert forall|i: int| 0 <= i < order.len() implies
+            (#[trigger] order[i]) < order.len() && plan.position_model(i).is_some() by {
+            assert(order[i] < ranks.len());
+        };
+        assert forall|i: int, j: int| 0 <= i < j < order.len() implies
+            (#[trigger] order[i]) != (#[trigger] order[j]) by {
+            assert(ranks[order[i] as int] == i);
+            assert(ranks[order[j] as int] == j);
+        };
+        assert forall|i: int, j: int| 0 <= i < j < order.len() implies
+            (#[trigger] plan.position_model(i)) != (#[trigger] plan.position_model(j)) by {
+            assert(order[i] != order[j]);
+            assert(vertices.positions_model()[order[i] as int] != vertices.positions_model()[order[j] as int]);
+        };
+        assert forall|i: int, site: FunctionCallSite|
+            #[trigger] self.expansion_call_in_source(site)
+                && #[trigger] plan.position_model(i) == Some((site.position.file, site.position.entry))
+            implies exists|j: int| 0 <= j < i && #[trigger] plan.position_model(j) == Some(site.target) by {
+            let pair = self.reachable_function_callee_precedes(root, plan, i, site);
+            assert(plan.position_model(pair.0) == Some(site.target));
+        };
+        reveal(UseAliases::function_template_plan);
+        self.reachable_rows_start_at_root(root, vertices.positions_model(), source_rows);
+        assert(order[ranks[0] as int] == 0);
+        ranks[0] as int
     }
 
     /// プロジェクトの `func` を呼び出し先から展開できる順に並べる。

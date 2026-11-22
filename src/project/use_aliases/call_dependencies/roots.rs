@@ -313,6 +313,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             ==> found.contains((#[trigger] rows[i]@[j]).target)
     }
 
+    pub(super) proof fn reachable_rows_start_at_root(&self, root: Position, found: Seq<Position>,
+        rows: Seq<Vec<FunctionCallSite>>,
+    )
+        requires self.reachable_function_rows(root, found, rows),
+        ensures 0 < found.len(), found[0] == root,
+    {}
+
     pub(super) proof fn reachable_call_evidence(&self, root: Position, found: Seq<Position>, rows: Seq<Vec<FunctionCallSite>>,
         i: int, j: int)
         requires self.reachable_function_rows(root, found, rows),

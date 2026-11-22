@@ -568,7 +568,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         parsed: &'s NamedBuildCircuit, Ghost(prepared): Ghost<&PreparedExpansionBody<'p, 'a>>, Ghost(caller): Ghost<(usize, usize, u64)>,
     ) -> (bindings: Vec<NorBinding<'s, 'p, 'a>>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.function_templates_match(plan, caller.2, table),
             plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
@@ -593,7 +593,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut i = 0usize;
         while i < roots.len()
             invariant
-                self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.can_resolve(), self.function_template_plan(*plan),
                 self.function_templates_match(plan, caller.2, table),
                 plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
                 self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
@@ -2480,7 +2480,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> (selection: (Vec<NorDefinition<'s, 'p, 'a>>, Vec<NorBinding<'s, 'p, 'a>>))
         requires
             self.projection_context(scope), self.projection_structures_match(scope),
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.function_templates_match(plan, scope.limit, table),
             plan.position_model(table.next_rank() as int) == Some((scope.file, scope.entry)),
             self.prepared_expansion_body_matches(*plan, scope.file, scope.entry, scope.limit, prepared),
@@ -2614,7 +2614,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         caller: (usize, usize, u64), prepared: PreparedExpansionBody<'p, 'a>, layout_limit: usize, gate_limit: usize,
     ) -> (result: Result<ExpandedBody<'p, 'a>, ExpandedBodyError<'p, 'a>>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.function_templates_match(plan, caller.2, templates),
             plan.position_model(templates.next_rank() as int) == Some((caller.0, caller.1)),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
