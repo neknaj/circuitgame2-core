@@ -299,6 +299,30 @@ impl<'p, 'a> UseTargets<'p, 'a> {
         }
     }
 
+    /// 断片の厳格索引位置から対応を一意に決められることを示す。
+    proof fn module_part_positions_distinct(&self, parts: &Vec<ModulePartBinding<'p, 'a>>, i: int, j: int)
+        requires self.covers_project(), self.module_parts_result(Ok(*parts)), 0 <= i < j < parts@.len(),
+        ensures parts@[i].part_position != parts@[j].part_position,
+    {
+        reveal(UseTargets::bindings_before);
+        let a = parts@[i];
+        let b = parts@[j];
+        if a.part_position == b.part_position {
+            let project = self.project_model();
+            let file = a.part_position.file;
+            assert(self.module_part_resolution(file, a.part_name, Ok(a)));
+            assert(self.module_part_resolution(file, b.part_name, Ok(b)));
+            self.parsed_project_model();
+            let parsed = project.circuits_model()[file as int];
+            let source = project.sources_model()[file as int];
+            parsed_index_evidence(source, parsed);
+            reveal(crate::syntax::circuit::named_forms_match);
+            assert(a.part_name < b.part_name);
+            assert(parsed.names@[a.part_name as int].form < parsed.names@[b.part_name as int].form);
+            assert(a.part.form == b.part.form);
+        }
+    }
+
     /// プロジェクト内の全断片を、その所有モジュールに対応付けてソース順に返す。
     ///
     /// # Errors

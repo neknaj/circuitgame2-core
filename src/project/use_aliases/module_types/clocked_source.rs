@@ -207,6 +207,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         let drivers = checked.module.expressions.typed.sources.roots.wiring.drivers;
         &&& builtin_nor_template(&builtin.netlist_model())
+        &&& super::primitive_nor::one_bit_ports(drivers.signature.inputs@, drivers.signature.inputs@.len() as int)
+        &&& super::primitive_nor::one_bit_ports(drivers.signature.outputs@, drivers.signature.outputs@.len() as int)
         &&& exists|instances: Seq<SourceInstance>, counts: Seq<usize>|
             #![trigger self.instances_match_source_calls(checked, instances, edges, templates, builtin),
                 source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)]

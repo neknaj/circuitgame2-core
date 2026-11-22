@@ -31,8 +31,8 @@ pub use source_trace::{
 };
 #[cfg(verus_only)]
 pub(crate) use source_trace::{
-    source_clocked_layout_from_pairs, source_gate_wiring_pair, source_output_pair_at, source_output_pairs,
-    source_output_wiring_pair, source_wire_pair,
+    source_clocked_layout_from_pairs, source_gate_positions_distinct, source_gate_wiring_pair, source_output_pair_at, source_output_pairs,
+    source_output_wiring_pair, source_trace_gate_index, source_trace_layout_counts, source_wire_pair,
 };
 #[cfg(verus_only)]
 pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};

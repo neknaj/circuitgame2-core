@@ -15,6 +15,10 @@ use crate::project::use_aliases::dependency_order::{
 use vstd::laws_cmp::obeys_cmp;
 #[cfg(verus_only)]
 use super::{builtin_nor_template, edge_templates_ready};
+#[cfg(verus_only)]
+use super::semantics::{ModuleSourceLayout, call_layout_is_ready, prior_layout_at};
+#[cfg(verus_only)]
+mod source_models;
 
 verus! {
 
@@ -167,10 +171,11 @@ spec fn graph_targets_loaded(graph: Seq<Vec<Option<usize>>>, modules: Seq<Option
 }
 
 spec fn completed_templates(modules: Seq<Option<ModuleCalls>>, rank: Seq<nat>, templates: Seq<Option<ClockedNor>>,
-    stop: int) -> bool
+    layouts: Seq<Option<ModuleSourceLayout>>, positions: Seq<ModuleBodyPosition>, stop: int) -> bool
 {
-    forall|node: int| 0 <= node < modules.len() && rank[node] < stop && modules[node].is_some()
-        ==> (#[trigger] templates[node]).is_some()
+    &&& layouts.len() == templates.len() == positions.len() == modules.len()
+    &&& forall|node: int| 0 <= node < modules.len() && rank[node] < stop && modules[node].is_some()
+        ==> #[trigger] prior_layout_at(templates, layouts, node, positions[node])
 }
 
 spec fn unseen_matches(seen: Seq<bool>, unseen: Set<usize>) -> bool {
@@ -191,6 +196,18 @@ spec fn call_vertex(call: &crate::project::CheckedModuleCall, vertices: Map<Posi
         ModuleCallTarget::Routine { position, .. } if vertices.contains_key(key(position)) => Some(vertices[key(position)]),
         _ => None,
     }
+}
+
+proof fn call_vertex_position(call: &crate::project::CheckedModuleCall, vertices: Map<Position, usize>,
+    positions: Seq<ModuleBodyPosition>, child: usize)
+    requires vertex_index_matches(positions, vertices), call_vertex(call, vertices) == Some(child),
+    ensures child < positions.len(),
+        call.inputs.ports.signature.target matches ModuleCallTarget::Routine { position, .. }
+            && positions[child as int] == position,
+{
+    let target = call.inputs.ports.signature.target;
+    assert(target is Routine);
+    assert(key(positions[child as int]) == key(target->Routine_position));
 }
 
 spec fn edges_match(modules: Seq<Option<ModuleCalls>>, graph: Seq<Vec<Option<usize>>>,
@@ -474,6 +491,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// 入出力は単一ビットで、各右辺は信号名か定数を直接渡すモジュールまたは基底 NOR の呼び出しとする。
     /// 同じ宣言の展開結果は共有し、ゲート番号は呼び出しごとに割り当てる。
+    /// 返した回路をソースの参照回路と同じ入力列で実行すると、reset 直後と各 tick の公開出力が一致する。
     /// 指定位置がモジュールを指さなければ `None` を返す。
     ///
     /// # Errors
@@ -490,7 +508,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.module_calls_result(owner, width_limit, Err(error)),
             result matches Ok(Some(circuit)) ==> circuit.netlist_model().gates@.len() <= gate_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
-                && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model()),
+                && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
+                && self.clocked_module_source_layout(owner, width_limit, &circuit.netlist_model()),
     {
         let (positions, vertices) = indexed_modules(self.targets.project(), owner);
         let Some(checked) = self.reachable_modules(owner, &positions, &vertices, width_limit)? else { return Ok(None); };
@@ -517,6 +536,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && completion_order_matches(order@, rank)
             && (forall|node: int| #![trigger rank[node]] 0 <= node < checked.graph@.len()
                 ==> rank[node] < order@.len() && order@[rank[node] as int] == node);
+        let ghost mut layouts = Seq::new(size as nat, |_: int| None::<ModuleSourceLayout>);
+        proof { self.empty_source_table(positions@, width_limit, checked.modules@, rank, layouts); }
         let mut i = 0;
         while i < order.len()
             invariant
@@ -527,7 +548,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 forall|vertex: int| #![trigger rank[vertex]] 0 <= vertex < size
                     ==> rank[vertex] < order@.len() && order@[rank[vertex] as int] == vertex,
                 dependencies_in_order(checked.graph@, rank), graph_targets_loaded(checked.graph@, checked.modules@),
-                completed_templates(checked.modules@, rank, templates@, i as int),
+                completed_templates(checked.modules@, rank, templates@, layouts, positions@, i as int),
+                vertex_index_matches(positions@, vertices@), edges_match(checked.modules@, checked.graph@, vertices@),
+                self.source_model_table(positions@, width_limit, checked.modules@, rank, layouts),
+                forall|j: int| 0 <= j < layouts.len() && (#[trigger] layouts[j]).is_some() ==> rank[j] < i,
                 builtin_nor_template(&builtin.netlist_model()),
                 i <= rank[0] < order@.len(), order@[rank[0] as int] == 0usize,
             decreases order@.len() - i,
@@ -537,34 +561,87 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if let Some(loaded) = &checked.modules[node] {
                 let edges = &checked.graph[node];
                 proof { vstd::std_specs::vec::axiom_spec_len(edges); }
-                assert forall|field: int| 0 <= field < checked.graph@[node as int]@.len() implies
-                    ((#[trigger] checked.graph@[node as int]@[field]) matches Some(child)
-                        ==> child < size && templates@[child as int].is_some()) by {
-                    if let Some(child) = checked.graph@[node as int]@[field] {
-                        assert(child < size);
+                assert forall|field: int| 0 <= field < edges@.len() implies #[trigger]
+                    call_layout_is_ready(&loaded.calls@[field], edges@[field], templates@, layouts) by {
+                    if let Some(child) = edges@[field] {
                         assert(field as usize as int == field);
+                        let call = &loaded.calls@[field];
+                        assert(edges@[field] == checked.graph@[node as int]@[field]);
+                        assert(call_vertex(call, vertices@) == Some(child));
+                        call_vertex_position(call, vertices@, positions@, child);
+                        let position = call.inputs.ports.signature.target->Routine_position;
                         let edge = DependencyEdge { from: node, to: child, field: field as usize };
                         assert(dependency_edge(checked.graph@, edge));
                         assert(rank[child as int] < rank[node as int]);
+                        assert(prior_layout_at(templates@, layouts, child as int, position));
                     }
                 };
-                assert(edge_templates_ready(checked.graph@[node as int]@, templates@));
+                assert(edge_templates_ready(edges@, templates@)) by {
+                    assert forall|field: int| 0 <= field < edges@.len() implies
+                        ((#[trigger] edges@[field]) matches Some(child) ==> child < size && templates@[child as int].is_some()) by {
+                        assert(call_layout_is_ready(&loaded.calls@[field], edges@[field], templates@, layouts));
+                    };
+                };
                 let circuit = self.lower_checked_module(positions[node], width_limit, gate_limit, loaded, edges,
                     &templates, &builtin)?;
-                if node == 0 { return Ok(Some(circuit)); }
+                let ghost layout = self.source_layout_from_compiled(positions@[node as int], width_limit, loaded,
+                    edges@, templates@, layouts, &builtin, &circuit.netlist_model());
+                proof {
+                    assert(layouts[node as int].is_none());
+                    assert forall|field: int| 0 <= field < loaded.calls@.len() implies #[trigger]
+                        source_models::source_call_in_table(loaded, layout, positions@, rank, layouts, node as int, field) by {
+                        let call = loaded.calls@[field];
+                        self.source_layer_call_supported(loaded, &layout.circuit, &layout.layer, field);
+                        if call.inputs.ports.signature.target is Routine {
+                            assert(edges@[field].is_some());
+                            let child = edges@[field]->Some_0;
+                            assert(edges@[field] == checked.graph@[node as int]@[field]);
+                            assert(call_vertex(&call, vertices@) == Some(child));
+                            call_vertex_position(&call, vertices@, positions@, child);
+                            assert(call_layout_is_ready(&call, edges@[field], templates@, layouts));
+                            let edge = DependencyEdge { from: node, to: child, field: field as usize };
+                            assert(dependency_edge(checked.graph@, edge));
+                            assert(rank[child as int] < rank[node as int]);
+                            self.source_call_for_child(loaded, layout, positions@, rank, layouts, node as int, field, child as int);
+                        }
+                    };
+                    self.extend_source_table(positions@, width_limit, checked.modules@, rank, layouts, node as int, layout);
+                }
+                if node == 0 {
+                    proof {
+                        assert forall|a: int, b: int| 0 <= a < b < positions@.len() implies
+                            #[trigger] positions@[a] != #[trigger] positions@[b] by {
+                            let first = key(positions@[a]);
+                            let second = key(positions@[b]);
+                            assert(vertices@[first] == a && vertices@[second] == b);
+                        };
+                        self.source_model_for_root(owner, width_limit, positions@, checked.modules@, rank,
+                            layouts.update(0, Some(layout)), &circuit.netlist_model());
+                    }
+                    return Ok(Some(circuit));
+                }
                 let ghost previous = templates@;
+                let ghost previous_layouts = layouts;
                 templates.set(node, Some(circuit));
+                proof { layouts = layouts.update(node as int, Some(layout)); }
+                assert forall|j: int| 0 <= j < layouts.len() && (#[trigger] layouts[j]).is_some() implies rank[j] < i + 1 by {
+                    if j != node { assert(layouts[j] == previous_layouts[j]); }
+                };
                 assert forall|child: int| 0 <= child < checked.modules@.len() && rank[child] < i + 1
-                    && checked.modules@[child].is_some() implies (#[trigger] templates@[child]).is_some() by {
+                    && checked.modules@[child].is_some() implies #[trigger]
+                    prior_layout_at(templates@, layouts, child, positions@[child]) by {
                     if child != node {
                         assert(child == order@[rank[child] as int]);
                         assert(rank[child] < i);
                         assert(templates@[child] == previous[child]);
+                        assert(layouts[child] == previous_layouts[child]);
+                        assert(prior_layout_at(previous, previous_layouts, child, positions@[child]));
                     }
                 };
             } else {
                 assert forall|child: int| 0 <= child < checked.modules@.len() && rank[child] < i + 1
-                    && checked.modules@[child].is_some() implies (#[trigger] templates@[child]).is_some() by {
+                    && checked.modules@[child].is_some() implies #[trigger]
+                    prior_layout_at(templates@, layouts, child, positions@[child]) by {
                     assert(child == order@[rank[child] as int] && child != node);
                     assert(rank[child] < i);
                 };

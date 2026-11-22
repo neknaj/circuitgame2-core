@@ -83,6 +83,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.inferred_module_call_plan(&checked.module, row.at, limit, row.inputs);
     }
 
+    /// 同じモジュールを組み立てる呼び出しが、互いに異なるソース位置を持つことを示す。
+    pub(in crate::project::use_aliases::module_types) proof fn module_call_sites_distinct(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, i: int, j: int,
+    )
+        requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            0 <= i < j < checked.calls@.len(),
+        ensures checked.calls@[i].at != checked.calls@[j].at,
+    {
+        reveal(UseAliases::module_calls_before);
+        let a = checked.calls@[i];
+        let b = checked.calls@[j];
+        assert(before(row_cursor(a), row_cursor(b)));
+        if a.at == b.at {
+            assert(a.member < b.member);
+            self.module_calls_type_evidence(owner, limit, checked);
+            self.module_output_types_evidence(owner, limit, checked.module);
+            self.module_selections_evidence(owner, limit, checked.module.expressions);
+            let drivers = checked.module.expressions.typed.sources.roots.wiring.drivers;
+            self.checked_module_driver_body(owner, limit, drivers);
+            self.targets.module_body_members_distinct(&drivers.body, a.member as int, b.member as int);
+            assert(drivers.body.members@[a.member as int] == drivers.body.members@[b.member as int]);
+        }
+    }
+
     spec fn module_call_body(module: &ModuleOutputTypes) -> ModuleBody {
         module.expressions.typed.sources.roots.wiring.drivers.body
     }

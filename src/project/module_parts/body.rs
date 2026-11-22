@@ -53,6 +53,29 @@ spec fn has_body(project: &CircuitProject, position: ModuleBodyPosition, head: H
     &&& circuits[position.file as int].syntax.entries@[position.entry as int].head == head
 }
 
+proof fn selected_part_at(owner: ModuleBodyPosition, parts: Seq<ModulePartBinding>, count: nat, i: int)
+    -> (part: int)
+    requires count <= parts.len(), 0 < i < member_positions(owner, parts, count).len(),
+    ensures 0 <= part < count,
+        i == member_positions(owner, parts, part as nat).len(),
+        parts[part].part_position == member_positions(owner, parts, count)[i],
+    decreases count,
+{
+    reveal(member_positions);
+    if count == 0 {
+        assert(false);
+        0
+    } else {
+        let end = (count - 1) as nat;
+        let prior = member_positions(owner, parts, end);
+        if i < prior.len() {
+            selected_part_at(owner, parts, end, i)
+        } else {
+            end as int
+        }
+    }
+}
+
 spec fn body_definitions(project: &CircuitProject, position: ModuleBodyPosition) -> Seq<ModuleDefinition> {
     let defs = project.circuits_model()[position.file as int].entry_ranges@[position.entry as int].definitions;
     Seq::new((defs.end - defs.start) as nat, |i: int| ModuleDefinition { body: position, local: i as usize })
@@ -154,6 +177,31 @@ impl<'p, 'a> UseTargets<'p, 'a> {
                 == if index == 0 { Head::Module } else { Head::ModulePart }
         }),
     {
+    }
+
+    /// 各断片の位置が、組み立てた本体に一度だけ現れることを示す。
+    pub(in crate::project) proof fn module_body_members_distinct(&self, body: &ModuleBody, i: int, j: int)
+        requires self.covers_project(), self.module_body_result(body.owner, Ok(Some(*body))),
+            0 <= i < j < body.members@.len(),
+        ensures body.members@[i] != body.members@[j],
+    {
+        if i == 0 {
+            self.module_body_member(body, i);
+            self.module_body_member(body, j);
+        } else {
+            let parts = choose|parts: Vec<ModulePartBinding>| #[trigger] self.module_parts_result(Ok(parts))
+                && body.members@ == member_positions(body.owner, parts@, parts@.len());
+            let a = selected_part_at(body.owner, parts@, parts@.len(), i);
+            let b = selected_part_at(body.owner, parts@, parts@.len(), j);
+            if a < b {
+                self.module_part_positions_distinct(&parts, a, b);
+            } else if b < a {
+                self.module_part_positions_distinct(&parts, b, a);
+            } else {
+                // 同じ断片より前に選んだ断片の数が等しければ、本体内の添字も等しい。
+                assert(false);
+            }
+        }
     }
 
     /// 指定したモジュールの定義を全断片から集める。

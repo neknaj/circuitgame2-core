@@ -183,6 +183,36 @@ pub(crate) proof fn source_gate_wiring_pair(
 {
 }
 
+/// ゲート番号の対応が一対一であることを示す。
+pub(crate) proof fn source_gate_positions_distinct(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>, a: int, b: int,
+)
+    requires source_clocked_layout(source, netlist, order, index), 0 <= a < b < order.len(),
+    ensures order[a] != order[b],
+{
+    assert(index[order[a]] == a && index[order[b]] == b);
+}
+
+/// 対応表の入出力数とゲート列の長さがネットリストと一致することを示す。
+pub(crate) proof fn source_trace_layout_counts(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>,
+)
+    requires source_clocked_layout(source, netlist, order, index),
+    ensures source.input_count == netlist.input_count, order.len() == netlist.gates@.len(),
+        source.outputs.len() == netlist.outputs@.len(),
+{
+}
+
+/// ソース上の識別子を、対応するゲート番号に結び付ける。
+pub(crate) proof fn source_trace_gate_index(
+    source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>,
+    site: SourceGateId,
+)
+    requires source_clocked_layout(source, netlist, order, index), source.gates.dom().contains(site),
+    ensures index.dom().contains(site), 0 <= index[site] < order.len(), order[index[site]] == site,
+{
+}
+
 /// 指定した公開出力が、ソースとネットリストで対応する配線を指すことを示す。
 pub(crate) proof fn source_output_wiring_pair(
     source: &SourceTickCircuit, netlist: &NorNetlist, order: Seq<SourceGateId>, index: Map<SourceGateId, int>, port: int,

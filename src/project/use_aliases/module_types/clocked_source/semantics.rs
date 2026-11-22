@@ -20,6 +20,10 @@ use crate::project::DefinitionPosition;
 use core::ops::Range;
 use vstd::prelude::*;
 
+mod hierarchy_layout;
+mod reference;
+pub(super) use hierarchy_layout::{ModuleSourceLayout, call_layout_is_ready, prior_layout_at};
+
 verus! {
 
 enum SourceLink {
