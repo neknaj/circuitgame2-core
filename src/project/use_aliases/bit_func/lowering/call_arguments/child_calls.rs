@@ -1203,6 +1203,14 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn nested_gate_ins
         initial.len() <= gate < final_gates.len() <= usize::MAX,
     ensures nested_gate_instance(caller, calls, count, arguments, layout, callee, initial, final_gates,
         input_bits, outputs, gate, result.0, result.1, result.2),
+        ({
+            let (i, before, mapped) = result;
+            let target = if i == calls.len() { callee } else { calls[i].circuit };
+            &&& 0 <= i <= calls.len()
+            &&& initial.len() <= before.len() <= gate < before.len() + target.gates@.len() <= final_gates.len()
+            &&& instance_gates_match(before, target.gates@, mapped,
+                final_gates.take((before.len() + target.gates@.len()) as int))
+        }),
 {
     reveal(nested_root_wiring_matches);
     reveal(child_wiring_trace_matches);

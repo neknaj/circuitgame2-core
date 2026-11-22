@@ -38,7 +38,9 @@ use crate::syntax::Form;
 use super::call_group::{
     WiringView, call_group_result, call_group_values, call_group_wires_match, call_output_bit_has_value, wiring_view_is_prefix,
     nested_call_group_frame, nested_call_group_result, nor_call_group_evaluation_matches, nor_call_group_frame,
-    nor_call_group_result, nor_call_group_values,
+    nor_call_group_result, nor_call_group_values, CallGateWiring, call_gate_wiring_matches, flat_call_group_gate,
+    nested_call_group_gate, nor_call_group_gate, flat_call_group_gate_matches, nested_call_group_gate_matches,
+    nor_call_group_gate_matches,
 };
 #[cfg(verus_only)]
 use super::super::instances::{instance_gates_match, instance_wire_values};
@@ -850,6 +852,79 @@ pub(super) proof fn rooted_trace_gate_step(
         assert(step.after.gates[gate] == added->Some_0);
     }
     at
+}
+
+pub(super) closed spec fn gate_call_in_definition(
+    layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    step: WiringStep, final_wiring: WiringView, gate: int, call: Option<CallGateWiring>,
+) -> bool {
+    if step.nor_before != step.nor_after {
+        &&& 0 <= step.nor_before < roots.len()
+        &&& call matches Some(row)
+        &&& step.nested matches Some(nested)
+        &&& call_gate_wiring_matches(row, step.before.gates, final_wiring.gates, gate)
+        &&& {
+            let root = roots[step.nor_before as int];
+            nor_call_group_gate_matches(row, &root.selected, *root.references, forms, layouts,
+                &nested.builtin, step.before, step.after, gate)
+        }
+    } else if step.group_before != step.group_after {
+        &&& 0 <= step.group_before < bindings.len()
+        &&& call matches Some(row)
+        &&& call_gate_wiring_matches(row, step.before.gates, final_wiring.gates, gate)
+        &&& {
+            let binding = bindings[step.group_before as int];
+            let selected = binding._selection@;
+            match step.nested {
+                Some(nested) => nested_call_group_gate_matches(row, &selected, forms, layouts, &nested.builtin, step.before, step.after, gate),
+                None => flat_call_group_gate_matches(row, binding.group, forms, binding.arguments@, layouts, selected.template,
+                    step.before, step.after, binding._output_widths@, gate),
+            }
+        }
+    } else {
+        call.is_none()
+    }
+}
+
+/// ゲートを追加した段が呼び出しなら、その定義内の参照番号と実引数の配線を取り出す。
+pub(super) proof fn rooted_trace_gate_call<'s, 'p, 'a>(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding<'s, 'p, 'a>>,
+    roots: Seq<NorBinding<'s, 'p, 'a>>, limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize,
+    final_wiring: WiringView, gate: int,
+) -> (result: (int, Option<CallGateWiring<'s, 'p, 'a>>))
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        forall|g: int| 0 <= g < bindings.len() ==> binding_matches_selection(#[trigger] bindings[g], bindings[g]._selection@),
+        0 <= gate < final_wiring.gates.len(),
+    ensures
+        rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, result.0),
+        gate_call_in_definition(layouts, forms, bindings, roots, steps[result.0], final_wiring, gate, result.1),
+{
+    let at = rooted_trace_gate_step(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, gate);
+    let step = steps[at];
+    let widths = definition_widths(body.definitions@);
+    let call = if step.nor_before != step.nor_after {
+        let root = roots[step.nor_before as int];
+        let nested = step.nested->Some_0;
+        Some(nor_call_group_gate(&root.selected, *root.references, forms, layouts, &nested.builtin,
+            step.before, step.after, limit, nested.child_limit, widths, gate))
+    } else if step.group_before != step.group_after {
+        let binding = bindings[step.group_before as int];
+        let selected = binding._selection@;
+        assert(binding_matches_selection(binding, selected));
+        if let Some(nested) = step.nested {
+            Some(nested_call_group_gate(&selected, forms, layouts, &nested.builtin,
+                step.before, step.after, limit, nested.child_limit, widths, gate))
+        } else {
+            Some(flat_call_group_gate(binding.group, forms, binding.arguments@, layouts, selected.template,
+                step.before, step.after, limit, widths, binding._output_widths@, gate))
+        }
+    } else { None };
+    if let Some(row) = call {
+        let end = (row.prior.len() + row.target.gates@.len()) as int;
+        assert(final_wiring.gates.take(end) =~= step.after.gates.take(end));
+    }
+    (at, call)
 }
 
 /// 本体に展開した根 NOR の配線状態と、同じ配線を評価した値。
