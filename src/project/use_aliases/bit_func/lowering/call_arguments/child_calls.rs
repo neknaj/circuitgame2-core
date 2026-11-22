@@ -1125,6 +1125,145 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nested_root
     }
 }
 
+proof fn child_gate_step(
+    caller: &CallerArguments, calls: Seq<ChildCall>, stop: nat, count: usize,
+    initial: Seq<NorGate>, trace: Seq<ChildWiringSnapshot>, end: ChildWiringSnapshot,
+    input_bits: usize, gate: int, prefix: nat,
+) -> (child: int)
+    requires
+        child_wiring_trace_matches(caller, calls, stop, count, initial, trace, end, input_bits),
+        prefix <= stop, initial.len() <= gate < trace[prefix as int].gates.len(),
+    ensures
+        0 <= child < prefix,
+        trace[child].gates.len() <= gate < trace[child + 1].gates.len(),
+    decreases prefix,
+{
+    reveal(child_wiring_trace_matches);
+    assert(prefix > 0);
+    let child = prefix as int - 1;
+    if trace[child].gates.len() <= gate {
+        child
+    } else {
+        child_gate_step(caller, calls, stop, count, initial, trace, end, input_bits, gate, child as nat)
+    }
+}
+
+pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn nested_gate_instance(
+    caller: &CallerArguments, calls: Seq<ChildCall>, count: usize, arguments: Seq<ProjectedCallArgument>,
+    layout: &PortBitLayout, callee: &NorNetlist, initial: Seq<NorGate>, final_gates: Seq<NorGate>,
+    input_bits: usize, outputs: Seq<Wire>, gate: int, index: int, before: Seq<NorGate>, mapped: Seq<Wire>,
+) -> bool {
+    &&& 0 <= index <= calls.len()
+    &&& before.len() == initial.len() + child_sizes(calls, index as nat).0 <= gate
+    &&& before == final_gates.take(before.len() as int)
+    &&& exists|trace: Seq<ChildWiringSnapshot>, invocation: CallerArguments|
+        #![trigger child_wiring_trace_matches(caller, calls, calls.len(), count, initial, trace,
+            trace[calls.len() as int], input_bits), invocation.child_ranges@]
+    {
+        &&& child_wiring_trace_matches(caller, calls, calls.len(), count, initial, trace,
+            trace[calls.len() as int], input_bits)
+        &&& before == trace[index].gates
+        &&& invocation.source == caller.source && invocation.forms@ == caller.forms@
+        &&& invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
+        &&& invocation.wires@ == caller.wires@
+        &&& invocation.child_ranges@ == trace[index].table.ranges@
+        &&& invocation.child_wires@ == trace[index].table.wires@
+        &&& wires_available(mapped, input_bits, before.len())
+        &&& {
+            let (inputs, target, projected, after) = if index < calls.len() {
+                let child = calls[index];
+                (child.inputs, child.circuit, child.arguments@, trace[index + 1].gates)
+            } else { (layout, callee, arguments, final_gates) };
+            &&& before.len() <= gate < after.len() <= final_gates.len()
+            &&& after == final_gates.take(after.len() as int)
+            &&& argument_prefix_wires(&invocation, projected, inputs.ranges_model(), projected.len() as int, mapped)
+            &&& mapped.len() == inputs.total_bits_model()
+            &&& instance_gates_match(before, target.gates@, mapped, after)
+            &&& 0 <= gate - before.len() < target.gates@.len()
+            &&& if index < calls.len() {
+                child_outputs_appended(&trace[index].table, &trace[index + 1].table, calls[index].reference, target,
+                    mapped, before, after, input_bits)
+            } else {
+                instance_outputs_match(target.outputs@, mapped, before.len() as usize, outputs)
+            }
+        }
+    }
+}
+
+/// 入れ子の展開で追加したゲートを、子の添字または根と、その呼び出しに渡した配線へ対応付ける。
+///
+/// 子の個数と等しい添字は、子の出力を受け取る根を表す。
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn nested_gate_instance_at(
+    caller: &CallerArguments, calls: Seq<ChildCall>, count: usize, arguments: Seq<ProjectedCallArgument>,
+    layout: &PortBitLayout, callee: &NorNetlist, initial: Seq<NorGate>, final_gates: Seq<NorGate>,
+    input_bits: usize, outputs: Seq<Wire>, gate: int,
+) -> (result: (int, Seq<NorGate>, Seq<Wire>))
+    requires
+        nested_root_wiring_matches(caller, calls, count, arguments, layout, callee, initial, final_gates, input_bits, outputs),
+        initial.len() <= gate < final_gates.len() <= usize::MAX,
+    ensures nested_gate_instance(caller, calls, count, arguments, layout, callee, initial, final_gates,
+        input_bits, outputs, gate, result.0, result.1, result.2),
+{
+    reveal(nested_root_wiring_matches);
+    reveal(child_wiring_trace_matches);
+    let stop = calls.len();
+    let (trace, invocation, mapped) = choose|trace: Seq<ChildWiringSnapshot>, invocation: CallerArguments, mapped: Seq<Wire>|
+        #![trigger child_wiring_trace_matches(caller, calls, stop, count, initial, trace, trace[stop as int], input_bits),
+            argument_prefix_wires(&invocation, arguments, layout.ranges_model(), arguments.len() as int, mapped)]
+    {
+        &&& stop < trace.len()
+        &&& {
+            let end = trace[stop as int];
+            &&& child_wiring_trace_matches(caller, calls, stop, count, initial, trace, end, input_bits)
+            &&& invocation.source == caller.source && invocation.forms@ == caller.forms@
+            &&& invocation.inputs@ == caller.inputs@ && invocation.definitions@ == caller.definitions@
+            &&& invocation.wires@ == caller.wires@
+            &&& invocation.child_ranges@ == end.table.ranges@ && invocation.child_wires@ == end.table.wires@
+            &&& argument_prefix_wires(&invocation, arguments, layout.ranges_model(), arguments.len() as int, mapped)
+            &&& mapped.len() == layout.total_bits_model()
+            &&& wires_available(mapped, input_bits, end.gates.len())
+            &&& instance_gates_match(end.gates, callee.gates@, mapped, final_gates)
+            &&& end.gates.len() <= final_gates.len()
+            &&& instance_outputs_match(callee.outputs@, mapped, end.gates.len() as usize, outputs)
+        }
+    };
+    let end = trace[stop as int];
+    if end.gates.len() <= gate {
+        child_wiring_trace_sizes(caller, calls, stop, count, initial, trace, end, stop, input_bits);
+        assert(final_gates.take(final_gates.len() as int) =~= final_gates);
+        assert(end.gates == final_gates.take(end.gates.len() as int));
+        assert(0 <= gate - end.gates.len() < callee.gates@.len());
+        assert(nested_gate_instance(caller, calls, count, arguments, layout, callee, initial, final_gates,
+            input_bits, outputs, gate, stop as int, end.gates, mapped));
+        (stop as int, end.gates, mapped)
+    } else {
+        let child = child_gate_step(caller, calls, stop, count, initial, trace, end, input_bits, gate, stop);
+        let call = calls[child];
+        let before = trace[child];
+        let after = trace[child + 1];
+        child_wiring_trace_sizes(caller, calls, stop, count, initial, trace, end, child as nat, input_bits);
+        child_wiring_prefix_preserved(caller, calls, stop, count, initial, trace, end, (child + 1) as nat, stop, input_bits);
+        assert(after.gates == final_gates.take(after.gates.len() as int));
+        assert(child_instance_matches(caller, call.arguments@, call.inputs, call.circuit,
+            &before.table, &after.table, call.reference, before.gates, after.gates, input_bits));
+        reveal(child_instance_matches);
+        let (used, inputs) = choose|used: CallerArguments, inputs: Seq<Wire>|
+            #[trigger] argument_prefix_wires(&used, call.arguments@, call.inputs.ranges_model(), call.arguments@.len() as int, inputs)
+            && used.source == caller.source && used.forms@ == caller.forms@
+            && used.inputs@ == caller.inputs@ && used.definitions@ == caller.definitions@
+            && used.wires@ == caller.wires@
+            && used.child_ranges@ == before.table.ranges@ && used.child_wires@ == before.table.wires@
+            && inputs.len() == call.inputs.total_bits_model()
+            && wires_available(inputs, input_bits, before.gates.len())
+            && child_outputs_appended(&before.table, &after.table, call.reference, call.circuit, inputs,
+                before.gates, after.gates, input_bits);
+        assert(before.gates == final_gates.take(before.gates.len() as int));
+        assert(nested_gate_instance(caller, calls, count, arguments, layout, callee, initial, final_gates,
+            input_bits, outputs, gate, child, before.gates, inputs));
+        (child, before.gates, inputs)
+    }
+}
+
 #[verifier::opaque]
 pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nested_root_wiring_result(
     caller: &CallerArguments, calls: Seq<ChildCall>, reference_count: usize, arguments: Seq<ProjectedCallArgument>,

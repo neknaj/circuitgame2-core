@@ -733,6 +733,125 @@ proof fn rooted_trace_preserves_prefix(
     }
 }
 
+/// 指定したゲートを追加した段を、履歴の末尾からたどる。
+proof fn rooted_trace_gate_step_before(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
+    gate: int, end: int,
+) -> (at: int)
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        0 <= end < steps.len(), 0 <= gate < steps[end].after.gates.len(),
+    ensures 0 <= at <= end, steps[at].before.gates.len() <= gate < steps[at].after.gates.len(),
+    decreases end,
+{
+    reveal(rooted_mixed_trace);
+    if steps[end].before.gates.len() <= gate {
+        end
+    } else {
+        assert(end > 0) by {
+            if end == 0 { assert(wiring_empty(steps[0].before)); }
+        };
+        assert(steps[end - 1].after == steps[end].before);
+        rooted_trace_gate_step_before(body, layouts, forms, bindings, roots, limit, steps,
+            slot, group, nor, final_wiring, gate, end - 1)
+    }
+}
+
+pub(super) closed spec fn rooted_gate_step_origin(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, final_wiring: WiringView, gate: int, at: int,
+) -> bool {
+    &&& 0 <= at < steps.len()
+    &&& steps[at].before.gates.len() <= gate < steps[at].after.gates.len()
+    &&& wiring_view_is_prefix(steps[at].before, steps[at].after)
+    &&& wiring_view_is_prefix(steps[at].after, final_wiring)
+    &&& final_wiring.gates[gate] == steps[at].after.gates[gate]
+    &&& forall|other: int| 0 <= other < steps.len()
+        && (#[trigger] steps[other]).before.gates.len() <= gate < steps[other].after.gates.len()
+        ==> other == at
+    &&& {
+        let step = steps[at];
+        if step.nor_before != step.nor_after {
+            &&& 0 <= step.nor_before < roots.len()
+            &&& step.from == roots[step.nor_before as int].selected.prepared.output_slot
+            &&& step.nested matches Some(nested)
+            &&& ({
+                let root = roots[step.nor_before as int];
+                nor_call_group_result(&root.selected, *root.references, forms, layouts, &nested.builtin,
+                    step.before, step.after, limit, nested.child_limit, definition_widths(body.definitions@), Ok(()))
+            })
+        } else if step.group_before != step.group_after {
+            &&& 0 <= step.group_before < bindings.len()
+            &&& step.from == bindings[step.group_before as int].group.outputs.start
+            &&& ({
+                let binding = bindings[step.group_before as int];
+                match step.nested {
+                    Some(nested) => nested_call_group_result(&binding._selection@, forms, layouts, &nested.builtin,
+                        step.before, step.after, limit, nested.child_limit, definition_widths(body.definitions@), Ok(())),
+                    None => call_group_result(binding.group, forms, binding.arguments@, layouts, binding.callee,
+                        step.before, step.after, limit, definition_widths(body.definitions@), binding._output_widths@, Ok(())),
+                }
+            })
+        } else {
+            &&& step.from < body.definitions@.len()
+            &&& body.definitions@[step.from as int].rhs is Nor
+            &&& rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
+                step.before.definitions, body.definitions@[step.from as int].rhs) == Some(final_wiring.gates[gate])
+            &&& gate == step.before.gates.len()
+            &&& step.after.gates == step.before.gates.push(final_wiring.gates[gate])
+        }
+    }
+}
+
+/// 最終ゲート列の添字から、ゲートを追加した定義と展開時の配線状態を取り出す。
+///
+/// ゲートを追加しない定義や呼び出しを含んでも、追加区間は重ならず最終ゲート列を覆う。
+pub(super) proof fn rooted_trace_gate_step(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
+    gate: int,
+) -> (at: int)
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        0 <= gate < final_wiring.gates.len(),
+    ensures rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, at),
+{
+    reveal(rooted_mixed_trace);
+    assert(steps.len() > 0);
+    let end = steps.len() as int - 1;
+    assert(steps[end].after == final_wiring);
+    let at = rooted_trace_gate_step_before(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor,
+        final_wiring, gate, end);
+    rooted_wiring_step_keeps_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at, end);
+    assert(final_wiring.gates[gate] == steps[at].after.gates[gate]);
+    assert forall|other: int| 0 <= other < steps.len()
+        && (#[trigger] steps[other]).before.gates.len() <= gate < steps[other].after.gates.len()
+        implies other == at by {
+        if other < at {
+            rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor,
+                final_wiring, other, at - 1);
+            assert(steps[at - 1].after == steps[at].before);
+        } else if at < other {
+            rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor,
+                final_wiring, at, other - 1);
+            assert(steps[other - 1].after == steps[other].before);
+        }
+    };
+    reveal(wiring_step_valid);
+    reveal(nor_wiring_step_valid);
+    let step = steps[at];
+    if step.nor_before == step.nor_after && step.group_before == step.group_after {
+        reveal(gate_step_matches);
+        let rhs = body.definitions@[step.from as int].rhs;
+        let added = rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), step.before.definitions, rhs);
+        assert(added.is_some());
+        assert(step.after.gates[gate] == added->Some_0);
+    }
+    at
+}
+
 /// 本体に展開した根 NOR の配線状態と、同じ配線を評価した値。
 #[cfg(verus_only)]
 pub(super) struct RootedNorEvaluation<'s, 'p, 'a> {
