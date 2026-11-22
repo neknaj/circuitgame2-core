@@ -1900,11 +1900,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         &scope.wiring.drivers.signature, scope.inputs@, scope.outputs@, slots@, drivers, error),
                     Ok(value) => output_widths_before(scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
                         && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, arguments, layout_limit, gate_limit, Ok(value.circuit)),
+                            drivers, scope.parsed.syntax.forms@, selected, Seq::empty(), arguments, layout_limit, gate_limit, Ok(value.circuit)),
                     Err(ExpandedBodyError::Lowering(error)) => output_widths_before(
                         scope.inputs@, scope.outputs@, slots@, drivers, drivers.len() as int)
                         && projected_lowering_view(scope.inputs@, slots@, scope.outputs@,
-                            drivers, scope.parsed.syntax.forms@, selected, arguments, layout_limit, gate_limit, Err(error)),
+                            drivers, scope.parsed.syntax.forms@, selected, Seq::empty(), arguments, layout_limit, gate_limit, Err(error)),
                     _ => false,
                 },
         }
@@ -1936,7 +1936,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
             &&& output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
             &&& projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
-                selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit))
+                selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit))
             &&& value.has_structure_ports <==> has_structure_port(wiring.drivers.signature.inputs@)
                 || has_structure_port(wiring.drivers.signature.outputs@)
         }),
@@ -1961,7 +1961,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] self.prepared_definition_result(&scope, prepared.calls@, selected, Ok(slots))
             && output_widths_before(ports.inputs@, ports.outputs@, slots@, drivers, drivers.len() as int)
             && projected_lowering_view(ports.inputs@, slots@, ports.outputs@, drivers,
-                parsed.syntax.forms@, selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit));
+                parsed.syntax.forms@, selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, Ok(value.circuit));
         reveal(UseAliases::routine_ports_result);
         assert(self.projection_port_widths_match(&scope));
         assert(self.prepared_expansion_body_matches(*plan, file, entry, limit, prepared)
@@ -2001,7 +2001,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::routine_ports_result);
         reveal(UseAliases::template_port_widths_match);
         projected_lowering_ports(ports.inputs@, slots@, ports.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, &value.circuit);
+            selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, &value.circuit);
     }
 
     /// 展開後の評価結果を、ソースが出力ポートごとに指定した駆動元の値に結び付ける。
@@ -2026,7 +2026,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let netlist = circuit.netlist_model();
         let drivers = scope.wiring.drivers.outputs@;
         projected_lowering_ports(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit);
+            selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit);
         reveal(UseAliases::routine_ports_result);
         reveal(nor_evaluation);
         vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
@@ -2034,7 +2034,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && gates.len() == netlist.gates@.len() && output_values_match(input, gates, netlist.outputs@, output);
         reveal(UseAliases::template_port_widths_match);
         projected_lowering_output_values(scope.inputs@, slots@, scope.outputs@, drivers, scope.parsed.syntax.forms@,
-            selected, prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit, input, gates, output);
+            selected, Seq::empty(), prepared.projections.call_arguments.arguments@, bit_limit, gate_limit, circuit, input, gates, output);
         let incoming = port_values(circuit.input_layout_model(), input);
         let values = expanded_definition_values(circuit, input, gates);
         let outgoing = port_values(circuit.output_layout_model(), output);
@@ -2105,7 +2105,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::template_port_widths_match);
         reveal(UseAliases::prepared_definition_result);
         let evidence = projected_lowering_call_evaluation(self, plan, caller, prepared, scope.inputs@,
-            slots@, scope.outputs@, drivers, forms, selected, index, bit_limit, gate_limit, &value.circuit, input, gates);
+            slots@, scope.outputs@, drivers, forms, selected, Seq::empty(), index, bit_limit, gate_limit, &value.circuit, input, gates);
         if let MixedCallEvaluation::Flat(arguments, outputs) = evidence {
             let callee = call.template.circuit_model();
             assert(evaluated_flat_call_matches(self, caller, prepared, index, call,
@@ -2210,8 +2210,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(*selected@[g].group.expression.source == *source);
             };
         }
+        let roots: &[NorBinding] = &[];
+        assert(roots@ =~= Seq::empty());
         let lowered = lower_projected_expansion(self, ports.inputs.as_slice(), definitions.as_slice(),
-            ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected.as_slice(),
+            ports.outputs.as_slice(), wiring.drivers.outputs.as_slice(), forms, selected.as_slice(), roots,
             layout_limit, gate_limit, Ghost((plan, caller, &original)), Ghost(templates));
         let has_structure_ports = contains_structure_port(wiring.drivers.signature.inputs.as_slice())
             || contains_structure_port(wiring.drivers.signature.outputs.as_slice());

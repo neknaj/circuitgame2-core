@@ -3,7 +3,7 @@
 #[cfg(verus_only)]
 mod source_arguments;
 #[cfg(verus_only)]
-pub(super) use source_arguments::mixed_function_call_evaluation;
+pub(super) use source_arguments::{mixed_function_call_evaluation, nor_source_binding_matches, rooted_nor_source_arguments};
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_arguments::{
     EvaluatedCallBits, EvaluatedNestedCall, MixedCallEvaluation, evaluated_flat_call_matches, evaluated_nested_call_matches,
@@ -582,21 +582,30 @@ proof fn trace_step_covering_slot(steps: Seq<WiringStep>, end: int, definition: 
 }
 
 /// 変換履歴の途中までに生成した定義について、その定義を追加した段階を得る。
-proof fn mixed_trace_definition_step(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
-    steps: Seq<WiringStep>, slot: usize, group: usize, wiring: WiringView, end: int, definition: int,
+proof fn rooted_trace_definition_step(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, wiring: WiringView, end: int, definition: int,
 ) -> (at: int)
     requires
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, wiring),
         0 <= end < steps.len(),
         0 <= definition < steps[end].to,
+        !nor_binding_covers(roots, definition),
     ensures
         0 <= at <= end,
         steps[at].from <= definition < steps[at].to,
+        steps[at].nor_before == steps[at].nor_after,
         wiring_step_valid(body, layouts, forms, bindings, limit, steps[at]),
 {
-    reveal(mixed_trace);
-    trace_step_covering_slot(steps, end, definition)
+    reveal(rooted_mixed_trace);
+    let at = trace_step_covering_slot(steps, end, definition);
+    let step = steps[at];
+    if step.nor_before != step.nor_after {
+        reveal(nor_wiring_step_valid);
+        assert(definition == step.from);
+        assert(nor_binding_covers(roots, definition));
+    }
+    at
 }
 
 proof fn wiring_step_keeps_prefix(
@@ -656,47 +665,25 @@ proof fn wiring_prefix_reflexive(wiring: WiringView)
     assert(wiring.definitions.take(wiring.definitions.len() as int) =~= wiring.definitions);
 }
 
-/// 途中で追加したゲートと配線が、最終状態でも同じ添字にあることを示す。
-proof fn mixed_trace_preserves_prefix(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
-    steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int, end: int,
+/// 通常の定義と関数呼び出しでは、変換の前後の配線が最終配線の接頭辞であることを示す。
+proof fn rooted_trace_step_prefix(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView, at: int,
 )
     requires
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
-        0 <= at <= end < steps.len(),
-    ensures wiring_view_is_prefix(steps[at].after, steps[end].after),
-    decreases end - at,
-{
-    reveal(mixed_trace);
-    if at < end {
-        mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at, end - 1);
-        let early = steps[at].after;
-        let last = steps[end];
-        assert(last.before == steps[end - 1].after);
-        wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, last);
-        wiring_prefix_transitive(early, last.before, last.after);
-    } else {
-        wiring_prefix_reflexive(steps[end].after);
-    }
-}
-
-/// 指定した変換の前後にある配線が、最終配線の接頭辞であることを示す。
-proof fn mixed_trace_step_prefix(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
-    steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int,
-)
-    requires
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
     ensures
+        wiring_step_valid(body, layouts, forms, bindings, limit, steps[at]),
         wiring_view_is_prefix(steps[at].before, final_wiring),
         wiring_view_is_prefix(steps[at].after, final_wiring),
         steps[at].from <= body.definitions@.len(),
         steps[at].before.definitions.len() == preceding_port_bits(definition_widths(body.definitions@), steps[at].from as nat),
 {
-    mixed_trace_preserves_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring,
+    rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring,
         at, steps.len() as int - 1);
-    reveal(mixed_trace);
+    reveal(rooted_mixed_trace);
     reveal(wiring_step_valid);
     let step = steps[at];
     wiring_step_keeps_prefix(body, layouts, forms, bindings, limit, step);
@@ -876,20 +863,22 @@ proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
 
 /// 通常の定義を変換した箇所では、最終配線から読んだ値が型検査済みの右辺の値に一致する。
 proof fn mixed_trace_local_value(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize,
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize,
     final_wiring: WiringView, at: int, inputs: Seq<bool>, gates: Seq<bool>,
 )
     requires
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
         steps[at].group_before == steps[at].group_after,
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
-        forall|i: int| 0 <= i < body.definitions@.len() && !binding_covers(bindings, i) ==>
+        forall|i: int| 0 <= i < body.definitions@.len() && !binding_covers(bindings, i) && !nor_binding_covers(roots, i) ==>
             bit_definition_matches(body.input_widths@, body.definitions@.take(i), #[trigger] body.definitions@[i]),
         inputs.len() == layouts.inputs.total_bits_model(),
         gate_values_match(inputs, final_wiring.gates, gates),
         gates.len() == final_wiring.gates.len(),
+        final_wiring.gates.len() == final_wiring.origins.len(),
         wires_available(final_wiring.definitions, layouts.inputs.total_bits_model(), gates.len()),
     ensures ({
         let i = steps[at].from as int;
@@ -900,8 +889,8 @@ proof fn mixed_trace_local_value(
             definitions.take(i))
     }),
 {
-    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
-    reveal(mixed_trace);
+    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    reveal(rooted_mixed_trace);
     reveal(wiring_step_valid);
     let step = steps[at];
     let i = step.from as int;
@@ -913,16 +902,16 @@ proof fn mixed_trace_local_value(
 
 /// 変換に成功した関数で、通常の定義の値を最終配線から求める。
 pub(super) proof fn mixed_function_local_value(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
     widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
     function: &LoweredBitFunc, steps: Ghost<Seq<WiringStep>>, i: int, inputs: Seq<bool>, gates: Seq<bool>,
 )
     requires
-        mixed_function_success(body, layouts, forms, bindings, widths, drivers, gate_limit, function, steps@),
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, gate_limit, function, steps@),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
         0 <= i < body.definitions@.len(),
-        !binding_covers(bindings, i),
-        forall|j: int| 0 <= j < body.definitions@.len() && !binding_covers(bindings, j) ==>
+        !binding_covers(bindings, i), !nor_binding_covers(roots, i),
+        forall|j: int| 0 <= j < body.definitions@.len() && !binding_covers(bindings, j) && !nor_binding_covers(roots, j) ==>
             bit_definition_matches(body.input_widths@, body.definitions@.take(j), #[trigger] body.definitions@[j]),
         inputs.len() == layouts.inputs.total_bits_model(),
         gate_values_match(inputs, function.netlist.gates@, gates),
@@ -940,8 +929,9 @@ pub(super) proof fn mixed_function_local_value(
     vstd::slice::axiom_spec_len(body.definitions);
     let slot = body.definitions@.len() as usize;
     let group = bindings.len() as usize;
-    assert(0 <= end && steps@[end].to == slot) by { reveal(mixed_trace); };
-    let at = mixed_trace_definition_step(body, layouts, forms, bindings, gate_limit, steps@, slot, group, wiring, end, i);
+    let nor = roots.len() as usize;
+    assert(0 <= end && steps@[end].to == slot) by { reveal(rooted_mixed_trace); };
+    let at = rooted_trace_definition_step(body, layouts, forms, bindings, roots, gate_limit, steps@, slot, group, nor, wiring, end, i);
     assert(steps@[at].from == i && steps@[at].group_before == steps@[at].group_after) by {
         reveal(wiring_step_valid);
         reveal(binding_covers);
@@ -952,19 +942,20 @@ pub(super) proof fn mixed_function_local_value(
             assert(binding_covers(bindings, i));
         }
     };
-    mixed_trace_local_value(body, layouts, forms, bindings, gate_limit, layout_limit, steps@, slot, group,
+    mixed_trace_local_value(body, layouts, forms, bindings, roots, gate_limit, layout_limit, steps@, slot, group, nor,
         wiring, at, inputs, gates);
 }
 
 /// 評価済みの最終配線から、指定した呼び出しの入力と出力を得る。
 proof fn mixed_trace_call_values(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
-    layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int,
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>, limit: usize,
+    layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView, at: int,
     inputs: Seq<bool>, values: Seq<bool>,
 ) -> (result: (Seq<bool>, Seq<bool>))
     requires
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
         steps[at].group_before != steps[at].group_after,
         steps[at].nested.is_none(),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
@@ -986,9 +977,8 @@ proof fn mixed_trace_call_values(
                 inputs, values, result.1)
     }),
 {
-    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
+    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
     let step = steps[at];
-    assert(wiring_step_valid(body, layouts, forms, bindings, limit, step)) by { reveal(mixed_trace); };
     reveal(wiring_step_valid);
     reveal(binding_ready);
     let binding = bindings[step.group_before as int];
@@ -1777,43 +1767,51 @@ fn normalize_mixed_wiring_diagnostic<'p, 'a>(error: MixedBodyError<'p, 'a>) -> (
 }
 
 spec fn resolved_mixed_mode_matches(
-    bindings: Seq<CallBinding>, arguments: Seq<ProjectedCallArgument>, mode: Option<NestedWiring>,
+    bindings: Seq<CallBinding>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>, mode: Option<NestedWiring>,
 ) -> bool {
     match mode {
         Some(mode) => mode._arguments@ == arguments && mode.child_limit == child_output_limit_spec()
             && builtin_nor_call_matches(mode.builtin) && bindings_match_calls(bindings, mode.selected@)
-            && exists|i: int| 0 <= i < mode.selected@.len() && (#[trigger] mode.selected@[i]).children@.len() > 0,
-        None => forall|i: int| 0 <= i < bindings.len() ==> (#[trigger] bindings[i])._selection@.children@.len() == 0,
+            && (roots.len() > 0 || exists|i: int| 0 <= i < mode.selected@.len() && (#[trigger] mode.selected@[i]).children@.len() > 0),
+        None => roots.len() == 0
+            && forall|i: int| 0 <= i < bindings.len() ==> (#[trigger] bindings[i])._selection@.children@.len() == 0,
     }
 }
 
 pub(super) closed spec fn resolved_mixed_trace(
-    bindings: Seq<CallBinding>, arguments: Seq<ProjectedCallArgument>, steps: Seq<WiringStep>,
+    bindings: Seq<CallBinding>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>, steps: Seq<WiringStep>,
 ) -> bool {
     exists|mode: Option<NestedWiring>| #[trigger] wiring_trace_uses_mode(steps, mode)
-        && resolved_mixed_mode_matches(bindings, arguments, mode)
+        && resolved_mixed_mode_matches(bindings, roots, arguments, mode)
 }
 
 pub(super) closed spec fn mixed_function_failure(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    arguments: Seq<ProjectedCallArgument>, gate_limit: usize, diagnostic: MixedWiringError,
+    roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>, gate_limit: usize, diagnostic: MixedWiringError,
 ) -> bool {
     exists|mode: Option<NestedWiring>, raw: MixedBodyError|
-        #[trigger] mixed_body_failed(body, layouts, forms, bindings, gate_limit, mode, raw)
+        #[trigger] rooted_body_failed(body, layouts, forms, bindings, roots, gate_limit, mode, raw)
+        && (roots.len() == 0 ==> mixed_body_failed(body, layouts, forms, bindings, gate_limit, mode, raw))
         && mixed_wiring_diagnostic(raw) == diagnostic
-        && resolved_mixed_mode_matches(bindings, arguments, mode)
+        && resolved_mixed_mode_matches(bindings, roots, arguments, mode)
 }
 
 pub(super) open spec fn mixed_function_result(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    output_widths: Seq<u64>, output_drivers: Seq<OutputDriver>, arguments: Seq<ProjectedCallArgument>, gate_limit: usize,
+    roots: Seq<NorBinding>, output_widths: Seq<u64>, output_drivers: Seq<OutputDriver>,
+    arguments: Seq<ProjectedCallArgument>, gate_limit: usize,
     result: Result<(LoweredBitFunc, Ghost<Seq<WiringStep>>), MixedWiringError>,
 ) -> bool {
     match result {
-        Ok((value, steps)) => mixed_function_success(body, layouts, forms, bindings, output_widths, output_drivers,
-            gate_limit, &value, steps@) && wiring_trace_arguments_match(steps@, arguments)
-            && resolved_mixed_trace(bindings, arguments, steps@),
-        Err(error) => mixed_function_failure(body, layouts, forms, bindings, arguments, gate_limit, error),
+        Ok((value, steps)) => {
+            &&& rooted_mixed_function_success(body, layouts, forms, bindings, roots, output_widths, output_drivers,
+                gate_limit, &value, steps@)
+            &&& roots.len() == 0 ==> mixed_function_success(body, layouts, forms, bindings, output_widths, output_drivers,
+                gate_limit, &value, steps@)
+            &&& wiring_trace_arguments_match(steps@, arguments)
+            &&& resolved_mixed_trace(bindings, roots, arguments, steps@)
+        },
+        Err(error) => mixed_function_failure(body, layouts, forms, bindings, roots, arguments, gate_limit, error),
     }
 }
 
@@ -1954,14 +1952,15 @@ fn selected_has_child_calls(selected: &[ResolvedTemplateCall]) -> (present: bool
     false
 }
 
-/// 解決済みの呼び出しと通常の定義を合わせ、同じ定義順で配線へ変換する。
+/// 解決済みの呼び出し、根 NOR、通常の右辺を同じ定義順で配線へ変換する。
 ///
 /// # Errors
 ///
 /// 最初に配線へ変換できなかった定義または呼び出しの診断を返す。
 pub(super) fn lower_resolved_function<'s, 'p, 'a>(
     aliases: &UseAliases<'_, 'p, 'a>, body: &LoweringBody<'s, 'p, 'a>, layouts: Layouts, forms: &[Form],
-    selected: &[ResolvedTemplateCall<'s, 'p, 'a>], output_widths: &[u64], output_drivers: &[OutputDriver],
+    selected: &[ResolvedTemplateCall<'s, 'p, 'a>], roots: &[NorBinding<'s, 'p, 'a>],
+    output_widths: &[u64], output_drivers: &[OutputDriver],
     layout_limit: usize, gate_limit: usize,
     Ghost(context): Ghost<(&FunctionExpansionOrder<'p, 'a>, (usize, usize, u64), &PreparedExpansionBody<'p, 'a>)>,
     Ghost(templates): Ghost<&FunctionTemplates<'p, 'a>>,
@@ -1977,11 +1976,22 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
         aliases.expansion_selection_matches(context.0, templates, context.1, context.2, selected@),
         forall|g: int| 0 <= g < selected@.len() ==>
             resolved_call_fits_body(#[trigger] selected@[g], body.input_widths@, body.definitions@, forms@, context.1.2),
-        forall|slot: int| 0 <= slot < body.definitions@.len() && !call_covers(context.2.calls@, slot) ==>
+        forall|i: int| 0 <= i < roots@.len() ==> {
+            let binding = #[trigger] roots@[i];
+            let source = binding.selected.prepared.root.expression.source;
+            &&& !call_covers(context.2.calls@, binding.selected.prepared.output_slot as int)
+            &&& nor_binding_fits_body(binding, source, forms@, body.input_widths@, body.definitions@, context.1.2)
+            &&& aliases.nor_binding_context(context.0, templates, context.1.2, context.2.projections.call_arguments.arguments@, binding)
+            &&& form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int)
+        },
+        forall|i: int, j: int| 0 <= i < j < roots@.len() ==>
+            (#[trigger] roots@[i]).selected.prepared.output_slot < (#[trigger] roots@[j]).selected.prepared.output_slot,
+        forall|slot: int| 0 <= slot < body.definitions@.len() && !call_covers(context.2.calls@, slot)
+            && !nor_binding_covers(roots@, slot) ==>
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]),
     ensures exists|bindings: Seq<CallBinding>|
         #[trigger] bindings_match_calls(bindings, selected@)
-            && mixed_function_result(body, &layouts, forms@, bindings, output_widths@, output_drivers@,
+            && mixed_function_result(body, &layouts, forms@, bindings, roots@, output_widths@, output_drivers@,
                 context.2.projections.call_arguments.arguments@, gate_limit, result),
 {
     let bindings = bind_resolved_calls(aliases, selected, body, &layouts, Ghost(forms@), Ghost(layout_limit), Ghost(context));
@@ -1992,18 +2002,19 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
             assert(bindings@[i].group == selected@[i].group);
         };
         bindings_preserve_definition_order(bindings@, context.2.calls@);
-        assert forall|slot: int| 0 <= slot < body.definitions@.len() && !binding_covers(bindings@, slot) implies
+        assert forall|slot: int| 0 <= slot < body.definitions@.len() && !binding_covers(bindings@, slot)
+            && !nor_binding_covers(roots@, slot) implies
             bit_definition_matches(body.input_widths@, body.definitions@.take(slot), #[trigger] body.definitions@[slot]) by {
             assert(!call_covers(context.2.calls@, slot));
         };
     }
-    let builtin = if selected_has_child_calls(selected) { Some(builtin_nor_call()) } else { None };
+    let builtin = if !roots.is_empty() || selected_has_child_calls(selected) { Some(builtin_nor_call()) } else { None };
     let ghost arguments = context.2.projections.call_arguments.arguments@;
     let nested = match &builtin {
         Some(builtin) => Some(NestedWiring { selected, builtin, child_limit: child_output_limit(), _arguments: Ghost(arguments) }),
         None => None,
     };
-    assert(resolved_mixed_mode_matches(bindings@, arguments, nested)) by {
+    assert(resolved_mixed_mode_matches(bindings@, roots@, arguments, nested)) by {
         if nested.is_none() {
             assert forall|i: int| 0 <= i < bindings@.len() implies
                 (#[trigger] bindings@[i])._selection@.children@.len() == 0 by {
@@ -2011,14 +2022,19 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
             };
         }
     };
-    let roots: &[NorBinding] = &[];
-    assert(roots@ =~= Seq::empty());
+    let ghost root_context = Some((aliases, context.0, templates, context.1, context.2));
+    assert(nor_roots_ready(body, forms@, bindings@, roots@, nested, root_context)) by {
+        assert forall|i: int| 0 <= i < roots@.len() implies
+            !binding_covers(bindings@, (#[trigger] roots@[i]).selected.prepared.output_slot as int) by {
+            assert(!call_covers(context.2.calls@, roots@[i].selected.prepared.output_slot as int));
+        };
+    };
     let raw = lower_mixed_function_with_mode(body, layouts, forms, bindings.as_slice(), roots,
         output_widths, output_drivers, layout_limit, gate_limit, nested,
-        Ghost(Some((aliases, context.0, templates, context.1, context.2))));
+        Ghost(root_context));
     let result = match raw {
         Ok(lowered) => {
-            assert(resolved_mixed_trace(bindings@, arguments, lowered.1@)) by {
+            assert(resolved_mixed_trace(bindings@, roots@, arguments, lowered.1@)) by {
                 assert(wiring_trace_uses_mode(lowered.1@, nested));
             };
             Ok(lowered)
@@ -2026,14 +2042,15 @@ pub(super) fn lower_resolved_function<'s, 'p, 'a>(
         Err(error) => {
             let ghost cause = error;
             let diagnostic = normalize_mixed_wiring_diagnostic(error);
-            assert(mixed_function_failure(body, &layouts, forms@, bindings@, arguments, gate_limit, diagnostic)) by {
-                assert(mixed_body_failed(body, &layouts, forms@, bindings@, gate_limit, nested, cause));
+            assert(mixed_function_failure(body, &layouts, forms@, bindings@, roots@, arguments, gate_limit, diagnostic)) by {
+                assert(rooted_body_failed(body, &layouts, forms@, bindings@, roots@, gate_limit, nested, cause));
+                assert(roots@.len() == 0 ==> mixed_body_failed(body, &layouts, forms@, bindings@, gate_limit, nested, cause));
             };
             Err(diagnostic)
         },
     };
     assert(exists|rows: Seq<CallBinding>| #[trigger] bindings_match_calls(rows, selected@)
-        && mixed_function_result(body, &layouts, forms@, rows, output_widths@, output_drivers@, arguments, gate_limit, result)) by {
+        && mixed_function_result(body, &layouts, forms@, rows, roots@, output_widths@, output_drivers@, arguments, gate_limit, result)) by {
         assert(bindings_match_calls(bindings@, selected@));
     };
     result
@@ -2100,7 +2117,7 @@ fn mixed_body_passes_outputs_through_successive_calls() {
     let output_drivers = wiring.drivers.outputs.as_slice();
     let limited = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 16).unwrap();
     let Err(MixedWiringError::LocalGateCapacity(site)) = lower_resolved_function(
-        &aliases, &body, limited, forms, selected.as_slice(), output_widths, output_drivers, 16, 2,
+        &aliases, &body, limited, forms, selected.as_slice(), &[], output_widths, output_drivers, 16, 2,
         Ghost((&plan, (0usize, 1usize, 8u64), &prepared)), Ghost(&templates),
     ) else {
         panic!("expected the caller NOR to exceed the gate limit");
@@ -2109,7 +2126,7 @@ fn mixed_body_passes_outputs_through_successive_calls() {
 
     let layout = prepare_body_layouts(body.input_widths, body.definitions, output_widths, 16).unwrap();
     let (lowered, _) = lower_resolved_function(
-        &aliases, &body, layout, forms, selected.as_slice(), output_widths, output_drivers, 16, 3,
+        &aliases, &body, layout, forms, selected.as_slice(), &[], output_widths, output_drivers, 16, 3,
         Ghost((&plan, (0usize, 1usize, 8u64), &prepared)), Ghost(&templates),
     ).unwrap();
     assert_eq!(lowered.gate_definitions(), [0, 2, 4]);
@@ -2256,25 +2273,16 @@ fn mixed_function_wires_a_nor_root_between_a_function_call_and_a_local_definitio
             parsed.definitions[root.definition + 1].expression.start), width: 1,
             rhs: BitFuncRhs::Nor { left: input, right: input }, operands: Vec::new() },
     ];
-    let body = LoweringBody { input_widths: &[1], definitions: &definitions };
-    let layouts = prepare_body_layouts(&[1], &definitions, &[1], 3).unwrap();
-    let bindings = bind_resolved_calls(&aliases, &selected, &body, &layouts, Ghost(forms@), Ghost(3usize),
-        Ghost((&plan, (caller.0, caller.1, 1u64), &prepared)));
-    let builtin = builtin_nor_call();
-    let mode = Some(NestedWiring { selected: &selected, builtin: &builtin, child_limit: 1, _arguments: Ghost(arguments@) });
-    let lower = |gate_limit| lower_mixed_function_with_mode(&body,
-        prepare_body_layouts(&[1], &definitions, &[1], 3).unwrap(), forms, &bindings, &roots,
-        &[1], wiring.drivers.outputs.as_slice(), 3, gate_limit, mode,
-        Ghost(Some((&aliases, &plan, &templates, (caller.0, caller.1, 1u64), &prepared))));
-    let Err(raw) = lower(0) else { panic!("expected root capacity error"); };
-    assert!(matches!(&raw, MixedBodyError::Nor(_, NestedCallWiringError::Root(CallWiringError::GateCapacity))));
-    let MixedWiringError::Call(CallGroupError::GateCapacity(site)) = normalize_mixed_wiring_diagnostic(raw)
+    let lower = |gate_limit| super::lower_projected_expansion(&aliases, &[1], &definitions,
+        &[1], wiring.drivers.outputs.as_slice(), forms, &selected, &roots, 3, gate_limit,
+        Ghost((&plan, (caller.0, caller.1, 1u64), &prepared)), Ghost(&templates));
+    let Err(ProjectedLoweringError::Wiring(MixedWiringError::Call(CallGroupError::GateCapacity(site)))) = lower(0)
         else { panic!("expected the root diagnostic"); };
     assert_eq!(&text[site.span], "(nor (id a) earlier)");
-    let Err(MixedBodyError::Flat(MixedWiringError::LocalGateCapacity(site))) = lower(1)
+    let Err(ProjectedLoweringError::Wiring(MixedWiringError::LocalGateCapacity(site))) = lower(1)
         else { panic!("expected the later local capacity error"); };
     assert_eq!(&text[site.span], "(nor nested nested)");
-    let Ok((circuit, _)) = lower(2) else { panic!("expected a wired function"); };
+    let Ok(circuit) = lower(2) else { panic!("expected a wired function"); };
     assert_eq!(circuit.definition_wires, [Wire::Constant(false), Wire::Gate(0), Wire::Gate(1)]);
     assert_eq!(circuit.gate_definitions(), [1, 2]);
     let netlist = circuit.netlist();

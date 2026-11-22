@@ -341,7 +341,7 @@ proof fn trace_child_wire_values<'s, 'p, 'a>(
     (EvaluatedCallBits { input, ports, output }, mapped_from, mapped)
 }
 
-pub(super) open spec fn nor_source_binding_matches(
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn nor_source_binding_matches(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
     prepared: &PreparedExpansionBody, binding: &NorBinding, forms: Seq<Form>,
 ) -> bool {
@@ -860,7 +860,7 @@ proof fn nor_evaluated_child_sources(
 ///
 /// 根と子で同じ末尾の配線表を使い、入れ子の実引数を対応する子の出力に結び付ける。
 #[verifier::spinoff_prover]
-pub(super) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_nor_source_arguments<'s, 'p, 'a>(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, table: &FunctionTemplates, caller: (usize, usize, u64),
     prepared: &PreparedExpansionBody, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>,
     bindings: Seq<CallBinding>, roots: Seq<NorBinding<'s, 'p, 'a>>, limit: usize, layout_limit: usize,
@@ -1139,12 +1139,13 @@ proof fn nested_child_values<'s, 'p, 'a>(
 }
 
 proof fn trace_call_frame(
-    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, limit: usize,
-    steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView, at: int,
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>, limit: usize,
+    steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView, at: int,
 )
     requires
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
         steps[at].group_before != steps[at].group_after,
     ensures ({
         let step = steps[at];
@@ -1162,8 +1163,8 @@ proof fn trace_call_frame(
         &&& wires_available(step.after.definitions, layouts.inputs.total_bits_model(), final_wiring.gates.len())
     }),
 {
-    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
-    reveal(mixed_trace);
+    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    reveal(rooted_mixed_trace);
     reveal(wiring_step_valid);
     reveal(binding_ready);
     let step = steps[at];
@@ -1296,8 +1297,8 @@ pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_nested_call
 /// 入れ子の配線段から、各実引数に渡った値と最終配線に残った根の出力値を取り出す。
 proof fn nested_trace_call_values(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
-    selected: &ResolvedTemplateCall, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView,
+    selected: &ResolvedTemplateCall, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
     at: int, inputs: Seq<bool>, gates: Seq<bool>,
 ) -> (evaluation: EvaluatedNestedCall)
     requires
@@ -1310,8 +1311,9 @@ proof fn nested_trace_call_values(
             &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
             &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
         }),
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
         steps[at].group_before != steps[at].group_after,
         steps[at].nested matches Some(nested) && nested.arguments == prepared.projections.call_arguments.arguments@,
         ({
@@ -1342,7 +1344,7 @@ proof fn nested_trace_call_values(
         && selected_children_reachable(selected, prepared.projections.call_arguments.arguments@)
         && nested_call_group_result(selected, forms, layouts, builtin, step.before, step.after,
             limit, nested.child_limit, widths, Ok(()))) by {
-        reveal(mixed_trace);
+        reveal(rooted_mixed_trace);
         reveal(wiring_step_valid);
     };
     assert(nor_evaluation_ready(callee.netlist_model(), callee.input_layout_model().total_bits_model() as nat)
@@ -1356,8 +1358,8 @@ proof fn nested_trace_call_values(
             widths[selected.group.outputs.start + i] == #[trigger] template.output_widths_model()[i]) by {
         reveal(binding_ready);
     };
-    trace_call_frame(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
-    mixed_trace_step_prefix(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
+    trace_call_frame(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
     let (calls, invocation, root) = nested_call_group_values(selected, forms, layouts, builtin, step.before, step.after,
         limit, nested.child_limit, widths, layout_limit, combined, inputs, gates);
     let project = aliases.targets.project_model();
@@ -1585,8 +1587,8 @@ proof fn call_output_ports_match_definitions(
 /// 展開した引数配線から読んだ値を、元の呼び出しにある全引数の値に対応付ける。
 proof fn mixed_trace_source_call_values(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
-    selected: ResolvedTemplateCall, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>,
-    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, final_wiring: WiringView,
+    selected: ResolvedTemplateCall, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, layout_limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
     at: int, inputs: Seq<bool>, values: Seq<bool>,
 ) -> (result: (Seq<bool>, Seq<bool>))
     requires
@@ -1599,8 +1601,9 @@ proof fn mixed_trace_source_call_values(
             &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
             &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
         }),
-        mixed_trace(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring),
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
         0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
         steps[at].group_before != steps[at].group_after,
         steps[at].nested.is_none(),
         ({
@@ -1634,9 +1637,9 @@ proof fn mixed_trace_source_call_values(
                 .subrange(step.from as int, step.to as int)
     }),
 {
-    let result = mixed_trace_call_values(body, layouts, forms, bindings, limit, layout_limit, steps, slot, group,
+    let result = mixed_trace_call_values(body, layouts, forms, bindings, roots, limit, layout_limit, steps, slot, group, nor,
         final_wiring, at, inputs, values);
-    trace_call_frame(body, layouts, forms, bindings, limit, steps, slot, group, final_wiring, at);
+    trace_call_frame(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
     let step = steps[at];
     let index = step.group_before as int;
     let binding = bindings[index];
@@ -1726,7 +1729,7 @@ pub(in crate::project::use_aliases::bit_func) open spec fn evaluated_flat_call_m
 pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_call_evaluation(
     aliases: &UseAliases, plan: &FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
     selected: ResolvedTemplateCall, index: int, body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>,
-    bindings: Seq<CallBinding>, widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
+    bindings: Seq<CallBinding>, roots: Seq<NorBinding>, widths: Seq<u64>, drivers: Seq<OutputDriver>, layout_limit: usize, gate_limit: usize,
     function: &LoweredBitFunc, steps: Ghost<Seq<WiringStep>>, inputs: Seq<bool>, values: Seq<bool>,
 ) -> (result: MixedCallEvaluation)
     requires
@@ -1739,11 +1742,12 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_
             &&& caller.0 < project.circuits_model().len() && caller.0 < project.sources_model().len()
             &&& forms == project.circuits_model()[caller.0 as int].syntax.forms@
         }),
-        mixed_function_success(body, layouts, forms, bindings, widths, drivers, gate_limit, function, steps@),
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, gate_limit, function, steps@),
         wiring_trace_arguments_match(steps@, prepared.projections.call_arguments.arguments@),
         ordered_bindings(bindings),
         0 <= index < bindings.len(),
         binding_matches_selection(bindings[index], selected),
+        !nor_binding_covers(roots, selected.group.outputs.start as int),
         aliases.resolved_template_call_matches(plan, caller, prepared, index, selected),
         resolved_call_fits_body(selected, body.input_widths@, body.definitions@, forms, caller.2),
         body_definition_layouts(body.input_widths@, body.definitions@, layout_limit, layouts),
@@ -1769,11 +1773,12 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_
     vstd::slice::axiom_spec_len(body.definitions);
     let slot = body.definitions@.len() as usize;
     let group = bindings.len() as usize;
-    assert(0 <= end && steps@[end].to == slot) by { reveal(mixed_trace); };
+    let nor = roots.len() as usize;
+    assert(0 <= end && steps@[end].to == slot) by { reveal(rooted_mixed_trace); };
     let first = selected.group.outputs.start as int;
     assert(first < body.definitions@.len());
     assert(binding_covers(bindings, first));
-    let at = mixed_trace_definition_step(body, layouts, forms, bindings, gate_limit, steps@, slot, group, wiring, end, first);
+    let at = rooted_trace_definition_step(body, layouts, forms, bindings, roots, gate_limit, steps@, slot, group, nor, wiring, end, first);
     let step = steps@[at];
     assert(step.group_before != step.group_after && step.group_before == index) by {
         reveal(wiring_step_valid);
@@ -1795,12 +1800,12 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn mixed_function_
         assert(step.nested->Some_0.arguments == prepared.projections.call_arguments.arguments@) by {
             reveal(wiring_trace_arguments_match);
         };
-        let evaluation = nested_trace_call_values(aliases, plan, caller, prepared, &selected, body, layouts, forms, bindings,
-            gate_limit, layout_limit, steps@, slot, group, wiring, at, inputs, values);
+        let evaluation = nested_trace_call_values(aliases, plan, caller, prepared, &selected, body, layouts, forms, bindings, roots,
+            gate_limit, layout_limit, steps@, slot, group, nor, wiring, at, inputs, values);
         MixedCallEvaluation::Nested(evaluation)
     } else {
-        let (input, output) = mixed_trace_source_call_values(aliases, plan, caller, prepared, selected, body, layouts, forms, bindings,
-            gate_limit, layout_limit, steps@, slot, group, wiring, at, inputs, values);
+        let (input, output) = mixed_trace_source_call_values(aliases, plan, caller, prepared, selected, body, layouts, forms, bindings, roots,
+            gate_limit, layout_limit, steps@, slot, group, nor, wiring, at, inputs, values);
         reveal(wiring_step_valid);
         MixedCallEvaluation::Flat(input, output)
     }

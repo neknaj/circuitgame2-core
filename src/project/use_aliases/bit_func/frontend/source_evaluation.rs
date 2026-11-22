@@ -384,7 +384,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.projection_port_widths_match(scope),
             self.prepared_definition_result(scope, calls, selected, Ok(definitions)),
             projected_lowering_view(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
-                scope.parsed.syntax.forms@, selected, arguments, layout_limit, gate_limit, Ok(*function)),
+                scope.parsed.syntax.forms@, selected, Seq::empty(), arguments, layout_limit, gate_limit, Ok(*function)),
             calls.len() == selected.len(),
             forall|g: int| 0 <= g < selected.len() ==> *(#[trigger] selected[g]).group == calls[g],
             forall|a: int, b: int| 0 <= a < b < calls.len()
@@ -410,7 +410,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.prepared_ordinary_definition_evidence(scope, calls, selected, definitions, i);
         };
         projected_lowering_local_values(scope.inputs@, definitions@, scope.outputs@, scope.wiring.drivers.outputs@,
-            scope.parsed.syntax.forms@, selected, calls, arguments, layout_limit, gate_limit, function, inputs, gates);
+            scope.parsed.syntax.forms@, selected, Seq::empty(), calls, arguments, layout_limit, gate_limit, function, inputs, gates);
         let incoming = port_values(function.input_layout_model(), inputs);
         let values = expanded_definition_values(function, inputs, gates);
         assert(self.source_inputs_match(scope.wiring, scope.layouts, incoming));
