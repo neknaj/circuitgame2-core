@@ -8,9 +8,13 @@ use crate::project::{CircuitProject, LocatedName};
 #[cfg(verus_only)]
 use super::templates::complete_circuit_table;
 #[cfg(verus_only)]
+use super::frontend::function_source_model_matches;
+#[cfg(verus_only)]
 use crate::netlist::{NorEvaluationError, nor_evaluation_ready, nor_evaluation_result};
 #[cfg(verus_only)]
-use super::lowering::port_values;
+use super::lowering::{SourceChildModel, port_values};
+#[cfg(verus_only)]
+use crate::netlist::{SourceGateId, SourceTickCircuit, source_clocked_layout};
 #[cfg(verus_only)]
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -215,6 +219,53 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& circuit == *template.circuit_model()
             },
         }
+    }
+
+    /// 到達展開の根に当たるソース回路とゲート順を、厳格定義から求めたことを表す。
+    pub(in crate::project::use_aliases) closed spec fn reachable_function_source_circuit(
+        &self, root: (usize, usize), width_limit: u64, circuit: SourceTickCircuit, order: Seq<SourceGateId>,
+    ) -> bool {
+        exists|plan: FunctionExpansionOrder, table: FunctionTemplates, rank: int, models: Seq<SourceChildModel>| {
+            &&& #[trigger] self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+            &&& #[trigger] self.function_source_layout_prefix(&plan, &table, width_limit, models)
+            &&& 0 <= rank < models.len()
+            &&& #[trigger] plan.position_model(rank) == Some(root)
+            &&& models[rank].circuit == circuit && models[rank].order == order
+        }
+    }
+
+    /// 到達展開で返した関数を、厳格定義から構成したソース回路と照合する。
+    #[verifier::spinoff_prover]
+    pub(in crate::project::use_aliases) proof fn reachable_function_source_layout(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize, value: &LoweredBitFunc,
+    ) -> (layout: (SourceTickCircuit, Seq<SourceGateId>, Map<SourceGateId, int>))
+        requires
+            self.can_resolve(),
+            self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, Ok(Some(*value))),
+        ensures
+            self.reachable_function_source_circuit(root, width_limit, layout.0, layout.1),
+            source_clocked_layout(&layout.0, value.netlist_model(), layout.1, layout.2),
+    {
+        reveal(UseAliases::expand_reachable_function_result);
+        let (plan, table, rank) = choose|plan: FunctionExpansionOrder, table: FunctionTemplates, rank: int| {
+            &&& self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+            &&& #[trigger] self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Ok(table))
+            &&& 0 <= rank < plan.order_model().len()
+            &&& #[trigger] plan.position_model(rank) == Some(root)
+            &&& plan.order_model()[rank] < table.slots_model().len()
+            &&& table.slots_model()[plan.order_model()[rank] as int] matches Some(template)
+            &&& *value == *template.circuit_model()
+        };
+        self.reachable_function_template_plan(root, plan);
+        let models = self.completed_function_source_layout_prefix(&plan, &table, width_limit, bit_limit, gate_limit, (rank + 1) as nat);
+        let model = models[rank];
+        assert(function_source_model_matches(&plan, &table, rank, model));
+        let vertex = plan.order_model()[rank];
+        let template = table.slots_model()[vertex as int]->Some_0;
+        assert(source_clocked_layout(&model.circuit, template.circuit_model().netlist_model(), model.order, model.index));
+        reveal(UseAliases::reachable_function_source_circuit);
+        assert(self.reachable_function_source_circuit(root, width_limit, model.circuit, model.order));
+        (model.circuit, model.order, model.index)
     }
 
     /// 指定した宣言をソースの規則で評価したとき、入出力の値が対応することを表す。

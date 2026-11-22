@@ -11,18 +11,24 @@ use core::ops::Range;
 
 verus! {
 
+/// 指定順位のソース回路と、同じ頂点にある関数の配線が対応することを表す。
+pub(in crate::project::use_aliases::bit_func) open spec fn function_source_model_matches(
+    plan: &FunctionExpansionOrder, table: &FunctionTemplates, rank: int, model: SourceChildModel,
+) -> bool {
+    let vertex = plan.order_model()[rank];
+    &&& 0 <= rank < plan.order_model().len()
+    &&& vertex < table.slots_model().len()
+    &&& table.slots_model()[vertex as int] matches Some(template)
+    &&& source_clocked_layout(&model.circuit, template.circuit_model().netlist_model(), model.order, model.index)
+}
+
 /// 展開順の接頭部にある各ソース回路が、同じ順位で完成したテンプレートに対応する。
 pub(in crate::project::use_aliases::bit_func) open spec fn prior_function_source_models(
     plan: &FunctionExpansionOrder, table: &FunctionTemplates, models: Seq<SourceChildModel>,
 ) -> bool {
     &&& models.len() == table.next_rank() <= plan.order_model().len()
-    &&& forall|rank: int| 0 <= rank < models.len() ==> {
-        let model = #[trigger] models[rank];
-        let vertex = plan.order_model()[rank];
-        &&& vertex < table.slots_model().len()
-        &&& table.slots_model()[vertex as int] matches Some(template)
-        &&& source_clocked_layout(&model.circuit, template.circuit_model().netlist_model(), model.order, model.index)
-    }
+    &&& forall|rank: int| 0 <= rank < models.len() ==>
+        function_source_model_matches(plan, table, rank, #[trigger] models[rank])
 }
 
 spec fn expression_source_models(

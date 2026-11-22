@@ -4,7 +4,7 @@
 mod source_models;
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_models::{
-    prior_function_source_models, source_models_for_step, source_target_for_slot,
+    function_source_model_matches, prior_function_source_models, source_models_for_step, source_target_for_slot,
 };
 
 use super::*;
