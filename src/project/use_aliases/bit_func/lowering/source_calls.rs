@@ -1,5 +1,6 @@
 //! 呼び出し右辺のソース配線を、変換済みの左辺スロットと照合する。
 
+pub(super) mod final_layout;
 pub(super) mod flat;
 pub(super) mod local;
 

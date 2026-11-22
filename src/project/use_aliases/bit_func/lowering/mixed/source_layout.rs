@@ -1,5 +1,7 @@
 //! コンパイラの配線履歴を、定義単位のソース配線の証明に渡す。
 
+pub(super) mod body;
+
 use super::*;
 use super::super::call_arguments::source_wires::{
     SourceArguments, SourceChildModel, source_call_definition_wiring, source_child_site, source_gate_in_definition,
@@ -131,6 +133,34 @@ pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_st
     }
 }
 
+/// 型付きの右辺と呼び出し先のソース回路が、同じ入力幅と参照位置を使うことを表す。
+pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_step_ready(
+    source: &crate::project::ProjectSource, forms: Seq<Form>, body: &LoweringBody, width_limit: u64,
+    target: SourceStepTarget, first: usize, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>,
+    ordinary: Option<SourceChildModel>, children: Seq<Option<SourceChildModel>>,
+) -> bool {
+    match target {
+        SourceStepTarget::Local => first < body.definitions@.len()
+            && bit_definition_matches(body.input_widths@, body.definitions@.take(first as int),
+                body.definitions@[first as int]),
+        SourceStepTarget::Function(index) => 0 <= index < selected.len() && {
+            let call = selected[index];
+            let template = call.template.circuit_model();
+            &&& source == call.group.expression.source
+            &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, forms, width_limit)
+            &&& source_models_match_calls(call.children@, children, call.group.references)
+            &&& (call.children@.len() > 0 ==> nested_arguments_ready(&call))
+            &&& ordinary matches Some(model)
+                && source_clocked_layout(&model.circuit, template.netlist_model(), model.order, model.index)
+        },
+        SourceStepTarget::Nor(index) => 0 <= index < roots.len() && {
+            let root = roots[index];
+            &&& nor_binding_fits_body(root, source, forms, body.input_widths@, body.definitions@, width_limit)
+            &&& source_models_match_calls(root.selected.children@, children, *root.references)
+        },
+    }
+}
+
 /// 成功履歴の一段を、該当する右辺のソース配線と照合する。
 #[verifier::spinoff_prover]
 pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_step(
@@ -146,30 +176,8 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn rooted_source_s
         bindings_match_calls(bindings, selected),
         0 <= at < steps.len(),
         source_definition_start(context, body, layouts, capacity, source_step_before(steps[at]), source_step_slots(steps[at]).start, definition, prior),
-        ({
-            let step = steps[at];
-            let slots = source_step_slots(step);
-            match source_step_target(step) {
-                SourceStepTarget::Local => slots.start < body.definitions@.len()
-                    && bit_definition_matches(body.input_widths@, body.definitions@.take(slots.start as int),
-                        body.definitions@[slots.start as int]),
-                SourceStepTarget::Function(index) => 0 <= index < selected.len() && {
-                    let call = selected[index];
-                    let template = call.template.circuit_model();
-                    &&& context.source == call.group.expression.source
-                    &&& resolved_call_fits_body(call, body.input_widths@, body.definitions@, context.forms, width_limit)
-                    &&& source_models_match_calls(call.children@, children, call.group.references)
-                    &&& (call.children@.len() > 0 ==> nested_arguments_ready(&call))
-                    &&& ordinary matches Some(model)
-                        && source_clocked_layout(&model.circuit, template.netlist_model(), model.order, model.index)
-                },
-                SourceStepTarget::Nor(index) => 0 <= index < roots.len() && {
-                    let root = roots[index];
-                    &&& nor_binding_fits_body(root, context.source, context.forms, body.input_widths@, body.definitions@, width_limit)
-                    &&& source_models_match_calls(root.selected.children@, children, *root.references)
-                },
-            }
-        }),
+        source_step_ready(context.source, context.forms, body, width_limit, source_step_target(steps[at]),
+            source_step_slots(steps[at]).start, selected, roots, ordinary, children),
     ensures ({
         let step = steps[at];
         let (order, gates, definitions) = result;
