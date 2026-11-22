@@ -69,7 +69,7 @@ pub closed spec fn clocked_wiring_valid(netlist: &NorNetlist) -> bool {
 }
 
 /// 各ゲートと出力の参照先が範囲内なら、ネットリスト全体が検査条件を満たす。
-pub(super) proof fn clocked_wiring_from_endpoints(netlist: &NorNetlist)
+pub(crate) proof fn clocked_wiring_from_endpoints(netlist: &NorNetlist)
     requires
         forall|i: int| 0 <= i < netlist.gates@.len() ==> {
             let gate = #[trigger] netlist.gates@[i];

@@ -9,6 +9,8 @@ mod source_trace;
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 #[cfg(verus_only)]
+pub(crate) use clocked::clocked_wiring_from_endpoints;
+#[cfg(verus_only)]
 pub use clocked::{
     clocked_gate_updates, clocked_wiring_error, clocked_wiring_valid, nor_trace, nor_trace_from_reset, nor_trace_push_tick,
     nor_traces_agree, reset_matches, tick_matches,

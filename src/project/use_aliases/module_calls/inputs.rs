@@ -9,7 +9,7 @@ use crate::project::circuits::form_location;
 use crate::project::{CallPortType, circuits::{is_form_location, parsed_index_evidence}};
 use crate::project::use_aliases::{call_arity::check_leaf, function_atoms::{copy_location, copy_signal_type}};
 #[cfg(verus_only)]
-use crate::project::use_aliases::call_arity::leaf_result;
+use crate::project::use_aliases::call_arity::{checked_nor_literal_width, leaf_result};
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::{complete_list_indices, form_spans_valid, nested_list_indices, circuit::{
@@ -183,6 +183,88 @@ fn check_inputs<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(in crate::project::use_aliases) closed spec fn module_nor_literals_fit(
+        &self, at: DefinitionPosition, limit: u64, checked: &ModuleCallInputs,
+    ) -> bool {
+        let forms = self.targets.project_model().circuits_model()[at.file as int].syntax.forms@;
+        let source = checked.ports.signature.source.text;
+        forall|i: int| 0 <= i < checked.ports.arguments@.len() ==> {
+            let root = #[trigger] checked.ports.arguments@[i];
+            let form = forms[root as int];
+            let span = crate::syntax::form_span(form);
+            form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal) ==>
+                crate::project::circuit_literal_width_matches(source.spec_bytes()[span.start as int..span.end as int],
+                    Some(1), limit, Ok(1))
+        }
+    }
+
+    /// 検査結果から、NOR に渡した各二進・十六進リテラルの幅の根拠を取り出す。
+    pub(in crate::project::use_aliases) proof fn checked_module_nor_literals(
+        &self, at: DefinitionPosition, limit: u64, ports: &ModuleCallPorts, known: Seq<Option<SignalType>>, checked: &ModuleCallInputs,
+    )
+        requires self.module_inputs_from_plan_match(at, limit, ports, known, Ok(Some(*checked))),
+            ports.signature.target is Nor,
+        ensures self.module_nor_literals_fit(at, limit, checked),
+    {
+        let forms = self.targets.project_model().circuits_model()[at.file as int].syntax.forms@;
+        let source = ports.signature.source;
+        assert(checked.ports == *ports);
+        vstd::std_specs::vec::axiom_spec_len(&ports.arguments);
+        reveal(argument_type);
+        reveal(valid_input_prefix);
+        assert forall|i: int| 0 <= i < ports.arguments@.len() implies {
+            let root = #[trigger] ports.arguments@[i];
+            let form = forms[root as int];
+            let span = crate::syntax::form_span(form);
+            form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal) ==>
+                crate::project::circuit_literal_width_matches(source.text.spec_bytes()[span.start as int..span.end as int],
+                    Some(1), limit, Ok(1))
+        } by {
+            let root = ports.arguments@[i];
+            let form = forms[root as int];
+            if form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal) {
+                let typed = checked.types@[i];
+                let index = i as usize;
+                assert(index as int == i);
+                assert(argument_type(forms, ports, limit, index, known[i], Ok(typed)));
+                assert(exists|port: CallPortType|
+                    #[trigger] ports.signature.target.port_matches(PortDirection::Input, index, Some(port))
+                    && leaf_result(source, form, &port, known[i], limit, Ok(typed)));
+                let port = choose|port: CallPortType|
+                    #[trigger] ports.signature.target.port_matches(PortDirection::Input, index, Some(port))
+                    && leaf_result(source, form, &port, known[i], limit, Ok(typed));
+                ports.signature.target.nor_input_width(index, port);
+                checked_nor_literal_width(source, form, &port, known[i], limit, typed);
+            }
+        };
+    }
+
+    /// 実引数の構文位置から、NOR の入力幅を照合した結果を取り出す。
+    pub(in crate::project::use_aliases) proof fn module_nor_literal_item(
+        &self, at: DefinitionPosition, limit: u64, checked: &ModuleCallInputs, i: int,
+    )
+        requires self.module_nor_literals_fit(at, limit, checked), 0 <= i < checked.ports.arguments@.len(),
+        ensures ({
+            let source = checked.ports.signature.source.text;
+            let forms = self.targets.project_model().circuits_model()[at.file as int].syntax.forms@;
+            let form = forms[checked.ports.arguments@[i] as int];
+            let span = crate::syntax::form_span(form);
+            form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal) ==>
+                crate::project::circuit_literal_width_matches(source.spec_bytes()[span.start as int..span.end as int],
+                    Some(1), limit, Ok(1))
+        }),
+    {
+    }
+
+    /// 照合で返す入出力計画は、照合に渡した計画と同じである。
+    pub(in crate::project::use_aliases) proof fn module_inputs_plan_identity(
+        &self, at: DefinitionPosition, limit: u64, ports: &ModuleCallPorts, known: Seq<Option<SignalType>>, checked: ModuleCallInputs,
+    )
+        requires self.module_inputs_from_plan_match(at, limit, ports, known, Ok(Some(checked))),
+        ensures checked.ports == *ports,
+    {
+    }
+
     pub(in crate::project::use_aliases) closed spec fn module_inputs_from_plan_match(
         &self, at: DefinitionPosition, max_width: u64, ports: &ModuleCallPorts, known: Seq<Option<SignalType>>,
         result: Result<Option<ModuleCallInputs>, ModuleCallInputsError>,

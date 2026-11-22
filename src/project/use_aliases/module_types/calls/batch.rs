@@ -55,6 +55,34 @@ spec fn row_cursor(row: CheckedModuleCall) -> (int, int, int) {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 全件検査の成功結果から、モジュールの型表を取り出す。
+    pub(in crate::project::use_aliases::module_types) proof fn module_calls_type_evidence(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls,
+    )
+        requires self.module_calls_result(owner, limit, Ok(Some(*checked))),
+        ensures self.module_output_types_result(owner, limit, Ok(Some(checked.module))),
+    {
+    }
+
+    /// 全件検査の項目を元の断片と、その場所で選んだ呼び出し計画に対応付ける。
+    pub(in crate::project::use_aliases::module_types) proof fn module_calls_item_evidence(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, index: int,
+    )
+        requires self.module_calls_result(owner, limit, Ok(Some(*checked))), 0 <= index < checked.calls@.len(),
+        ensures ({
+            let row = checked.calls@[index];
+            let members = checked.module.expressions.typed.sources.roots.wiring.drivers.body.members@;
+            &&& row.member < members.len()
+            &&& members[row.member as int] == (ModuleBodyPosition { file: row.at.file, entry: row.at.entry })
+            &&& self.module_call_ports_result(row.at, limit, Ok(Some(row.inputs.ports)))
+            &&& (row.inputs.ports.signature.target is Nor ==> self.module_nor_literals_fit(row.at, limit, &row.inputs))
+        }),
+    {
+        reveal(UseAliases::module_calls_before);
+        let row = checked.calls@[index];
+        self.inferred_module_call_plan(&checked.module, row.at, limit, row.inputs);
+    }
+
     spec fn module_call_body(module: &ModuleOutputTypes) -> ModuleBody {
         module.expressions.typed.sources.roots.wiring.drivers.body
     }

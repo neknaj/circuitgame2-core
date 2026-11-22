@@ -29,6 +29,24 @@ pub enum ModuleInferredCallError<'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 照合済みの入力と、その照合で使った呼び出し計画が対応することを示す。
+    proof fn inferred_module_call_plan(&self, module: &ModuleOutputTypes, at: DefinitionPosition,
+        limit: u64, inputs: ModuleCallInputs,
+    )
+        requires self.inferred_call(module, at, limit, Ok(Some(inputs))),
+        ensures self.module_call_ports_result(at, limit, Ok(Some(inputs.ports))),
+            inputs.ports.signature.target is Nor ==> self.module_nor_literals_fit(at, limit, &inputs),
+    {
+        let (ports, known, member) = choose|ports: ModuleCallPorts, known: Seq<Option<SignalType>>, member: usize|
+            #[trigger] self.module_call_ports_result(at, limit, Ok(Some(ports)))
+            && #[trigger] self.inferred_arguments_prefix(module, at, limit, member, &ports, known)
+            && self.module_inputs_from_plan_match(at, limit, &ports, known, Ok(Some(inputs)));
+        self.module_inputs_plan_identity(at, limit, &ports, known, inputs);
+        if inputs.ports.signature.target is Nor {
+            self.checked_module_nor_literals(at, limit, &ports, known, &inputs);
+        }
+    }
+
     spec fn inferred_argument_at(
         &self, module: &ModuleOutputTypes, at: DefinitionPosition, limit: u64, member: usize, ports: &ModuleCallPorts,
         index: int, ty: Option<SignalType>,

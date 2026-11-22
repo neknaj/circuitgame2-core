@@ -139,6 +139,13 @@ impl<'p, 'a> ModuleCallTarget<'p, 'a> {
             ModuleCallTarget::StateElement { .. } => port.is_none(),
         }
     }
+
+    /// 基底 NOR の入力ポートは1ビット幅である。
+    pub(super) proof fn nor_input_width(&self, index: usize, port: CallPortType)
+        requires *self is Nor, self.port_matches(PortDirection::Input, index, Some(port)),
+        ensures port.ty == crate::project::ResolvedPortType::Bits(1),
+    {
+    }
 }
 
 spec fn after_argument(forms: Seq<Form>, root: int) -> int {

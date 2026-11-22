@@ -8,6 +8,8 @@ mod concats;
 pub use concats::{ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError};
 mod outputs;
 pub use outputs::{ModuleOutputTypes, ModuleOutputTypesError};
+mod primitive_nor;
+pub use primitive_nor::PrimitiveModuleError;
 mod propagation;
 pub use propagation::{ModuleAliasCycleStep, ModuleAliasTypes, ModuleAliasTypesError};
 mod selections;

@@ -160,6 +160,24 @@ pub(in crate::project::use_aliases) closed spec fn leaf_result(
     }
 }
 
+/// 1ビット入力に受理された定数は、元の表記の値が1ビットに収まる。
+pub(in crate::project::use_aliases) proof fn checked_nor_literal_width(
+    source: &ProjectSource, form: Form, port: &CallPortType, known: Option<SignalType>, limit: u64, typed: Option<SignalType>,
+)
+    requires
+        port.ty == ResolvedPortType::Bits(1),
+        form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal),
+        leaf_result(source, form, port, known, limit, Ok(typed)),
+    ensures ({
+        let span = form_span(form);
+        circuit_literal_width_matches(source.text.spec_bytes()[span.start as int..span.end as int], Some(1), limit, Ok(1))
+    }),
+{
+    let span = form_span(form);
+    let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+    crate::project::literal_width::checked_literal_for_port(bytes, 1, limit, typed->Some_0.ty->Bits_0);
+}
+
 pub(in crate::project::use_aliases) fn check_leaf<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], at: usize,
     port: &CallPortType<'_, 'p, 'a>, known: Option<SignalType<'p, 'a>>, limit: u64,
