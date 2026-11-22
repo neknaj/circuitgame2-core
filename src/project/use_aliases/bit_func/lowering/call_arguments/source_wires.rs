@@ -2,15 +2,16 @@
 
 use super::*;
 use super::super::source_wires::{
-    definition_wires_pair, flatten_source_wire_pairs, port_ranges_cover, source_driver_wire,
-    source_driver_wire_agrees, source_wires_pair,
+    definition_wires_in_extension, definition_wires_pair, flatten_source_wire_pairs, port_ranges_cover, source_driver_wire,
+    source_driver_wire_agrees, source_wires_pair, source_wires_pair_in_extension,
 };
 use super::super::super::expansion::source_argument_bytes;
 use super::super::super::templates::ResolvedExpressionCall;
 use crate::netlist::{
+    builtin_nor_source, builtin_nor_source_layout, builtin_nor_template,
     source_call_gate_order, source_call_order_appended, source_gate_belongs_to_call, source_gate_positions_distinct,
     source_instance_order_appended,
-    SourceGateId, SourceWire, SourceTickCircuit, source_wire_pair, source_clocked_layout, source_instance_gate_agrees,
+    SourceGateId, SourceNor, SourceWire, SourceTickCircuit, source_wire_pair, source_clocked_layout, source_instance_gate_agrees,
     source_instance_order_at, source_instance_outputs_agree, source_trace_layout_counts, source_wire_in_parent,
 };
 use crate::project::DefinitionPosition;
@@ -254,23 +255,6 @@ pub(in crate::project::use_aliases::bit_func::lowering) open spec fn source_chil
     Seq::new(source.outputs.len(), |bit: int| source_wire_in_parent(prefix, arguments, source.outputs[bit]))
 }
 
-proof fn source_wires_pair_in_extension(
-    before: Seq<SourceGateId>, after: Seq<SourceGateId>, source: Seq<SourceWire>, flat: Seq<Wire>,
-)
-    requires
-        source_wires_pair(before, source, flat),
-        after.take(before.len() as int) == before,
-        before.len() <= after.len(),
-    ensures source_wires_pair(after, source, flat),
-{
-    assert forall|bit: int| 0 <= bit < source.len() implies source_wire_pair(after, #[trigger] source[bit], flat[bit]) by {
-        assert(source_wire_pair(before, source[bit], flat[bit]));
-        if let Wire::Gate(gate) = flat[bit] {
-            assert(after[gate as int] == before[gate as int]);
-        }
-    };
-}
-
 /// 子のゲートを呼び出し位置で識別し、実引数の配線と出力先を展開履歴に対応付ける。
 /// 解決済みの呼び出しから種類を判定する。先行ゲートの識別子は展開済みのゲート番号順に渡す。
 /// 基底 NOR は呼び出し位置そのものを使い、通常呼び出しは子の識別子に経路を付ける。
@@ -322,6 +306,7 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_child_pl
         &&& order == prior_order + source_call_gate_order(site, child)
         &&& order.take(prior_order.len() as int) == prior_order
         &&& order.len() == after.gates.len()
+        &&& after.gates.take(before.gates.len() as int) == before.gates
         &&& order.no_duplicates()
         &&& forall|gate: int| prior_order.len() <= gate < order.len() ==>
             source_gate_belongs_to_call(site, #[trigger] order[gate])
@@ -409,6 +394,237 @@ pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_child_pl
     source_child_outputs_registered(order, context.children, outputs, &before.table, &after.table, call.reference,
         call.circuit, mapped, before.gates, after.gates, input_bits);
     (order, arguments)
+}
+
+/// 定義の厳格索引位置と、定義内での参照番号から子の位置を得る。
+pub(in crate::project::use_aliases::bit_func::lowering) open spec fn source_child_site(
+    definition: DefinitionPosition, reference: usize,
+) -> DefinitionPosition {
+    DefinitionPosition { reference, ..definition }
+}
+
+/// ソースで定めた子ゲートの左右を、呼び出し元の引数とゲート識別子で表す。
+spec fn source_child_gate(
+    prefix: Seq<DefinitionPosition>, arguments: Seq<SourceWire>, gate: SourceNor,
+) -> SourceNor {
+    SourceNor {
+        left: source_wire_in_parent(prefix, arguments, gate.left),
+        right: source_wire_in_parent(prefix, arguments, gate.right),
+    }
+}
+
+/// 各子のソース回路と、ゲート識別子から変換先の番号を引く対応表。
+pub(in crate::project::use_aliases::bit_func::lowering) struct SourceChildModel {
+    pub(in crate::project::use_aliases::bit_func::lowering) circuit: SourceTickCircuit,
+    pub(in crate::project::use_aliases::bit_func::lowering) order: Seq<SourceGateId>,
+    pub(in crate::project::use_aliases::bit_func::lowering) index: Map<SourceGateId, int>,
+}
+
+spec fn source_child_model(site: DefinitionPosition, primitive: bool, ordinary: Option<SourceChildModel>)
+    -> Option<SourceChildModel>
+{
+    if primitive {
+        let (circuit, order, index) = builtin_nor_source(site);
+        Some(SourceChildModel { circuit, order, index })
+    } else { ordinary }
+}
+
+/// 変換履歴を使わず、型付きの子呼び出し列から配線を組み立てる。
+pub(in crate::project::use_aliases::bit_func::lowering) closed spec fn source_children_wiring(
+    context: &SourceArguments, definition: DefinitionPosition, first_ref: usize, initial_order: Seq<SourceGateId>,
+    selected: Seq<ResolvedExpressionCall>, children: Seq<Option<SourceChildModel>>, stop: nat,
+) -> Option<(Seq<SourceGateId>, Map<usize, Seq<SourceWire>>, Seq<SourceNor>)>
+    decreases stop,
+{
+    if stop == 0 {
+        Some((initial_order, context.children, Seq::empty()))
+    } else if stop <= selected.len() && stop <= children.len() {
+        let call = selected[stop - 1];
+        if call.child.reference < first_ref {
+            None
+        } else if let Some((before, outputs, gates)) =
+            source_children_wiring(context, definition, first_ref, initial_order, selected, children, (stop - 1) as nat)
+        {
+            let reference = (call.child.reference - first_ref) as usize;
+            let site = source_child_site(definition, reference);
+            if let Some(model) = source_child_model(site, call.template.is_none(), children[stop - 1]) {
+                let child = if call.template.is_none() { None } else { Some(model.order) };
+                let prefix = if child.is_none() { Seq::empty() } else { seq![site] };
+                let widths = match call.template {
+                    Some(template) => template.input_widths_model(),
+                    None => seq![1u64, 1u64],
+                };
+                let available = SourceArguments { children: outputs, ..*context };
+                if let Some(arguments) = source_argument_wires(&available, call.arguments@, widths) {
+                    let order = before + source_call_gate_order(site, child);
+                    let added = Seq::new(model.order.len(), |gate: int|
+                        source_child_gate(prefix, arguments, model.circuit.gates[model.order[gate]]));
+                    Some((order, outputs.insert(reference, source_child_outputs(prefix, &model.circuit, arguments)), gates + added))
+                } else { None }
+            } else { None }
+        } else { None }
+    } else { None }
+}
+
+/// 子呼び出しの後順列を展開履歴と照合し、各子のゲートと出力を組み立てる。
+#[verifier::spinoff_prover]
+pub(in crate::project::use_aliases::bit_func::lowering) proof fn source_children_placement(
+    context: &SourceArguments, body: &LoweringBody, layouts: &Layouts, capacity: usize, width_limit: u64,
+    caller: &CallerArguments, calls: Seq<ChildCall>, references: Range<usize>, builtin: &(NorNetlist, PortBitLayout),
+    trace: Seq<ChildWiringSnapshot>, input_bits: usize, definition: DefinitionPosition, initial_order: Seq<SourceGateId>,
+    selected: Seq<ResolvedExpressionCall>, children: Seq<Option<SourceChildModel>>,
+    stop: nat,
+) -> (result: (Seq<SourceGateId>, Map<usize, Seq<SourceWire>>, Seq<SourceNor>))
+    requires
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        context.source == caller.source && context.forms == caller.forms@,
+        context.input_widths == body.input_widths@, context.definitions.len() <= body.definitions@.len(),
+        context.children == Map::<usize, Seq<SourceWire>>::empty(),
+        caller.inputs@ == layouts.inputs.ranges_model() && caller.definitions@ == layouts.definitions.ranges_model(),
+        caller.wires@.len() == preceding_port_bits(definition_widths(body.definitions@), context.definitions.len()),
+        definition_wires_pair(initial_order, context.definitions, caller.definitions@, caller.wires@),
+        stop <= calls.len() == selected.len() == children.len(),
+        trace.len() == calls.len() + 1, references.start <= references.end,
+        child_wiring_trace_matches(caller, calls, calls.len(), (references.end - references.start) as usize,
+            trace[0].gates, trace, trace[calls.len() as int], input_bits),
+        initial_order.len() == trace[0].gates.len(), initial_order.no_duplicates(),
+        forall|a: int, b: int| 0 <= a < b < calls.len() ==>
+            (#[trigger] calls[a]).reference != (#[trigger] calls[b]).reference,
+        forall|i: int| 0 <= i < calls.len() ==> {
+            let call = #[trigger] calls[i];
+            let site = source_child_site(definition, call.reference);
+            &&& child_call_ready(caller, calls, i)
+            &&& child_call_binding(selected[i], references, builtin, call)
+            &&& if selected[i].template.is_none() {
+                children[i].is_none()
+            } else {
+                children[i] matches Some(model) && source_clocked_layout(&model.circuit, call.circuit, model.order, model.index)
+            }
+            &&& trace[i + 1].gates.len() <= usize::MAX
+            &&& forall|gate: int| 0 <= gate < initial_order.len() ==>
+                !source_gate_belongs_to_call(site, #[trigger] initial_order[gate])
+            &&& forall|port: int| 0 <= port < call.arguments@.len() ==>
+                argument_matches_width(context.source, context.forms, context.input_widths,
+                    body.definitions@.take(context.definitions.len() as int), #[trigger] call.arguments@[port],
+                    call._input_widths@[port], width_limit)
+        },
+    ensures ({
+        let (order, outputs, gates) = result;
+        let flat = trace[stop as int];
+        &&& source_children_wiring(context, definition, references.start, initial_order, selected, children, stop) == Some(result)
+        &&& order.len() == flat.gates.len()
+        &&& order.len() == initial_order.len() + gates.len()
+        &&& order.take(initial_order.len() as int) == initial_order
+        &&& order.no_duplicates()
+        &&& source_child_outputs_pair(order, outputs, flat.table.ranges@, flat.table.wires@)
+        &&& definition_wires_pair(order, context.definitions, caller.definitions@, caller.wires@)
+        &&& forall|i: int, gate: int| 0 <= gate < order.len() && stop <= i < calls.len() ==>
+            !source_gate_belongs_to_call(source_child_site(definition, (#[trigger] calls[i]).reference), #[trigger] order[gate])
+        &&& forall|gate: int| 0 <= gate < gates.len() ==> {
+            let source = #[trigger] gates[gate];
+            let lowered = flat.gates[initial_order.len() + gate];
+            &&& source_wire_pair(order, source.left, lowered.left)
+            &&& source_wire_pair(order, source.right, lowered.right)
+        }
+    }),
+    decreases stop,
+{
+    if stop == 0 {
+        reveal(child_wiring_trace_matches);
+        assert(initial_order.take(initial_order.len() as int) =~= initial_order);
+        assert(source_child_outputs_pair(initial_order, context.children, trace[0].table.ranges@, trace[0].table.wires@)) by {
+            assert forall|r: usize| !(#[trigger] context.children.dom().contains(r))
+                && !(r < trace[0].table.ranges@.len() && trace[0].table.ranges@[r as int].is_some()) by {};
+        };
+        assert forall|i: int, gate: int| 0 <= gate < initial_order.len() && 0 <= i < calls.len() implies
+            !source_gate_belongs_to_call(source_child_site(definition, (#[trigger] calls[i]).reference),
+                #[trigger] initial_order[gate]) by {};
+        return (initial_order, context.children, Seq::empty());
+    }
+
+    let i = stop - 1;
+    let (prior, outputs, gates) = source_children_placement(context, body, layouts, capacity, width_limit, caller, calls,
+        references, builtin, trace, input_bits, definition, initial_order, selected, children, i as nat);
+    let call = calls[i];
+    let site = source_child_site(definition, call.reference);
+    let primitive = selected[i].template.is_none();
+    let model = source_child_model(site, primitive, children[i])->Some_0;
+    if primitive {
+        assert(builtin_nor_template(call.circuit)) by { reveal(nor_evaluation_ready); };
+        builtin_nor_source_layout(site, call.circuit);
+        assert(model.order == source_call_gate_order(site, None));
+    }
+    let before = trace[i];
+    let after = trace[i + 1];
+    let available = SourceArguments { children: outputs, ..*context };
+    assert forall|gate: int| 0 <= gate < prior.len() implies
+        !source_gate_belongs_to_call(site, #[trigger] prior[gate]) by {
+        assert(calls[i] == call);
+    };
+    let (order, arguments) = source_child_placement_agrees(&available, body, layouts, capacity, width_limit, caller, calls,
+        (references.end - references.start) as usize, trace[0].gates, trace, trace[calls.len() as int], input_bits,
+        i, site, selected[i], references, builtin, &model.circuit, model.order, model.index, prior);
+    let prefix = if selected[i].template.is_none() { Seq::empty() } else { seq![site] };
+    let added = Seq::new(model.order.len(), |gate: int|
+        source_child_gate(prefix, arguments, model.circuit.gates[model.order[gate]]));
+    let all = gates + added;
+    assert(order.take(initial_order.len() as int) =~= initial_order) by {
+        assert forall|gate: int| 0 <= gate < initial_order.len() implies
+            #[trigger] order.take(initial_order.len() as int)[gate] == initial_order[gate] by {
+            assert(order[gate] == prior[gate]);
+            assert(prior[gate] == initial_order[gate]);
+        };
+    };
+    assert forall|j: int, gate: int| 0 <= gate < order.len() && stop <= j < calls.len() implies
+        !source_gate_belongs_to_call(source_child_site(definition, (#[trigger] calls[j]).reference),
+            #[trigger] order[gate]) by {
+        let later = source_child_site(definition, calls[j].reference);
+        if gate < prior.len() {
+            assert(order[gate] == prior[gate]);
+        } else {
+            assert(calls[i].reference != calls[j].reference);
+            assert(site != later);
+            assert(source_gate_belongs_to_call(site, order[gate]));
+        }
+    };
+    definition_wires_in_extension(prior, order, context.definitions, caller.definitions@, caller.wires@);
+    assert forall|gate: int| 0 <= gate < all.len() implies {
+        let source = #[trigger] all[gate];
+        let flat = after.gates[initial_order.len() + gate];
+        &&& source_wire_pair(order, source.left, flat.left)
+        &&& source_wire_pair(order, source.right, flat.right)
+    } by {
+        let index = initial_order.len() + gate;
+        if gate < gates.len() {
+            assert(all[gate] == gates[gate]);
+            assert(after.gates[index] == before.gates[index]);
+            let flat = before.gates[index];
+            let source = gates[gate];
+            assert(source_wire_pair(prior, source.left, flat.left) && source_wire_pair(prior, source.right, flat.right));
+            if let Wire::Gate(left) = flat.left {
+                assert(order[left as int] == prior[left as int]);
+            }
+            if let Wire::Gate(right) = flat.right {
+                assert(order[right as int] == prior[right as int]);
+            }
+        } else {
+            let local = gate - gates.len();
+            assert(index == prior.len() + local);
+            assert(all[gate] == added[local]);
+        }
+    };
+    let result = (order, outputs.insert(call.reference, source_child_outputs(prefix, &model.circuit, arguments)), all);
+    assert(source_children_wiring(context, definition, references.start, initial_order, selected, children, stop) == Some(result)) by {
+        reveal_with_fuel(source_children_wiring, 2);
+        let chosen = selected[i];
+        assert(chosen.child.reference == references.start + call.reference);
+        assert(chosen.arguments@ == call.arguments@);
+        assert(match chosen.template {
+            Some(template) => call._input_widths@ == template.input_widths_model(),
+            None => call._input_widths@ == seq![1u64, 1u64],
+        });
+    };
+    result
 }
 
 } // verus!

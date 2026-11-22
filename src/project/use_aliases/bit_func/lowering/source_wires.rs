@@ -56,16 +56,57 @@ pub(super) open spec fn source_wires_pair(order: Seq<SourceGateId>, source: Seq<
     &&& forall|bit: int| 0 <= bit < source.len() ==> source_wire_pair(order, #[trigger] source[bit], flat[bit])
 }
 
+pub(super) open spec fn definition_wire_row_pair(
+    order: Seq<SourceGateId>, source: Seq<SourceWire>, range: Range<usize>, flat: Seq<Wire>,
+) -> bool {
+    &&& range.start <= range.end <= flat.len()
+    &&& source_wires_pair(order, source, flat.subrange(range.start as int, range.end as int))
+}
+
 /// 先行する定義ごとに、同じビット順で並ぶソース配線と変換先を対応付ける。
 pub(super) open spec fn definition_wires_pair(
     order: Seq<SourceGateId>, source: Seq<Seq<SourceWire>>, ranges: Seq<Range<usize>>, flat: Seq<Wire>,
 ) -> bool {
     &&& source.len() <= ranges.len()
-    &&& forall|i: int| 0 <= i < source.len() ==> {
+    &&& forall|i: int| 0 <= i < source.len() ==>
+        definition_wire_row_pair(order, #[trigger] source[i], ranges[i], flat)
+}
+
+/// ゲート列の末尾に識別子を追加しても、既存の配線元は同じ位置に対応する。
+pub(super) proof fn source_wires_pair_in_extension(
+    before: Seq<SourceGateId>, after: Seq<SourceGateId>, source: Seq<SourceWire>, flat: Seq<Wire>,
+)
+    requires
+        source_wires_pair(before, source, flat),
+        after.take(before.len() as int) == before,
+        before.len() <= after.len(),
+    ensures source_wires_pair(after, source, flat),
+{
+    assert forall|bit: int| 0 <= bit < source.len() implies source_wire_pair(after, #[trigger] source[bit], flat[bit]) by {
+        assert(source_wire_pair(before, source[bit], flat[bit]));
+        if let Wire::Gate(gate) = flat[bit] {
+            assert(after[gate as int] == before[gate as int]);
+        }
+    };
+}
+
+/// ゲート列を延長した後も、先行する定義の配線表との対応を保つ。
+pub(super) proof fn definition_wires_in_extension(
+    before: Seq<SourceGateId>, after: Seq<SourceGateId>, source: Seq<Seq<SourceWire>>,
+    ranges: Seq<Range<usize>>, flat: Seq<Wire>,
+)
+    requires
+        definition_wires_pair(before, source, ranges, flat),
+        after.take(before.len() as int) == before,
+        before.len() <= after.len(),
+    ensures definition_wires_pair(after, source, ranges, flat),
+{
+    assert forall|i: int| 0 <= i < source.len() implies
+        definition_wire_row_pair(after, #[trigger] source[i], ranges[i], flat) by {
         let range = ranges[i];
-        &&& range.start <= range.end <= flat.len()
-        &&& source_wires_pair(order, #[trigger] source[i], flat.subrange(range.start as int, range.end as int))
-    }
+        assert(definition_wire_row_pair(before, source[i], range, flat));
+        source_wires_pair_in_extension(before, after, source[i], flat.subrange(range.start as int, range.end as int));
+    };
 }
 
 /// 型が指定する一ビット参照を、配線表の同じポートとビットに対応付ける。
