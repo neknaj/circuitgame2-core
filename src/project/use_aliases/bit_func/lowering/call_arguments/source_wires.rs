@@ -423,10 +423,10 @@ spec fn source_child_gate(
 }
 
 /// 各子のソース回路と、ゲート識別子から変換先の番号を引く対応表。
-pub(in crate::project::use_aliases::bit_func::lowering) struct SourceChildModel {
-    pub(in crate::project::use_aliases::bit_func::lowering) circuit: SourceTickCircuit,
-    pub(in crate::project::use_aliases::bit_func::lowering) order: Seq<SourceGateId>,
-    pub(in crate::project::use_aliases::bit_func::lowering) index: Map<SourceGateId, int>,
+pub(in crate::project::use_aliases::bit_func) struct SourceChildModel {
+    pub(in crate::project::use_aliases::bit_func) circuit: SourceTickCircuit,
+    pub(in crate::project::use_aliases::bit_func) order: Seq<SourceGateId>,
+    pub(in crate::project::use_aliases::bit_func) index: Map<SourceGateId, int>,
 }
 
 spec fn source_child_model(site: DefinitionPosition, primitive: bool, ordinary: Option<SourceChildModel>)

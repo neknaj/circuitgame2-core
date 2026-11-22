@@ -1,5 +1,12 @@
 //! 通常の右辺と関数呼び出しの出力を、定義順に取り出す。
 
+#[cfg(verus_only)]
+mod source_models;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_models::{
+    prior_function_source_models, source_models_for_step, source_target_for_slot,
+};
+
 use super::*;
 use super::super::templates::{FunctionTemplates, NorBinding, ResolvedTemplateCall};
 #[cfg(verus_only)]
@@ -1474,22 +1481,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &self, plan: &FunctionExpansionOrder, table: &'w FunctionTemplates<'p, 'a>, caller: (usize, usize, u64),
         prepared: &'w PreparedExpansionBody<'p, 'a>, capacity: usize, limit: usize, value: &'w ExpandedBody<'p, 'a>,
     ) -> (witness: (FuncProjection<'w, 'p, 'a>, Seq<ResolvedTemplateCall<'w, 'p, 'a>>,
-        Seq<NorBinding<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>, Seq<super::super::lowering::WiringStep>))
+        Seq<NorBinding<'w, 'p, 'a>>, Vec<CheckedBitDefinition<'p, 'a>>, Seq<super::super::lowering::WiringStep>, Seq<NorDefinition<'w, 'p, 'a>>))
         requires
             self.can_resolve(),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
             self.expanded_body_lowering_result(plan, table, caller, prepared, capacity, limit, Ok(*value)),
         ensures ({
-            let (scope, selected, roots, slots, steps) = witness;
+            let (scope, selected, roots, slots, steps, rows) = witness;
             let project = self.targets.project_model();
             let parsed = &project.circuits_model()[caller.0 as int];
             let wiring = &prepared.typed.literals.wiring->Checked_0;
             &&& scope.file == caller.0 && scope.entry == caller.1 && scope.limit == caller.2
             &&& scope.source == &project.sources_model()[caller.0 as int] && scope.parsed == parsed && scope.wiring == wiring
             &&& self.expansion_selection_matches(plan, table, caller, prepared, selected)
+            &&& self.expanded_body_nor_bindings(&scope, plan, table, prepared, rows, roots, slots@)
             &&& slots@.len() == wiring.drivers.definitions@.len()
             &&& rooted_source_step_ranges(steps) == strict_definition_slots(parsed, caller.1, wiring)
-            &&& forall|i: int| 0 <= i < steps.len() ==> source_step_range_matches(#[trigger] steps[i], selected, roots, slots@.len())
+            &&& self.prepared_definition_result(&scope, prepared.calls@, selected, rows, Ok(slots))
+            &&& forall|i: int| 0 <= i < steps.len() ==> {
+                let step = #[trigger] steps[i];
+                let target = source_step_target(step);
+                &&& source_step_range_matches(step, selected, roots, slots@.len())
+                &&& target == source_target_for_slot(source_step_slots(step).start, selected, roots)
+                &&& match target {
+                    SourceStepTarget::Function(index) => 0 <= index < selected.len()
+                        && (selected[index].children@.len() > 0 ==> super::super::lowering::nested_arguments_ready(&selected[index])),
+                    _ => true,
+                }
+            }
             &&& projected_definition_history(value.ports.inputs@, slots@, value.ports.outputs@, wiring.drivers.outputs@,
                 parsed.syntax.forms@, selected, roots, prepared.projections.call_arguments.arguments@, capacity, limit, &value.circuit, steps)
         }),
@@ -1519,7 +1538,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         projected_definition_partition(inputs, slots@, outputs, drivers, forms, selected, roots, arguments,
             capacity, limit, &value.circuit, steps, expected);
-        (scope, selected, roots, slots, steps)
+        assert forall|i: int| 0 <= i < steps.len() implies {
+            let step = #[trigger] steps[i];
+            let target = source_step_target(step);
+            &&& source_step_range_matches(step, selected, roots, slots@.len())
+            &&& target == source_target_for_slot(source_step_slots(step).start, selected, roots)
+            &&& match target {
+                SourceStepTarget::Function(index) => 0 <= index < selected.len()
+                    && (selected[index].children@.len() > 0 ==> super::super::lowering::nested_arguments_ready(&selected[index])),
+                _ => true,
+            }
+        } by {
+            let step = steps[i];
+            self.source_target_for_strict_step(&scope, plan, table, prepared, selected, rows, roots, slots, step);
+            if let SourceStepTarget::Function(index) = source_step_target(step) {
+                self.expanded_call_step_ready(plan, table, caller, prepared, inputs, slots@, outputs, drivers, forms,
+                    selected, roots, capacity, limit, &value.circuit, steps, i, index);
+            }
+        };
+        (scope, selected, roots, slots, steps, rows)
     }
 
     /// 出力スロットを駆動する基底 NOR の定義番号と型付き署名を取り出す。

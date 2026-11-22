@@ -1174,6 +1174,78 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         (port, child)
     }
 
+    /// 根の引数がすべて信号またはリテラルなら、先に展開する子は存在しない。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn direct_expansion_has_no_children(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        group_index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            ({
+                let range = prepared.calls@[group_index].arguments;
+                forall|i: int| range.start <= i < range.end ==>
+                    (#[trigger] prepared.projections.call_arguments.arguments@[i]).source.has_direct_wires()
+            }),
+        ensures
+            prepared.calls@[group_index].postorder matches Some(children) ==> children@.len() == 0,
+    {
+        let group = prepared.calls@[group_index];
+        if let Some(children) = group.postorder {
+            if children@.len() > 0 {
+                reveal(UseAliases::checked_expansion_call_matches);
+                reveal(UseAliases::prepared_expression_children_match);
+                let (file, entry, limit) = caller;
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let source = &project.sources_model()[file as int];
+                let absolute = prepared.projections.calls@[group_index].definition;
+                let local = (absolute - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+                let row = parsed.definitions@[absolute as int];
+                let forms = parsed.syntax.forms@;
+                let refs = parsed.references@;
+                let child = children@[0];
+                let relative = (child.reference - group.references.start) as usize;
+                self.expansion_child_template_evidence(plan, caller, prepared, group_index, 0);
+                self.typed_call_arguments_ready(file, entry, local, relative, limit, child._signature@);
+                self.typed_call_arguments_ready(file, entry, local, 0, limit, group._signature@);
+                self.resolved_call_reference_form(file, entry, local, 0, group._signature@.call);
+                self.targets.parsed_project_model();
+                parsed_index_evidence(*source, *parsed);
+                build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+                vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+                root_call_reference(source.text, forms, refs, row);
+                crate::syntax::circuit::call_form_bounds(forms, child._signature@.call.call);
+                crate::syntax::circuit::call_form_bounds(forms, group._signature@.call.call);
+
+                let last = children@.len() as int;
+                let order = Seq::new(children@.len(), |i: int| children@[i].reference).push(group.references.start);
+                assert(order[0] == child.reference && order[last] == group.references.start);
+                let (parent, position) = call_postorder_positions(source.text, forms, refs, row,
+                    order, group.references.start, child.reference);
+                if parent < last {
+                    call_postorder_references_distinct(forms, refs, row.references, order, parent, last);
+                }
+                if position > 0 {
+                    call_postorder_references_distinct(forms, refs, row.references, order, 0, position);
+                }
+                assert(position == 0 && parent == last);
+
+                let range = group.arguments;
+                let arguments = prepared.projections.call_arguments.arguments@;
+                assert forall|i: int| range.start <= i < range.end implies
+                    !((#[trigger] arguments[i]).source is Deferred) by {
+                    assert(arguments[i].source.has_direct_wires());
+                };
+                let (port, _) = self.expansion_child_containing_form(plan, caller, prepared, group_index, last,
+                    child._signature@.call.call.form as int);
+                assert(arguments[range.start + port].source.has_direct_wires());
+            }
+        }
+    }
+
     /// 一つの定義で、対象の子と同じフォームを指す後順項目を同定する。
     pub(super) proof fn expansion_children_at_same_form(
         &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
@@ -2239,11 +2311,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& root.root.expression.source == source
             &&& references.start == root.root.reference
             &&& self.expression_children_in_reference_range(references, root.root.expression.source, Some(root.postorder))
+            &&& forall|i: int| 0 <= i < root.postorder@.len() ==>
+                references.start < (#[trigger] root.postorder@[i]).reference
         }),
     {
         reveal(UseAliases::prepared_nor_root_matches);
         reveal(UseAliases::prepared_expression_children_match);
         reveal(UseAliases::prepared_expression_call_matches);
+        let root = prepared.nor_roots@[index];
+        let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+        let references = parsed.definitions@[root.definition as int].references;
+        let children = root.postorder@;
+        let last = children.len() as int;
+        let order = Seq::new(children.len(), |i: int| children[i].reference).push(references.start);
+        assert forall|i: int| 0 <= i < children.len() implies
+            references.start < (#[trigger] children[i]).reference by {
+            assert(order[i] == children[i].reference && order[last] == references.start);
+            call_postorder_references_distinct(parsed.syntax.forms@, parsed.references@, references, order, i, last);
+        };
     }
 
     /// 根 NOR の出力スロットと式全体のソース範囲を、定義の投影に渡す。
@@ -2946,6 +3031,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) open spec fn nor_call_slots_disjoint(calls: Seq<CheckedExpansionCall>, roots: Seq<PreparedNorRoot>) -> bool {
         forall|i: int, j: int| 0 <= i < calls.len() && 0 <= j < roots.len() ==>
             !((#[trigger] calls[i]).outputs.start <= (#[trigger] roots[j]).output_slot < calls[i].outputs.end)
+    }
+
+    /// 通常呼び出しは一つ以上の左辺を持ち、先行する呼び出しの左辺と重ならない。
+    pub(super) proof fn prepared_expansion_ordered_call_ranges(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+    )
+        requires self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+        ensures
+            forall|i: int| 0 <= i < prepared.calls@.len() ==> {
+                let call = #[trigger] prepared.calls@[i];
+                call.outputs.start < call.outputs.end <= prepared.typed.types@.len()
+            },
+            forall|i: int, j: int| 0 <= i < j < prepared.calls@.len() ==>
+                (#[trigger] prepared.calls@[i]).outputs.end <= (#[trigger] prepared.calls@[j]).outputs.start,
+    {
+        assert forall|i: int| 0 <= i < prepared.calls@.len() implies {
+            let call = #[trigger] prepared.calls@[i];
+            call.outputs.start < call.outputs.end <= prepared.typed.types@.len()
+        } by {
+            reveal(UseAliases::checked_expansion_call_matches);
+        };
     }
 
     pub(super) open spec fn prepared_expansion_body_matches(

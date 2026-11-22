@@ -1,6 +1,7 @@
 //! コンパイラの配線履歴を、定義単位のソース配線の証明に渡す。
 
 pub(super) mod body;
+pub(in crate::project::use_aliases::bit_func) mod call_mode;
 pub(in crate::project::use_aliases::bit_func) mod ranges;
 
 use super::*;

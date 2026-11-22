@@ -4,10 +4,12 @@
 mod evaluation;
 mod call_arguments;
 #[cfg(verus_only)]
-pub(super) use call_arguments::literal_argument_matches_width;
+pub(super) use call_arguments::{SourceChildModel, literal_argument_matches_width};
 mod call_group;
 #[cfg(verus_only)]
 mod source_calls;
+#[cfg(verus_only)]
+pub(super) use source_calls::source_models_match_calls;
 mod mixed;
 #[cfg(verus_only)]
 mod source_wires;
@@ -41,7 +43,9 @@ pub(super) use mixed::{
     SourceStepTarget, WiringStep, rooted_source_step_ranges, source_slot_partition, source_step_range_matches, source_step_slots, source_step_target,
 };
 #[cfg(verus_only)]
-use mixed::{rooted_source_step_range, rooted_source_step_ranges_match, rooted_mixed_function_success};
+use mixed::{rooted_source_call_mode, rooted_source_step_range, rooted_source_step_ranges_match, rooted_mixed_function_success};
+#[cfg(verus_only)]
+pub(super) use mixed::nested_arguments_ready;
 #[cfg(verus_only)]
 use super::super::call_arity::ProjectedCallArgument;
 #[cfg(verus_only)]
@@ -325,6 +329,35 @@ pub(super) proof fn projected_definition_partition(
         origins: value.gate_definitions@ };
     rooted_source_step_ranges_match(&body, &layouts, forms, bindings, roots, limit, steps, definitions.len() as usize,
         bindings.len() as usize, roots.len() as usize, final_wiring, expected);
+}
+
+/// 成功履歴から、根を直接配線できるか、根とすべての子の引数が確定していたことを得る。
+pub(super) proof fn projected_call_mode(
+    inputs: Seq<u64>, definitions: Seq<CheckedBitDefinition>, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    forms: Seq<Form>, selected: Seq<ResolvedTemplateCall>, roots: Seq<NorBinding>, arguments: Seq<ProjectedCallArgument>,
+    capacity: usize, limit: usize, value: &LoweredBitFunc, steps: Seq<WiringStep>, at: int, index: int,
+)
+    requires
+        projected_definition_history(inputs, definitions, outputs, drivers, forms, selected, roots, arguments, capacity, limit, value, steps),
+        definitions.len() <= usize::MAX,
+        0 <= at < steps.len(), 0 <= index < selected.len(),
+        source_step_target(steps[at]) == SourceStepTarget::Function(index),
+    ensures
+        nested_arguments_ready(&selected[index])
+            || forall|port: int| 0 <= port < selected[index].arguments@.len() ==>
+                (#[trigger] selected[index].arguments@[port]).source.has_direct_wires(),
+{
+    reveal(projected_definition_history);
+    let (body, layouts, bindings) = choose|body: LoweringBody, layouts: Layouts, bindings: Seq<CallBinding>|
+        #[trigger] rooted_mixed_function_success(&body, &layouts, forms, bindings, roots, outputs, drivers, limit, value, steps)
+        && body.input_widths@ == inputs && body.definitions@ == definitions
+        && body_layouts_result(inputs, definitions, outputs, capacity, Ok(layouts))
+        && bindings_match_calls(bindings, selected)
+        && mixed_function_result(&body, &layouts, forms, bindings, roots, outputs, drivers, arguments, limit, Ok((*value, Ghost(steps))));
+    let wiring = call_group::WiringView { definitions: value.definition_wires@, gates: value.netlist.gates@,
+        origins: value.gate_definitions@ };
+    rooted_source_call_mode(&body, &layouts, forms, bindings, selected, roots, arguments, limit,
+        steps, definitions.len() as usize, bindings.len() as usize, roots.len() as usize, wiring, at, index);
 }
 
 pub(super) closed spec fn projected_gate_origin_link(

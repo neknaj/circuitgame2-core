@@ -44,7 +44,7 @@ pub(super) open spec fn source_definition_start(
 }
 
 /// 通常の子回路は解決済みテンプレートに対応し、基底 NOR の回路は呼び出し位置から得る。
-pub(super) open spec fn source_models_match_calls(
+pub(in crate::project::use_aliases::bit_func) open spec fn source_models_match_calls(
     children: Seq<ResolvedExpressionCall>, models: Seq<Option<SourceChildModel>>, references: Range<usize>,
 ) -> bool {
     &&& references.start <= references.end

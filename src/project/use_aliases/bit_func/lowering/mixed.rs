@@ -15,6 +15,8 @@ pub(super) use source_layout::{rooted_source_step, rooted_source_step_range};
 #[cfg(verus_only)]
 pub(super) use source_layout::ranges::rooted_source_step_ranges_match;
 #[cfg(verus_only)]
+pub(super) use source_layout::call_mode::rooted_source_call_mode;
+#[cfg(verus_only)]
 pub(super) use source_arguments::{mixed_function_call_evaluation, nor_source_binding_matches, rooted_nor_source_arguments};
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_arguments::{
@@ -1548,7 +1550,7 @@ pub(in crate::project::use_aliases::bit_func) fn arguments_are_determined_exec(a
 }
 
 #[verifier::opaque]
-pub(super) closed spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
+pub(in crate::project::use_aliases::bit_func) closed spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
     &&& call.children@.len() > 0
     &&& arguments_are_determined(call.arguments@)
     &&& forall|i: int| 0 <= i < call.children@.len() ==>
