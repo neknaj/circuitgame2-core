@@ -218,6 +218,19 @@ spec fn module_signals_prefix(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 型検査が使う駆動元を、配線検査の成功結果から取り出す。
+    pub(super) proof fn module_wiring_keeps_drivers(&self, owner: ModuleBodyPosition, max_width: u64, wiring: ModuleWiring)
+        requires self.module_wiring_result(owner, max_width, Ok(Some(wiring))),
+        ensures self.module_drivers_result(owner, max_width, Ok(Some(wiring.drivers))),
+    {
+        let project = self.targets.project_model();
+        let prepared = choose|prepared: IndexedModuleDrivers|
+            #[trigger] self.indexed_module_drivers_result(owner, max_width, Ok(Some(prepared)))
+            && wiring.drivers == prepared.drivers && wiring.signals@.len() == prepared.drivers.body.members@.len()
+            && module_signals_prefix(&project, &prepared, wiring.signals@);
+        self.indexed_module_drivers_evidence(owner, max_width, &prepared);
+    }
+
     /// 本体ごとの束縛、または定義と信号名の順で最初に見つかった違反を表す。
     pub closed spec fn module_wiring_result(
         &self, owner: ModuleBodyPosition, max_width: u64,

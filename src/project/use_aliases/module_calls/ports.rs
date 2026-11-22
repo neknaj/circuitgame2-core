@@ -219,7 +219,7 @@ fn collect_argument_roots(forms: &[Form], call: &CallShape) -> (roots: Vec<usize
     roots
 }
 
-spec fn expected_outputs(forms: Seq<Form>, row: BuildDefinition, call: CallShape) -> int {
+pub(in crate::project::use_aliases) open spec fn expected_outputs(forms: Seq<Form>, row: BuildDefinition, call: CallShape) -> int {
     if call.form == row.expression.start {
         let (start, end) = definition_target_range(forms, row);
         end - start
@@ -333,6 +333,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ModuleCallTarget::Routine { signature, .. } => plan.arguments@.len() == signature.inputs@.len(),
                 ModuleCallTarget::StateElement { .. } => false,
             },
+            ({
+                let parsed = self.targets.project_model().circuits_model()[at.file as int];
+                let row = parsed.definitions@[parsed.entry_ranges@[at.entry as int].definitions.start + at.definition];
+                let count = expected_outputs(parsed.syntax.forms@, row, plan.signature.call);
+                match plan.signature.target {
+                    ModuleCallTarget::Nor => count == 1,
+                    ModuleCallTarget::Routine { signature, .. } => count == signature.outputs@.len(),
+                    ModuleCallTarget::StateElement { .. } => false,
+                }
+            }),
     {
         let project = self.targets.project_model();
         let parsed = &project.circuits_model()[at.file as int];
@@ -343,7 +353,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(plan.signature == signature);
         if let ModuleCallTarget::Routine { signature, .. } = &plan.signature.target {
             vstd::std_specs::vec::axiom_spec_len(&signature.inputs);
+            vstd::std_specs::vec::axiom_spec_len(&signature.outputs);
         }
+    }
+
+    pub(in crate::project::use_aliases) proof fn module_call_ports_present(&self, at: DefinitionPosition, limit: u64)
+        requires self.module_call_at(at),
+        ensures !self.module_call_ports_result(at, limit, Ok(None)),
+    {
+        self.module_call_signature_present(at, limit);
     }
 
     /// 通常呼び出しの入出力数を照合し、各入力ポートに対応する引数位置を返す。

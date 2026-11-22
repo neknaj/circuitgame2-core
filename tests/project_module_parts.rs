@@ -143,6 +143,32 @@ fn matches_direct_arguments_and_distinguishes_root_from_nested_outputs() {
 }
 
 #[test]
+fn seeds_call_outputs_for_all_fragments_before_checking_forward_inputs() {
+    let input = [
+        SourceSnapshot { path: "owner.ncg2", revision: 2,
+            text: "(using nor) (func pair (in a (b (bits 2))) (out a (b (bits 2))))
+                  (module root (in (wide (bits 2))) (out y (z (bits 2)))
+                    (def (y z) (pair mid wide)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 6,
+            text: "(module-part root (def mid (nor (bit z 0) 0)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let checked = aliases.check_module_root_types(owner, 16).unwrap().unwrap();
+    let [Some(y), Some(z), Some(mid)] = checked.types.as_slice() else {
+        panic!("both calls must seed all their output types");
+    };
+    assert!(matches!(y.ty, ResolvedPortType::Bits(1)));
+    assert!(matches!(z.ty, ResolvedPortType::Bits(2)));
+    assert!(matches!(mid.ty, ResolvedPortType::Bits(1)));
+    assert_eq!(&z.origin.source.text[z.origin.span.clone()], "2");
+    assert_eq!(mid.origin.source.revision, 6);
+    assert_eq!(&mid.origin.source.text[mid.origin.span.clone()], "(nor (bit z 0) 0)");
+}
+
+#[test]
 fn reports_the_first_undefined_signal_at_its_fragment_location() {
     let input = [
         SourceSnapshot { path: "owner.ncg2", revision: 4,

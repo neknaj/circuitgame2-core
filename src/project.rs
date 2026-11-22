@@ -76,6 +76,7 @@ pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{ModuleDriverError, ModuleDrivers};
 pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
+pub use use_aliases::{ModuleRootTypes, ModuleRootTypesError};
 pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
     ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};

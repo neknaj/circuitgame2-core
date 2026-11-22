@@ -27,6 +27,8 @@ pub use module_calls::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts,
     ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
 mod module_drivers;
 pub use module_drivers::{ModuleDriverError, ModuleDrivers};
+mod module_types;
+pub use module_types::{ModuleRootTypes, ModuleRootTypesError};
 mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;

@@ -71,13 +71,19 @@ pub enum ModuleCallSignatureError<'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn module_call_at(&self, at: DefinitionPosition) -> bool {
+    pub(super) open spec fn module_call_at(&self, at: DefinitionPosition) -> bool {
         let parsed = self.targets.project_model().circuits_model()[at.file as int];
         let def = parsed.entry_ranges@[at.entry as int].definitions.start + at.definition;
         let head = parsed.syntax.entries@[at.entry as int].head;
         &&& self.position_exists(at.file, at.entry, at.definition, at.reference)
         &&& at.entry < parsed.syntax.entries@.len() && (head is Module || head is ModulePart)
         &&& parsed.references@[parsed.definitions@[def].references.start + at.reference].kind is Callee
+    }
+
+    pub(super) proof fn module_call_signature_present(&self, at: DefinitionPosition, limit: u64)
+        requires self.module_call_at(at),
+        ensures !self.module_call_signature_result(at, limit, Ok(None)),
+    {
     }
 
     spec fn module_callee_position(

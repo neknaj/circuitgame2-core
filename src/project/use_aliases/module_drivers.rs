@@ -198,6 +198,9 @@ spec fn target_origin_matches(
     sources: Seq<ProjectSource>, circuits: Seq<NamedBuildCircuit>, row: DefinitionDriver, position: ModuleBodyPosition,
 ) -> bool {
     &&& position.file < sources.len() && position.file < circuits.len()
+    &&& position.entry < circuits[position.file as int].syntax.entries@.len()
+    &&& (circuits[position.file as int].syntax.entries@[position.entry as int].head is Module
+        || circuits[position.file as int].syntax.entries@[position.entry as int].head is ModulePart)
     &&& indexed_driver_site(&sources[position.file as int], &circuits[position.file as int], position.entry as int, row)
 }
 
@@ -217,6 +220,9 @@ proof fn extend_target_origins(
     requires
         target_origins_match(sources, circuits, earlier, prior_origins),
         position.file < sources.len() && position.file < circuits.len(),
+        position.entry < circuits[position.file as int].syntax.entries@.len(),
+        circuits[position.file as int].syntax.entries@[position.entry as int].head is Module
+            || circuits[position.file as int].syntax.entries@[position.entry as int].head is ModulePart,
         forall|j: int| 0 <= j < next.len() ==> indexed_driver_site(
             &sources[position.file as int], &circuits[position.file as int], position.entry as int, #[trigger] next[j]),
     ensures target_origins_match(sources, circuits, earlier + next,
@@ -240,6 +246,32 @@ proof fn extend_target_origins(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 各駆動元が、元の本体にある定義と左辺の出力順に対応することを取り出す。
+    pub(super) proof fn module_driver_sites(
+        &self, owner: ModuleBodyPosition, max_width: u64, drivers: ModuleDrivers, index: int,
+    )
+        requires self.module_drivers_result(owner, max_width, Ok(Some(drivers))), 0 <= index < drivers.definitions@.len(),
+        ensures
+            drivers.origins@.len() == drivers.definitions@.len(),
+            ({
+                let row = drivers.definitions@[index];
+                let at = drivers.origins@[index];
+                let project = self.targets.project_model();
+                &&& at.file < project.sources_model().len() && at.file < project.circuits_model().len()
+                &&& at.entry < project.circuits_model()[at.file as int].syntax.entries@.len()
+                &&& (project.circuits_model()[at.file as int].syntax.entries@[at.entry as int].head is Module
+                    || project.circuits_model()[at.file as int].syntax.entries@[at.entry as int].head is ModulePart)
+                &&& indexed_driver_site(&project.sources_model()[at.file as int], &project.circuits_model()[at.file as int], at.entry as int, row)
+            }),
+    {
+        let project = self.targets.project_model();
+        assert(target_origins_match(project.sources_model(), project.circuits_model(), drivers.definitions@, drivers.origins@));
+        reveal(target_origins_match);
+        let at = drivers.origins@[index];
+        assert(target_origin_matches(project.sources_model(), project.circuits_model(), drivers.definitions@[index], at));
+        reveal(target_origin_matches);
+    }
+
     /// 署名と本体の定義から駆動元を取り出す処理の結果を表す。
     pub closed spec fn module_drivers_result(
         &self, owner: ModuleBodyPosition, max_width: u64, result: Result<Option<ModuleDrivers<'p, 'a>>, ModuleDriverError<'p, 'a>>,
