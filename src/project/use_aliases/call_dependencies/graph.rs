@@ -1237,6 +1237,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 指定位置に関数があれば、到達展開は関数がないという結果を返さない。
+    pub(in crate::project::use_aliases) proof fn reachable_function_not_absent(&self, root: (usize, usize))
+        requires function_position(self.targets.project_model().circuits_model(), root),
+        ensures !self.reachable_function_expansion_evidence(root, Ok(None)),
+    {
+    }
+
     /// 指定した関数と、その関数から呼び出せる関数を依存順に並べる。
     ///
     /// 起点はファイルと厳格索引項目の添字で指定する。関数を指さない位置には `None` を返す。

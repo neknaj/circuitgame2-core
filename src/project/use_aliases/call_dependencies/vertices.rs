@@ -26,7 +26,7 @@ spec fn before(left: Position, right: Position) -> bool {
 }
 
 /// 位置がプロジェクトの関数宣言を指すことを表す。
-pub(super) open spec fn function_position(circuits: Seq<NamedBuildCircuit>, position: Position) -> bool {
+pub(in crate::project::use_aliases) open spec fn function_position(circuits: Seq<NamedBuildCircuit>, position: (usize, usize)) -> bool {
     &&& position.0 < circuits.len()
     &&& position.1 < circuits[position.0 as int].syntax.entries@.len()
     &&& circuits[position.0 as int].syntax.entries@[position.1 as int].head is Func

@@ -7,7 +7,7 @@ pub use instances::{clocked_instance_inputs, clocked_instance_outputs_match, clo
 
 use super::{GateInput, NorNetlist, Wire, read_wire};
 #[cfg(verus_only)]
-use super::{NorGate, output_ports_available, output_values_match, wire_available, wire_value};
+use super::{NorGate, nor_evaluation_ready, output_ports_available, output_values_match, wire_available, wire_value};
 use alloc::{vec, vec::Vec};
 use vstd::prelude::*;
 
@@ -324,6 +324,26 @@ impl ClockedNor {
     /// 配線の仕様から参照する、検査済みのネットリスト。
     pub closed spec fn netlist_model(&self) -> NorNetlist {
         self.netlist
+    }
+
+    /// 組み合わせ評価の配線検査を通った回路を、同じ配線のまま tick 実行に使う。
+    pub(crate) fn from_combinational(netlist: NorNetlist) -> (circuit: Self)
+        requires nor_evaluation_ready(&netlist, netlist.input_count as nat),
+        ensures circuit.netlist_model() == netlist,
+    {
+        proof {
+            assert forall|i: int| 0 <= i < netlist.gates@.len() implies {
+                let gate = #[trigger] netlist.gates@[i];
+                &&& wire_available(gate.left, netlist.input_count as nat, netlist.gates@.len())
+                &&& wire_available(gate.right, netlist.input_count as nat, netlist.gates@.len())
+            } by {
+                let gate = netlist.gates@[i];
+                assert(wire_available(gate.left, netlist.input_count as nat, i as nat));
+                assert(wire_available(gate.right, netlist.input_count as nat, i as nat));
+            };
+            clocked_wiring_from_endpoints(&netlist);
+        }
+        Self { netlist }
     }
 
     /// 全ゲートと出力の参照先を検査し、tick 実行用の回路を作る。

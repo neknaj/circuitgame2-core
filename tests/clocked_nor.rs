@@ -182,6 +182,43 @@ fn lowers_a_parent_and_its_child_calls_from_source() {
 }
 
 #[test]
+fn a_module_observes_delayed_function_gates_and_immediate_wires() {
+    let project = parse_circuit_project(&[SourceSnapshot {
+        path: "root.ncg2", revision: 4,
+        text: "(using nor)
+               (module root (in a) (out q echo other)
+                 (def q (buffer a))
+                 (def echo (direct a))
+                 (def other (buffer 0)))
+               (func invert (in a) (out y) (def y (nor a a)))
+               (func buffer (in a) (out y) (def n (invert a)) (def y (invert n)))
+               (func direct (in a) (out a))",
+    }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry: 1 };
+    let Err(ClockedModuleError::Function { call, expansion }) =
+        aliases.lower_clocked_module_with_limits(owner, 8, 1, 4)
+    else { panic!("function definition bits must respect the configured limit"); };
+    assert_eq!((call.source.revision, &call.source.text[call.span]), (4, "(buffer a)"));
+    assert!(matches!(expansion, circuitgame2_core::project::ExpandFunctionsError::Function { position: (0, 3), .. }));
+
+    let circuit = aliases.lower_clocked_module_with_limits(owner, 8, 2, 4).unwrap().unwrap();
+    let mut frame = circuit.reset();
+    assert_eq!(frame.gates.len(), 4);
+    assert_eq!(frame.outputs, [false, false, false]);
+    for (input, expected) in [
+        (true, [true, true, true]),
+        (true, [true, true, false]),
+        (false, [true, false, false]),
+        (false, [false, false, false]),
+    ] {
+        frame = circuit.step(&frame.gates, &[input]).unwrap();
+        assert_eq!(frame.outputs, expected);
+    }
+}
+
+#[test]
 fn rejects_reachable_module_recursion_at_the_original_calls() {
     let project = parse_circuit_project(&[
         SourceSnapshot { path: "parent.ncg2", revision: 2,

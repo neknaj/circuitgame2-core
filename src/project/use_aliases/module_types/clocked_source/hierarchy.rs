@@ -1,6 +1,6 @@
 //! ルートから到達するモジュールを調べ、子の展開結果を親の呼び出しで共有する。
 
-use super::{ClockedModuleError, ClockedNor, LocatedName, ModuleBodyPosition, ModuleCallTarget, ModuleCalls, UseAliases, builtin_instance};
+use super::{ClockedModuleError, ClockedNor, FunctionTemplates, LocatedName, ModuleBodyPosition, ModuleCallTarget, ModuleCalls, UseAliases, builtin_instance};
 use crate::project::{CircuitProject, use_aliases::dependency_order::{DependencyEdge, check_dependency_order}};
 use crate::syntax::circuit::Head;
 #[cfg(verus_only)]
@@ -14,7 +14,9 @@ use crate::project::use_aliases::dependency_order::{
 #[cfg(verus_only)]
 use vstd::laws_cmp::obeys_cmp;
 #[cfg(verus_only)]
-use super::{builtin_nor_template, edge_templates_ready};
+use super::{builtin_nor_template, edge_templates_ready, function_templates::function_target};
+#[cfg(verus_only)]
+use crate::project::use_aliases::call_dependencies::function_position;
 #[cfg(verus_only)]
 use super::semantics::{ModuleSourceLayout, call_layout_is_ready, prior_layout_at};
 #[cfg(verus_only)]
@@ -287,6 +289,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && loaded.modules@[0].is_some(),
             Ok(None) => self.module_calls_result(root, width, Ok(None)),
             Err(ClockedModuleError::Parent(error)) => self.module_calls_result(root, width, Err(error)),
+            Err(ClockedModuleError::Function { .. }) => false,
             Err(_) => true,
         },
     {
@@ -489,16 +492,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// ルートから到達するモジュールを子から順に展開する。
     ///
-    /// 入出力は単一ビットで、各右辺は信号名か定数を直接渡すモジュールまたは基底 NOR の呼び出しとする。
-    /// 同じ宣言の展開結果は共有し、ゲート番号は呼び出しごとに割り当てる。
-    /// 返した回路をソースの参照回路と同じ入力列で実行すると、reset 直後と各 tick の公開出力が一致する。
-    /// 指定位置がモジュールを指さなければ `None` を返す。
+    /// 関数内で平坦化するビット配列の上限には `usize::MAX` を使う。
     ///
     /// # Errors
     ///
-    /// 到達する宣言の型と呼び出しを検査する。同じ宣言から新たに見つけた呼び出し先は後ろから調べる。
-    /// 宣言間の再帰は、その閉路を構成する呼び出しの位置で報告する。
-    /// 配線の組み立てでは、対応外の式や型、ゲート数の上限、遅延のない配線の循環を診断する。
+    /// [Self::lower_clocked_module_with_limits] と同じ順に違反を診断する。
     pub fn lower_clocked_module(&self, owner: ModuleBodyPosition, width_limit: u64, gate_limit: usize)
         -> (result: Result<Option<ClockedNor>, ClockedModuleError<'p, 'a>>)
         requires self.can_resolve(),
@@ -506,6 +504,41 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result == Ok(None) ==> self.module_calls_result(owner, width_limit, Ok(None)),
             result matches Err(ClockedModuleError::Parent(error)) ==>
                 self.module_calls_result(owner, width_limit, Err(error)),
+            result matches Err(ClockedModuleError::Function { call, expansion }) ==>
+                self.clocked_module_function_error(width_limit, usize::MAX, gate_limit, call, expansion),
+            result matches Ok(Some(circuit)) ==> circuit.netlist_model().gates@.len() <= gate_limit
+                && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
+                && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
+                && self.clocked_module_source_layout(owner, width_limit, &circuit.netlist_model()),
+    {
+        self.lower_clocked_module_with_limits(owner, width_limit, usize::MAX, gate_limit)
+    }
+
+    /// ルートから到達するモジュールを子から順に展開する。
+    ///
+    /// 入出力は単一ビットで、各右辺は信号名か定数を直接渡すモジュール、関数、基底 NOR のいずれかの呼び出しとする。
+    /// `bit_limit` は関数展開中の入力・定義・出力それぞれのビット配列に適用する。
+    /// モジュールと、モジュールから直接呼ぶ関数の展開結果は宣言ごとに共有する。
+    /// ゲート番号は呼び出しごとに割り当てる。
+    /// 返した回路をソースの参照回路と同じ入力列で実行すると、reset 直後と各 tick の公開出力が一致する。
+    /// 指定位置がモジュールを指さなければ `None` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 到達する宣言の型と呼び出しを検査する。同じ宣言から新たに見つけた呼び出し先は後ろから調べる。
+    /// 宣言間の再帰は、その閉路を構成する呼び出しの位置で報告する。
+    /// 各モジュールの入出力の型を確かめてから、直接呼ぶ関数を呼び出し順に展開する。
+    /// 関数の展開に失敗した場合は、モジュールの呼び出し位置と関数側の診断を返す。
+    /// 配線の組み立てでは、対応外の式や型、ゲート数の上限、遅延のない配線の循環を診断する。
+    pub fn lower_clocked_module_with_limits(&self, owner: ModuleBodyPosition, width_limit: u64, bit_limit: usize, gate_limit: usize)
+        -> (result: Result<Option<ClockedNor>, ClockedModuleError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures
+            result == Ok(None) ==> self.module_calls_result(owner, width_limit, Ok(None)),
+            result matches Err(ClockedModuleError::Parent(error)) ==>
+                self.module_calls_result(owner, width_limit, Err(error)),
+            result matches Err(ClockedModuleError::Function { call, expansion }) ==>
+                self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
             result matches Ok(Some(circuit)) ==> circuit.netlist_model().gates@.len() <= gate_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
                 && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
@@ -522,6 +555,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(ClockedModuleError::Netlist(error)),
         };
         let size = positions.len();
+        let mut functions = FunctionTemplates::new();
         let mut templates: Vec<Option<ClockedNor>> = Vec::with_capacity(size);
         let mut i = 0;
         while i < size
@@ -542,6 +576,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while i < order.len()
             invariant
                 self.can_resolve(), size == positions@.len() == templates@.len(), positions@[0] == owner,
+                obeys_cmp::<Position>(), self.clocked_functions_match(functions@, width_limit, bit_limit, gate_limit),
+                forall|at: Position| #[trigger] vertices@.contains_key(at)
+                    == (at == key(owner) || module_key(self.targets.project_model().circuits_model(), at)),
                 self.loaded_modules_match(positions@, width_limit, checked.modules@),
                 slots_match(checked.modules@, checked.graph@), checked.modules@[0].is_some(),
                 completion_order_matches(order@, rank), rank.len() == size,
@@ -582,27 +619,47 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         assert(call_layout_is_ready(&loaded.calls@[field], edges@[field], templates@, layouts));
                     };
                 };
-                let circuit = self.lower_checked_module(positions[node], width_limit, gate_limit, loaded, edges,
-                    &templates, &builtin)?;
+                proof {
+                    assert forall|field: int| 0 <= field < loaded.calls@.len() implies {
+                        (#[trigger] function_target(loaded, edges@, field)) matches Some(target)
+                            ==> function_position(self.targets.project_model().circuits_model(), target)
+                    } by {
+                        if let Some(target) = function_target(loaded, edges@, field) {
+                            let call = &loaded.calls@[field];
+                            self.module_calls_item_evidence(positions@[node as int], width_limit, loaded, field);
+                            self.module_call_ports_evidence(call.at, width_limit, call.inputs.ports);
+                            self.module_call_site_evidence(call.at, width_limit, call.inputs.ports.signature);
+                            assert(edges@[field] == checked.graph@[node as int]@[field]);
+                            assert(call_vertex(call, vertices@).is_none());
+                            assert(!vertices@.contains_key(target));
+                            assert(!module_key(self.targets.project_model().circuits_model(), target));
+                        }
+                    };
+                }
+                let circuit = self.lower_checked_module(positions[node], width_limit, bit_limit, gate_limit, loaded, edges,
+                    &templates, &mut functions, &builtin)?;
                 let ghost layout = self.source_layout_from_compiled(positions@[node as int], width_limit, loaded,
-                    edges@, templates@, layouts, &builtin, &circuit.netlist_model());
+                    edges@, templates@, layouts, functions@, bit_limit, gate_limit, &builtin, &circuit.netlist_model());
                 proof {
                     assert(layouts[node as int].is_none());
                     assert forall|field: int| 0 <= field < loaded.calls@.len() implies #[trigger]
-                        source_models::source_call_in_table(loaded, layout, positions@, rank, layouts, node as int, field) by {
+                        self.source_call_in_table(loaded, width_limit, layout, positions@, rank, layouts, node as int, field) by {
                         let call = loaded.calls@[field];
                         self.source_layer_call_supported(loaded, &layout.circuit, &layout.layer, field);
-                        if call.inputs.ports.signature.target is Routine {
-                            assert(edges@[field].is_some());
-                            let child = edges@[field]->Some_0;
-                            assert(edges@[field] == checked.graph@[node as int]@[field]);
-                            assert(call_vertex(&call, vertices@) == Some(child));
-                            call_vertex_position(&call, vertices@, positions@, child);
-                            assert(call_layout_is_ready(&call, edges@[field], templates@, layouts));
-                            let edge = DependencyEdge { from: node, to: child, field: field as usize };
-                            assert(dependency_edge(checked.graph@, edge));
-                            assert(rank[child as int] < rank[node as int]);
-                            self.source_call_for_child(loaded, layout, positions@, rank, layouts, node as int, field, child as int);
+                        if let ModuleCallTarget::Routine { position, .. } = call.inputs.ports.signature.target {
+                            if edges@[field].is_none() {
+                                assert(self.source_function_in_layer(width_limit, position, layout, field));
+                            } else {
+                                let child = edges@[field]->Some_0;
+                                assert(edges@[field] == checked.graph@[node as int]@[field]);
+                                assert(call_vertex(&call, vertices@) == Some(child));
+                                call_vertex_position(&call, vertices@, positions@, child);
+                                assert(call_layout_is_ready(&call, edges@[field], templates@, layouts));
+                                let edge = DependencyEdge { from: node, to: child, field: field as usize };
+                                assert(dependency_edge(checked.graph@, edge));
+                                assert(rank[child as int] < rank[node as int]);
+                                self.source_call_for_child(loaded, width_limit, layout, positions@, rank, layouts, node as int, field, child as int);
+                            }
                         }
                     };
                     self.extend_source_table(positions@, width_limit, checked.modules@, rank, layouts, node as int, layout);

@@ -1,6 +1,15 @@
 //! 検査済みの親モジュールから子回路の配置と実引数の配線を求める。
 
+mod function_templates;
 mod hierarchy;
+use function_templates::FunctionTemplates;
+#[cfg(verus_only)]
+use function_templates::function_templates_cover;
+#[cfg(verus_only)]
+use vstd::laws_cmp::obeys_cmp;
+#[cfg(verus_only)]
+use crate::project::use_aliases::bit_func::ClockedFunctionTemplate;
+use crate::project::use_aliases::bit_func::ExpandFunctionsError;
 #[cfg(verus_only)]
 mod semantics;
 
@@ -39,6 +48,13 @@ pub enum ClockedModuleError<'p, 'a> {
         call: LocatedName<'p, 'a>,
         /// 子モジュールのソースに対応する診断。
         reason: PrimitiveModuleError<'p, 'a>,
+    },
+    /// 子として使う関数の展開に失敗した。
+    Function {
+        /// モジュールで関数を呼び出した位置。
+        call: LocatedName<'p, 'a>,
+        /// 関数側の展開診断。
+        expansion: ExpandFunctionsError<'p, 'a>,
     },
     /// 現在の変換対象に含まれない型、回路呼び出し、または式。
     Unsupported(LocatedName<'p, 'a>),
@@ -163,7 +179,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     spec fn instance_matches_source_call(&self, checked: &ModuleCalls, index: int, instance: SourceInstance,
-        edge: Option<usize>, templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor) -> bool
+        edge: Option<usize>, templates: Seq<Option<ClockedNor>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        builtin: &ClockedNor) -> bool
     {
         let call = checked.calls@[index];
         let at = call.at;
@@ -171,6 +188,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let frame = parsed.entry_ranges@[at.entry as int];
         let definition = frame.definitions.start + at.definition;
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
+        &&& instance.site == (LocatedName { source: call.inputs.ports.signature.source, span: call.inputs.ports.signature.call.span })
         &&& self.source_arguments_match(checked, index, instance.arguments@)
         &&& at.reference == 0 && call.inputs.ports.signature.call.form == parsed.definitions@[definition].expression.start
         &&& forall|out: int| 0 <= out < instance.output_sites@.len() ==> {
@@ -182,32 +200,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         &&& match call.inputs.ports.signature.target {
             ModuleCallTarget::Nor => *instance.template == *builtin,
-            ModuleCallTarget::Routine { .. } => edge matches Some(child) && child < templates.len()
-                && templates[child as int] == Some(*instance.template),
+            ModuleCallTarget::Routine { position, .. } => match edge {
+                Some(child) => child < templates.len() && templates[child as int] == Some(*instance.template),
+                None => {
+                    let key = (position.file, position.entry);
+                    functions.contains_key(key) && functions[key].circuit == *instance.template
+                },
+            },
             ModuleCallTarget::StateElement { .. } => false,
         }
     }
 
     spec fn instances_match_source_calls(&self, checked: &ModuleCalls, instances: Seq<SourceInstance>,
-        edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor) -> bool
+        edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        builtin: &ClockedNor) -> bool
     {
         &&& instances.len() <= checked.calls@.len() == edges.len()
         &&& forall|i: int| 0 <= i < instances.len() ==> #[trigger]
-            self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, builtin)
+            self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, functions, builtin)
     }
 
     spec fn clocked_checked_assembly_matches(&self, checked: &ModuleCalls, edges: Seq<Option<usize>>,
-        templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor, netlist: NorNetlist) -> bool
+        templates: Seq<Option<ClockedNor>>, functions: Map<(usize, usize), ClockedFunctionTemplate>, builtin: &ClockedNor, netlist: NorNetlist) -> bool
     {
         let drivers = checked.module.expressions.typed.sources.roots.wiring.drivers;
         &&& builtin_nor_template(&builtin.netlist_model())
         &&& super::primitive_nor::one_bit_ports(drivers.signature.inputs@, drivers.signature.inputs@.len() as int)
         &&& super::primitive_nor::one_bit_ports(drivers.signature.outputs@, drivers.signature.outputs@.len() as int)
         &&& exists|instances: Seq<SourceInstance>, counts: Seq<usize>|
-            #![trigger self.instances_match_source_calls(checked, instances, edges, templates, builtin),
+            #![trigger self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin),
                 source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)]
             instances.len() == checked.calls@.len()
-            && self.instances_match_source_calls(checked, instances, edges, templates, builtin)
+            && self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin)
             && instance_output_slots(instances, drivers.definitions@.len() as int)
             && source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)
     }
@@ -295,16 +319,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     fn prepare_module_instances<'s>(&self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>,
-        edges: &[Option<usize>], templates: &'s [Option<ClockedNor>], builtin: &'s ClockedNor,
+        edges: &[Option<usize>], templates: &'s [Option<ClockedNor>], functions: &'s FunctionTemplates, builtin: &'s ClockedNor,
     ) -> (result: Result<(Vec<SourceInstance<'s, 'p, 'a>>, Vec<usize>), ClockedModuleError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
-            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
+            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
+            function_templates_cover(checked, edges@, functions@, checked.calls@.len() as int),
         ensures
             result matches Ok((instances, counts)) ==> instance_counts_match(instances@, counts@)
                 && instances@.len() == checked.calls@.len()
                 && instance_output_slots(instances@, checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len() as int)
-                && self.instances_match_source_calls(checked, instances@, edges@, templates@, builtin),
+                && self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
             !(result matches Err(ClockedModuleError::Parent(_))),
+            !(result matches Err(ClockedModuleError::Function { .. })),
     {
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
         proof {
@@ -323,10 +349,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.module_drivers_result(owner, limit, Ok(Some(*drivers))),
                 *drivers == checked.module.expressions.typed.sources.roots.wiring.drivers,
                 *project == self.targets.project_model(),
-                edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
+                edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
+                function_templates_cover(checked, edges@, functions@, checked.calls@.len() as int),
                 index <= checked.calls@.len(), index == counts@.len() == instances@.len(),
                 instance_counts_match(instances@, counts@),
-                self.instances_match_source_calls(checked, instances@, edges@, templates@, builtin),
+                self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
                 instance_output_slots(instances@, driver as int),
                 driver <= drivers.definitions@.len(),
             decreases checked.calls@.len() - index,
@@ -357,12 +384,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             let template = match &signature.target {
                 ModuleCallTarget::Nor => builtin,
-                ModuleCallTarget::Routine { signature: typed, .. } => {
+                ModuleCallTarget::Routine { position, signature: typed, .. } => {
                     if unsupported_port(typed.inputs.as_slice()).is_some() || unsupported_port(typed.outputs.as_slice()).is_some() {
                         return Err(ClockedModuleError::Unsupported(site));
                     }
-                    let Some(child) = edges[index] else { return Err(ClockedModuleError::Unsupported(site)); };
-                    templates[child].as_ref().unwrap()
+                    if let Some(child) = edges[index] {
+                        templates[child].as_ref().unwrap()
+                    } else {
+                        let key = (position.file, position.entry);
+                        assert(function_templates::function_target(checked, edges@, index as int) == Some(key));
+                        let function = functions.get(&key).unwrap();
+                        if function.inputs.total_bits() != typed.inputs.len()
+                            || function.outputs.total_bits() != typed.outputs.len()
+                        {
+                            return Err(ClockedModuleError::Unsupported(site));
+                        }
+                        &function.circuit
+                    }
                 },
                 ModuleCallTarget::StateElement { .. } => return Err(ClockedModuleError::Unsupported(site)),
             };
@@ -458,12 +496,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 if j < index { assert(instances@[j] == before_instances[j] && counts@[j] == before_counts[j]); }
             };
             assert(self.instance_matches_source_call(checked, index as int, instances@[index as int],
-                edges@[index as int], templates@, builtin));
+                edges@[index as int], templates@, functions@, builtin));
             assert forall|j: int| 0 <= j < instances@.len() implies #[trigger]
-                self.instance_matches_source_call(checked, j, instances@[j], edges@[j], templates@, builtin) by {
+                self.instance_matches_source_call(checked, j, instances@[j], edges@[j], templates@, functions@, builtin) by {
                 if j < index {
                     assert(instances@[j] == before_instances[j]);
-                    assert(self.instance_matches_source_call(checked, j, before_instances[j], edges@[j], templates@, builtin));
+                    assert(self.instance_matches_source_call(checked, j, before_instances[j], edges@[j], templates@, functions@, builtin));
                 }
             };
             index += 1;
@@ -474,18 +512,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ok((instances, counts))
     }
 
-    fn lower_checked_module(&self, owner: ModuleBodyPosition, width_limit: u64, gate_limit: usize, checked: &ModuleCalls<'p, 'a>,
-        edges: &[Option<usize>], templates: &[Option<ClockedNor>], builtin: &ClockedNor,
+    fn lower_checked_module(&self, owner: ModuleBodyPosition, width_limit: u64, bit_limit: usize, gate_limit: usize,
+        checked: &ModuleCalls<'p, 'a>, edges: &[Option<usize>], templates: &[Option<ClockedNor>],
+        functions: &mut FunctionTemplates, builtin: &ClockedNor,
     ) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, width_limit, Ok(Some(*checked))),
-            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@),
+            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
             builtin_nor_template(&builtin.netlist_model()),
+            self.clocked_functions_match(old(functions)@, width_limit, bit_limit, gate_limit),
+            self.function_targets_are_declared(checked, edges@),
         ensures
+            self.clocked_functions_match(final(functions)@, width_limit, bit_limit, gate_limit),
             !(result matches Err(ClockedModuleError::Parent(_))),
+            result matches Err(ClockedModuleError::Function { call, expansion }) ==>
+                self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
             result matches Ok(circuit) ==> circuit.netlist_model().gates@.len() <= gate_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
                 && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
-                && self.clocked_checked_assembly_matches(checked, edges@, templates@, builtin, circuit.netlist_model()),
+                && self.clocked_checked_assembly_matches(checked, edges@, templates@, final(functions)@, builtin, circuit.netlist_model()),
     {
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
         proof {
@@ -498,13 +542,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let outputs = drivers.signature.outputs.as_slice();
         if let Some(i) = unsupported_port(inputs) { return Err(ClockedModuleError::Unsupported(copy_location(&inputs[i].annotation))); }
         if let Some(i) = unsupported_port(outputs) { return Err(ClockedModuleError::Unsupported(copy_location(&outputs[i].annotation))); }
-        let (instances, counts) = self.prepare_module_instances(owner, width_limit, checked, edges, templates, builtin)?;
+        self.prepare_clocked_functions(owner, width_limit, bit_limit, gate_limit, checked, edges, functions)?;
+        let (instances, counts) = self.prepare_module_instances(owner, width_limit, checked, edges, templates, functions, builtin)?;
         let circuit = assemble_source_instances(&instances, &counts, inputs.len(), &drivers.outputs, gate_limit)?;
         assert(instances@.len() == checked.calls@.len());
-        assert(self.clocked_checked_assembly_matches(checked, edges@, templates@, builtin, circuit.netlist_model())) by {
+        assert(self.clocked_checked_assembly_matches(checked, edges@, templates@, functions@, builtin, circuit.netlist_model())) by {
             let input_count = checked.module.expressions.typed.sources.roots.wiring.drivers.signature.inputs@.len() as usize;
             assert(input_count == inputs.len());
-            assert(self.instances_match_source_calls(checked, instances@, edges@, templates@, builtin));
+            assert(self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin));
             assert(instance_output_slots(instances@, drivers.definitions@.len() as int));
             assert(source_assembly_matches(instances@, counts@, input_count, drivers.outputs@, circuit.netlist_model()));
         };
@@ -646,6 +691,7 @@ fn resolve_instance_arguments<'p, 'a>(instance: &SourceInstance<'_, 'p, 'a>, wir
     ensures
         result matches Ok(arguments) ==> arguments@ == resolved_arguments(*instance, wires@) && arguments_valid(*instance, wires@),
         !(result matches Err(ClockedModuleError::Parent(_))),
+        !(result matches Err(ClockedModuleError::Function { .. })),
 {
     let mut arguments: Vec<Wire> = Vec::new();
     let mut j = 0;
@@ -685,6 +731,7 @@ fn assemble_child_drivers<'p, 'a>(
         result matches Ok((drivers, sites)) ==> sites@.len() == drivers@.len()
             && child_drivers_match(instances@, regions@, instances@.len() as int, drivers@),
         !(result matches Err(ClockedModuleError::Parent(_))),
+        !(result matches Err(ClockedModuleError::Function { .. })),
 {
     let mut drivers: Vec<ClockedWireDriver> = Vec::new();
     let mut sites = Vec::new();
@@ -759,6 +806,7 @@ fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], c
             && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
             && source_assembly_matches(instances@, counts@, inputs, output_drivers@, circuit.netlist_model()),
         !(result matches Err(ClockedModuleError::Parent(_))),
+        !(result matches Err(ClockedModuleError::Function { .. })),
 {
     let (regions, total) = match clocked_reserve(counts, limit) {
         Ok(plan) => plan,

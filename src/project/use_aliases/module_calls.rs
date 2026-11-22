@@ -176,8 +176,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     &&& row.expression.start <= signature.call.form
                         < parsed.syntax.forms@[signature.call.form as int]->List_end <= row.expression.end
             }),
-            signature.target matches ModuleCallTarget::Routine { position, signature: ports, .. } ==>
-                self.typed_signature_evidence(position.file, position.entry, max_width, Ok(Some(ports))),
+            signature.target matches ModuleCallTarget::Routine { position, signature: ports, .. } ==> {
+                let circuits = self.targets.project_model().circuits_model();
+                &&& self.typed_signature_evidence(position.file, position.entry, max_width, Ok(Some(ports)))
+                &&& position.file < circuits.len()
+                &&& position.entry < circuits[position.file as int].syntax.entries@.len()
+                &&& {
+                    let head = circuits[position.file as int].syntax.entries@[position.entry as int].head;
+                    head is Func || head is Module
+                }
+            },
     {
         let parsed = self.targets.project_model().circuits_model()[at.file as int];
         let row = parsed.definitions@[parsed.entry_ranges@[at.entry as int].definitions.start + at.definition];

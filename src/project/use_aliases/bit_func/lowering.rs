@@ -1972,6 +1972,19 @@ pub struct LoweredBitFunc {
 }
 
 impl LoweredBitFunc {
+    /// ネットリストを移し、tick 用の回路と宣言順の入出力配置を返す。
+    pub(in crate::project::use_aliases::bit_func) fn into_clocked(self)
+        -> (result: (crate::netlist::ClockedNor, PortBitLayout, PortBitLayout))
+        requires nor_evaluation_ready(self.netlist_model(), self.input_layout_model().total_bits_model() as nat),
+        ensures
+            result.0.netlist_model() == *self.netlist_model(),
+            result.1 == *self.input_layout_model(),
+            result.2 == *self.output_layout_model(),
+    {
+        let circuit = crate::netlist::ClockedNor::from_combinational(self.netlist);
+        (circuit, self.layouts.inputs, self.layouts.outputs)
+    }
+
     /// 評価する NOR ネットリストを返す。
     pub fn netlist(&self) -> (netlist: &NorNetlist)
         ensures *netlist == *self.netlist_model(),

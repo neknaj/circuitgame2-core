@@ -1,5 +1,6 @@
 //! 検査済みのソースと子回路から、親回路の配線を定める。
 
+use super::super::ClockedFunctionTemplate;
 use super::{
     ChildSourceLayout, SourceAssembly, SourceLink, SourceWiring, child_argument_links_valid,
     child_source_placement, gate_follows_source_call, gate_in_parent, instance_for_gate,
@@ -137,10 +138,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     proof fn reference_output_at(&self, checked: &ModuleCalls, source: &SourceLayer,
         layouts: Seq<ChildSourceLayout>, instances: Seq<SourceInstance>, counts: Seq<usize>,
-        edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor, slot: int)
+        edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, builtin: &ClockedNor, slot: int)
         requires
             instance_counts_match(instances, counts),
-            self.instances_match_source_calls(checked, instances, edges, templates, builtin),
+            self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin),
             instances.len() == checked.calls@.len() == layouts.len() == source.children.len(),
             forall|i: int| 0 <= i < layouts.len() ==> #[trigger]
                 child_layout_uses_call(checked, i, layouts[i], &instances[i].template.netlist_model()),
@@ -163,7 +165,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(layout.prefix == call_prefix(checked, i));
         source_trace_layout_counts(&layout.circuit, &template, layout.order, layout.index);
         assert(source.children[i] == layout.circuit);
-        assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, builtin));
+        assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, functions, builtin));
         assert(0 <= port < instance.output_sites@.len() == source.children[i].outputs.len());
         assert(instance.output_sites@[port].span == drivers.definitions@[slot].name.span);
         assert(output_driver_matches(&drivers, call.at, definition as usize, slot, port));
@@ -173,10 +175,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn reference_layer_from_assembly(&self, checked: &ModuleCalls, source: &SourceAssembly,
         layouts: Seq<ChildSourceLayout>, instances: Seq<SourceInstance>, counts: Seq<usize>,
         regions: Seq<Range<usize>>, order: Seq<SourceGateId>, netlist: &NorNetlist, edges: Seq<Option<usize>>,
-        templates: Seq<Option<ClockedNor>>, builtin: &ClockedNor) -> (layer: SourceLayer)
+        templates: Seq<Option<ClockedNor>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, builtin: &ClockedNor) -> (layer: SourceLayer)
         requires
             instance_counts_match(instances, counts),
-            self.instances_match_source_calls(checked, instances, edges, templates, builtin),
+            self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin),
             instances.len() == checked.calls@.len() == layouts.len() == regions.len(),
             forall|i: int| 0 <= i < layouts.len() ==> #[trigger]
                 child_layout_uses_call(checked, i, layouts[i], &instances[i].template.netlist_model()),
@@ -214,13 +217,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let instance = instances[i];
             let model = instance.template.netlist_model();
             child_source_at_call(checked, i, layouts[i], &model);
-            assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, builtin));
+            assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, functions, builtin));
             assert(self.source_argument_link_list(checked, i, instance.arguments@, layer.wiring.arguments[i], order));
         };
         assert forall|slot: int| 0 <= slot < layer.wiring.outlets.len() implies
             #[trigger] reference_outlet_at(self, checked, &layer, slot) by {
             assert(outlet_follows_source_call(layouts, layer.wiring.arguments, instances, slot, layer.wiring.outlets[slot]));
-            self.reference_output_at(checked, &layer, layouts, instances, counts, edges, templates, builtin, slot);
+            self.reference_output_at(checked, &layer, layouts, instances, counts, edges, templates, functions, builtin, slot);
         };
         assert forall|i: int, site: SourceGateId| #[trigger] source_child_has_gate(&layer, i, site) implies
             placed_source_gate(checked, &layer, &source.circuit, i, site) by {

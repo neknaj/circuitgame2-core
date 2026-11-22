@@ -3,6 +3,7 @@
 use super::{ChildSourceLayout, all_child_source_placements, child_source_placement, instance_for_gate,
     instance_owns_gate, source_gate_under};
 use super::reference::SourceLayer;
+use super::super::ClockedFunctionTemplate;
 use super::super::{SourceInstance, assembled_gate_prefix, assembled_outputs, child_drivers_match,
     instance_counts_match, instance_output_slots, source_assembly_matches};
 use super::super::super::clocked_plan::{ClockedWireDriver, clocked_regions_cover, clocked_wires_match};
@@ -48,15 +49,20 @@ pub(super) closed spec fn builtin_source(at: DefinitionPosition) -> ChildSourceL
     ChildSourceLayout { prefix: Seq::empty(), circuit, order, index }
 }
 
-spec fn layout_for_call(checked: &ModuleCalls, edges: Seq<Option<usize>>, layouts: Seq<Option<ModuleSourceLayout>>, i: int)
+spec fn layout_for_call(checked: &ModuleCalls, edges: Seq<Option<usize>>, layouts: Seq<Option<ModuleSourceLayout>>,
+    functions: Map<(usize, usize), ClockedFunctionTemplate>, i: int)
     -> ChildSourceLayout
 {
     let call = checked.calls@[i];
     if call.inputs.ports.signature.target is Nor {
         builtin_source(call.at)
+    } else if let Some(child) = edges[i] {
+        let layout = layouts[child as int]->Some_0;
+        ChildSourceLayout { prefix: seq![call.at], circuit: layout.circuit, order: layout.order, index: layout.index }
     } else {
-        let child = layouts[edges[i]->Some_0 as int]->Some_0;
-        ChildSourceLayout { prefix: seq![call.at], circuit: child.circuit, order: child.order, index: child.index }
+        let position = call.inputs.ports.signature.target->Routine_position;
+        let (circuit, order, index) = functions[(position.file, position.entry)]._source@;
+        ChildSourceLayout { prefix: seq![call.at], circuit, order, index }
     }
 }
 
@@ -177,11 +183,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(in crate::project::use_aliases::module_types::clocked_source) proof fn source_layout_from_compiled(
         &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, edges: Seq<Option<usize>>,
         templates: Seq<Option<ClockedNor>>, prior: Seq<Option<ModuleSourceLayout>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, bit_limit: usize, gate_limit: usize,
         builtin: &ClockedNor, netlist: &NorNetlist,
     ) -> (layout: ModuleSourceLayout)
         requires
             self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
-            self.clocked_checked_assembly_matches(checked, edges, templates, builtin, *netlist),
+            self.clocked_checked_assembly_matches(checked, edges, templates, functions, builtin, *netlist),
+            self.clocked_functions_match(functions, limit, bit_limit, gate_limit),
             crate::netlist::clocked_wiring_valid(netlist),
             edges.len() == checked.calls@.len(),
             forall|i: int| 0 <= i < edges.len() ==>
@@ -189,8 +197,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures layout.owner == owner, source_clocked_layout(&layout.circuit, netlist, layout.order, layout.index),
             self.module_source_layer(checked, &layout.circuit, &layout.layer),
             layout.layer.children_model().len() == checked.calls@.len(),
-            forall|i: int| 0 <= i < edges.len() ==> (#[trigger] checked.calls@[i]).inputs.ports.signature.target is Routine
-                ==> edges[i].is_some(),
+            forall|i: int| 0 <= i < edges.len() && edges[i].is_none() ==>
+                ((#[trigger] checked.calls@[i]).inputs.ports.signature.target matches ModuleCallTarget::Routine { position, .. }
+                ==> exists|order: Seq<SourceGateId>| #[trigger]
+                    self.reachable_function_source_circuit((position.file, position.entry), limit, layout.layer.children_model()[i], order)),
             forall|i: int| 0 <= i < edges.len() ==> ((#[trigger] edges[i]) matches Some(child)
                 ==> layout.layer.children_model()[i] == prior[child as int]->Some_0.circuit),
     {
@@ -198,10 +208,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         vstd::std_specs::vec::axiom_spec_len(&drivers.signature.inputs);
         let input_count = drivers.signature.inputs@.len() as usize;
         let (instances, counts) = choose|instances: Seq<SourceInstance>, counts: Seq<usize>|
-            #![trigger self.instances_match_source_calls(checked, instances, edges, templates, builtin),
+            #![trigger self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin),
                 source_assembly_matches(instances, counts, input_count, drivers.outputs@, *netlist)]
             instances.len() == checked.calls@.len()
-            && self.instances_match_source_calls(checked, instances, edges, templates, builtin)
+            && self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin)
             && instance_output_slots(instances, drivers.definitions@.len() as int)
             && source_assembly_matches(instances, counts, input_count, drivers.outputs@, *netlist);
         let end = instances.len() as int;
@@ -217,40 +227,54 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 wire_available(#[trigger] flat_wires[i], input_count as nat, netlist.gates@.len()))
             && assembled_gate_prefix(instances, regions, flat_wires, netlist.gates@, end)
             && assembled_outputs(drivers.outputs@, flat_wires, netlist.outputs@);
-        let layouts = Seq::new(instances.len(), |i: int| layout_for_call(checked, edges, prior, i));
+        let layouts = Seq::new(instances.len(), |i: int| layout_for_call(checked, edges, prior, functions, i));
         assert forall|i: int| 0 <= i < layouts.len() implies #[trigger]
             child_layout_uses_call(checked, i, layouts[i], &instances[i].template.netlist_model()) by {
             let call = checked.calls@[i];
             let instance = instances[i];
-            assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, builtin));
+            assert(self.instance_matches_source_call(checked, i, instance, edges[i], templates, functions, builtin));
             let model = instance.template.netlist_model();
             if call.inputs.ports.signature.target is Nor {
                 builtin_nor_source_layout(call.at, &model);
-            } else {
-                assert(edges[i].is_some());
+            } else if edges[i].is_some() {
                 assert(call_layout_is_ready(&call, edges[i], templates, prior));
+            } else {
+                let position = call.inputs.ports.signature.target->Routine_position;
+                let key = (position.file, position.entry);
+                self.clocked_function_template_evidence(key, limit, bit_limit, gate_limit, &functions[key]);
+                assert(functions[key].circuit == *instance.template);
             }
             crate::netlist::source_trace_layout_counts(&layouts[i].circuit, &model, layouts[i].order, layouts[i].index);
         };
         let order = self.order_for_assembled_calls(owner, limit, checked, instances, counts, regions, total, layouts);
         assert forall|i: int| 0 <= i < instances.len() implies
             self.source_arguments_match(checked, i, (#[trigger] instances[i]).arguments@) by {
-            assert(self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, builtin));
+            assert(self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, functions, builtin));
         };
         let source = self.source_circuit_from_assembly(checked, layouts, order, instances, counts, regions, flat_drivers,
             flat_wires, netlist);
         crate::netlist::source_trace_layout_counts(&source.circuit, netlist, order, source.index);
         let layer = self.reference_layer_from_assembly(checked, &source, layouts, instances, counts,
-            regions, order, netlist, edges, templates, builtin);
+            regions, order, netlist, edges, templates, functions, builtin);
         assert forall|i: int| 0 <= i < edges.len() implies ((#[trigger] edges[i]) matches Some(child)
             ==> layer.children_model()[i] == prior[child as int]->Some_0.circuit) by {
             let call = &checked.calls@[i];
             assert(call_layout_is_ready(call, edges[i], templates, prior));
             assert(layer.children_model()[i] == layouts[i].circuit);
         };
-        assert forall|i: int| 0 <= i < edges.len()
-            && (#[trigger] checked.calls@[i]).inputs.ports.signature.target is Routine implies edges[i].is_some() by {
-            assert(self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, builtin));
+        assert forall|i: int| 0 <= i < edges.len() && edges[i].is_none()
+            && (#[trigger] checked.calls@[i]).inputs.ports.signature.target is Routine implies
+            exists|order: Seq<SourceGateId>| #[trigger] self.reachable_function_source_circuit(
+                (checked.calls@[i].inputs.ports.signature.target->Routine_position.file,
+                    checked.calls@[i].inputs.ports.signature.target->Routine_position.entry), limit, layer.children_model()[i], order)
+        by {
+            let position = checked.calls@[i].inputs.ports.signature.target->Routine_position;
+            let key = (position.file, position.entry);
+            assert(self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, functions, builtin));
+            self.clocked_function_template_evidence(key, limit, bit_limit, gate_limit, &functions[key]);
+            let (circuit, order, _) = functions[key]._source@;
+            assert(layer.children_model()[i] == layouts[i].circuit && layouts[i].circuit == circuit);
+            assert(self.reachable_function_source_circuit(key, limit, layer.children_model()[i], order));
         };
         ModuleSourceLayout { owner, circuit: source.circuit, order, index: source.index, layer }
     }

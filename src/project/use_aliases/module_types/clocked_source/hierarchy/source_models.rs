@@ -16,19 +16,26 @@ pub(super) open spec fn child_source_at(positions: Seq<ModuleBodyPosition>, rank
     &&& table[child] matches Some(layout) && layout.circuit == source
 }
 
-pub(super) open spec fn source_call_in_table(checked: &ModuleCalls, layout: ModuleSourceLayout,
-    positions: Seq<ModuleBodyPosition>, rank: Seq<nat>, table: Seq<Option<ModuleSourceLayout>>, node: int, call: int) -> bool
-{
-    let target = checked.calls@[call].inputs.ports.signature.target;
-    match target {
-        ModuleCallTarget::Routine { position, .. } => exists|i: int|
-            #[trigger] child_source_at(positions, rank, table, node, position, layout.layer.children_model()[call], i),
-        ModuleCallTarget::Nor => true,
-        ModuleCallTarget::StateElement { .. } => false,
-    }
-}
-
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    pub(super) open spec fn source_function_in_layer(&self, limit: u64, position: ModuleBodyPosition,
+        layout: ModuleSourceLayout, call: int) -> bool {
+        exists|order: Seq<SourceGateId>| #[trigger] self.reachable_function_source_circuit(
+            (position.file, position.entry), limit, layout.layer.children_model()[call], order)
+    }
+
+    pub(super) open spec fn source_call_in_table(&self, checked: &ModuleCalls, limit: u64, layout: ModuleSourceLayout,
+        positions: Seq<ModuleBodyPosition>, rank: Seq<nat>, table: Seq<Option<ModuleSourceLayout>>, node: int, call: int,
+    ) -> bool {
+        let target = checked.calls@[call].inputs.ports.signature.target;
+        match target {
+            ModuleCallTarget::Routine { position, .. } => self.source_function_in_layer(limit, position, layout, call)
+                || (exists|i: int| #[trigger]
+                    child_source_at(positions, rank, table, node, position, layout.layer.children_model()[call], i)),
+            ModuleCallTarget::Nor => true,
+            ModuleCallTarget::StateElement { .. } => false,
+        }
+    }
+
     spec fn source_table_entry(&self, owner: ModuleBodyPosition, limit: u64, checked: Option<ModuleCalls>,
         layout: ModuleSourceLayout) -> bool
     {
@@ -45,7 +52,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& forall|i: int| 0 <= i < table.len() && (#[trigger] table[i]).is_some() ==>
             self.source_table_entry(positions[i], limit, modules[i], table[i]->Some_0)
         &&& forall|i: int, c: int| 0 <= i < table.len() && table[i].is_some() && 0 <= c < modules[i]->Some_0.calls@.len() ==>
-            #[trigger] source_call_in_table(&modules[i]->Some_0, table[i]->Some_0, positions, rank, table, i, c)
+            #[trigger] self.source_call_in_table(&modules[i]->Some_0, limit, table[i]->Some_0, positions, rank, table, i, c)
     }
 
     pub(super) proof fn empty_source_table(&self, positions: Seq<ModuleBodyPosition>, limit: u64,
@@ -56,7 +63,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
     }
 
-    pub(super) proof fn source_call_for_child(&self, checked: &ModuleCalls, layout: ModuleSourceLayout,
+    pub(super) proof fn source_call_for_child(&self, checked: &ModuleCalls, limit: u64, layout: ModuleSourceLayout,
         positions: Seq<ModuleBodyPosition>, rank: Seq<nat>, table: Seq<Option<ModuleSourceLayout>>, node: int,
         call: int, child: int)
         requires
@@ -66,7 +73,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             checked.calls@[call].inputs.ports.signature.target matches ModuleCallTarget::Routine { position, .. }
                 && positions[child] == position,
             table[child] matches Some(prior) && prior.circuit == layout.layer.children_model()[call],
-        ensures source_call_in_table(checked, layout, positions, rank, table, node, call),
+        ensures self.source_call_in_table(checked, limit, layout, positions, rank, table, node, call),
     {
         assert(child_source_at(positions, rank, table, node, positions[child], layout.layer.children_model()[call], child));
     }
@@ -84,7 +91,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_source_layer(&modules[node]->Some_0, &layout.circuit, &layout.layer),
             layout.layer.children_model().len() == modules[node]->Some_0.calls@.len(),
             forall|c: int| 0 <= c < modules[node]->Some_0.calls@.len() ==>
-                #[trigger] source_call_in_table(&modules[node]->Some_0, layout, positions, rank, table, node, c),
+                #[trigger] self.source_call_in_table(&modules[node]->Some_0, limit, layout, positions, rank, table, node, c),
         ensures self.source_model_table(positions, limit, modules, rank, table.update(node, Some(layout))),
     {
         let next = table.update(node, Some(layout));
@@ -95,17 +102,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
         };
         assert forall|i: int, c: int| 0 <= i < next.len() && next[i].is_some() && 0 <= c < modules[i]->Some_0.calls@.len()
-            implies #[trigger] source_call_in_table(&modules[i]->Some_0, next[i]->Some_0, positions, rank, next, i, c) by {
+            implies #[trigger] self.source_call_in_table(&modules[i]->Some_0, limit, next[i]->Some_0, positions, rank, next, i, c) by {
             let checked = &modules[i]->Some_0;
             let parent = next[i]->Some_0;
             if i != node { assert(next[i] == table[i]); }
-            assert(source_call_in_table(checked, parent, positions, rank, table, i, c));
+            assert(self.source_call_in_table(checked, limit, parent, positions, rank, table, i, c));
             if let ModuleCallTarget::Routine { position, .. } = checked.calls@[c].inputs.ports.signature.target {
-                let child = choose|j: int| #[trigger]
-                    child_source_at(positions, rank, table, i, position, parent.layer.children_model()[c], j);
-                assert(child != node);
-                assert(next[child] == table[child]);
-                assert(child_source_at(positions, rank, next, i, position, parent.layer.children_model()[c], child));
+                if !self.source_function_in_layer(limit, position, parent, c) {
+                    let child = choose|j: int| #[trigger]
+                        child_source_at(positions, rank, table, i, position, parent.layer.children_model()[c], j);
+                    assert(child != node);
+                    assert(next[child] == table[child]);
+                    assert(child_source_at(positions, rank, next, i, position, parent.layer.children_model()[c], child));
+                }
             }
         };
     }

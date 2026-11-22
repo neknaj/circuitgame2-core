@@ -1,9 +1,12 @@
 //! プロジェクトの関数を展開し、元の宣言位置からネットリストを取得する。
 
 use super::super::{FunctionExpansionError, FunctionExpansionOrder, UseAliases};
+#[cfg(verus_only)]
+use super::super::call_dependencies::function_position;
 use super::frontend::{BitFuncError, ExpandedBodyError};
 use super::lowering::{BitFuncLowerError, CallGroupError, LoweredBitFunc, MixedWiringError, ProjectedLoweringError};
 use super::templates::{FunctionTemplateBuildError, FunctionTemplates};
+use crate::netlist::{ClockedNor, PortBitLayout};
 use crate::project::{CircuitProject, LocatedName};
 #[cfg(verus_only)]
 use super::templates::complete_circuit_table;
@@ -25,6 +28,20 @@ verus! {
 pub struct ExpandedFunctions<'p, 'a> {
     plan: FunctionExpansionOrder<'p, 'a>,
     table: FunctionTemplates<'p, 'a>,
+}
+
+#[cfg(verus_only)]
+type FunctionSource = (SourceTickCircuit, Seq<SourceGateId>, Map<SourceGateId, int>);
+#[cfg(not(verus_only))]
+type FunctionSource = ();
+
+/// tick 回路と、呼び出しが使う入出力ポートのビット配置。
+pub(in crate::project::use_aliases) struct ClockedFunctionTemplate {
+    pub(in crate::project::use_aliases) circuit: ClockedNor,
+    pub(in crate::project::use_aliases) inputs: PortBitLayout,
+    pub(in crate::project::use_aliases) outputs: PortBitLayout,
+    /// 厳格定義から組み立てた回路と、そのゲートを配列で引くための対応。
+    pub(in crate::project::use_aliases) _source: Ghost<FunctionSource>,
 }
 
 /// 関数展開の計画または変換で見つかった診断。
@@ -366,6 +383,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(0 <= rank < plan.order_model().len());
         assert(built.slots_model()[vertex as int] matches Some(template) && circuit == Some(*template.circuit_model()));
         Ok(circuit)
+    }
+
+    /// tick 用の子回路が、指定した関数の展開結果と同じ配線を持つことを表す。
+    pub(in crate::project::use_aliases) closed spec fn clocked_function_template_matches(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize, template: &ClockedFunctionTemplate,
+    ) -> bool {
+        let (source, order, index) = template._source@;
+        let netlist = &template.circuit.netlist_model();
+        &&& self.reachable_function_source_circuit(root, width_limit, source, order)
+        &&& source_clocked_layout(&source, netlist, order, index)
+        &&& template.inputs.total_bits_model() == netlist.input_count
+        &&& template.outputs.total_bits_model() == netlist.outputs@.len()
+        &&& exists|value: LoweredBitFunc| {
+            &&& #[trigger] self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, Ok(Some(value)))
+            &&& *value.netlist_model() == *netlist
+            &&& *value.input_layout_model() == template.inputs
+            &&& *value.output_layout_model() == template.outputs
+        }
+    }
+
+    /// 関数の子回路を、呼び出し元で使うソース回路と配置の証拠に結び付ける。
+    pub(in crate::project::use_aliases) proof fn clocked_function_template_evidence(
+        &self, root: (usize, usize), width: u64, bits: usize, gates: usize, template: &ClockedFunctionTemplate,
+    )
+        requires self.clocked_function_template_matches(root, width, bits, gates, template),
+        ensures
+            self.reachable_function_source_circuit(root, width, template._source@.0, template._source@.1),
+            source_clocked_layout(&template._source@.0, &template.circuit.netlist_model(), template._source@.1, template._source@.2),
+    {
+    }
+
+    /// 指定した関数を展開し、各 NOR を保ったまま tick 実行用の子回路にする。
+    ///
+    /// # Errors
+    ///
+    /// 到達する関数の展開に失敗した場合は、元の展開診断を返す。
+    pub(in crate::project::use_aliases) fn expand_clocked_function(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize,
+    ) -> (result: Result<ClockedFunctionTemplate, ExpandFunctionsError<'p, 'a>>)
+        requires self.can_resolve(), function_position(self.targets.project_model().circuits_model(), root),
+        ensures match result {
+            Ok(template) => self.clocked_function_template_matches(root, width_limit, bit_limit, gate_limit, &template),
+            Err(error) => self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, Err(error)),
+        },
+    {
+        let value = self.expand_reachable_function(root, width_limit, bit_limit, gate_limit)?;
+        let Some(value) = value else {
+            proof {
+                reveal(UseAliases::expand_reachable_function_result);
+                self.reachable_function_not_absent(root);
+                assert(false);
+            }
+            unreachable!()
+        };
+        let ghost source = self.reachable_function_source_layout(root, width_limit, bit_limit, gate_limit, &value);
+        let ghost expanded = value;
+        let (circuit, inputs, outputs) = value.into_clocked();
+        let template = ClockedFunctionTemplate { circuit, inputs, outputs, _source: Ghost(source) };
+        assert(*expanded.netlist_model() == template.circuit.netlist_model());
+        assert(self.clocked_function_template_matches(root, width_limit, bit_limit, gate_limit, &template));
+        Ok(template)
     }
 
     /// プロジェクト内のすべての `func` を依存順にネットリストへ展開する。

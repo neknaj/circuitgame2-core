@@ -3,6 +3,7 @@
 mod compile;
 mod frontend;
 pub use compile::{ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic};
+pub(super) use compile::ClockedFunctionTemplate;
 mod expansion;
 mod templates;
 mod instances;
