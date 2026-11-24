@@ -2,6 +2,8 @@
 
 use super::{ModuleCalls, ModuleCallsError, UseAliases, copy_location};
 use crate::netlist::{ClockedStorageInputs, Wire};
+#[cfg(verus_only)]
+use crate::netlist::{clocked_storage_output_width, clocked_storage_width_concat, clocked_storage_width_push};
 use crate::project::{DefinitionPosition, LocatedName, ModuleBodyPosition, ModuleCallTarget,
     ResolvedPortType, StorageSignature, StructureTypeError};
 #[cfg(verus_only)]
@@ -119,6 +121,13 @@ impl ClockedStoragePlacement<'_, '_> {
                 }
         }
     }
+
+    /// VM に渡すデータ配線の幅は、この素子に割り当てた登録出力の幅に等しい。
+    pub(super) proof fn storage_inputs_width(&self, wires: Seq<Wire>, inputs: ClockedStorageInputs)
+        requires self.storage_inputs_match(wires, Some(inputs)),
+        ensures self.outputs.start + inputs.data@.len() == self.outputs.end,
+    {
+    }
 }
 
 fn copy_storage_wires(wires: &[Wire], start: usize, end: usize) -> (out: Vec<Wire>)
@@ -206,6 +215,34 @@ proof fn storage_neighbor(instances: Seq<ClockedStoragePlacement>, external: usi
         instances[i].call_index < instances[i + 1].call_index,
 {
     reveal(ranges_follow);
+}
+
+proof fn placed_output_width(instances: Seq<ClockedStoragePlacement>, external: usize,
+    wiring: Seq<ClockedStorageInputs>, count: nat)
+    requires
+        ranges_follow(instances, external), wiring.len() == instances.len(), count <= wiring.len(),
+        forall|i: int| 0 <= i < count ==>
+            (#[trigger] instances[i]).outputs.start + (#[trigger] wiring[i]).data@.len() == instances[i].outputs.end,
+    ensures external + clocked_storage_output_width(wiring.take(count as int))
+        == if count == 0 { external } else { instances[count - 1].outputs.end },
+    decreases count,
+{
+    if count == 0 {
+        let empty = wiring.take(0);
+        assert(empty + empty =~= empty);
+        clocked_storage_width_concat(empty, empty);
+    } else {
+        let i = (count - 1) as int;
+        placed_output_width(instances, external, wiring, i as nat);
+        if i == 0 {
+            reveal(ranges_follow);
+        } else {
+            storage_neighbor(instances, external, i - 1);
+        }
+        let prior = wiring.take(i);
+        assert(prior.push(wiring[i]) =~= wiring.take(count as int));
+        clocked_storage_width_push(prior, wiring[i]);
+    }
 }
 
 proof fn ordered_storage_ranges(instances: Seq<ClockedStoragePlacement>, external: usize, first: int, later: int)
@@ -376,6 +413,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     },
             _ => false,
         }
+    }
+
+    /// 配置通りの幅で素子を束ねると、増補入力の末尾は計画した位置と一致する。
+    pub(super) proof fn placed_storage_width_evidence(&self, checked: &ModuleCalls, limit: u64, external: usize,
+        capacity: usize, plan: &ClockedStorageLayout, wiring: Seq<ClockedStorageInputs>)
+        requires
+            self.storage_on_checked(checked, limit, external, capacity, Ok(*plan)),
+            wiring.len() == plan.instances@.len(),
+            forall|i: int| 0 <= i < wiring.len() ==>
+                (#[trigger] plan.instances@[i]).outputs.start + (#[trigger] wiring[i]).data@.len()
+                    == plan.instances@[i].outputs.end,
+        ensures external + clocked_storage_output_width(wiring) == plan.augmented_inputs,
+    {
+        reveal(UseAliases::storage_on_checked);
+        reveal(UseAliases::placed_prefix);
+        placed_output_width(plan.instances@, external, wiring, wiring.len());
+        assert(wiring.take(wiring.len() as int) =~= wiring);
     }
 
     /// 呼び出し番号から、同じ状態素子に割り当てた増補入力の範囲を取り出す。

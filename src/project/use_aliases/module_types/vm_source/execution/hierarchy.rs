@@ -5,7 +5,7 @@ mod placement_model;
 use placement_model::RoutineWiring;
 #[cfg(verus_only)]
 use placement_model::{empty_routines, extend_routines, join_routine_input_offsets, routine_placed,
-    routine_vm_input_offsets, routines_placed};
+    routine_vm_input_offsets, routines_output_width, routines_placed};
 use super::super::super::{ClockedModuleOutputs, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement,
     ClockedWireDriver, copy_location};
 #[cfg(verus_only)]
@@ -30,7 +30,8 @@ use super::super::super::clocked_source::resolved_driver;
 use super::super::super::clocked_plan::{clocked_cycle_edge, clocked_wire_at, clocked_wire_cycle, clocked_wires_match};
 use crate::netlist::{ClockedNor, ClockedStatefulInstanceError, ClockedStorageInputs, NorGate, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
-use crate::netlist::{clocked_stateful_arguments, clocked_storage_output_width, instance_outputs_match};
+use crate::netlist::{clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_width_concat,
+    instance_outputs_match};
 use crate::project::{LocatedName, ModuleCallTarget};
 use alloc::{boxed::Box, vec::Vec};
 use core::ops::Range;
@@ -108,9 +109,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         exists|ports: ClockedModuleOutputs|
             #[trigger] self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports))
             && network.inputs == ports.inputs && network.outputs == ports.outputs
+            && network.inputs.total_bits_model() + clocked_storage_output_width(network.storage@)
+                == network.circuit.netlist_model().input_count
             && (network._hierarchy_wiring@ matches Some(wiring)
                 && self.hierarchy_public_wiring(checked, limits.width, &ports, &wiring, network.circuit.netlist_model().outputs@)
                 && wiring.direct_devices <= network.storage@.len()
+                && routine_vm_input_offsets(wiring.routines, network.storage@, wiring.direct_devices,
+                    network.inputs.total_bits_model())
                 && routines_placed(wiring.routines, network.circuit.netlist_model().gates@,
                     network.storage@.skip(wiring.direct_devices as int), wiring.first_child_input,
                     network.circuit.netlist_model().input_count))
@@ -319,9 +324,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && networks[0] == Some(network)
             && hierarchy.modules@[0].is_some()
             && self.hierarchy_network_wiring(&hierarchy.modules@[0]->Some_0, limits, &network)
-            && (network._hierarchy_wiring@ matches Some(wiring)
-                && routine_vm_input_offsets(wiring.routines, network.storage@, wiring.direct_devices,
-                    network.inputs.total_bits_model()))
             && network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits
     }
@@ -440,13 +442,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     }
                     return match self.initialize_clocked_network(network, limits.state_bits) {
                         Ok(vm) => {
-                            proof {
-                                assert(self.hierarchy_network_wiring(checked, limits, &source));
-                                let wiring = source._hierarchy_wiring@->Some_0;
-                                join_routine_input_offsets(wiring.routines, source.circuit.netlist_model().gates@,
-                                    source.storage@, wiring.direct_devices, source.inputs.total_bits_model(),
-                                    wiring.first_child_input, source.circuit.netlist_model().input_count);
-                            }
                             assert(self.clocked_module_hierarchy_vm(owner, limits, &vm)) by {
                                 assert(self.network_vm_on_reset(&source, limits.state_bits, &vm));
                                 assert(self.hierarchy_templates_through(&hierarchy, limits, index + 1, completed, functions@));
@@ -536,6 +531,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
                 self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports)),
                 call == placements@.len() <= count == edges@.len() == checked.calls@.len(),
+                self.storage_on_checked(checked, limits.width, external, limits.wiring_bits, Ok(direct)),
+                external == ports.inputs.total_bits_model(),
                 direct.augmented_inputs <= total_inputs <= limits.wiring_bits, total_gates <= limits.gates,
                 obeys_cmp::<(usize, usize)>(),
                 function_templates_cover(checked, edges@, functions@, count as int),
@@ -1047,6 +1044,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> (result: Result<ClockedModuleNetwork<'p, 'a>, ClockedModuleVmError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
             self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports)),
+            self.storage_on_checked(checked, limits.width, ports.inputs.total_bits_model(), limits.wiring_bits, Ok(direct)),
             calls@.len() == checked.calls@.len(),
             forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
                 == (checked.calls@[i].inputs.ports.signature.target is Routine),
@@ -1075,7 +1073,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             !(result matches Err(ClockedModuleVmError::Hierarchy(_) | ClockedModuleVmError::ChildStateCapacity { .. })),
     {
         let mut gates = Vec::new();
-        let mut storage = Vec::new();
+        let mut storage: Vec<ClockedStorageInputs> = Vec::new();
         let mut child_storage: Vec<ClockedStorageInputs> = Vec::new();
         let mut child_sites = Vec::new();
         let ghost mut captured = Seq::<Option<RoutineWiring>>::empty();
@@ -1095,6 +1093,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
                 self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports)),
+                storage@.len() <= direct.instances@.len(),
+                forall|i: int| 0 <= i < storage@.len() ==>
+                    (#[trigger] direct.instances@[i]).outputs.start + (#[trigger] storage@[i]).data@.len()
+                        == direct.instances@[i].outputs.end,
                 clocked_wires_match(_rows.bits@, definitions@),
                 forall|i: int| 0 <= i < call ==> #[trigger]
                     self.captured_call_output(checked, &ports, calls@, _rows, definitions@, i, captured[i]),
@@ -1230,7 +1232,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let Some(inputs) = direct.instances[instance].storage_inputs(&arguments) else {
                         return Err(ClockedModuleVmError::CallWiring(call_site(checked, call)));
                     };
+                    let ghost prior_direct = storage@;
+                    proof { direct.instances@[instance as int].storage_inputs_width(arguments@, inputs); }
                     storage.push(inputs);
+                    assert forall|i: int| 0 <= i < storage@.len() implies
+                        (#[trigger] direct.instances@[i]).outputs.start + (#[trigger] storage@[i]).data@.len()
+                            == direct.instances@[i].outputs.end by {
+                        if i < instance {
+                            assert(storage@[i] == prior_direct[i]);
+                        }
+                    };
                 }
                 proof {
                     assert(gates@.take(prior_gates.len() as int) =~= prior_gates);
@@ -1248,14 +1259,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if gates.len() != total_gates || next_state != total_inputs || storage.len() != direct.instances.len() {
             return Err(ClockedModuleVmError::InstanceCount);
         }
+        let ghost direct_wiring = storage@;
+        let ghost routine_storage = child_storage@;
+        proof {
+            self.placed_storage_width_evidence(checked, limits.width, ports.inputs.total_bits_model(),
+                limits.wiring_bits, &direct, direct_wiring);
+            routines_output_width(captured, gates@, routine_storage, first_state, next_state);
+            clocked_storage_width_concat(direct_wiring, routine_storage);
+        }
         let mut storage_sites = direct.instances;
         if storage.try_reserve(child_storage.len()).is_err() || storage_sites.try_reserve(child_sites.len()).is_err() {
             return Err(ClockedModuleVmError::Allocation);
         }
-        let ghost routine_storage = child_storage@;
         let direct_devices = storage.len();
         storage.append(&mut child_storage);
         assert(storage@.skip(direct_devices as int) =~= routine_storage);
+        proof {
+            assert(storage@ =~= direct_wiring + routine_storage);
+            join_routine_input_offsets(captured, gates@, storage@, direct_devices, ports.inputs.total_bits_model(),
+                first_state, next_state);
+        }
         storage_sites.append(&mut child_sites);
         let outputs = match resolve_rows(&ports.drivers, definitions) {
             Ok(outputs) => outputs,

@@ -64,6 +64,17 @@ pub(super) closed spec fn routines_placed(
             ==> routine_before(first, second))
 }
 
+/// 出力を連結した子回路列が占める増補入力の幅。
+pub(super) proof fn routines_output_width(
+    routines: Seq<Option<RoutineWiring>>, gates: Seq<NorGate>, storage: Seq<ClockedStorageInputs>,
+    first_state: usize, next_state: usize,
+)
+    requires routines_placed(routines, gates, storage, first_state, next_state),
+    ensures first_state + clocked_storage_output_width(storage) == next_state,
+{
+    reveal(routines_placed);
+}
+
 /// 空の子回路列には予約済みの区間がない。
 pub(super) proof fn empty_routines(first_state: usize)
     ensures routines_placed(Seq::empty(), Seq::empty(), Seq::empty(), first_state, first_state),

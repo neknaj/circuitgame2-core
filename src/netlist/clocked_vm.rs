@@ -180,6 +180,20 @@ pub proof fn clocked_storage_width_concat(first: Seq<ClockedStorageInputs>, seco
     concatenated_wiring_prefix_width(first, second, second.len());
 }
 
+/// 状態素子を末尾に置くと、登録出力の幅だけ増補入力が広がる。
+pub proof fn clocked_storage_width_push(wiring: Seq<ClockedStorageInputs>, added: ClockedStorageInputs)
+    ensures clocked_storage_output_width(wiring.push(added)) ==
+        clocked_storage_output_width(wiring) + added.data@.len(),
+{
+    let extended = wiring.push(added);
+    assert forall|i: int| 0 <= i < wiring.len() implies
+        (#[trigger] wiring[i]).data@.len() == (#[trigger] extended[i]).data@.len() by {
+        assert(extended[i] == wiring[i]);
+    };
+    equal_wiring_prefix_width(wiring, extended, wiring.len());
+    wiring_width_step(extended, wiring.len());
+}
+
 pub(super) proof fn wiring_width_grows(wiring: Seq<ClockedStorageInputs>, before: nat, end: nat)
     requires before <= end <= wiring.len(),
     ensures wiring_width(wiring, before) <= wiring_width(wiring, end),
