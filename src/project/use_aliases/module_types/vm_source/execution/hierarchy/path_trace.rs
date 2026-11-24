@@ -51,6 +51,16 @@ spec fn path_offsets(
     }
 }
 
+/// 経路が分岐する最初の位置で、先の呼び出しを選ぶ。
+/// 一方が他方の接頭列である場合は、同じインスタンスの内外を指す。
+spec fn paths_diverge_in_order(first: Seq<usize>, second: Seq<usize>) -> bool
+    decreases first.len(),
+{
+    &&& first.len() > 0 && second.len() > 0
+    &&& (first[0] < second[0]
+        || (first[0] == second[0] && paths_diverge_in_order(first.skip(1), second.skip(1))))
+}
+
 /// 選ばれたインスタンスの状態は、開始モジュールのゲート列と状態素子列の部分列にある。
 struct PathTrace {
     frames: Seq<RoutineFrame>,
@@ -345,7 +355,98 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         result
     }
 
-    /// 別々の子から始まる経路は、同じ宣言を指す場合もルート VM の状態区間が重ならない。
+    /// 経路末尾の配置が、開始インスタンスと最初の子の区間内に収まる。
+    proof fn resolved_path_bounds(
+        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
+        end: int, networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        node: usize, path: Seq<usize>, target: usize,
+    )
+        requires
+            self.clocked_hierarchy_matches(root, limits.width, hierarchy),
+            self.hierarchy_templates_through(hierarchy, limits, end, networks, functions),
+            node < networks.len(), node < hierarchy.rank@.len(), node < hierarchy.modules@.len(),
+            hierarchy.rank@[node as int] < end,
+            hierarchy.modules@[node as int].is_some(), networks[node as int].is_some(),
+            path_target(hierarchy.graph@, node, path) == Some(target),
+        ensures
+            target < networks.len(), networks[target as int].is_some(),
+            ({
+                let parent = networks[node as int]->Some_0;
+                let leaf = networks[target as int]->Some_0;
+                let offset = path_offsets(hierarchy.graph@, networks, node, path);
+                &&& offset.0 + leaf.circuit.netlist_model().gates@.len() <= parent.circuit.netlist_model().gates@.len()
+                &&& offset.1 + leaf.storage@.len() <= parent.storage@.len()
+                &&& path.len() > 0 ==> {
+                    let wiring = parent._hierarchy_wiring@->Some_0;
+                    let routine = wiring.routines[path[0] as int]->Some_0;
+                    &&& routine.gates.start <= offset.0
+                    &&& offset.0 + leaf.circuit.netlist_model().gates@.len() <= routine.gates.end
+                    &&& wiring.direct_devices + routine.storage.start <= offset.1
+                    &&& offset.1 + leaf.storage@.len() <= wiring.direct_devices + routine.storage.end
+                }
+            }),
+        decreases path.len(),
+    {
+        self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
+        if path.len() > 0 {
+            let call = path[0];
+            let child = hierarchy.graph@[node as int]@[call as int]->Some_0;
+            let routine = self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, node, call, child);
+            self.resolved_path_bounds(root, limits, hierarchy, end, networks, functions, child, path.skip(1), target);
+            let parent = networks[node as int]->Some_0;
+            let direct = parent._hierarchy_wiring@->Some_0.direct_devices;
+            assert(direct + routine.storage.end <= parent.storage@.len());
+        }
+    }
+
+    /// 分岐した二つの経路は、分岐までの共通の配置を足しても状態区間が重ならない。
+    proof fn resolved_paths_separate(
+        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
+        end: int, networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        node: usize, first: Seq<usize>, second: Seq<usize>, first_target: usize, second_target: usize,
+    )
+        requires
+            self.clocked_hierarchy_matches(root, limits.width, hierarchy),
+            self.hierarchy_templates_through(hierarchy, limits, end, networks, functions),
+            node < networks.len(), node < hierarchy.rank@.len(), node < hierarchy.modules@.len(),
+            hierarchy.rank@[node as int] < end,
+            hierarchy.modules@[node as int].is_some(), networks[node as int].is_some(),
+            paths_diverge_in_order(first, second),
+            path_target(hierarchy.graph@, node, first) == Some(first_target),
+            path_target(hierarchy.graph@, node, second) == Some(second_target),
+        ensures
+            first_target < networks.len(), networks[first_target as int].is_some(),
+            second_target < networks.len(), networks[second_target as int].is_some(),
+            ({
+                let leaf = networks[first_target as int]->Some_0;
+                let left = path_offsets(hierarchy.graph@, networks, node, first);
+                let right = path_offsets(hierarchy.graph@, networks, node, second);
+                &&& left.0 + leaf.circuit.netlist_model().gates@.len() <= right.0
+                &&& left.1 + leaf.storage@.len() <= right.1
+            }),
+        decreases first.len(),
+    {
+        self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
+        let edges = hierarchy.graph@[node as int]@;
+        let earlier = edges[first[0] as int]->Some_0;
+        self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, node, first[0], earlier);
+        if first[0] == second[0] {
+            self.resolved_paths_separate(root, limits, hierarchy, end, networks, functions, earlier,
+                first.skip(1), second.skip(1), first_target, second_target);
+        } else {
+            let later = edges[second[0] as int]->Some_0;
+            self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, node, second[0], later);
+            self.resolved_path_bounds(root, limits, hierarchy, end, networks, functions, node, first, first_target);
+            self.resolved_path_bounds(root, limits, hierarchy, end, networks, functions, node, second, second_target);
+            let parent = networks[node as int]->Some_0;
+            let wiring = parent._hierarchy_wiring@->Some_0;
+            let netlist = parent.circuit.netlist_model();
+            sibling_routines_order(wiring.routines, netlist.gates@, parent.storage@.skip(wiring.direct_devices as int),
+                wiring.first_child_input, netlist.input_count, first[0] as int, second[0] as int);
+        }
+    }
+
+    /// 二つの経路の末尾は、同じ宣言を指す場合も分岐先ごとに別の状態区間を使う。
     proof fn project_separate_vm_paths(
         &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
         end: int, networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
@@ -359,7 +460,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             networks.len() > 0, networks[0].is_some(),
             hierarchy.modules@.len() > 0, hierarchy.modules@[0].is_some(),
             self.network_vm_on_reset(&networks[0]->Some_0, limits.state_bits, compiled),
-            0 < first.len(), 0 < second.len(), first[0] < second[0],
+            paths_diverge_in_order(first, second),
             path_target(hierarchy.graph@, 0, first) == Some(first_target),
             path_target(hierarchy.graph@, 0, second) == Some(second_target),
             clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
@@ -387,14 +488,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let later = self.project_resolved_vm_path(root, limits, hierarchy, end, networks, functions, compiled,
             second, second_target, inputs, states, outputs);
         self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
-        let parent = networks[0]->Some_0;
-        let wiring = parent._hierarchy_wiring@->Some_0;
-        let edges = hierarchy.graph@[0]@;
-        self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, 0, first[0], edges[first[0] as int]->Some_0);
-        self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, 0, second[0], edges[second[0] as int]->Some_0);
-        let netlist = parent.circuit.netlist_model();
-        sibling_routines_order(wiring.routines, netlist.gates@, parent.storage@.skip(wiring.direct_devices as int),
-            wiring.first_child_input, netlist.input_count, first[0] as int, second[0] as int);
+        self.resolved_paths_separate(root, limits, hierarchy, end, networks, functions, 0, first, second,
+            first_target, second_target);
         (earlier, later)
     }
 }
