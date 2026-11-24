@@ -5,9 +5,9 @@ mod semantics;
 
 use super::{ModuleCalls, ModuleCallsError, UseAliases, copy_location};
 use crate::netlist::{ClockedNor, NorGate, NorNetlist, Wire};
-use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, ModuleWiring, OutputDriver, ResolvedPortType,
+use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, OutputDriver, ResolvedPortType,
     TypedPort, circuits::{form_location, read_indexed_atom}};
-use crate::syntax::{AtomKind, Form, circuit::indexed_call_signal, read_bit_literal};
+use crate::syntax::{AtomKind, Form, read_bit_literal};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -16,7 +16,7 @@ use crate::netlist::{clocked_wiring_from_endpoints, output_ports_available, wire
 use crate::project::circuits::{is_form_location, parsed_index_evidence};
 #[cfg(verus_only)]
 use crate::syntax::{bit_literal_value_at, form_span, circuit::{build_definition_scope_evidence,
-    build_entry_ranges_evidence, call_argument_position_bounds, call_argument_position_is_direct}};
+    build_entry_ranges_evidence}};
 #[cfg(verus_only)]
 use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
 
@@ -141,21 +141,6 @@ pub(super) fn read_literal_bit(source: &str, forms: &[Form], root: usize) -> (bi
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    pub(super) open spec fn primitive_name_resolves(&self, checked: &ModuleCalls, index: int, root: usize,
-        position: int, operand: PrimitiveOperand,
-    ) -> bool {
-        let call = checked.calls@[index];
-        let wiring = &checked.module.expressions.typed.sources.roots.wiring;
-        let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
-        let frame = parsed.entry_ranges@[call.at.entry as int];
-        let definition = parsed.definitions@[frame.definitions.start + call.at.definition];
-        let bound = wiring.signals@[call.member as int]@[position - frame.signals.start];
-        &&& definition.signals.start <= position < definition.signals.end
-        &&& parsed.signals@[position] == root
-        &&& bound.form == root
-        &&& operand == PrimitiveOperand::Driver(bound.driver)
-    }
-
     pub(super) open spec fn primitive_operand_resolves(&self, checked: &ModuleCalls, index: int, arg: int, operand: PrimitiveOperand) -> bool {
         let call = checked.calls@[index];
         let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
@@ -163,7 +148,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let form = parsed.syntax.forms@[root as int];
         &&& 0 <= arg < call.inputs.ports.arguments@.len() && root < parsed.syntax.forms@.len()
         &&& if form is Atom && form->Atom_kind is Name {
-            exists|position: int| #[trigger] self.primitive_name_resolves(checked, index, root, position, operand)
+            operand matches PrimitiveOperand::Driver(driver) && self.module_argument_binding(checked, index, arg, driver)
         } else {
             operand matches PrimitiveOperand::Literal(value) && literal_bit(call.inputs.ports.signature.source.text, form, value)
                 && literal_value_fits(call.inputs.ports.signature.source.text, form)
@@ -248,50 +233,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.primitive_argument_error(checked, index as int, arg as int, site),
             wire.is_err() ==> wire matches Err(PrimitiveModuleError::Argument(_)),
     {
-        let call = &checked.calls[index];
-        let ghost at = call.at;
-        let ports = &call.inputs.ports;
-        let wiring = &checked.module.expressions.typed.sources.roots.wiring;
-        proof {
-            self.module_calls_type_evidence(_owner, _limit, checked);
-            self.module_output_types_evidence(_owner, _limit, checked.module);
-            self.module_selections_evidence(_owner, _limit, checked.module.expressions);
-            self.module_calls_item_evidence(_owner, _limit, checked, index as int);
-            self.module_call_ports_evidence(at, _limit, *ports);
-            self.module_call_site_evidence(at, _limit, ports.signature);
-        }
-        let project = self.targets.project();
-        let source = ports.signature.source;
-        let parsed = &project.circuits()[call.at.file];
-        let ghost model = parsed.build_model();
-        proof {
-            parsed_index_evidence(*source, *parsed);
-            build_entry_ranges_evidence(source.text, &model, at.entry as int);
-        }
-        let frame = &parsed.entry_ranges[call.at.entry];
-        let definition = frame.definitions.start + call.at.definition;
-        let row = &parsed.definitions[definition];
-        let forms = parsed.syntax.forms.as_slice();
-        let root = ports.arguments[arg];
-        proof {
-            build_definition_scope_evidence(source.text, &model, at.entry as int, definition as int);
-            call_argument_position_bounds(forms@, ports.signature.call, ports.arguments@, arg as int);
-        }
-        if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
-            proof { call_argument_position_is_direct(forms@, ports.signature.call, ports.arguments@, arg as int); }
-            let reference = row.references.start + call.at.reference;
-            let position = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), reference,
-                &ports.signature.call, parsed.signals.as_slice(), root);
-            proof { self.module_signal_index_item(_owner, _limit, *wiring, call.member as int, position as int); }
-            let bound = &wiring.signals[call.member][position - frame.signals.start];
-            assert(self.primitive_name_resolves(checked, index as int, root, position as int, PrimitiveOperand::Driver(bound.driver)));
-            assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Driver(bound.driver)));
-            Ok(map_driver(bound.driver))
+        let argument = self.module_argument(_owner, _limit, checked, index, arg);
+        let source = argument.source;
+        let forms = argument.forms;
+        let root = argument.root;
+        if let Some(driver) = argument.driver {
+            assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Driver(driver)));
+            Ok(map_driver(driver))
         } else if let Some(bit) = read_literal_bit(source.text, forms, root) {
             proof {
                 let form = forms@[root as int];
                 if form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal) {
-                    self.module_nor_literal_item(at, _limit, &call.inputs, arg as int);
+                    let call = &checked.calls@[index as int];
+                    self.module_calls_item_evidence(_owner, _limit, checked, index as int);
+                    self.module_nor_literal_item(call.at, _limit, &call.inputs, arg as int);
                     let span = form_span(form);
                     let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
                     crate::project::literal_width::circuit_bit_literal_boundary(bytes, Some(1), _limit, Ok(1));

@@ -6,8 +6,6 @@ use crate::netlist::{
     source_clocked_layout, source_clocked_layout_from_pairs, source_output_pair_at, source_output_pairs, source_tick_trace, source_trace_from_flat,
     source_wire_pair, wire_available,
 };
-use crate::project::circuits::parsed_index_evidence;
-use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, definition_signal_positions_in_order};
 use vstd::prelude::*;
 use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
 
@@ -81,31 +79,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures first == second,
     {
         let call = checked.calls@[index];
-        self.module_calls_item_evidence(owner, limit, checked, index);
-        self.module_call_ports_evidence(call.at, limit, call.inputs.ports);
-        self.module_call_site_evidence(call.at, limit, call.inputs.ports.signature);
-        self.targets.parsed_project_model();
-        let project = self.targets.project_model();
-        let parsed = project.circuits_model()[call.at.file as int];
-        let source = call.inputs.ports.signature.source;
-        let frame = parsed.entry_ranges@[call.at.entry as int];
-        let definition = frame.definitions.start + call.at.definition;
+        let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
         let root = call.inputs.ports.arguments@[arg];
         let form = parsed.syntax.forms@[root as int];
         if form is Atom && form->Atom_kind is Name {
-            parsed_index_evidence(*source, parsed);
-            let model = parsed.build_model();
-            build_entry_ranges_evidence(source.text, &model, call.at.entry as int);
-            build_definition_scope_evidence(source.text, &model, call.at.entry as int, definition);
-            definition_signal_positions_in_order(source.text, &model, call.at.entry as int, definition);
-            let a = choose|at: int| #[trigger] self.primitive_name_resolves(checked, index, root, at, first);
-            let b = choose|at: int| #[trigger] self.primitive_name_resolves(checked, index, root, at, second);
-            assert(parsed.signals@[a] == parsed.signals@[b]);
-            if a < b {
-                assert(parsed.signals@[a] < parsed.signals@[b]);
-            } else if b < a {
-                assert(parsed.signals@[b] < parsed.signals@[a]);
-            }
+            self.module_argument_bindings_agree(owner, limit, checked, index, arg, first->Driver_0, second->Driver_0);
         } else {
             reveal_strlit("0");
             reveal_strlit("1");

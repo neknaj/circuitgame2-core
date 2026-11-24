@@ -22,16 +22,13 @@ use crate::project::use_aliases::function_drivers::name_location;
 use crate::netlist::{ClockedInstanceError, ClockedNor, ClockedNorError, NorGate, NorNetlist, Wire};
 use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, OutputDriver,
     circuits::{form_location, read_indexed_atom}};
-use crate::syntax::{AtomKind, Form, circuit::indexed_call_signal, read_bit_literal};
+use crate::syntax::{AtomKind, Form, read_bit_literal};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use crate::project::{DefinitionPosition, ModuleDrivers, circuits::parsed_index_evidence};
+use crate::project::{DefinitionPosition, ModuleDrivers, circuits::is_form_location};
 #[cfg(verus_only)]
 use crate::netlist::{builtin_nor_template, instance_gates_at, instance_gates_in_extension, wire_available};
-#[cfg(verus_only)]
-use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence,
-    call_argument_position_bounds, call_argument_position_is_direct};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
@@ -267,45 +264,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> (driver: Result<ClockedWireDriver, LocatedName<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(_owner, limit, Ok(Some(*checked))),
             index < checked.calls@.len(), arg < checked.calls@[index as int].inputs.ports.arguments@.len(),
-        ensures driver matches Ok(wire) ==> self.source_argument_matches(checked, index as int, arg as int, wire),
+        ensures match driver {
+            Ok(wire) => self.source_argument_matches(checked, index as int, arg as int, wire),
+            Err(site) => {
+                let call = checked.calls@[index as int];
+                let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
+                let form = parsed.syntax.forms@[call.inputs.ports.arguments@[arg as int] as int];
+                &&& is_form_location(call.inputs.ports.signature.source, form, site)
+                &&& !(form is Atom && form->Atom_kind is Name)
+            },
+        },
     {
-        let call = &checked.calls[index];
-        let ports = &call.inputs.ports;
-        let ghost at = call.at;
-        let wiring = &checked.module.expressions.typed.sources.roots.wiring;
-        proof {
-            self.module_calls_type_evidence(_owner, limit, checked);
-            self.module_output_types_evidence(_owner, limit, checked.module);
-            self.module_selections_evidence(_owner, limit, checked.module.expressions);
-            self.module_calls_item_evidence(_owner, limit, checked, index as int);
-            self.module_call_ports_evidence(at, limit, *ports);
-            self.module_call_site_evidence(at, limit, ports.signature);
-        }
-        let project = self.targets.project();
-        let source = ports.signature.source;
-        let parsed = &project.circuits()[call.at.file];
-        let ghost model = parsed.build_model();
-        proof {
-            parsed_index_evidence(*source, *parsed);
-            build_entry_ranges_evidence(source.text, &model, at.entry as int);
-        }
-        let frame = &parsed.entry_ranges[call.at.entry];
-        let definition = frame.definitions.start + call.at.definition;
-        let row = &parsed.definitions[definition];
-        let forms = parsed.syntax.forms.as_slice();
-        let root = ports.arguments[arg];
-        proof {
-            build_definition_scope_evidence(source.text, &model, at.entry as int, definition as int);
-            call_argument_position_bounds(forms@, ports.signature.call, ports.arguments@, arg as int);
-        }
-        if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
-            proof { call_argument_position_is_direct(forms@, ports.signature.call, ports.arguments@, arg as int); }
-            let reference = row.references.start + call.at.reference;
-            let position = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), reference,
-                &ports.signature.call, parsed.signals.as_slice(), root);
-            proof { self.module_signal_index_item(_owner, limit, *wiring, call.member as int, position as int); }
-            let driver = wiring.signals[call.member][position - frame.signals.start].driver;
-            assert(self.primitive_name_resolves(checked, index as int, root, position as int, PrimitiveOperand::Driver(driver)));
+        let argument = self.module_argument(_owner, limit, checked, index, arg);
+        let source = argument.source;
+        let forms = argument.forms;
+        let root = argument.root;
+        if let Some(driver) = argument.driver {
             assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Driver(driver)));
             return Ok(symbolic_driver(driver));
         }

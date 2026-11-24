@@ -4,6 +4,7 @@ mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod clocked_plan;
 mod clocked_source;
+mod source_arguments;
 mod storage_placement;
 pub use storage_placement::{ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement};
 pub use clocked_source::ClockedModuleError;
