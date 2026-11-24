@@ -19,6 +19,9 @@ use crate::project::use_aliases::module_types::clocked_source::resolve_driver;
 use crate::project::use_aliases::module_types::clocked_source::resolved_driver;
 #[cfg(verus_only)]
 use crate::netlist::{clocked_storage_output_width, clocked_vm_result};
+#[cfg(verus_only)]
+use crate::netlist::{SourceVmCircuit, SourceVmFrame, SourceVmLayout, clocked_vm_trace, source_vm_state_projection, source_vm_trace,
+    source_vm_wiring_valid};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -479,6 +482,43 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         exists|checked: ModuleCalls| #[trigger] self.module_calls_result(owner, limits.width, Ok(Some(checked)))
             && #[trigger] self.cycle_on_checked(&checked, limits.width, limits.wiring_bits, limits.gates, sites)
+    }
+
+    /// 直接経路と階層経路を含む、コンパイル成功後のソース参照回路を表す。
+    pub closed spec fn clocked_compiled_source_model(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        source: &SourceVmCircuit, layout: &SourceVmLayout,
+    ) -> bool {
+        (self.clocked_module_vm_wiring(owner, limits, compiled)
+            && self.clocked_direct_source_circuit(owner, limits, source, layout))
+        || self.clocked_hierarchy_source_circuit(owner, limits, compiled, source, layout)
+    }
+
+    /// コンパイルに成功した回路をリセットして実行すると、各 tick の公開出力がソースと一致する。
+    ///
+    /// `lower_clocked_vm` の成功時の契約と、同じ VM のリセットおよび tick の契約を使う。
+    pub proof fn clocked_compiled_source_trace(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    ) -> (reference: (SourceVmCircuit, SourceVmLayout, Seq<SourceVmFrame>))
+        requires
+            self.can_resolve(),
+            self.clocked_module_vm_wiring(owner, limits, compiled) || self.clocked_module_hierarchy_vm(owner, limits, compiled),
+            clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
+        ensures
+            self.clocked_compiled_source_model(owner, limits, compiled, &reference.0, &reference.1),
+            source_vm_wiring_valid(&reference.0),
+            source_vm_trace(&reference.0, inputs, reference.2),
+            reference.2.map_values(|frame: SourceVmFrame| frame.outputs) == outputs,
+            reference.2 == Seq::new(outputs.len(), |i: int| SourceVmFrame {
+                state: source_vm_state_projection(&states[i], &reference.1), outputs: outputs[i],
+            }),
+    {
+        if self.clocked_module_vm_wiring(owner, limits, compiled) {
+            self.clocked_direct_source_trace(owner, limits, compiled, inputs, states, outputs)
+        } else {
+            self.clocked_hierarchy_source_trace(owner, limits, compiled, inputs, states, outputs)
+        }
     }
 
     /// モジュールのソースから tick 実行用の VM を初期化する。

@@ -10,6 +10,10 @@ mod source_links;
 #[cfg(verus_only)]
 mod source_widths;
 #[cfg(verus_only)]
+mod source_model;
+#[cfg(verus_only)]
+mod source_assembly;
+#[cfg(verus_only)]
 mod source_placement;
 #[cfg(verus_only)]
 pub use path_trace::ClockedModuleObservation;

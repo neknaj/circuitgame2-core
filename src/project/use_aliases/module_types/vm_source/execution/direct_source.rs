@@ -12,7 +12,7 @@ use crate::netlist::{
     SourceVmCircuit, SourceVmFrame, SourceVmLayout, SourceVmNor, SourceVmWire, Wire, clocked_vm_trace,
     clocked_wiring_endpoints, output_ports_available, source_vm_project_trace, source_vm_trace,
     source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_layout_matches, source_vm_row_pair,
-    source_vm_storage_pair, source_vm_terminal_pair, source_vm_wiring_valid, wire_available,
+    source_vm_state_projection, source_vm_storage_pair, source_vm_terminal_pair, source_vm_wiring_valid, wire_available,
 };
 use crate::project::ClockedWireDriver;
 use alloc::vec::Vec;
@@ -67,7 +67,7 @@ spec fn direct_source_row(
     symbolic.map_values(|driver: ClockedWireDriver| source_vm_link_value(direct_source_link(plan, gates, driver), definitions))
 }
 
-spec fn direct_storage_row(site: &super::ClockedStoragePlacement, row: Seq<SourceVmWire>) -> SourceStorage {
+pub(super) open spec fn direct_storage_row(site: &super::ClockedStoragePlacement, row: Seq<SourceVmWire>) -> SourceStorage {
     let address = site.address_bits.unwrap_or(0) as int;
     let end = address + site.outputs.end - site.outputs.start;
     SourceStorage {
@@ -97,7 +97,7 @@ spec fn direct_source_circuit(
     }
 }
 
-proof fn source_storage_row_matches(
+pub(super) proof fn source_storage_row_matches(
     external: usize, storage: Seq<ClockedStorageInputs>, layout: &crate::netlist::SourceVmLayout,
     site: &super::ClockedStoragePlacement, source: Seq<SourceVmWire>, flat: Seq<Wire>, lowered: ClockedStorageInputs,
 )
@@ -704,6 +704,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             source_vm_wiring_valid(&reference.0),
             source_vm_trace(&reference.0, inputs, reference.2),
             reference.2.map_values(|frame: SourceVmFrame| frame.outputs) == outputs,
+            reference.2 == Seq::new(outputs.len(), |i: int| SourceVmFrame {
+                state: source_vm_state_projection(&states[i], &reference.1), outputs: outputs[i],
+            }),
     {
         let (source, layout, storage) = self.clocked_direct_source_layout(owner, limits, compiled);
         let initial = &states[0];

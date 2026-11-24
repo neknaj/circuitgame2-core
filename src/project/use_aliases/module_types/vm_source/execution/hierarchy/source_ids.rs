@@ -109,7 +109,7 @@ spec fn parent_device_id(
     }
 }
 
-spec fn selected_source_children(hierarchy: &ClockedHierarchy, node: int, orders: Seq<HierarchySourceIds>,
+pub(super) open spec fn selected_source_children(hierarchy: &ClockedHierarchy, node: int, orders: Seq<HierarchySourceIds>,
     functions: Map<(usize, usize), ClockedFunctionTemplate>,
 ) -> Seq<Option<HierarchySourceIds>> {
     let checked = hierarchy.modules@[node]->Some_0;
@@ -133,6 +133,18 @@ pub(super) closed spec fn source_ids_match_network(ids: HierarchySourceIds, chec
     &&& ids.gates.no_duplicates() && ids.devices.no_duplicates()
     &&& ids.gates == Seq::new(ids.gates.len(), |i: int| parent_gate_id(checked, wiring, children, i as nat))
     &&& ids.devices == Seq::new(ids.devices.len(), |i: int| parent_device_id(checked, wiring, children, i as nat))
+}
+
+/// 親の ID 列は、同じネットワークの有効な素子添字を一度ずつ含む。
+pub(super) proof fn source_id_dimensions(
+    ids: HierarchySourceIds, checked: &ModuleCalls, network: &ClockedModuleNetwork,
+    children: Seq<Option<HierarchySourceIds>>,
+)
+    requires source_ids_match_network(ids, checked, network, children),
+    ensures ids.gates.len() == network.circuit.netlist_model().gates@.len(),
+        ids.devices.len() == network.storage@.len(),
+        ids.gates.no_duplicates() && ids.devices.no_duplicates(),
+{
 }
 
 /// 子の素子 ID を、呼び出し経路を付けて親の割り当て区間に置く。
@@ -163,17 +175,22 @@ proof fn interval_given_owns_index(wiring: &HierarchyWiring, area: PartitionArea
 }
 
 #[verifier::opaque]
-spec fn hierarchy_source_orders(hierarchy: &ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+pub(super) closed spec fn hierarchy_source_orders(hierarchy: &ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
     functions: Map<(usize, usize), ClockedFunctionTemplate>, orders: Seq<HierarchySourceIds>,
 ) -> bool {
     &&& orders.len() <= hierarchy.order@.len()
-    &&& forall|rank: int| 0 <= rank < orders.len() ==> {
-        let node = hierarchy.order@[rank] as int;
-        let ids = #[trigger] orders[rank];
-        hierarchy.modules@[node] matches Some(checked) ==> networks[node] matches Some(network)
-            && source_ids_match_network(ids, &checked, &network,
-                selected_source_children(hierarchy, node, orders.take(rank), functions))
-    }
+    &&& forall|rank: int| 0 <= rank < orders.len() ==>
+        #[trigger] hierarchy_source_order_entry(hierarchy, networks, functions, orders, rank)
+}
+
+spec fn hierarchy_source_order_entry(hierarchy: &ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+    functions: Map<(usize, usize), ClockedFunctionTemplate>, orders: Seq<HierarchySourceIds>, rank: int,
+) -> bool {
+    let node = hierarchy.order@[rank] as int;
+    let children = selected_source_children(hierarchy, node, orders.take(rank), functions);
+    hierarchy.modules@[node] matches Some(checked) ==> networks[node] matches Some(network)
+        && children_follow_calls(&network._hierarchy_wiring@->Some_0, children)
+        && source_ids_match_network(orders[rank], &checked, &network, children)
 }
 
 proof fn gate_owner_evidence(checked: &ModuleCalls, wiring: &HierarchyWiring,
@@ -233,6 +250,24 @@ proof fn device_owner_evidence(checked: &ModuleCalls, wiring: &HierarchyWiring,
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 階層順に構成した ID 列から、処理済みの一つの回路と各子の対応を取り出す。
+    pub(super) proof fn hierarchy_source_order_at(
+        &self, hierarchy: &ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, orders: Seq<HierarchySourceIds>, rank: int,
+    )
+        requires hierarchy_source_orders(hierarchy, networks, functions, orders), 0 <= rank < orders.len(),
+        ensures ({
+            let node = hierarchy.order@[rank] as int;
+            let children = selected_source_children(hierarchy, node, orders.take(rank), functions);
+            hierarchy.modules@[node] matches Some(checked) ==> networks[node] matches Some(network)
+                && children_follow_calls(&network._hierarchy_wiring@->Some_0, children)
+                && source_ids_match_network(orders[rank], &checked, &network, children)
+        }),
+    {
+        reveal(hierarchy_source_orders);
+        assert(hierarchy_source_order_entry(hierarchy, networks, functions, orders, rank));
+    }
+
     /// 親の実配列上で、この呼び出しに割り当てた子の ID を取り出す。
     pub(super) proof fn child_source_ids_evidence(
         &self, limits: ClockedModuleVmLimits, checked: &ModuleCalls, network: &ClockedModuleNetwork,
@@ -352,7 +387,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 依存先の ID を展開順に取り出し、親の素子順を一つずつ構成する。
-    proof fn hierarchy_source_order_prefix(
+    pub(super) proof fn hierarchy_source_order_prefix(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
         networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
         end: int, count: int,
@@ -401,6 +436,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         if let Some(child) = edges[call] {
                             let child_rank = hierarchy.rank@[child as int] as int;
                             assert(hierarchy.order@[child_rank] == child);
+                            assert(hierarchy_source_order_entry(hierarchy, networks, functions, before, child_rank));
                             let child_ids = before[child_rank];
                             let target = networks[child as int]->Some_0;
                             assert(source_ids_match_network(child_ids, &hierarchy.modules@[child as int]->Some_0, &target,
@@ -423,20 +459,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             HierarchySourceIds { gates: Seq::empty(), devices: Seq::empty() }
         };
         let after = before.push(ids);
-        assert forall|i: int| 0 <= i < after.len() implies {
-            let at = hierarchy.order@[i] as int;
-            let item = #[trigger] after[i];
-            hierarchy.modules@[at] matches Some(checked) ==> networks[at] matches Some(network)
-                && source_ids_match_network(item, &checked, &network,
-                    selected_source_children(hierarchy, at, after.take(i), functions))
-        } by {
+        assert(after.len() == count);
+        assert forall|i: int| 0 <= i < after.len() implies
+            #[trigger] hierarchy_source_order_entry(hierarchy, networks, functions, after, i) by {
             if i < rank {
+                assert(hierarchy_source_order_entry(hierarchy, networks, functions, before, i));
                 assert(after[i] == before[i]);
                 assert(after.take(i) =~= before.take(i));
             } else {
+                assert(after[i] == ids);
                 assert(after.take(i) =~= before);
             }
         };
+        assert(hierarchy_source_orders(hierarchy, networks, functions, after));
         after
     }
 
@@ -474,6 +509,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(hierarchy_source_orders);
         let root = orders[end - 1];
         assert(hierarchy.order@[end - 1] == 0);
+        assert(hierarchy_source_order_entry(&hierarchy, networks, functions, orders, end - 1));
         assert(self.clocked_hierarchy_source_ids(owner, limits, compiled, root.gates, root.devices));
         (root.gates, root.devices)
     }
