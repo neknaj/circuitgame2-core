@@ -559,14 +559,16 @@ fn checks_storage_calls_with_types_from_their_declaration_scope() {
 #[test]
 fn places_struct_ram_outputs_in_call_order_across_module_parts() {
     use circuitgame2_core::netlist::{ClockedNor, ClockedVm, NorNetlist, PortBitLayoutError, Wire};
-    use circuitgame2_core::project::{ClockedDefinitionLayoutError, ClockedStorageLayoutError, ModuleBodyPosition};
+    use circuitgame2_core::project::{
+        ClockedDefinitionLayoutError, ClockedStorageLayoutError, ClockedWireDriver, ModuleBodyPosition,
+    };
 
     let input = [
         SourceSnapshot { path: "main.ncg2", revision: 5,
             text: "(using nor)
                 (struct Word (width 8))
                 (memory bank (address 2) (data Word))
-                (module root (in (a (bits 2)) (d Word) we) (out (first Word) (second Word))
+                (module root (in (a (bits 2)) (d Word) we) (out (a (bits 2)) (first Word) (second Word))
                   (def first (bank a d we)))" },
         SourceSnapshot { path: "part.ncg2", revision: 7, text: "(module-part root (def second (bank a d we)))" },
     ];
@@ -583,6 +585,13 @@ fn places_struct_ram_outputs_in_call_order_across_module_parts() {
     }) = aliases.plan_clocked_definitions(owner, 16, 15) else { panic!("the second definition exceeds the limit"); };
     assert_eq!(definition.source.revision, 7);
     assert_eq!(&definition.source.text[definition.span], "second");
+
+    let output_plan = aliases.plan_clocked_outputs(owner, 16, 18).unwrap().unwrap();
+    assert_eq!(output_plan.inputs.ranges(), [0..2, 2..10, 10..11]);
+    assert_eq!(output_plan.outputs.ranges(), [0..2, 2..10, 10..18]);
+    assert_eq!(output_plan.drivers[0], [0, 1].map(|i| ClockedWireDriver::Terminal(Wire::Input(i))));
+    assert_eq!(output_plan.drivers[1], core::array::from_fn::<_, 8, _>(ClockedWireDriver::Alias));
+    assert_eq!(output_plan.drivers[2], core::array::from_fn::<_, 8, _>(|i| ClockedWireDriver::Alias(8 + i)));
 
     let plan = aliases.plan_clocked_storage(owner, 16, 11, 27).unwrap().unwrap();
     let [first, second] = plan.instances.as_slice() else { panic!("expected two calls"); };

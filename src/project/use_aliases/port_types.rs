@@ -709,6 +709,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 解決済みの署名にあるビット列は、宣言で検査した正の幅を保つ。
+    pub(super) proof fn typed_signature_bit_widths(
+        &self, file: usize, entry: usize, limit: u64, signature: TypedRoutineSignature,
+    )
+        requires self.typed_signature_evidence(file, entry, limit, Ok(Some(signature))),
+        ensures
+            forall|i: int| 0 <= i < signature.inputs@.len() ==>
+                ((#[trigger] signature.inputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit),
+            forall|i: int| 0 <= i < signature.outputs@.len() ==>
+                ((#[trigger] signature.outputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit),
+    {
+        let project = &self.targets.project_model();
+        let (context, checked) = choose|context: PortContext, checked: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, limit, Ok(Some(checked)))
+            && self.typed_after_signature(&context, &checked, Ok(Some(signature)));
+        checked_signature_ports(project, file as int, entry as int, limit, checked);
+        checked_width_sites(project, file as int, entry as int, limit, checked.ports);
+        assert forall|i: int| 0 <= i < signature.inputs@.len() implies
+            ((#[trigger] signature.inputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit) by {
+            assert(self.typed_port_evidence(&context, checked.ports.inputs@[i], signature.inputs@[i]));
+        };
+        assert forall|i: int| 0 <= i < signature.outputs@.len() implies
+            ((#[trigger] signature.outputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit) by {
+            assert(self.typed_port_evidence(&context, checked.ports.outputs@[i], signature.outputs@[i]));
+        };
+    }
+
     pub(super) proof fn typed_signature_sites(
         &self, file: usize, entry: usize, max_width: u64, typed: TypedRoutineSignature,
     )

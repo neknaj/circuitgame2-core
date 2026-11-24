@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use crate::netlist::{PortBitLayout, PortBitLayoutError};
 use crate::project::PortDirection;
 #[cfg(verus_only)]
-use crate::netlist::{port_bit_layout_result, preceding_port_bits};
+use crate::netlist::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, preceding_port_bits};
 use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc};
@@ -872,6 +872,73 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& #[trigger] self.template_port_widths_match(signature, width_limit, incoming, outgoing, structures)
             &&& port_bit_layout_result(incoming, bit_limit, Ok(*inputs))
             &&& port_bit_layout_result(outgoing, bit_limit, Ok(*outputs))
+        }
+    }
+
+    pub(in crate::project::use_aliases) open spec fn routine_port_range_width(
+        &self, ports: Seq<TypedPort>, layout: &PortBitLayout, width: u64, capacity: usize, index: usize,
+    ) -> bool {
+        let range = layout.ranges_model()[index as int];
+        let bits = range.end - range.start;
+        &&& layout.ranges_model().len() == ports.len()
+        &&& range.start < range.end <= layout.total_bits_model() <= capacity
+        &&& match ports[index as int].ty {
+            ResolvedPortType::Bits(count) => bits == count,
+            ty @ ResolvedPortType::Struct { .. } =>
+                exists|table: StructureLayouts| self.structure_types_match(width, Ok(table))
+                    && #[trigger] self.layout_port_width_matches(&table, ty, bits),
+        }
+    }
+
+    /// 宣言ポートの幅と、配置した範囲の長さとの対応を取り出す。
+    pub(in crate::project::use_aliases) proof fn routine_bit_layout_port(
+        &self, signature: TypedRoutineSignature, width: u64, capacity: usize,
+        inputs: &PortBitLayout, outputs: &PortBitLayout, direction: PortDirection, index: usize,
+    )
+        requires
+            self.routine_bit_layouts_match(signature, width, capacity, inputs, outputs),
+            index < if direction is Input { signature.inputs@.len() } else { signature.outputs@.len() },
+        ensures
+            direction is Input ==> self.routine_port_range_width(signature.inputs@, inputs, width, capacity, index),
+            direction is Output ==> self.routine_port_range_width(signature.outputs@, outputs, width, capacity, index),
+    {
+        let (incoming, outgoing, structures) = choose|incoming: Seq<u64>, outgoing: Seq<u64>, structures: Option<StructureLayouts>|
+            #[trigger] self.template_port_widths_match(signature, width, incoming, outgoing, structures)
+                && port_bit_layout_result(incoming, capacity, Ok(*inputs))
+                && port_bit_layout_result(outgoing, capacity, Ok(*outputs));
+        reveal(UseAliases::template_port_widths_match);
+        let table = match &structures { Some(table) => Some(table), None => None };
+        if direction is Input {
+            self.routine_port_layout_width(signature.inputs@, incoming, table, width, capacity, inputs, index);
+        } else {
+            self.routine_port_layout_width(signature.outputs@, outgoing, table, width, capacity, outputs, index);
+        }
+    }
+
+    proof fn routine_port_layout_width(
+        &self, ports: Seq<TypedPort>, widths: Seq<u64>, structures: Option<&StructureLayouts>,
+        width: u64, capacity: usize, layout: &PortBitLayout, index: usize,
+    )
+        requires
+            self.structure_layout_for_ports(width, structures),
+            self.port_widths_match(ports, widths, structures),
+            port_bit_layout_result(widths, capacity, Ok(*layout)),
+            index < ports.len(),
+        ensures self.routine_port_range_width(ports, layout, width, capacity, index),
+    {
+        let i = index as int;
+        let ty = ports[i].ty;
+        let range = layout.ranges_model()[i];
+        port_bit_layout_size(widths, capacity, layout);
+        port_bit_layout_port(widths, capacity, *layout, index);
+        assert(range.end - range.start == widths[i]);
+        assert(self.port_width_matches(ty, widths[i], structures));
+        if ty is Struct {
+            let witness = *structures->Some_0;
+            assert(self.structure_types_match(width, Ok(witness)));
+            assert(self.layout_port_width_matches(&witness, ty, range.end - range.start));
+            assert(exists|table: StructureLayouts| self.structure_types_match(width, Ok(table))
+                && #[trigger] self.layout_port_width_matches(&table, ty, range.end - range.start));
         }
     }
 

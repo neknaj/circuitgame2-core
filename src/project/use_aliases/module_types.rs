@@ -22,6 +22,8 @@ mod definition_layout;
 pub use definition_layout::ClockedDefinitionLayoutError;
 mod concats;
 pub use concats::{ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError};
+mod output_wiring;
+pub use output_wiring::{ClockedModuleOutputs, ClockedModuleOutputsError};
 mod outputs;
 pub use outputs::{ModuleOutputTypes, ModuleOutputTypesError};
 mod primitive_nor;

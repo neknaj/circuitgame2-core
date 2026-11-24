@@ -38,6 +38,7 @@ pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes
     CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError, PrimitiveModuleError,
     ModuleOutputTypes, ModuleOutputTypesError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
+pub use module_types::{ClockedModuleOutputs, ClockedModuleOutputsError};
 pub use module_types::{ClockedDriverBitsError, clocked_driver_bits};
 #[cfg(verus_only)]
 pub use module_types::{clocked_driver_bit, clocked_driver_bits_result, clocked_driver_port_model, clocked_driver_selection_matches};

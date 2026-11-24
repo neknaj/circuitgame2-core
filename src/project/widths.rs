@@ -382,6 +382,10 @@ pub(super) proof fn checked_width_sites(
         0 <= file < project.circuits_model().len(),
         checked_name_sites(project.circuits_model()[file].syntax.forms@, widths.inputs@),
         checked_name_sites(project.circuits_model()[file].syntax.forms@, widths.outputs@),
+        forall|i: int| 0 <= i < widths.inputs@.len() ==>
+            ((#[trigger] widths.inputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
+        forall|i: int| 0 <= i < widths.outputs@.len() ==>
+            ((#[trigger] widths.outputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
 {
     assert(0 <= file < project.circuits_model().len());
     let source = &project.sources_model()[file];

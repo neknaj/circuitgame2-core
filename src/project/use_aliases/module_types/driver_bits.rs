@@ -104,6 +104,22 @@ pub closed spec fn clocked_driver_bits_result(
     }
 }
 
+/// 信号全体を展開すると、配線数はそのポートまたは定義の範囲の長さになる。
+pub(super) proof fn clocked_whole_port_bits(
+    inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver, wires: Vec<ClockedWireDriver>,
+)
+    requires clocked_driver_bits_result(inputs, definitions, driver, None, Ok(wires)),
+    ensures ({
+        let (ranges, slot) = match driver {
+            OutputDriver::Input(port) => (inputs.ranges_model(), port),
+            OutputDriver::Definition(slot) => (definitions.ranges_model(), slot),
+        };
+        &&& slot < ranges.len()
+        &&& wires@.len() == ranges[slot as int].end - ranges[slot as int].start
+    }),
+{
+}
+
 /// 信号全体に対応する配線列を表す。配列の確保や展開は行わない。
 pub closed spec fn clocked_driver_port_model(
     inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver,

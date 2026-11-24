@@ -67,6 +67,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures self.module_selections_result(owner, limit, Ok(Some(checked.expressions))),
     {
     }
+    /// 出力ポートを駆動する信号の型と、宣言型の照合結果を取り出す。
+    pub(super) proof fn module_output_binding_type(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleOutputTypes, index: usize,
+    )
+        requires
+            self.module_output_types_result(owner, limit, Ok(Some(checked))),
+            index < checked.expressions.typed.sources.roots.wiring.drivers.outputs@.len(),
+        ensures ({
+            let drivers = checked.expressions.typed.sources.roots.wiring.drivers;
+            let actual = bound_type(&checked.expressions.typed, checked.expressions.types@, drivers.outputs@[index as int]);
+            &&& checked.outputs@.len() == drivers.outputs@.len()
+            &&& checked.outputs@[index as int] == actual
+            &&& (actual matches Some(signal) ==> port_types_equal(signal.ty, drivers.signature.outputs@[index as int].ty))
+        }),
+    {
+        reveal(outputs_before);
+    }
+
     /// 出力の照合結果と、宣言順で最初に見つかる不一致を定める。
     pub closed spec fn module_output_types_result(&self, owner: ModuleBodyPosition, limit: u64,
         result: Result<Option<ModuleOutputTypes>, ModuleOutputTypesError>) -> bool {
