@@ -5,6 +5,9 @@ pub use ports::{ModuleCallPorts, ModuleCallPortsError};
 mod inputs;
 pub use inputs::{ModuleCallInputs, ModuleCallInputsError};
 
+use super::port_types::{StorageSignature, StorageSignatureError};
+#[cfg(verus_only)]
+use crate::project::storage_declarations::storage_entry;
 use super::{DefinitionBinding, DefinitionPosition, DefinitionReferenceError, TypedRoutineSignature, TypedSignatureError, UseAliases};
 #[cfg(verus_only)]
 use super::ResolvedDefinitionReference;
@@ -32,14 +35,14 @@ pub enum ModuleCallTarget<'p, 'a> {
         /// 宣言のスコープで型名を解決した入出力。
         signature: TypedRoutineSignature<'p, 'a>,
     },
-    /// 名前解決したラッチまたはメモリ。状態素子の検査は後段で行う。
+    /// ラッチまたは RAM の宣言と型付き署名。
     StateElement {
-        /// ラッチまたはメモリの宣言種別。
-        head: Head,
         /// 参照先のファイルと厳格索引の位置。
         position: ModuleBodyPosition,
         /// 参照先の宣言名を含む範囲。
         declaration: LocatedName<'p, 'a>,
+        /// 宣言元のスコープで解決したポート型。
+        storage: StorageSignature<'p, 'a>,
     },
 }
 
@@ -67,6 +70,15 @@ pub enum ModuleCallSignatureError<'p, 'a> {
         declaration: LocatedName<'p, 'a>,
         /// 署名の検査で見つかった違反。
         reason: TypedSignatureError<'p, 'a>,
+    },
+    /// 状態素子の入出力を検査できなかった。
+    Storage {
+        /// 呼び出し名を指すソース範囲。
+        reference: LocatedName<'p, 'a>,
+        /// 状態素子の宣言名を指すソース範囲。
+        declaration: LocatedName<'p, 'a>,
+        /// 状態素子の幅または型名の診断。
+        error: StorageSignatureError<'p, 'a>,
     },
 }
 
@@ -110,9 +122,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.module_callee_position(binding, position, declaration)
                 && (binding->Declaration_form.head is Func || binding->Declaration_form.head is Module)
                 && self.typed_signature_evidence(position.file, position.entry, max_width, Ok(Some(signature))),
-            ModuleCallTarget::StateElement { head, position, declaration } =>
+            ModuleCallTarget::StateElement { position, declaration, storage } =>
                 self.module_callee_position(binding, position, declaration)
-                && head == binding->Declaration_form.head && (head is Latch || head is Memory),
+                && (binding->Declaration_form.head is Latch || binding->Declaration_form.head is Memory)
+                && self.storage_signature_result(position.file, position.entry, max_width, Ok(Some(storage))),
         }
     }
 
@@ -148,6 +161,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && #[trigger] self.typed_signature_evidence(position.file, position.entry, max_width, Err(reason))
                         && self.module_callee_position(resolved.binding, position, declaration)
                         && (resolved.binding->Declaration_form.head is Func || resolved.binding->Declaration_form.head is Module)
+                        && *reference.source == *resolved.site.source && reference.span == resolved.site.name.span
+                        && location_in_source(reference),
+                Err(ModuleCallSignatureError::Storage { reference, declaration, error: reason }) =>
+                    exists|resolved: ResolvedDefinitionReference, position: ModuleBodyPosition|
+                        #[trigger] self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, Ok(resolved))
+                        && #[trigger] self.storage_signature_result(position.file, position.entry, max_width, Err(reason))
+                        && self.module_callee_position(resolved.binding, position, declaration)
+                        && (resolved.binding->Declaration_form.head is Latch || resolved.binding->Declaration_form.head is Memory)
                         && *reference.source == *resolved.site.source && reference.span == resolved.site.name.span
                         && location_in_source(reference),
                 Ok(None) => false,
@@ -186,6 +207,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     head is Func || head is Module
                 }
             },
+            signature.target matches ModuleCallTarget::StateElement { position, storage: ports, .. } ==>
+                self.storage_signature_result(position.file, position.entry, max_width, Ok(Some(ports))),
     {
         let parsed = self.targets.project_model().circuits_model()[at.file as int];
         let row = parsed.definitions@[parsed.entry_ranges@[at.entry as int].definitions.start + at.definition];
@@ -259,7 +282,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let declaration = LocatedName { source: origin, span: form.name.span.start..form.name.span.end };
                 assert(self.module_callee_position(resolved.binding, position, declaration));
                 if matches!(form.head, Head::Latch | Head::Memory) {
-                    ModuleCallTarget::StateElement { head: form.head, position, declaration }
+                    let signature = match self.resolve_storage_signature(file, entry, max_width) {
+                        Ok(Some(signature)) => signature,
+                        Ok(None) => {
+                            proof {
+                                assert(storage_entry(&self.targets.project_model(), file, entry));
+                                self.storage_signature_present(file, entry, max_width);
+                            }
+                            unreachable!()
+                        },
+                        Err(reason) => {
+                            let reference = LocatedName { source: resolved.site.source, span: resolved.site.name.span.start..resolved.site.name.span.end };
+                            proof {
+                                self.resolved_reference_location(at.file, at.entry, at.definition, at.reference, resolved);
+                                located_name_evidence(reference);
+                            }
+                            return Err(ModuleCallSignatureError::Storage { reference, declaration, error: reason });
+                        },
+                    };
+                    ModuleCallTarget::StateElement { position, declaration, storage: signature }
                 } else {
                     let signature = match self.resolve_routine_signature(file, entry, max_width) {
                         Ok(Some(signature)) => signature,

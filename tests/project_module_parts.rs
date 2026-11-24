@@ -516,3 +516,41 @@ fn module_part_owner_ignores_aliases_and_reports_other_declaration_kinds() {
     assert_eq!(&target.source.text[target.span.clone()], "helper");
     assert!(target.span.start < part.span.start);
 }
+
+
+#[test]
+fn checks_storage_calls_with_types_from_their_declaration_scope() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot { path: "app.ncg2", revision: 17,
+            text: "(using nor)
+                (namespace app
+                  (struct Word (width 8))
+                  (module root (in (address (bits 2)) (payload ::lib::Word) enable)
+                    (out (observed ::lib::Word) (held (bits 2)))
+                    (def observed (::lib::ram address payload enable))
+                    (def held (::lib::hold address enable))))" },
+        SourceSnapshot { path: "lib.ncg2", revision: 21,
+            text: "(namespace lib
+                    (struct Word (width 8))
+                    (memory ram (address 2) (data Word))
+                    (latch hold (width 2))
+                    (export Word ram hold))" },
+    ]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let entry = project.circuits()[0].syntax.entries.iter().position(|item| item.head == Head::Module).unwrap();
+    let owner = circuitgame2_core::project::ModuleBodyPosition { file: 0, entry };
+    let checked = aliases.check_module_calls(owner, 16).unwrap().unwrap();
+    let [ram, latch] = checked.calls.as_slice() else { panic!("expected the RAM and latch calls"); };
+    let target = &ram.inputs.ports.signature.target;
+    let data = target.port(PortDirection::Input, 1).unwrap();
+    let output = target.port(PortDirection::Output, 0).unwrap();
+    assert!(data.ty.is_same_type(&output.ty));
+    assert!(matches!(data.ty, ResolvedPortType::Struct { source, .. } if source.revision == 21));
+    let annotation = data.annotation.unwrap();
+    assert_eq!(&annotation.source.text[annotation.span.clone()], "Word");
+    let enable = target.port(PortDirection::Input, 2).unwrap();
+    assert!(matches!(enable.ty, ResolvedPortType::Bits(1)) && enable.annotation.is_none());
+    let output = latch.inputs.ports.signature.target.port(PortDirection::Output, 0).unwrap();
+    assert!(matches!(output.ty, ResolvedPortType::Bits(2)));
+}

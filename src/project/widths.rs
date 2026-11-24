@@ -89,7 +89,7 @@ pub(super) open spec fn natural_width_value(source: &str, form: crate::syntax::F
 pub(super) open spec fn width_number_result(value: int, max_width: u64) -> Result<u64, PortWidthErrorKind> {
     if value > u64::MAX {
         Err(PortWidthErrorKind::NumericRange)
-    } else if value == 0 {
+    } else if value <= 0 {
         Err(PortWidthErrorKind::Zero)
     } else if value > max_width {
         Err(PortWidthErrorKind::LimitExceeded { width: value as u64, limit: max_width })
@@ -110,14 +110,18 @@ pub(super) fn read_explicit_width<'p, 'a>(
         let span = form_span(forms@[atom as int]);
         &&& value >= 0
         &&& match result {
-            Ok((width, found)) => width_number_result(value, max_width) == Ok(width) && found == span,
+            Ok((width, found)) => width_number_result(value, max_width) == Ok(width) && found == span
+                && super::location_in_source(super::LocatedName { source, span: found }),
             Err(error) => width_number_result(value, max_width) == Err(error.kind)
                 && *error.source == *source && error.span == span,
         }
     }),
 {
     let (word, span) = read_indexed_atom(source.text, forms, atom);
-    proof { natural_atom_has_value(word.spec_bytes()); }
+    proof {
+        natural_atom_has_value(word.spec_bytes());
+        super::declarations::located_name_evidence(super::LocatedName { source, span });
+    }
     let width = match read_natural_u64(word) {
         Ok(width) => width,
         Err(NaturalRangeError::OutOfRange) =>

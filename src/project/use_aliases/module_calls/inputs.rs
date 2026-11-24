@@ -51,7 +51,7 @@ pub enum ModuleCallInputsError<'p, 'a> {
         argument: LocatedName<'p, 'a>,
         /// 入力ポートの要求型。
         expected: ResolvedPortType<'p, 'a>,
-        /// 要求型の注釈。基底 NOR の場合は `None`。
+        /// 要求型の注釈。基底 NOR や状態素子の許可入力では `None`。
         required_at: Option<LocatedName<'p, 'a>>,
         /// 不一致やリテラル幅の違反の理由。
         reason: CallInputReason<'p, 'a>,
@@ -117,11 +117,7 @@ fn check_inputs<'p, 'a>(
         call_argument_positions(forms@, ports.signature.call, ports.arguments@),
         complete_list_indices(forms@), nested_list_indices(forms@),
         form_spans_valid(ports.signature.source.text, forms@, ports.signature.source.text.spec_bytes().len() as int),
-        match ports.signature.target {
-            ModuleCallTarget::Nor => ports.arguments@.len() == 2,
-            ModuleCallTarget::Routine { signature, .. } => ports.arguments@.len() == signature.inputs@.len(),
-            ModuleCallTarget::StateElement { .. } => false,
-        },
+        ports.arguments@.len() == ports.signature.target.port_counts().inputs,
     ensures checked_input_types(forms@, ports, limit, known@, result),
 {
     let count = ports.arguments.len();
@@ -139,11 +135,7 @@ fn check_inputs<'p, 'a>(
             call_argument_positions(forms@, ports.signature.call, ports.arguments@),
             complete_list_indices(forms@), nested_list_indices(forms@),
             form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
-            match ports.signature.target {
-                ModuleCallTarget::Nor => count == 2,
-                ModuleCallTarget::Routine { signature, .. } => count == signature.inputs@.len(),
-                ModuleCallTarget::StateElement { .. } => false,
-            },
+            count == ports.signature.target.port_counts().inputs,
             valid_input_prefix(forms@, ports, limit, known@, types@),
         decreases count - i,
     {

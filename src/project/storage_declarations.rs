@@ -47,6 +47,7 @@ spec fn explicit_width(
 
 spec fn annotation_at(source: &ProjectSource, forms: Seq<Form>, atom: usize, annotation: LocatedName) -> bool {
     *annotation.source == *source && annotation.span == form_span(forms[atom as int])
+        && super::location_in_source(annotation)
 }
 
 spec fn storage_width_error(source: &ProjectSource, forms: Seq<Form>, atom: usize, limit: u64, error: PortWidthError) -> bool {
@@ -87,7 +88,7 @@ spec fn storage_numbers_match(
     }
 }
 
-spec fn storage_entry(project: &CircuitProject, file: usize, entry: usize) -> bool {
+pub(super) open spec fn storage_entry(project: &CircuitProject, file: usize, entry: usize) -> bool {
     let circuits = project.circuits_model();
     &&& file < circuits.len()
     &&& entry < circuits[file as int].syntax.entries@.len()
@@ -113,6 +114,51 @@ pub closed spec fn storage_declaration_result(
     }
 }
 
+// 型名解決は数値検査で選んだ宣言と同じソース、同じ字句を使う。
+pub(super) proof fn checked_storage_declaration(
+    project: &CircuitProject, file: usize, entry: usize, limit: u64, declaration: StorageDeclaration,
+)
+    requires storage_declaration_result(project, file, entry, limit, Ok(Some(declaration))),
+    ensures
+        file < project.sources_model().len(), file < project.circuits_model().len(),
+        entry < project.circuits_model()[file as int].syntax.entries@.len(),
+        ({
+            let source = project.sources_model()[file as int];
+            let syntax = project.circuits_model()[file as int].syntax;
+            let forms = syntax.forms@;
+            match declaration {
+                StorageDeclaration::Latch { width, annotation } =>
+                    syntax.entries@[entry as int].head is Latch && 0 < width <= limit && *annotation.source == source && super::location_in_source(annotation),
+                StorageDeclaration::Memory { address, address_annotation, data, data_annotation } =>
+                    syntax.entries@[entry as int].head is Memory && 0 < address <= limit
+                        && *address_annotation.source == source && *data_annotation.source == source
+                        && super::location_in_source(address_annotation) && super::location_in_source(data_annotation)
+                        && match data {
+                            DeclaredPortType::Bits(width) => 0 < width <= limit,
+                            DeclaredPortType::Named { form } => form < forms.len()
+                                && forms[form as int] is Atom
+                                && crate::syntax::circuit::reference_atom(forms[form as int]->Atom_kind)
+                                && data_annotation.span == form_span(forms[form as int]),
+                        },
+            }
+        }),
+{
+    let source = &project.sources_model()[file as int];
+    let syntax = &project.circuits_model()[file as int].syntax;
+    let sites = choose|sites: StorageSites| #[trigger] storage_sites_match(source.text, syntax, entry as int, Some(sites))
+        && storage_numbers_match(source, syntax.forms@, sites, limit, Ok(Some(declaration)));
+    storage_site_evidence(source.text, syntax, entry as int, sites);
+}
+
+/// 対象位置が状態素子の宣言かどうかを、幅の検査結果から示す。
+pub(super) proof fn storage_declaration_presence(
+    project: &CircuitProject, file: usize, entry: usize, limit: u64,
+    result: Result<Option<StorageDeclaration>, PortWidthError>,
+)
+    requires storage_declaration_result(project, file, entry, limit, result),
+    ensures (result != Ok(None)) <==> storage_entry(project, file, entry),
+{
+}
 /// ラッチまたは RAM に明記された幅を検査する。
 ///
 /// `file` はソース一覧、`entry` はそのファイルの厳格索引の添字。範囲外や他の宣言は
@@ -175,6 +221,7 @@ pub fn check_storage_declaration<'p, 'a>(
                 },
                 FieldTypeSite::Named { form } => {
                     let (_, span) = read_indexed_atom(source.text, forms, form);
+                    proof { super::declarations::located_name_evidence(LocatedName { source, span }); }
                     (DeclaredPortType::Named { form }, span)
                 },
             };

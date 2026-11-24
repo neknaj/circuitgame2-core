@@ -27,6 +27,7 @@ mod function_types;
 mod function_wiring;
 mod local_signal_index;
 mod module_calls;
+pub use port_types::{StorageSignature, StorageSignatureError};
 pub use module_calls::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
     ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
 mod module_drivers;

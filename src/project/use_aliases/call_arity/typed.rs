@@ -29,7 +29,7 @@ pub enum FuncCallSignature<'p, 'a> {
 pub struct CallPortType<'s, 'p, 'a> {
     /// ポートが受け取る、または返す型。
     pub ty: ResolvedPortType<'p, 'a>,
-    /// 関数の元の型注釈。基底 NOR では `None`。
+    /// 元の型注釈。基底 NOR や状態素子の許可入力では `None`。
     pub annotation: Option<&'s LocatedName<'p, 'a>>,
 }
 

@@ -87,7 +87,7 @@ pub use use_aliases::{ClockedLinkPlan, ClockedModuleError, ClockedPlanError, Clo
 pub use use_aliases::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,
     clocked_wire_solutions_agree, clocked_wires_match};
 pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
-    ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
+    ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget, StorageSignature, StorageSignatureError};
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};

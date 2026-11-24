@@ -1,7 +1,7 @@
 //! 通常呼び出しの入出力数を検査し、実引数の構文位置を入力ポートと対応付ける。
 
-use super::{ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget, UseAliases};
-use crate::project::{CallPortType, DefinitionPosition, LocatedName, PortDirection};
+use super::{ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget, StorageSignature, UseAliases};
+use crate::project::{CallPortType, DefinitionPosition, LocatedName, PortDirection, ResolvedPortType};
 #[cfg(verus_only)]
 use crate::project::{FuncCallSignature, circuits::{is_form_location, parsed_index_evidence}, location_in_source};
 use crate::project::circuits::form_location;
@@ -37,15 +37,6 @@ pub struct ModuleCallPorts<'p, 'a> {
 pub enum ModuleCallPortsError<'p, 'a> {
     /// 呼び出し名の解決または参照先の署名の診断。
     Signature(ModuleCallSignatureError<'p, 'a>),
-    /// この検査で使う署名を持たない状態素子の呼び出し。
-    StateElement {
-        /// ラッチまたはメモリの宣言種別。
-        head: crate::syntax::circuit::Head,
-        /// 呼び出し式全体の範囲。
-        call: LocatedName<'p, 'a>,
-        /// ラッチまたはメモリの宣言名の範囲。
-        state_declaration: LocatedName<'p, 'a>,
-    },
     /// 入力ポート数と実引数数の不一致。
     InputCount {
         /// 呼び出し式全体の範囲。
@@ -73,25 +64,30 @@ pub enum ModuleCallPortsError<'p, 'a> {
 }
 
 impl<'p, 'a> ModuleCallTarget<'p, 'a> {
-    spec fn port_counts(&self) -> Option<RoutineArity> {
+    /// 宣言または組み込みの署名が持つ入力と出力の個数。
+    pub open spec fn port_counts(&self) -> RoutineArity {
         match self {
-            ModuleCallTarget::Nor => Some(RoutineArity { inputs: 2, outputs: 1 }),
-            ModuleCallTarget::Routine { signature, .. } => Some(RoutineArity {
+            ModuleCallTarget::Nor => RoutineArity { inputs: 2, outputs: 1 },
+            ModuleCallTarget::Routine { signature, .. } => RoutineArity {
                 inputs: signature.inputs@.len() as usize, outputs: signature.outputs@.len() as usize,
-            }),
-            ModuleCallTarget::StateElement { .. } => None,
+            },
+            ModuleCallTarget::StateElement { storage: signature, .. } => RoutineArity {
+                inputs: if signature is Latch { 2 } else { 3 }, outputs: 1,
+            },
         }
     }
 
-    fn arity(&self) -> (result: Option<RoutineArity>)
+    fn arity(&self) -> (result: RoutineArity)
         ensures result == self.port_counts(),
     {
         match self {
-            Self::Nor => Some(RoutineArity { inputs: 2, outputs: 1 }),
-            Self::Routine { signature, .. } => Some(RoutineArity {
+            Self::Nor => RoutineArity { inputs: 2, outputs: 1 },
+            Self::Routine { signature, .. } => RoutineArity {
                 inputs: signature.inputs.len(), outputs: signature.outputs.len(),
-            }),
-            Self::StateElement { .. } => None,
+            },
+            Self::StateElement { storage: signature, .. } => RoutineArity {
+                inputs: if matches!(signature, StorageSignature::Latch { .. }) { 2 } else { 3 }, outputs: 1,
+            },
         }
     }
 
@@ -111,22 +107,34 @@ impl<'p, 'a> ModuleCallTarget<'p, 'a> {
         }
     }
 
-    /// 指定した方向のポート型を宣言順の添字で参照する。範囲外や状態素子の場合は `None` を返す。
+    /// 指定した方向のポート型を宣言順の添字で参照する。範囲外なら `None` を返す。
     pub fn port<'s>(&'s self, direction: PortDirection, index: usize) -> (port: Option<CallPortType<'s, 'p, 'a>>)
         ensures
             self.port_matches(direction, index, port),
-            port.is_some() == match self {
-                ModuleCallTarget::Nor => index < if direction is Input { 2usize } else { 1usize },
-                ModuleCallTarget::Routine { signature, .. } => index < if direction is Input {
-                    signature.inputs@.len()
-                } else { signature.outputs@.len() },
-                ModuleCallTarget::StateElement { .. } => false,
-            },
+            port.is_some() == (index < if direction is Input { self.port_counts().inputs } else { self.port_counts().outputs }),
     {
         match self {
             Self::Nor => signature_port(None, direction, index),
-            Self::Routine { signature, .. } => signature_port(Some(signature), direction, index),
-            Self::StateElement { .. } => None,
+            Self::Routine { signature, .. } => {
+                proof {
+                    vstd::std_specs::vec::axiom_spec_len(&signature.inputs);
+                    vstd::std_specs::vec::axiom_spec_len(&signature.outputs);
+                }
+                signature_port(Some(signature), direction, index)
+            },
+            Self::StateElement { storage: signature, .. } => match (signature, direction, index) {
+                (StorageSignature::Latch { width, annotation }, PortDirection::Input | PortDirection::Output, 0) =>
+                    Some(CallPortType { ty: ResolvedPortType::Bits(*width), annotation: Some(annotation) }),
+                (StorageSignature::Memory { address, address_annotation, .. }, PortDirection::Input, 0) =>
+                    Some(CallPortType { ty: ResolvedPortType::Bits(*address), annotation: Some(address_annotation) }),
+                (StorageSignature::Memory { data, data_annotation, .. }, PortDirection::Input, 1)
+                | (StorageSignature::Memory { data, data_annotation, .. }, PortDirection::Output, 0) =>
+                    Some(CallPortType { ty: *data, annotation: Some(data_annotation) }),
+                (StorageSignature::Latch { .. }, PortDirection::Input, 1)
+                | (StorageSignature::Memory { .. }, PortDirection::Input, 2) =>
+                    Some(CallPortType { ty: ResolvedPortType::Bits(1), annotation: None }),
+                _ => None,
+            },
         }
     }
 
@@ -136,7 +144,20 @@ impl<'p, 'a> ModuleCallTarget<'p, 'a> {
             ModuleCallTarget::Nor => signature_port_matches(FuncCallSignature::Nor, direction, index, port),
             ModuleCallTarget::Routine { signature, .. } =>
                 signature_port_matches(FuncCallSignature::Function(*signature), direction, index, port),
-            ModuleCallTarget::StateElement { .. } => port.is_none(),
+            ModuleCallTarget::StateElement { storage: signature, .. } =>
+                port == match (signature, direction, index) {
+                    (StorageSignature::Latch { width, annotation }, _, 0) =>
+                        Some(CallPortType { ty: ResolvedPortType::Bits(*width), annotation: Some(annotation) }),
+                    (StorageSignature::Memory { address, address_annotation, .. }, PortDirection::Input, 0) =>
+                        Some(CallPortType { ty: ResolvedPortType::Bits(*address), annotation: Some(address_annotation) }),
+                    (StorageSignature::Memory { data, data_annotation, .. }, PortDirection::Input, 1)
+                    | (StorageSignature::Memory { data, data_annotation, .. }, PortDirection::Output, 0) =>
+                        Some(CallPortType { ty: *data, annotation: Some(data_annotation) }),
+                    (StorageSignature::Latch { .. }, PortDirection::Input, 1)
+                    | (StorageSignature::Memory { .. }, PortDirection::Input, 2) =>
+                        Some(CallPortType { ty: ResolvedPortType::Bits(1), annotation: None }),
+                    _ => None,
+                },
         }
     }
 
@@ -241,29 +262,23 @@ spec fn checked_ports(
     forms: Seq<Form>, row: BuildDefinition, signature: ModuleCallSignature,
     result: Result<Option<ModuleCallPorts>, ModuleCallPortsError>,
 ) -> bool {
-    match signature.target.port_counts() {
-        None => result matches Err(ModuleCallPortsError::StateElement { head, call, state_declaration })
-            && signature.target is StateElement && head == signature.target->StateElement_head
-            && call_span(signature, call) && signature.target.declaration_site() == Some(state_declaration),
-        Some(arity) => {
-            let outputs = expected_outputs(forms, row, signature.call);
-            if signature.call.arguments != arity.inputs {
-                result matches Err(ModuleCallPortsError::InputCount { call, declaration, expected, actual })
-                    && call_span(signature, call) && declaration == signature.target.declaration_site()
-                    && expected == arity.inputs && actual == signature.call.arguments
-            } else if outputs != arity.outputs {
-                result matches Err(ModuleCallPortsError::OutputCount { call, left, declaration, expected, actual })
-                    && call_span(signature, call) && declaration == signature.target.declaration_site()
-                    && expected == outputs && actual == arity.outputs
-                    && if signature.call.form == row.expression.start {
-                        left matches Some(site) && is_form_location(signature.source, forms[row.form + 2], site)
-                    } else { left.is_none() }
-            } else {
-                result matches Ok(Some(plan)) && plan.signature == signature
-                    && plan.arguments@.len() == arity.inputs
-                    && call_argument_positions(forms, signature.call, plan.arguments@)
-            }
-        },
+    let arity = signature.target.port_counts();
+    let outputs = expected_outputs(forms, row, signature.call);
+    if signature.call.arguments != arity.inputs {
+        result matches Err(ModuleCallPortsError::InputCount { call, declaration, expected, actual })
+            && call_span(signature, call) && declaration == signature.target.declaration_site()
+            && expected == arity.inputs && actual == signature.call.arguments
+    } else if outputs != arity.outputs {
+        result matches Err(ModuleCallPortsError::OutputCount { call, left, declaration, expected, actual })
+            && call_span(signature, call) && declaration == signature.target.declaration_site()
+            && expected == outputs && actual == arity.outputs
+            && if signature.call.form == row.expression.start {
+                left matches Some(site) && is_form_location(signature.source, forms[row.form + 2], site)
+            } else { left.is_none() }
+    } else {
+        result matches Ok(Some(plan)) && plan.signature == signature
+            && plan.arguments@.len() == arity.inputs
+            && call_argument_positions(forms, signature.call, plan.arguments@)
     }
 }
 
@@ -279,13 +294,7 @@ fn plan_call_ports<'p, 'a>(forms: &[Form], row: &BuildDefinition, signature: Mod
     let source = signature.source;
     let call = LocatedName { source, span: signature.call.span.start..signature.call.span.end };
     assert(call_span(signature, call));
-    let Some(arity) = signature.target.arity() else {
-        let ModuleCallTarget::StateElement { head: kind, declaration: location, .. } = &signature.target else {
-            proof { assert(false); }
-            unreachable!()
-        };
-        return Err(ModuleCallPortsError::StateElement { head: *kind, call, state_declaration: copy_location(location) });
-    };
+    let arity = signature.target.arity();
     if signature.call.arguments != arity.inputs {
         return Err(ModuleCallPortsError::InputCount {
             call, declaration: signature.target.copy_declaration(), expected: arity.inputs, actual: signature.call.arguments,
@@ -319,13 +328,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures port.annotation matches Some(annotation) ==> location_in_source(*annotation),
     {
         self.module_call_site_evidence(at, limit, call);
-        if let ModuleCallTarget::Routine { position, signature, .. } = call.target {
-            self.typed_signature_sites(position.file, position.entry, limit, signature);
-            if direction is Input {
-                assert(signature.inputs@[index as int].annotation == *port.annotation->Some_0);
-            } else {
-                assert(signature.outputs@[index as int].annotation == *port.annotation->Some_0);
-            }
+        match call.target {
+            ModuleCallTarget::Routine { position, signature, .. } => {
+                self.typed_signature_sites(position.file, position.entry, limit, signature);
+                if direction is Input {
+                    assert(signature.inputs@[index as int].annotation == *port.annotation->Some_0);
+                } else {
+                    assert(signature.outputs@[index as int].annotation == *port.annotation->Some_0);
+                }
+            },
+            ModuleCallTarget::StateElement { position, storage: signature, .. } =>
+                self.storage_signature_sites(position.file, position.entry, limit, signature),
+            ModuleCallTarget::Nor => {},
         }
     }
 
@@ -356,20 +370,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_call_signature_result(at, max_width, Ok(Some(plan.signature))),
             call_argument_positions(self.targets.project_model().circuits_model()[at.file as int].syntax.forms@,
                 plan.signature.call, plan.arguments@),
-            match plan.signature.target {
-                ModuleCallTarget::Nor => plan.arguments@.len() == 2,
-                ModuleCallTarget::Routine { signature, .. } => plan.arguments@.len() == signature.inputs@.len(),
-                ModuleCallTarget::StateElement { .. } => false,
-            },
+            plan.arguments@.len() == plan.signature.target.port_counts().inputs,
             ({
                 let parsed = self.targets.project_model().circuits_model()[at.file as int];
                 let row = parsed.definitions@[parsed.entry_ranges@[at.entry as int].definitions.start + at.definition];
                 let count = expected_outputs(parsed.syntax.forms@, row, plan.signature.call);
-                match plan.signature.target {
-                    ModuleCallTarget::Nor => count == 1,
-                    ModuleCallTarget::Routine { signature, .. } => count == signature.outputs@.len(),
-                    ModuleCallTarget::StateElement { .. } => false,
-                }
+                count == plan.signature.target.port_counts().outputs
             }),
     {
         let project = self.targets.project_model();
