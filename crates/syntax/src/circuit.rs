@@ -133,6 +133,8 @@ pub use selection_shapes::{
     field_selection_shape,
 };
 #[cfg(verus_only)]
+pub use call_shapes::indexed_call_selection_leaf;
+#[cfg(verus_only)]
 pub use selection_shapes::{
     bit_selection_path, bit_selection_paths_agree, bit_selection_step_root, build_selection_chain_signal,
     build_selection_input_position,

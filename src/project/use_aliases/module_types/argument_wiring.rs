@@ -1,7 +1,9 @@
 //! 型と位置を照合した実引数から、入力ポートごとの配線を取り出す。
 
+mod selection;
+
 use super::{ClockedDriverBitsError, ClockedModuleOutputs, ClockedModuleOutputsError, ClockedWireDriver,
-    ModuleCalls, UseAliases, clocked_driver_bits, driver_bits::reserve_clocked_bits};
+    ModuleCalls, ModuleSelectionsError, UseAliases, clocked_driver_bits, driver_bits::reserve_clocked_bits};
 use crate::netlist::Wire;
 use crate::project::{LocatedName, ModuleBodyPosition, PortDirection, ResolvedPortType,
     circuits::{form_location, read_indexed_atom}};
@@ -29,6 +31,19 @@ pub enum ClockedArgumentWiringError<'p, 'a> {
     Allocation,
     /// 変換が未対応の実引数。範囲は引数式全体を指す。
     Unsupported(LocatedName<'p, 'a>),
+    /// 選択対象の型、選択の数値引数、または選択範囲に違反がある。
+    Selection(ModuleSelectionsError<'p, 'a>),
+    /// 選択したビット列と呼び出し先の入力型が一致しない。
+    SelectionPort {
+        /// 選択式全体の範囲。
+        argument: LocatedName<'p, 'a>,
+        /// 入力ポートの要求型。
+        expected: ResolvedPortType<'p, 'a>,
+        /// 入力ポートの型注釈。注釈のない入力では `None`。
+        required_at: Option<LocatedName<'p, 'a>>,
+        /// 選択したビット列の幅。
+        width: u64,
+    },
     /// 配線列の容量または確保に失敗した。
     Wiring {
         /// 元の引数式の範囲。
@@ -138,19 +153,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         site(argument) && literal_wires(bytes, port.ty->Bits_0, Err(reason)),
                     _ => false,
                 }
+        } else if form is List {
+            exists|port: CallPortType| #[trigger] ports.signature.target.port_matches(PortDirection::Input, arg, Some(port))
+                && self.selected_argument_wires(checked, limit, plan, index, arg, port, result)
         } else {
             result matches Err(ClockedArgumentWiringError::Unsupported(argument)) && site(argument)
         }
     }
 
     fn wire_call_argument(
-        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>,
+        &self, owner: ModuleBodyPosition, limit: u64, _capacity: usize, checked: &ModuleCalls<'p, 'a>,
         plan: &ClockedModuleOutputs, index: usize, arg: usize,
     ) -> (result: Result<Vec<ClockedWireDriver>, ClockedArgumentWiringError<'p, 'a>>)
         requires
             self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
             index < checked.calls@.len(), arg < checked.calls@[index as int].inputs.ports.arguments@.len(),
+            self.outputs_on_checked(&checked.module, limit, _capacity, Ok(*plan)),
         ensures self.argument_wires(checked, limit, plan, index, arg, result),
+            !(result matches Err(ClockedArgumentWiringError::Layout(_))),
     {
         let row = &checked.calls[index];
         let argument = self.module_argument(owner, limit, checked, index, arg);
@@ -176,6 +196,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }
             let ResolvedPortType::Bits(width) = port.ty else { unreachable!() };
             wire_literal(word, width, limit)
+        } else if matches!(forms[root], Form::List { .. }) {
+            return self.wire_selected_argument(owner, limit, _capacity, checked, plan, index, arg, port);
         } else {
             return Err(ClockedArgumentWiringError::Unsupported(form_location(source, forms, root)));
         };
@@ -277,6 +299,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_call_ports_evidence(row.at, limit, ports);
             self.module_call_port_type_declared(row.at, limit, ports.signature, PortDirection::Input, arg, port);
             self.equivalent_declared_port_types(actual, port.ty);
+        } else if form is List {
+            let declared = choose|declared: CallPortType| #[trigger] ports.signature.target.port_matches(PortDirection::Input, arg, Some(declared))
+                && self.selected_argument_wires(checked, limit, plan, index, arg, declared, Ok(bits));
+            ports.signature.target.port_results_agree(PortDirection::Input, arg, Some(port), Some(declared));
+            self.selected_argument_width(checked, limit, plan, index, arg, port, bits);
         } else {
             assert(literal_atom(form));
             let span = form_span(form);
@@ -297,6 +324,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))), index < checked.calls@.len(),
             self.outputs_on_checked(&checked.module, limit, _capacity, Ok(*plan)),
         ensures self.call_wires_result(checked, limit, plan, index, result),
+            !(result matches Err(ClockedArgumentWiringError::Layout(_))),
     {
         let count = checked.calls[index].inputs.ports.arguments.len();
         let mut wires = Vec::new();
@@ -307,10 +335,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))), index < checked.calls@.len(),
                 arg == wires@.len() <= count == checked.calls@[index as int].inputs.ports.arguments@.len(),
+                self.outputs_on_checked(&checked.module, limit, _capacity, Ok(*plan)),
                 self.call_wires_prefix(checked, limit, plan, index, wires@),
             decreases count - arg,
         {
-            let bits = self.wire_call_argument(owner, limit, checked, plan, index, arg)?;
+            let bits = self.wire_call_argument(owner, limit, _capacity, checked, plan, index, arg)?;
             let ghost before = wires@;
             wires.push(bits);
             assert(self.call_wires_prefix(checked, limit, plan, index, wires@)) by {
@@ -357,8 +386,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// # Errors
     ///
     /// 型検査と入出力・定義の配置を確認した後、入力ポートの一覧を確保する。
-    /// 実引数は裸の信号名とビットリテラルを扱う。変換できない式や配線列を確保できない式があれば、
-    /// 入力ポート順で最初に失敗した引数の範囲を返す。
+    /// 型検査で保留した選択式は、配線を作る段階で調べる。実引数は裸の信号名、ビットリテラル、
+    /// 信号名からのビット選択を扱う。配線を作る段階では、入力ポート順で最初に失敗した引数の範囲を返す。
     pub fn plan_clocked_call_arguments(&self, owner: ModuleBodyPosition, limit: u64, capacity: usize, index: usize)
         -> (result: Result<Option<(ClockedModuleOutputs, Vec<Vec<ClockedWireDriver>>)>, ClockedArgumentWiringError<'p, 'a>>)
         requires self.can_resolve(),
@@ -380,7 +409,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         match self.wire_call_arguments(owner, limit, capacity, &checked, &plan, index) {
             Ok(wires) => Ok(Some((plan, wires))),
-            Err(error) => Err(error),
+            Err(error) => {
+                assert(self.clocked_call_arguments_result(owner, limit, capacity, index, Err(error)));
+                Err(error)
+            },
         }
     }
 }

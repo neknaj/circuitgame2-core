@@ -631,8 +631,8 @@ fn lowers_nor_and_latch_to_one_tick_machine() {
     let input = [SourceSnapshot { path: "main.ncg2", revision: 5,
         text: "(using nor)
             (latch hold (width 1))
-            (module root (in d we) (out q mixed)
-              (def q (hold d we))
+            (module root (in (d (bits 4)) we) (out q mixed)
+              (def q (hold (bit (slice d 1 2 2) 1) we))
               (def mixed (nor q 0)))" }];
     let project = parse_circuit_project(&input).unwrap();
     let targets = index_use_targets(&project).unwrap();
@@ -642,6 +642,44 @@ fn lowers_nor_and_latch_to_one_tick_machine() {
     let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 8, gates: 1, state_bits: 1 };
     let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
     assert_eq!(compiled.vm.reset(), [false, false]);
-    assert_eq!(compiled.vm.step(&[true, true]).unwrap(), [true, true]);
-    assert_eq!(compiled.vm.step(&[false, false]).unwrap(), [true, false]);
+    assert_eq!(compiled.vm.step(&[false, false, false, true, true]).unwrap(), [true, true]);
+    assert_eq!(compiled.vm.step(&[false, false, false, false, false]).unwrap(), [true, false]);
+}
+
+#[test]
+fn reports_selection_in_a_call_at_the_argument_and_input_declaration() {
+    use circuitgame2_core::project::{ClockedArgumentWiringError, ClockedModuleVmError, ClockedModuleVmLimits};
+
+    let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 8, gates: 1, state_bits: 1 };
+    for argument in ["(bit d 4)", "(slice d 0 2)"] {
+        let body = format!("(module-part root (def q (hold {argument} we)))");
+        let input = [
+            SourceSnapshot { path: "root.ncg2", revision: 3, text:
+                "(using nor) (latch hold (width 1)) (module root (in (d (bits 4)) we) (out q))" },
+            SourceSnapshot { path: "part.ncg2", revision: 9, text: &body },
+        ];
+        let project = parse_circuit_project(&input).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let owner = targets.collect_module_parts().unwrap()[0].module_position;
+        let aliases = check_use_aliases(&targets).unwrap();
+        match aliases.lower_clocked_vm(owner, limits) {
+            Err(ClockedModuleVmError::Arguments(ClockedArgumentWiringError::Selection(
+                ModuleSelectionsError::Argument(SelectionArgumentError::Outside {
+                    site, width_origin, start: 4, last: 4, input_width: 4,
+                }),
+            ))) if argument == "(bit d 4)" => {
+                assert_eq!((site.source.revision, width_origin.source.revision), (9, 3));
+                assert_eq!(&site.source.text[site.span], "4");
+                assert_eq!(&width_origin.source.text[width_origin.span], "4");
+            },
+            Err(ClockedModuleVmError::Arguments(ClockedArgumentWiringError::SelectionPort {
+                argument: site, expected: ResolvedPortType::Bits(1), required_at: Some(required), width: 2,
+            })) if argument == "(slice d 0 2)" => {
+                assert_eq!((site.source.revision, required.source.revision), (9, 3));
+                assert_eq!(&site.source.text[site.span], argument);
+                assert_eq!(&required.source.text[required.span], "1");
+            },
+            _ => panic!("expected a selection diagnostic for {argument}"),
+        }
+    }
 }

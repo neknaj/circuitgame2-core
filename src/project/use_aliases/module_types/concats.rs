@@ -102,35 +102,40 @@ struct ConcatContext<'w, 'p, 'a> {
     parsed: &'p NamedBuildCircuit<'a>,
 }
 
-fn find_signal(signals: &[usize], start: usize, end: usize, form: usize) -> (result: usize)
+/// 定義の信号索引から、指定したフォームの位置を二分探索する。
+pub(super) fn find_signal(signals: &[usize], start: usize, end: usize, form: usize) -> (result: Option<usize>)
     requires
         start <= end <= signals@.len(),
-        exists|i: int| start <= i < end && (#[trigger] signals@[i]) == form,
         forall|i: int, j: int| start <= i < j < end ==> #[trigger] signals@[i] < #[trigger] signals@[j],
-    ensures start <= result < end && signals@[result as int] == form,
+    ensures
+        result matches Some(position) ==> start <= position < end && signals@[position as int] == form,
+        result.is_none() <==> (forall|i: int| start <= i < end ==> (#[trigger] signals@[i]) != form),
 {
-    let ghost target = choose|i: int| start <= i < end && (#[trigger] signals@[i]) == form;
     let mut low = start;
     let mut high = end;
     while low < high
         invariant
-            start <= low <= target < high <= end <= signals@.len(), signals@[target] == form,
+            start <= low <= high <= end <= signals@.len(),
             forall|i: int, j: int| start <= i < j < end ==> #[trigger] signals@[i] < #[trigger] signals@[j],
+            forall|i: int| start <= i < end && (i < low || high <= i) ==> (#[trigger] signals@[i]) != form,
         decreases high - low,
     {
         let middle = low + (high - low) / 2;
         let current = signals[middle];
-        if current == form { return middle; }
+        if current == form { return Some(middle); }
         if current < form {
-            assert(middle < target) by { if target < middle { assert(signals@[target] < signals@[middle as int]); } };
+            assert forall|i: int| low <= i <= middle implies (#[trigger] signals@[i]) != form by {
+                if i < middle { assert(signals@[i] < signals@[middle as int]); }
+            };
             low = middle + 1;
         } else {
-            assert(target < middle) by { if middle < target { assert(signals@[middle as int] < signals@[target]); } };
+            assert forall|i: int| middle <= i < high implies (#[trigger] signals@[i]) != form by {
+                if middle < i { assert(signals@[middle as int] < signals@[i]); }
+            };
             high = middle;
         }
     }
-    proof { assert(false); }
-    unreachable!()
+    None
 }
 
 spec fn argument_end(forms: Seq<Form>, root: int) -> int {
@@ -229,7 +234,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     definition_signal_positions_in_order(source.text, &model, context.body.entry as int, context.definition as int);
                     build_definition_scope_evidence(source.text, &model, context.body.entry as int, context.definition as int);
                 }
-                let position = find_signal(parsed.signals.as_slice(), row.signals.start, row.signals.end, at);
+                let Some(position) = find_signal(parsed.signals.as_slice(), row.signals.start, row.signals.end, at) else {
+                    unreachable!()
+                };
                 let wiring = &context.typed.sources.roots.wiring;
                 let frame = &parsed.entry_ranges[context.body.entry].signals;
                 proof {

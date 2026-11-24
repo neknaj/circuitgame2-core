@@ -142,6 +142,41 @@ pub(super) proof fn clocked_whole_port_bits(
 {
 }
 
+/// 基底信号の配置幅に選択範囲が収まることを表す。
+pub(super) open spec fn clocked_selected_port_ready(
+    inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver, selection: CheckedBitSelection,
+) -> bool {
+    let (ranges, slot) = match driver {
+        OutputDriver::Input(port) => (inputs.ranges_model(), port),
+        OutputDriver::Definition(slot) => (definitions.ranges_model(), slot),
+    };
+    &&& slot < ranges.len()
+    &&& ranges[slot as int].start < ranges[slot as int].end
+    &&& selection.fits((ranges[slot as int].end - ranges[slot as int].start) as u64)
+}
+
+/// 妥当な選択の配線化で失敗が残るのは、配列の容量または確保に関する場合である。
+pub(super) proof fn checked_selection_wiring_error(
+    inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver,
+    selection: CheckedBitSelection, error: ClockedDriverBitsError,
+)
+    requires
+        clocked_selected_port_ready(inputs, definitions, driver, selection),
+        clocked_driver_bits_result(inputs, definitions, driver, Some(selection), Err(error)),
+    ensures error is Allocation || error is Capacity,
+{
+}
+
+/// ビット選択に成功した配線列は、指定した選択数と同じ長さを持つ。
+pub(super) proof fn clocked_selected_port_bits(
+    inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver,
+    selection: CheckedBitSelection, wires: Vec<ClockedWireDriver>,
+)
+    requires clocked_driver_bits_result(inputs, definitions, driver, Some(selection), Ok(wires)),
+    ensures wires@.len() == selection.count,
+{
+}
+
 /// 信号全体に対応する配線列を表す。配列の確保や展開は行わない。
 pub closed spec fn clocked_driver_port_model(
     inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver,

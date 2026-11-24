@@ -362,6 +362,44 @@ pub proof fn following_call_argument(
     assert(form_region_ends_at(forms, call.form + 2, forms[call.form as int]->List_end as int));
 }
 
+/// 呼び出しの直接の選択式が読む裸の信号名は、同じ定義行の信号索引に含まれる。
+pub proof fn indexed_call_selection_leaf(
+    source: &str, forms: Seq<Form>, row: &BuildDefinition, references: Seq<ExpressionReference>,
+    reference: usize, call: &CallShape, signals: Seq<usize>, argument: usize, steps: Seq<super::BitSelectionShape>, leaf: usize,
+)
+    requires
+        definition_call_index(source, forms, *row, references),
+        row.references.start <= reference < row.references.end,
+        call_shape_matches(source, forms, *row, references[reference as int], Some(*call)),
+        row.signals.start <= row.signals.end <= signals.len(),
+        signals.subrange(row.signals.start as int, row.signals.end as int)
+            == expression_signals(source, forms, row.expression.start as int, row.expression.end as int),
+        forms.len() <= usize::MAX, complete_list_indices(forms), nested_list_indices(forms),
+        direct_call_argument(forms, *call, argument as int),
+        super::bit_selection_path(source, forms, argument, steps, leaf),
+        leaf < forms.len() && forms[leaf as int] is Atom && forms[leaf as int]->Atom_kind is Name,
+    ensures exists|position: int| row.signals.start <= position < row.signals.end
+        && #[trigger] signals[position] == leaf,
+{
+    let start = row.expression.start as int;
+    let stop = row.expression.end as int;
+    reveal(nested_list_indices);
+    reveal(expression_region);
+    assert forall|f: int| start <= f < stop && #[trigger] forms[f] is List
+        implies forms[f]->List_end <= stop by {
+        if f != start {
+            assert(forms[start] is List && forms[start]->List_end == stop);
+        }
+    };
+    let refs = references.subrange(row.references.start as int, row.references.end as int);
+    let offset = reference - row.references.start;
+    assert(refs[offset] == references[reference as int]);
+    super::expression_forest::call_argument_selected_signal_index(source, forms, start, stop, offset, argument, steps, leaf);
+    let indexed = signals.subrange(row.signals.start as int, row.signals.end as int);
+    let i = choose|i: int| 0 <= i < indexed.len() && indexed[i] == leaf;
+    assert(signals[row.signals.start + i] == leaf);
+}
+
 /// 呼び出しの直接の裸名に対応する、ファイル全体の信号索引の添字を返す。
 ///
 /// 厳格解析で得た同一ファイルの構文木と索引を渡す。定義の信号区間を二分探索する。

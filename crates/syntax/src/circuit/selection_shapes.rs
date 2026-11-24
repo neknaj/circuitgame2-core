@@ -529,7 +529,7 @@ pub proof fn strict_bit_selection_input(
     same_expression_head(source, forms, index + 1, candidate, Some(expected));
 }
 
-proof fn selection_path_preserves_signals(
+pub(super) proof fn selection_path_preserves_signals(
     source: &str, forms: Seq<Form>, root: usize, end: int, steps: Seq<BitSelectionShape>, leaf: usize,
 )
     requires
