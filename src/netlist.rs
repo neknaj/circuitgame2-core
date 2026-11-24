@@ -5,6 +5,7 @@
 mod clocked;
 pub(crate) mod instances;
 mod port_layout;
+mod state_elements;
 #[cfg(verus_only)]
 mod source_trace;
 
@@ -23,6 +24,9 @@ pub use clocked::{clocked_instance_inputs, clocked_instance_outputs_match, clock
 #[cfg(verus_only)]
 pub use instances::{instance_gates_at, instance_gates_in_extension, instance_outputs_match, instance_wire};
 pub use port_layout::{PortBitLayout, PortBitLayoutError};
+pub use state_elements::{LatchState, RamState, StateAllocationError, StateInputError};
+#[cfg(verus_only)]
+pub use state_elements::{latch_next, ram_next_memory, ram_read_word, ram_resident_bits, state_bits_fit};
 #[cfg(verus_only)]
 pub use source_trace::{
     SourceGateId, SourceNor, SourceTickCircuit, SourceTickFrame, SourceWire, source_clocked_layout, source_clocked_layout_valid,
