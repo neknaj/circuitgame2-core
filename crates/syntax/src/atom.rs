@@ -38,6 +38,17 @@ pub proof fn natural_atom_has_value(bytes: Seq<u8>)
     crate::natural::digits_admit_value(bytes);
 }
 
+/// 負の整数として分類されたアトムの数字列が、絶対値を表すことを示す。
+pub proof fn negative_atom_has_value(bytes: Seq<u8>)
+    requires bare_atom_kind(bytes) == Some(AtomKind::NegativeInteger),
+    ensures
+        bytes.len() > 1,
+        bytes[0] == b'-',
+        crate::decimal_natural_value(bytes[1..]).is_some(),
+{
+    crate::natural::digits_admit_value(bytes[1..]);
+}
+
 pub(crate) proof fn bit_atom_has_digits(bytes: Seq<u8>, kind: Option<AtomKind>)
     requires
         kind == bare_atom_kind(bytes),

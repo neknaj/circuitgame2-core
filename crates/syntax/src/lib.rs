@@ -21,7 +21,7 @@ pub use bit_literal::{
     bit_literal_value_at, bit_literal_written_widths_agree,
 };
 #[cfg(verus_only)]
-pub use atom::natural_atom_has_value;
+pub use atom::{natural_atom_has_value, negative_atom_has_value};
 pub use natural::{NaturalRangeError, read_natural_u64};
 #[cfg(verus_only)]
 pub use natural::{decimal_natural_value, natural_u64_matches};
