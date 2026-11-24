@@ -857,7 +857,7 @@ impl ClockedVm {
     /// 外部入力の長さが違う場合は状態を変更せずに入力数のエラーを返す。
     pub fn step(&mut self, input: &[bool]) -> (result: Result<Vec<bool>, TickInputError>)
         requires old(self).valid(),
-        ensures final(self).valid(), match result {
+        ensures final(self).valid(), final(self).same_layout(old(self)), match result {
             Ok(output) => final(self).tick_matches(old(self), input@, output@),
             Err(error) => error == TickInputError::InputCount && input@.len() != old(self).external_count()
                 && *final(self) == *old(self),
@@ -901,6 +901,7 @@ impl ClockedVm {
         let new_inputs = snapshot(input, self.storage.as_slice(), self.starts.as_slice(), inputs, Ghost(gates));
         proof { clocked_wiring_endpoints(netlist); }
         let output = observe(netlist.outputs.as_slice(), new_inputs.as_slice(), self.gates.as_slice());
+        proof { self.tick_snapshots(old(self), input@, output@); }
         Ok(output)
     }
 }

@@ -52,7 +52,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& forall|i: int| 0 <= i < slot ==> (#[trigger] drivers.definitions@[i]).name.word.spec_bytes() != name
     }
 
-    spec fn checked_vram_target(
+    pub(super) closed spec fn checked_vram_target(
         &self, owner: ModuleBodyPosition, checked: &ModuleCalls, name: Seq<u8>, target: VramTarget,
     ) -> bool {
         exists|slot: int, call: int| {
@@ -67,6 +67,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && target.address_bits == address && target.word_type == data
             &&& forall|i: int| 0 <= i < call ==> !#[trigger] self.vram_memory_call(checked, slot, i)
         }
+    }
+
+    /// 解決した読み出し信号から、型検査済みの RAM 呼び出しの行を得る。
+    pub(super) proof fn checked_vram_call(
+        &self, owner: ModuleBodyPosition, checked: &ModuleCalls, name: Seq<u8>, target: &VramTarget,
+    ) -> (call: usize)
+        requires self.checked_vram_target(owner, checked, name, *target),
+            checked.calls@.len() <= usize::MAX,
+        ensures
+            call < checked.calls@.len(),
+            checked.calls@[call as int].at == target.call,
+            checked.calls@[call as int].inputs.ports.signature.target matches
+                ModuleCallTarget::StateElement { storage: StorageSignature::Memory { address, data, .. }, .. }
+                && address == target.address_bits && data == target.word_type,
+    {
+        let (_slot, call) = choose|slot: int, call: int| {
+            &&& #[trigger] self.vram_definition_matches(checked, name, slot)
+            &&& #[trigger] self.vram_memory_call(checked, slot, call)
+            &&& target.call == checked.calls@[call].at
+            &&& checked.calls@[call].inputs.ports.signature.target matches
+                ModuleCallTarget::StateElement { storage: StorageSignature::Memory { address, data, .. }, .. }
+                && target.address_bits == address && target.word_type == data
+        };
+        call as usize
     }
 
     spec fn vram_single_output(&self, at: DefinitionPosition) -> bool {
@@ -87,7 +111,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_call_ports_evidence(row.at, limit, row.inputs.ports);
     }
 
-    spec fn checked_vram_result(
+    pub(super) closed spec fn checked_vram_result(
         &self, owner: ModuleBodyPosition, checked: &ModuleCalls, name: Seq<u8>,
         result: Result<VramTarget, VramOutputError>,
     ) -> bool {
@@ -109,11 +133,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    fn resolve_vram_checked(
+    pub(super) fn resolve_vram_checked(
         &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>, name: &str,
     ) -> (result: Result<VramTarget<'p, 'a>, VramOutputError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
         ensures self.checked_vram_result(owner, checked, name.spec_bytes(), result),
+            result matches Ok(target) ==> self.checked_vram_target(owner, checked, name.spec_bytes(), target),
     {
         let expressions = &checked.module.expressions;
         let drivers = &expressions.typed.sources.roots.wiring.drivers;

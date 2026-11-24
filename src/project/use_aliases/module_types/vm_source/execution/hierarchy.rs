@@ -33,7 +33,7 @@ use super::super::super::clocked_source::function_templates::{function_cache_ext
 #[cfg(verus_only)]
 use crate::project::use_aliases::bit_func::ClockedFunctionTemplate;
 use super::super::{ClockedEndpointError, ClockedPlanError, clocked_resolve};
-use super::{ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits,
+use super::{ClockedModuleCompilation, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits,
     ModuleBodyPosition, ModuleCalls, ResolveRowError, ResolveRowsError, UseAliases, append_row, resolve_rows};
 #[cfg(verus_only)]
 use super::row_model;
@@ -687,12 +687,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     pub(super) fn lower_clocked_hierarchy_vm(&self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits)
-        -> (result: Result<Option<ClockedModuleVm>, ClockedModuleVmError<'p, 'a>>)
+        -> (result: Result<Option<ClockedModuleCompilation<'p, 'a>>, ClockedModuleVmError<'p, 'a>>)
         requires self.can_resolve(),
         ensures
-            result matches Ok(Some(compiled)) ==> compiled.vm.valid() && compiled.vm.initial()
-                && compiled.vm.external_count() == compiled.inputs.total_bits_model()
-                && self.clocked_module_hierarchy_vm(owner, limits, &compiled),
+            result matches Ok(Some(root)) ==> root.compiled.vm.valid() && root.compiled.vm.initial()
+                && root.compiled.vm.external_count() == root.compiled.inputs.total_bits_model()
+                && self.clocked_module_hierarchy_vm(owner, limits, &root.compiled)
+                && self.compilation_keeps_root_storage(owner, limits, &root),
             result matches Err(ClockedModuleVmError::Hierarchy(super::super::super::ClockedModuleError::Recursion(path))) ==>
                 self.clocked_hierarchy_recursion(owner, limits.width, path@),
             result matches Err(ClockedModuleVmError::InModule { owner: failed, reason }) ==>
@@ -703,7 +704,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> capacity == limits.wiring_bits && used <= capacity && used + width > capacity),
             !(result matches Err(ClockedModuleVmError::Endpoints(_))),
     {
-        let hierarchy = match self.checked_clocked_hierarchy(owner, limits.width) {
+        let mut hierarchy = match self.checked_clocked_hierarchy(owner, limits.width) {
             Ok(Some(hierarchy)) => hierarchy,
             Ok(None) => return Ok(None),
             Err(error) => return Err(ClockedModuleVmError::Hierarchy(error)),
@@ -784,15 +785,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         self.append_hierarchy_template(owner, limits, &hierarchy, index as int, networks@, completed,
                             old_functions, functions@, Some(source));
                     }
-                    return match self.initialize_clocked_network(network, limits.state_bits) {
-                        Ok(vm) => {
-                            assert(self.clocked_module_hierarchy_vm(owner, limits, &vm)) by {
-                                assert(self.network_vm_on_reset(&source, limits.state_bits, &vm));
-                                assert(self.hierarchy_templates_through(&hierarchy, limits, index + 1, completed, functions@));
-                                assert(self.hierarchy_compilation_snapshot(owner, limits, &vm, hierarchy,
+                    let ghost source_hierarchy = hierarchy;
+                    let Some(checked) = hierarchy.modules.swap_remove(0) else {
+                        return Err(ClockedModuleVmError::InstanceCount);
+                    };
+                    return match self.initialize_clocked_network(network, limits.state_bits, checked) {
+                        Ok(root) => {
+                            assert(self.clocked_module_hierarchy_vm(owner, limits, &root.compiled)) by {
+                                assert(self.network_vm_on_reset(&source, limits.state_bits, &root.compiled));
+                                assert(self.hierarchy_templates_through(&source_hierarchy, limits, index + 1, completed, functions@));
+                                assert(self.hierarchy_compilation_snapshot(owner, limits, &root.compiled, source_hierarchy,
                                     completed, functions@, index + 1));
                             };
-                            Ok(Some(vm))
+                            assert(self.root_storage_matches(&root._checked, limits, &source));
+                            Ok(Some(root))
                         },
                         Err(error) => match error {
                             ClockedModuleVmError::Vm(_, _) => Err(error),

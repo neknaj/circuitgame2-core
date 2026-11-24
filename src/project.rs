@@ -84,6 +84,7 @@ pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 pub use use_aliases::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
 pub use use_aliases::{VramOutputError, VramTarget};
+pub use use_aliases::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use use_aliases::ClockedModuleObservation;
 pub use use_aliases::{ClockedArgumentWiringError, ClockedModuleOutputs, ClockedModuleOutputsError};

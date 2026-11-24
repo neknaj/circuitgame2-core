@@ -8,6 +8,8 @@ mod hierarchy;
 mod root_storage;
 #[cfg(verus_only)]
 mod source_links;
+mod vram_binding;
+pub use vram_binding::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use hierarchy::ClockedModuleObservation;
 
@@ -50,6 +52,13 @@ pub struct ClockedModuleVm {
     pub outputs: PortBitLayout,
     /// 回路の状態と tick 実行機能。
     pub vm: ClockedVm,
+}
+
+struct ClockedModuleCompilation<'p, 'a> {
+    compiled: ClockedModuleVm,
+    _checked: ModuleCalls<'p, 'a>,
+    _storage_sites: Vec<ClockedStoragePlacement<'p, 'a>>,
+    _direct_devices: usize,
 }
 
 /// ソースから組み立てた配線。状態領域は、この回路を初期化するときに割り当てる。
@@ -459,12 +468,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// 配線が参照する各状態素子を、出現順に初期化する。
     fn initialize_clocked_network(
-        &self, network: ClockedModuleNetwork<'p, 'a>, state_limit: usize,
-    ) -> (result: Result<ClockedModuleVm, ClockedModuleVmError<'p, 'a>>)
+        &self, network: ClockedModuleNetwork<'p, 'a>, state_limit: usize, checked: ModuleCalls<'p, 'a>,
+    ) -> (result: Result<ClockedModuleCompilation<'p, 'a>, ClockedModuleVmError<'p, 'a>>)
         ensures
-            result matches Ok(compiled) ==> compiled.vm.valid() && compiled.vm.initial()
-                && compiled.vm.external_count() == compiled.inputs.total_bits_model()
-                && self.network_vm_on_reset(&network, state_limit, &compiled),
+            result matches Ok(root) ==> root.compiled.vm.valid() && root.compiled.vm.initial()
+                && root.compiled.vm.external_count() == root.compiled.inputs.total_bits_model()
+                && self.network_vm_on_reset(&network, state_limit, &root.compiled)
+                && root._checked == checked
+                && root._storage_sites@ == network.storage_sites@
+                && root._direct_devices == network._direct_devices,
             result.is_ok() ==> network.inputs.total_bits_model() + clocked_storage_output_width(network.storage@)
                 == network.circuit.netlist_model().input_count,
             result matches Err(error) ==> error is Vm,
@@ -474,7 +486,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         match ClockedVm::new(network.circuit, external, network.storage, state_limit) {
             Ok(vm) => {
                 proof { vm.initialized_layout_evidence(&source.circuit, external, source.storage@, state_limit); }
-                Ok(ClockedModuleVm { inputs: network.inputs, outputs: network.outputs, vm })
+                Ok(ClockedModuleCompilation {
+                    compiled: ClockedModuleVm { inputs: network.inputs, outputs: network.outputs, vm },
+                    _checked: checked, _storage_sites: network.storage_sites, _direct_devices: network._direct_devices,
+                })
             },
             Err(error) => {
                 let site = if let ClockedVmError::Storage { instance, .. } = error {
@@ -484,6 +499,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 } else { None };
                 Err(ClockedModuleVmError::Vm(error, site))
             },
+        }
+    }
+
+    spec fn compilation_keeps_root_storage(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, root: &ClockedModuleCompilation,
+    ) -> bool {
+        &&& self.module_calls_result(owner, limits.width, Ok(Some(root._checked)))
+        &&& exists|network: ClockedModuleNetwork| {
+            &&& #[trigger] self.root_storage_matches(&root._checked, limits, &network)
+            &&& self.network_vm_on_reset(&network, limits.state_bits, &root.compiled)
+            &&& root._storage_sites@ == network.storage_sites@
+            &&& root._direct_devices == network._direct_devices
         }
     }
 
@@ -576,6 +603,35 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result matches Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites))) ==>
                 self.clocked_module_vm_projection_cycle(owner, limits, sites@),
     {
+        match self.compile_clocked_root(owner, limits) {
+            Ok(Some(root)) => Ok(Some(root.compiled)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn compile_clocked_root(&self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits)
+        -> (result: Result<Option<ClockedModuleCompilation<'p, 'a>>, ClockedModuleVmError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures
+            result matches Ok(Some(root)) ==> root.compiled.vm.valid() && root.compiled.vm.initial()
+                && root.compiled.vm.external_count() == root.compiled.inputs.total_bits_model()
+                && (self.clocked_module_vm_wiring(owner, limits, &root.compiled)
+                    || self.clocked_module_hierarchy_vm(owner, limits, &root.compiled))
+                && self.compilation_keeps_root_storage(owner, limits, &root),
+            result matches Err(ClockedModuleVmError::Hierarchy(super::super::ClockedModuleError::Recursion(path))) ==>
+                self.clocked_hierarchy_recursion(owner, limits.width, path@),
+            result matches Err(ClockedModuleVmError::InModule { owner: failed, reason }) ==>
+                ((*reason) matches ClockedModuleVmError::Hierarchy(super::super::ClockedModuleError::Function { call, expansion })
+                    ==> self.clocked_hierarchy_function_failure(owner, limits, failed, call, expansion)),
+            result matches Err(ClockedModuleVmError::InModule { reason, .. }) ==>
+                ((*reason) matches ClockedModuleVmError::ChildStateCapacity { used, width, capacity, .. }
+                    ==> capacity == limits.wiring_bits && used <= capacity && used + width > capacity),
+            result matches Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::Calls(error))) ==>
+                self.module_calls_result(owner, limits.width, Err(error)),
+            result matches Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites))) ==>
+                self.clocked_module_vm_projection_cycle(owner, limits, sites@),
+    {
         let checked = match self.check_module_calls(owner, limits.width) {
             Ok(Some(checked)) => checked,
             Ok(None) => return Ok(None),
@@ -588,9 +644,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(plan) => plan,
             Err(error) => return Err(ClockedModuleVmError::Endpoints(error)),
         };
+        let ghost endpoints = plan;
         let network = self.assemble_direct_network(owner, limits, &checked, plan)?;
-        match self.initialize_clocked_network(network, limits.state_bits) {
-            Ok(vm) => Ok(Some(vm)),
+        let ghost source_network = network;
+        match self.initialize_clocked_network(network, limits.state_bits, checked) {
+            Ok(root) => {
+                assert(self.network_wiring_on_checked(limits, &root._checked, &endpoints, &source_network));
+                assert(self.root_storage_matches(&root._checked, limits, &source_network));
+                Ok(Some(root))
+            },
             Err(error) => Err(error),
         }
     }
