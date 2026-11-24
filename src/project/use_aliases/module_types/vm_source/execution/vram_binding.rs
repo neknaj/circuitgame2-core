@@ -138,35 +138,144 @@ impl<'n, 'p, 'a> ClockedVramVm<'n, 'p, 'a> {
         }
     }
 
-    /// 最初に一致する公開名の VRAM を読み取る。名前が見つからない場合は `None` を返す。
-    pub fn read_vram<'b>(&'b self, name: &str) -> (result: Option<VramView<'b, 'p, 'a>>)
-        requires self.valid(),
-        ensures self.vram_view_matches(name.spec_bytes(), result),
+    spec fn first_binding(&self, name: Seq<u8>, result: Option<usize>) -> bool {
+        match result {
+            Some(i) => {
+                &&& i < self.bindings@.len()
+                &&& self.bindings@[i as int].name.spec_bytes() == name
+                &&& forall|j: int| 0 <= j < i ==> (#[trigger] self.bindings@[j]).name.spec_bytes() != name
+            },
+            None => forall|j: int| 0 <= j < self.bindings@.len() ==> (#[trigger] self.bindings@[j]).name.spec_bytes() != name,
+        }
+    }
+
+    fn find_binding(&self, name: &str) -> (result: Option<usize>)
+        ensures self.first_binding(name.spec_bytes(), result),
     {
         let mut i = 0;
         while i < self.bindings.len()
             invariant
-                self.valid(), i <= self.bindings@.len(),
+                i <= self.bindings@.len(),
                 forall|j: int| 0 <= j < i ==> (#[trigger] self.bindings@[j]).name.spec_bytes() != name.spec_bytes(),
             decreases self.bindings@.len() - i,
         {
             let binding = &self.bindings[i];
             proof { encode_utf8_decode_utf8(binding.name@); encode_utf8_decode_utf8(name@); }
             if binding.name == name {
-                proof {
-                    let wiring = self._wiring@[binding.index as int];
-                    assert(self.module.vm.storage_model()[binding.index as int].wiring_model() == wiring);
-                    self.module.vm.storage_shape_evidence(binding.index as int);
-                    assert(clocked_storage_memory_width(&wiring).is_some());
-                }
-                let Some(bits) = self.module.vm.ram_memory(binding.index) else { unreachable!() };
-                let view = VramView { target: &binding.target, bits };
-                assert(self.vram_view_matches(name.spec_bytes(), Some(view)));
-                return Some(view);
+                return Some(i);
             }
             i += 1;
         }
         None
+    }
+
+    /// 最初に一致する公開名の VRAM を読み取る。名前が見つからない場合は `None` を返す。
+    pub fn read_vram<'b>(&'b self, name: &str) -> (result: Option<VramView<'b, 'p, 'a>>)
+        requires self.valid(),
+        ensures self.vram_view_matches(name.spec_bytes(), result),
+    {
+        let Some(i) = self.find_binding(name) else { return None; };
+        let binding = &self.bindings[i];
+        proof { self.binding_has_memory(i); }
+        let Some(bits) = self.module.vm.ram_memory(binding.index) else { unreachable!() };
+        Some(VramView { target: &binding.target, bits })
+    }
+
+    proof fn binding_has_memory(&self, i: usize)
+        requires self.valid(), i < self.bindings@.len(),
+        ensures
+            self.bindings@[i as int].index < self.vm_model().storage_model().len(),
+            self.vm_model().storage_model()[self.bindings@[i as int].index as int].memory_model().is_some(),
+    {
+        let binding = self.bindings@[i as int];
+        let wiring = self._wiring@[binding.index as int];
+        assert(self.module.vm.storage_model()[binding.index as int].wiring_model() == wiring);
+        self.module.vm.storage_shape_evidence(binding.index as int);
+        assert(clocked_storage_memory_width(&wiring).is_some());
+    }
+
+    /// 格納添字の検索結果が、公開名で直接読み取った記憶部に対応することを表す。
+    pub closed spec fn vram_index_matches(&self, name: Seq<u8>, result: Option<usize>) -> bool {
+        match result {
+            None => self.first_binding(name, None),
+            Some(index) => exists|i: usize| {
+                &&& #[trigger] self.first_binding(name, Some(i))
+                &&& index == self.bindings@[i as int].index
+                &&& index < self.vm_model().storage_model().len()
+                &&& self.vm_model().storage_model()[index as int].memory_model().is_some()
+            },
+        }
+    }
+
+    /// 最初に一致した公開名の RAM の格納添字を返す。
+    ///
+    /// 名前が見つからない場合は `None` を返す。添字は、この VM から
+    /// [Self::into_module] で取り出した回路の記憶部を参照するために使える。
+    pub fn vram_storage_index(&self, name: &str) -> (result: Option<usize>)
+        requires self.valid(),
+        ensures self.vram_index_matches(name.spec_bytes(), result),
+    {
+        let Some(i) = self.find_binding(name) else { return None; };
+        proof { self.binding_has_memory(i); }
+        let index = self.bindings[i].index;
+        assert(self.first_binding(name.spec_bytes(), Some(i)));
+        Some(index)
+    }
+
+    /// 名前解決時の借用を手放し、ポート配置と現在の VM を取り出す。
+    ///
+    /// リセットや tick を行わず、現在の状態と RAM の格納順を保つ。
+    pub fn into_module(self) -> (module: ClockedModuleVm)
+        requires self.valid(),
+        ensures module == self.module_model(), module.vm.valid(),
+    {
+        self.module
+    }
+
+    /// 同じ公開名で得た格納添字と読み出し結果は、同じ記憶部を指す。
+    pub proof fn storage_index_agrees(&self, name: Seq<u8>, index: Option<usize>, view: Option<VramView>)
+        requires self.vram_index_matches(name, index), self.vram_view_matches(name, view),
+        ensures
+            match (index, view) {
+                (Some(i), Some(read)) => self.vm_model().storage_model()[i as int].memory_model() == Some(read.bits@),
+                (None, None) => true,
+                _ => false,
+            },
+    {
+        match (index, view) {
+            (Some(index), Some(read)) => {
+                let i = choose|i: usize| {
+                    &&& #[trigger] self.first_binding(name, Some(i))
+                    &&& index == self.bindings@[i as int].index
+                    &&& index < self.vm_model().storage_model().len()
+                    &&& self.vm_model().storage_model()[index as int].memory_model().is_some()
+                };
+                let j = choose|j: int| {
+                    let binding = #[trigger] self.bindings@[j];
+                    &&& 0 <= j < self.bindings@.len() && binding.name.spec_bytes() == name
+                    &&& forall|k: int| 0 <= k < j ==> (#[trigger] self.bindings@[k]).name.spec_bytes() != name
+                    &&& *read.target == binding.target
+                    &&& self.vm_model().storage_model()[binding.index as int].memory_model() == Some(read.bits@)
+                };
+                if i < j {
+                    assert(self.bindings@[i as int].name.spec_bytes() != name);
+                } else if j < i {
+                    assert(self.bindings@[j].name.spec_bytes() != name);
+                }
+                assert(i as int == j);
+                assert(index == self.bindings@[j].index);
+                assert(self.vm_model().storage_model()[index as int].memory_model() == Some(read.bits@));
+            },
+            (None, Some(read)) => {
+                assert(exists|j: int| 0 <= j < self.bindings@.len() && (#[trigger] self.bindings@[j]).name.spec_bytes() == name);
+            },
+            (Some(index), None) => {
+                assert(exists|i: usize| #[trigger] self.first_binding(name, Some(i)));
+                let i = choose|i: usize| #[trigger] self.first_binding(name, Some(i));
+                assert(self.bindings@[i as int].name.spec_bytes() != name);
+            },
+            (None, None) => {},
+        }
     }
 }
 
