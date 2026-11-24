@@ -3,8 +3,9 @@
 use crate::netlist::{ClockedStorageInputs, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
 use crate::netlist::{ClockedVm, NorGate, clocked_gate_updates, clocked_instance_gate_updates_match,
-    clocked_instance_inputs, clocked_instance_outputs_match, clocked_stateful_arguments, clocked_storage_output_width,
-    clocked_storage_pins_valid, output_ports_available, output_values_match,
+    clocked_instance_inputs, clocked_instance_outputs_match, clocked_mapped_storage_reads_match,
+    clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_pin_values,
+    clocked_storage_pins_valid, clocked_storage_value_transition, output_ports_available, output_values_match,
     clocked_storage_width_concat, clocked_storage_widths_agree, instance_gates_at, wire_value,
     instance_gates_in_extension, instance_outputs_match, clocked_wiring_valid, wire_available};
 use core::ops::Range;
@@ -383,7 +384,7 @@ pub(super) proof fn routine_augmented_snapshot(
     child
 }
 
-/// 親 VM の tick を一つの子への入力、ゲート更新、更新後の出力に対応付ける。
+/// 親 VM の tick を、子の入力、ゲートと状態素子の更新、更新後の出力に対応付ける。
 ///
 /// 実引数は親の各時点の配線から読む。更新後の観測には、更新後の実引数を使う。
 pub(super) proof fn routine_tick_observation(
@@ -412,6 +413,22 @@ pub(super) proof fn routine_tick_observation(
             &&& clocked_gate_updates(routine.callee.gates@, result.0, old_gates, new_gates)
             &&& result.2.len() == routine.callee.outputs@.len()
             &&& output_values_match(result.1, new_gates, routine.callee.outputs@, result.2)
+            &&& forall|device: int| #![trigger routine.devices[device]]
+                0 <= device < routine.devices.len() ==> {
+                    let parent = direct + routine.storage.start + device;
+                    let from = routine.external.len() as int
+                        + clocked_storage_output_width(routine.devices.take(device));
+                    let to = from + routine.devices[device].data@.len();
+                    &&& 0 <= parent < previous.storage_model().len()
+                    &&& parent < vm.storage_model().len()
+                    &&& to <= result.0.len() && to <= result.1.len()
+                    &&& result.0.subrange(from, to) == previous.storage_model()[parent].output_model()
+                    &&& result.1.subrange(from, to) == vm.storage_model()[parent].output_model()
+                    &&& clocked_storage_value_transition(previous.storage_model()[parent].output_model(),
+                        previous.storage_model()[parent].memory_model(), vm.storage_model()[parent].output_model(),
+                        vm.storage_model()[parent].memory_model(),
+                        clocked_storage_pin_values(&routine.devices[device], result.0, old_gates))
+                }
             &&& exists|before: Seq<bool>, after: Seq<bool>| {
                 &&& #[trigger] previous.augmented_input_matches(input, before)
                 &&& #[trigger] vm.augmented_input_matches(input, after)
@@ -440,6 +457,35 @@ pub(super) proof fn routine_tick_observation(
     let observed = clocked_instance_inputs(routine.outputs, snapshots.1, new_gates);
     assert(output_values_match(snapshots.1, new_gates, routine.outputs, observed));
     clocked_instance_outputs_match(&routine.callee, pins, routine.outputs, base, snapshots.1, new_gates, observed);
+    let suffix = wiring.skip(direct as int);
+    let child_gates = old_gates.subrange(routine.gates.start as int, routine.gates.end as int);
+    assert(routine_placed(routine, netlist.gates@, suffix, netlist.input_count));
+    assert forall|device: int| #![trigger routine.devices[device]]
+        0 <= device < routine.devices.len() implies {
+            let parent = direct + routine.storage.start + device;
+            let from = routine.external.len() as int
+                + clocked_storage_output_width(routine.devices.take(device));
+            let to = from + routine.devices[device].data@.len();
+            &&& 0 <= parent < previous.storage_model().len()
+            &&& parent < vm.storage_model().len()
+            &&& to <= old_input.len() && to <= new_input.len()
+            &&& old_input.subrange(from, to) == previous.storage_model()[parent].output_model()
+            &&& new_input.subrange(from, to) == vm.storage_model()[parent].output_model()
+            &&& clocked_storage_value_transition(previous.storage_model()[parent].output_model(),
+                previous.storage_model()[parent].memory_model(), vm.storage_model()[parent].output_model(),
+                vm.storage_model()[parent].memory_model(),
+                clocked_storage_pin_values(&routine.devices[device], old_input, child_gates))
+        } by {
+            let relative = routine.storage.start + device;
+            let parent = direct + relative;
+            let mapped = previous.storage_model()[parent].wiring_model();
+            assert(mapped == wiring[parent]);
+            assert(wiring[parent] == suffix[relative]);
+            assert(routine.devices[device].parent_placement_matches(pins, base, &mapped));
+            clocked_mapped_storage_reads_match(routine.devices, device, &mapped, pins, base,
+                routine.callee.gates@.len() as usize, snapshots.0, old_gates);
+            vm.storage_model()[parent].tick_values(&previous.storage_model()[parent], snapshots.0, old_gates);
+        };
     (old_input, new_input, observed)
 }
 

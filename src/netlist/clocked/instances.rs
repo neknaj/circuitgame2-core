@@ -703,6 +703,7 @@ pub proof fn clocked_stateful_instance_reads_match(
 {
     reveal(storage_pins_prefix);
     reveal(placed_storage_prefix);
+    vstd::std_specs::vec::axiom_spec_len(&callee.gates);
     let base = before.len() as usize;
     let count = callee.gates@.len();
     let original = child[index];
@@ -711,12 +712,34 @@ pub proof fn clocked_stateful_instance_reads_match(
     assert(original.parent_placement_matches(arguments, base, &mapped));
     assert(original.pins_available(arguments.len(), count));
     assert(output_ports_available(arguments, input.len(), state.len(), arguments.len() as int));
+    clocked_mapped_storage_reads_match(child, index, &mapped, arguments, base, count as usize, input, state);
+}
+
+/// 親に移した素子の端子は、子回路の配線を読んだときと同じ値を得る。
+pub proof fn clocked_mapped_storage_reads_match(
+    child: Seq<ClockedStorageInputs>, index: int, mapped: &ClockedStorageInputs, arguments: Seq<Wire>,
+    base: usize, count: usize, input: Seq<bool>, state: Seq<bool>,
+)
+    requires
+        0 <= index < child.len(),
+        arguments.len() <= usize::MAX,
+        clocked_storage_pins_valid(child, arguments.len() as usize, count),
+        child[index].parent_placement_matches(arguments, base, mapped),
+        output_ports_available(arguments, input.len(), state.len(), arguments.len() as int),
+        base + count <= state.len() <= usize::MAX,
+    ensures clocked_storage_pin_values(mapped, input, state) ==
+        clocked_storage_pin_values(&child[index], clocked_instance_inputs(arguments, input, state),
+            state[base as int..base + count]),
+{
+    reveal(storage_pins_prefix);
+    let original = child[index];
+    assert(original.pins_available(arguments.len(), count as nat));
     if let Some(address) = original.address {
         let mapped_address = mapped.address->Some_0;
-        instance_pin_values_match(address@, mapped_address@, arguments, base, count, input, state);
+        instance_pin_values_match(address@, mapped_address@, arguments, base, count as nat, input, state);
     }
-    instance_pin_values_match(original.data@, mapped.data@, arguments, base, count, input, state);
-    mapped_wire_value(original.enable, arguments, base, count, input, state);
+    instance_pin_values_match(original.data@, mapped.data@, arguments, base, count as nat, input, state);
+    mapped_wire_value(original.enable, arguments, base, count as nat, input, state);
 }
 
 } // verus!

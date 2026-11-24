@@ -162,16 +162,28 @@ spec fn state_shape(wiring: &ClockedStorageInputs, state: &StorageState) -> bool
 spec fn storage_transition(
     previous: &StorageState, next: &StorageState, address: Option<Seq<bool>>, data: Seq<bool>, enabled: bool,
 ) -> bool {
+    clocked_storage_value_transition(previous.output_bits(), previous.memory_bits(),
+        next.output_bits(), next.memory_bits(), (address, data, enabled))
+}
+
+/// 旧状態と端子値から、ラッチの保持値や RAM の次の記憶内容と登録出力を定める。
+///
+/// RAM の登録出力は書き込み前の記憶内容から読む。
+pub open spec fn clocked_storage_value_transition(
+    previous_output: Seq<bool>, previous_memory: Option<Seq<bool>>,
+    next_output: Seq<bool>, next_memory: Option<Seq<bool>>, pins: (Option<Seq<bool>>, Seq<bool>, bool),
+) -> bool {
+    let (address, data, enabled) = pins;
     match address {
-        None => next.memory_bits().is_none() && previous.memory_bits().is_none()
-            && next.output_bits() == latch_next(previous.output_bits(), data, enabled),
+        None => next_memory.is_none() && previous_memory.is_none()
+            && next_output == latch_next(previous_output, data, enabled),
         Some(bits) => {
             let a = ram_address_value(bits);
-            let memory = previous.memory_bits()->Some_0;
-            &&& previous.memory_bits().is_some()
+            let memory = previous_memory->Some_0;
+            &&& previous_memory.is_some()
             &&& a * data.len() + data.len() <= memory.len()
-            &&& next.output_bits() == ram_read_word(memory, a, data.len())
-            &&& next.memory_bits() == Some(ram_next_memory(memory, a, data, enabled))
+            &&& next_output == ram_read_word(memory, a, data.len())
+            &&& next_memory == Some(ram_next_memory(memory, a, data, enabled))
         },
     }
 }
@@ -369,6 +381,15 @@ impl ClockedStorage {
         &&& self.wiring == previous.wiring
         &&& self.inputs == previous.inputs && self.gates == previous.gates
         &&& storage_transition(&previous.state, &self.state, address, data, enabled)
+    }
+
+    /// 状態素子の実行契約から、配線を読んだ値による状態遷移を取り出す。
+    pub proof fn tick_values(&self, previous: &Self, input: Seq<bool>, gates: Seq<bool>)
+        requires self.storage_tick_matches(previous, input, gates),
+        ensures clocked_storage_value_transition(previous.output_model(), previous.memory_model(),
+            self.output_model(), self.memory_model(),
+            clocked_storage_pin_values(&previous.wiring_model(), input, gates)),
+    {
     }
 
     /// 回路で共有する tick 開始時の入力値と NOR 出力を読み、状態を1 tick 進める。
