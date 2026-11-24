@@ -334,6 +334,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             (instance.outputs.end - instance.outputs.start) as nat)
     }
 
+    /// RAM の配置から、宣言で指定したアドレス幅と1語のビット幅を取り出す。
+    pub(super) proof fn placed_ram_width(
+        &self, checked: &ModuleCalls, limit: u64, site: ClockedStoragePlacement,
+        address: u64, data: ResolvedPortType,
+    )
+        requires
+            self.placement_matches(checked, limit, site),
+            checked.calls@[site.call_index as int].inputs.ports.signature.target matches
+                ModuleCallTarget::StateElement { storage: StorageSignature::Memory { address: expected, data: word, .. }, .. }
+                && address == expected && data == word,
+        ensures
+            site.address_bits == Some(address),
+            match data {
+                ResolvedPortType::Bits(bits) => site.outputs.end - site.outputs.start == bits,
+                ResolvedPortType::Struct { .. } => exists|layouts: StructureLayouts|
+                    #[trigger] self.structure_types_match(limit, Ok(layouts))
+                    && self.layout_port_width_matches(&layouts, data, site.outputs.end - site.outputs.start),
+            },
+    {
+        reveal(UseAliases::placement_matches);
+    }
+
     #[verifier::opaque]
     spec fn placed_prefix(&self, checked: &ModuleCalls, limit: u64, calls: Seq<Option<usize>>,
         instances: Seq<ClockedStoragePlacement>, external: usize, next: usize,

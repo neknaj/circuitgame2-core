@@ -20,7 +20,7 @@ use vstd::prelude::*;
 
 verus! {
 
-spec fn gate_call_order(
+pub(super) closed spec fn gate_call_order(
     calls: Seq<Option<usize>>, consumed: int, order: Seq<int>,
 ) -> bool {
     &&& 0 <= consumed <= calls.len()
@@ -237,7 +237,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// ゲート番号と呼び出し番号の対応を、直接経路が使う配置から導く。
-    proof fn direct_gate_call_order(
+    pub(super) proof fn direct_gate_call_order(
         &self, checked: &ModuleCalls, plan: &ClockedModuleEndpoints, width_limit: u64, wire_limit: usize,
         gate_limit: usize,
     ) -> (order: Seq<int>)

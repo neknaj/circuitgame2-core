@@ -346,6 +346,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         exists|ports: ClockedModuleOutputs|
             #[trigger] self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports))
             && network.inputs == ports.inputs && network.outputs == ports.outputs
+            && self.root_storage_matches(checked, limits, network)
             && clocked_wiring_valid(&network.circuit.netlist_model())
             && network.inputs.total_bits_model() + clocked_storage_output_width(network.storage@)
                 == network.circuit.netlist_model().input_count
@@ -359,6 +360,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && wiring.primitives.len() == checked.calls@.len()
                 && wiring.direct_devices <= network.storage@.len()
                 && wiring.direct_devices <= network.storage_sites@.len()
+                && wiring.direct_devices == network._direct_devices
                 && routines_pins_valid(wiring.routines, network.circuit.netlist_model().input_count,
                     network.circuit.netlist_model().gates@.len())
                 && call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, CallBoundary {
@@ -1837,8 +1839,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
         }
         let network = ClockedModuleNetwork {
-            inputs: ports.inputs, outputs: ports.outputs, circuit, storage, storage_sites, _hierarchy_wiring: Ghost(Some(wiring)),
+            inputs: ports.inputs, outputs: ports.outputs, circuit, storage, storage_sites,
+            _direct_devices: direct_devices, _hierarchy_wiring: Ghost(Some(wiring)),
         };
+        proof {
+            reveal(UseAliases::hierarchy_primitives_bound);
+            assert forall|i: int| 0 <= i < direct_devices implies
+                #[trigger] super::root_storage::storage_site_shape(network.storage_sites@[i], network.storage@[i]) by {
+                let call = self.storage_layout_call_for_instance(checked, limits.width,
+                    network.inputs.total_bits_model(), limits.wiring_bits, &source_direct, i);
+                self.storage_layout_call(checked, limits.width, network.inputs.total_bits_model(), limits.wiring_bits,
+                    &source_direct, call as usize);
+                assert(primitive_follows_plan(checked, calls@, &source_direct, call, primitives[call]));
+                assert(self.hierarchy_primitive_bound(checked, limits.width, &source_ports, definitions@,
+                    call, primitives[call], circuit.netlist_model().gates@, direct_wiring, direct_sites));
+                let primitive = primitives[call]->Some_0;
+                assert(primitive.placement == PrimitivePlacement::Storage(i as usize));
+                super::root_storage::storage_shape_from_row(&direct_sites[i], primitive.arguments, direct_wiring[i]);
+            };
+            self.finish_root_storage(checked, limits, &network, &source_direct);
+        }
         assert(self.hierarchy_network_wiring(checked, limits, &network)) by {
             assert(self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(source_ports)));
         };

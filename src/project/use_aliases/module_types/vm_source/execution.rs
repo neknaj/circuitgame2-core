@@ -5,6 +5,8 @@ mod child_outputs;
 mod direct_source;
 mod hierarchy;
 #[cfg(verus_only)]
+mod root_storage;
+#[cfg(verus_only)]
 mod source_links;
 #[cfg(verus_only)]
 pub use hierarchy::ClockedModuleObservation;
@@ -57,6 +59,7 @@ struct ClockedModuleNetwork<'p, 'a> {
     circuit: ClockedNor,
     storage: Vec<ClockedStorageInputs>,
     storage_sites: Vec<ClockedStoragePlacement<'p, 'a>>,
+    _direct_devices: usize,
     _hierarchy_wiring: Ghost<Option<hierarchy::HierarchyWiring>>,
 }
 
@@ -292,6 +295,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         &&& network.inputs == plan.ports.inputs && network.outputs == plan.ports.outputs
         &&& network.storage_sites@ == plan.storage.instances@
+        &&& self.root_storage_matches(checked, limits, network)
         &&& exists|arguments: Seq<Vec<Vec<ClockedWireDriver>>>, pins: Seq<Vec<Wire>>| {
             let netlist = network.circuit.netlist_model();
             &&& #[trigger] self.vm_calls_bound(limits, checked, plan, arguments, pins, network.circuit.netlist_model().gates@, network.storage@)
@@ -315,8 +319,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             network.storage@.len() == plan.storage.instances@.len(),
             network.circuit.netlist_model().input_count == plan.storage.augmented_inputs,
             resolved_bits(row_model(plan.ports.drivers@), plan.definitions@, network.circuit.netlist_model().outputs@),
+            network._direct_devices == plan.storage.instances@.len(),
+            self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, plan),
         ensures self.network_wiring_on_checked(limits, checked, plan, network),
     {
+        self.direct_gate_call_order(checked, plan, limits.width, limits.wiring_bits, limits.gates);
+        reveal(UseAliases::vm_calls_bound);
+        let direct = &plan.storage;
+        assert forall|i: int| 0 <= i < network._direct_devices implies
+            #[trigger] root_storage::storage_site_shape(network.storage_sites@[i], network.storage@[i]) by {
+            let call = self.storage_layout_call_for_instance(checked, limits.width,
+                network.inputs.total_bits_model(), limits.wiring_bits, direct, i);
+            self.storage_layout_call(checked, limits.width, network.inputs.total_bits_model(), limits.wiring_bits,
+                direct, call as usize);
+            let row = pins[call]@;
+            assert(plan.gate_by_call@[call].is_none());
+            root_storage::storage_shape_from_row(&direct.instances@[i], row, network.storage@[i]);
+        };
+        assert(network.storage_sites@.take(network._direct_devices as int) =~= direct.instances@);
+        self.finish_root_storage(checked, limits, network, direct);
     }
 
     spec fn network_vm_on_reset(
@@ -427,9 +448,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(ClockedModuleVmError::Netlist(error)),
         };
         let ghost source_plan = plan;
+        let direct_devices = plan.storage.instances.len();
         let network = ClockedModuleNetwork {
             inputs: plan.ports.inputs, outputs: plan.ports.outputs, circuit, storage,
-            storage_sites: plan.storage.instances, _hierarchy_wiring: Ghost(None),
+            storage_sites: plan.storage.instances, _direct_devices: direct_devices, _hierarchy_wiring: Ghost(None),
         };
         proof { self.finish_network_wiring(limits, checked, &source_plan, &network, args, pins); }
         Ok(network)
