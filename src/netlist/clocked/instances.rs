@@ -434,28 +434,28 @@ impl ClockedNor {
     }
 
     fn append_checked_instance(
-        &self, caller: &mut Vec<NorGate>, arguments: &[Wire], inputs: usize, planned: usize, mut outputs: Vec<Wire>,
+        &self, caller: &mut Vec<NorGate>, arguments: &[Wire], _inputs: usize, _planned: usize, mut outputs: Vec<Wire>,
     ) -> (result: Vec<Wire>)
         requires
             arguments@.len() == self.netlist_model().input_count,
-            old(caller)@.len() + self.netlist_model().gates@.len() <= planned,
-            arguments_valid(arguments@, inputs, planned, arguments@.len() as int),
+            old(caller)@.len() + self.netlist_model().gates@.len() <= _planned,
+            arguments_valid(arguments@, _inputs, _planned, arguments@.len() as int),
             outputs@.len() == 0,
         ensures
-            clocked_instance_result(&self.netlist_model(), old(caller)@, arguments@, inputs, planned, final(caller)@, Ok(result)),
+            clocked_instance_result(&self.netlist_model(), old(caller)@, arguments@, _inputs, _planned, final(caller)@, Ok(result)),
             ({
                 let base = old(caller)@.len() as usize;
-                &&& final(caller)@.len() == base + self.netlist_model().gates@.len() <= planned
+                &&& final(caller)@.len() == base + self.netlist_model().gates@.len() <= _planned
                 &&& final(caller)@.take(base as int) == old(caller)@
                 &&& instance_gates_at(self.netlist_model().gates@, arguments@, base, final(caller)@)
                 &&& instance_outputs_match(self.netlist_model().outputs@, arguments@, base, result@)
                 &&& forall|i: int| base <= i < final(caller)@.len() ==> {
                     let gate = #[trigger] final(caller)@[i];
-                    wire_available(gate.left, inputs as nat, planned as nat)
-                        && wire_available(gate.right, inputs as nat, planned as nat)
+                    wire_available(gate.left, _inputs as nat, _planned as nat)
+                        && wire_available(gate.right, _inputs as nat, _planned as nat)
                 }
                 &&& forall|i: int| 0 <= i < result@.len() ==>
-                    wire_available(#[trigger] result@[i], inputs as nat, planned as nat)
+                    wire_available(#[trigger] result@[i], _inputs as nat, _planned as nat)
             }),
     {
         proof { use_type_invariant(self); }
@@ -467,14 +467,14 @@ impl ClockedNor {
         assert(caller@.take(base as int) =~= before);
         while i < count
             invariant
-                base == before.len(), count == callee.gates@.len(), base + count <= planned,
+                base == before.len(), count == callee.gates@.len(), base + count <= _planned,
                 arguments@.len() == callee.input_count, i <= count,
-                clocked_wiring_valid(callee), arguments_valid(arguments@, inputs, planned, arguments@.len() as int),
+                clocked_wiring_valid(callee), arguments_valid(arguments@, _inputs, _planned, arguments@.len() as int),
                 instance_gates_match(before, callee.gates@.take(i as int), arguments@, caller@),
                 forall|j: int| base <= j < caller@.len() ==> {
                     let gate = #[trigger] caller@[j];
-                    wire_available(gate.left, inputs as nat, planned as nat)
-                        && wire_available(gate.right, inputs as nat, planned as nat)
+                    wire_available(gate.left, _inputs as nat, _planned as nat)
+                        && wire_available(gate.right, _inputs as nat, _planned as nat)
                 },
             decreases count - i,
         {
@@ -483,8 +483,8 @@ impl ClockedNor {
             let left = instantiate_wire(gate.left, arguments, base);
             let right = instantiate_wire(gate.right, arguments, base);
             proof {
-                mapped_wire_available(gate.left, arguments@, base, inputs, planned, count as nat);
-                mapped_wire_available(gate.right, arguments@, base, inputs, planned, count as nat);
+                mapped_wire_available(gate.left, arguments@, base, _inputs, _planned, count as nat);
+                mapped_wire_available(gate.right, arguments@, base, _inputs, _planned, count as nat);
             }
             let ghost prior = caller@;
             caller.push(NorGate { left, right });
@@ -494,8 +494,8 @@ impl ClockedNor {
                 let original = callee.gates@.take(i + 1)[j];
                 &&& saved.left == instance_wire(original.left, arguments@, base)
                 &&& saved.right == instance_wire(original.right, arguments@, base)
-                &&& wire_available(saved.left, inputs as nat, planned as nat)
-                &&& wire_available(saved.right, inputs as nat, planned as nat)
+                &&& wire_available(saved.left, _inputs as nat, _planned as nat)
+                &&& wire_available(saved.right, _inputs as nat, _planned as nat)
             } by {
                 if j < i {
                     assert(caller@[base + j] == prior[base + j]);
@@ -508,22 +508,22 @@ impl ClockedNor {
         let mut i = 0;
         while i < callee.outputs.len()
             invariant
-                base == before.len(), count == callee.gates@.len(), base + count <= planned,
+                base == before.len(), count == callee.gates@.len(), base + count <= _planned,
                 arguments@.len() == callee.input_count, i == outputs@.len() <= callee.outputs@.len(),
-                clocked_wiring_valid(callee), arguments_valid(arguments@, inputs, planned, arguments@.len() as int),
+                clocked_wiring_valid(callee), arguments_valid(arguments@, _inputs, _planned, arguments@.len() as int),
                 instance_outputs_match(callee.outputs@.take(i as int), arguments@, base, outputs@),
-                forall|j: int| 0 <= j < i ==> wire_available(#[trigger] outputs@[j], inputs as nat, planned as nat),
+                forall|j: int| 0 <= j < i ==> wire_available(#[trigger] outputs@[j], _inputs as nat, _planned as nat),
             decreases callee.outputs@.len() - i,
         {
             let output = callee.outputs[i];
             let wire = instantiate_wire(output, arguments, base);
-            proof { mapped_wire_available(output, arguments@, base, inputs, planned, count as nat); }
+            proof { mapped_wire_available(output, arguments@, base, _inputs, _planned, count as nat); }
             let ghost prior = outputs@;
             outputs.push(wire);
             assert forall|j: int| 0 <= j < outputs@.len() implies {
                 let mapped = #[trigger] outputs@[j];
                 mapped == instance_wire(callee.outputs@.take(i + 1)[j], arguments@, base)
-                    && wire_available(mapped, inputs as nat, planned as nat)
+                    && wire_available(mapped, _inputs as nat, _planned as nat)
             } by {
                 if j < i {
                     assert(outputs@[j] == prior[j]);

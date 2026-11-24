@@ -315,7 +315,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && instances@.len() == checked.calls@.len()
                 && instance_output_slots(instances@, checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len() as int)
                 && self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
-            !(result matches Err(ClockedModuleError::Parent(_))),
+            !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
             !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
     {
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
@@ -511,7 +511,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.function_targets_are_declared(checked, edges@),
         ensures
             self.clocked_functions_match(final(functions)@, width_limit, bit_limit, gate_limit),
-            !(result matches Err(ClockedModuleError::Parent(_))),
+            !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
             result matches Err(ClockedModuleError::PortLayout { direction, site, layout }) ==>
@@ -626,6 +626,50 @@ proof fn extend_assembled_gate_prefix(instances: Seq<SourceInstance>, regions: S
     };
 }
 
+/// 子の出力が参照する入力・状態出力・ゲートを、親の予約区間に対応付ける。
+pub(super) open spec fn relocated_child_driver(
+    output: Wire, arguments: Seq<ClockedWireDriver>, states: core::ops::Range<usize>, gates: core::ops::Range<usize>,
+) -> Option<ClockedWireDriver> {
+    match output {
+        Wire::Input(i) if i < arguments.len() => Some(arguments[i as int]),
+        Wire::Input(i) if states.start + (i - arguments.len()) < states.end =>
+            Some(ClockedWireDriver::Terminal(Wire::Input((states.start + (i - arguments.len())) as usize))),
+        Wire::Input(_) => None,
+        Wire::Constant(bit) => Some(ClockedWireDriver::Terminal(Wire::Constant(bit))),
+        Wire::Gate(i) if gates.start + i < gates.end =>
+            Some(ClockedWireDriver::Terminal(Wire::Gate((gates.start + i) as usize))),
+        Wire::Gate(_) => None,
+    }
+}
+
+/// 子の出力を親の配線に移す。子が外部入力を公開する場合は、親の実引数の駆動元をそのまま返す。
+/// 配置対象の状態出力やゲートが予約区間を外れる場合は `None` を返す。
+pub(super) fn relocate_child_output(
+    output: Wire, arguments: &[ClockedWireDriver], states: &core::ops::Range<usize>, gates: &core::ops::Range<usize>,
+) -> (driver: Option<ClockedWireDriver>)
+    ensures driver == relocated_child_driver(output, arguments@, *states, *gates),
+{
+    match output {
+        Wire::Input(i) if i < arguments.len() => Some(arguments[i]),
+        Wire::Input(i) => {
+            let offset = i - arguments.len();
+            if states.start <= states.end && offset < states.end - states.start {
+                Some(ClockedWireDriver::Terminal(Wire::Input(states.start + offset)))
+            } else {
+                None
+            }
+        },
+        Wire::Constant(bit) => Some(ClockedWireDriver::Terminal(Wire::Constant(bit))),
+        Wire::Gate(i) => {
+            if gates.start <= gates.end && i < gates.end - gates.start {
+                Some(ClockedWireDriver::Terminal(Wire::Gate(gates.start + i)))
+            } else {
+                None
+            }
+        },
+    }
+}
+
 spec fn child_output_driver(output: Wire, arguments: Seq<ClockedWireDriver>, gate_base: usize) -> ClockedWireDriver {
     match output {
         Wire::Input(i) => arguments[i as int],
@@ -706,7 +750,7 @@ fn resolve_instance_arguments<'p, 'a>(instance: &SourceInstance<'_, 'p, 'a>, wir
     -> (result: Result<Vec<Wire>, ClockedModuleError<'p, 'a>>)
     ensures
         result matches Ok(arguments) ==> arguments@ == resolved_arguments(*instance, wires@) && arguments_valid(*instance, wires@),
-        !(result matches Err(ClockedModuleError::Parent(_))),
+        !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
         !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
 {
     let mut arguments: Vec<Wire> = Vec::new();
@@ -746,7 +790,7 @@ fn assemble_child_drivers<'p, 'a>(
     ensures
         result matches Ok((drivers, sites)) ==> sites@.len() == drivers@.len()
             && child_drivers_match(instances@, regions@, instances@.len() as int, drivers@),
-        !(result matches Err(ClockedModuleError::Parent(_))),
+        !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
         !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
 {
     let mut drivers: Vec<ClockedWireDriver> = Vec::new();
@@ -776,21 +820,12 @@ fn assemble_child_drivers<'p, 'a>(
                     == child_output_driver(outputs[k], instance.arguments@, region.start),
             decreases netlist.outputs@.len() - j,
         {
-            let driver = match netlist.outputs[j] {
-                Wire::Input(arg) => {
-                    if arg >= instance.arguments.len() {
-                        return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
-                    }
-                    instance.arguments[arg]
-                },
-                Wire::Constant(bit) => ClockedWireDriver::Terminal(Wire::Constant(bit)),
-                Wire::Gate(gate) => {
-                    if gate >= region.end - region.start {
-                        return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
-                    }
-                    ClockedWireDriver::Terminal(Wire::Gate(region.start + gate))
-                },
+            // 状態を持たない子では、増補入力に配置する状態出力がない。
+            let no_states = core::ops::Range { start: 0, end: 0 };
+            let Some(driver) = relocate_child_output(netlist.outputs[j], &instance.arguments, &no_states, region) else {
+                return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
             };
+            assert(driver == child_output_driver(outputs[j as int], instance.arguments@, region.start));
             let ghost before = drivers@;
             drivers.push(driver);
             assert(drivers@.take(base as int) =~= prefix);
@@ -821,7 +856,7 @@ fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], c
             && circuit.netlist_model().gates@.len() <= limit
             && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
             && source_assembly_matches(instances@, counts@, inputs, output_drivers@, circuit.netlist_model()),
-        !(result matches Err(ClockedModuleError::Parent(_))),
+        !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
         !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
 {
     let (regions, total) = match clocked_reserve(counts, limit) {

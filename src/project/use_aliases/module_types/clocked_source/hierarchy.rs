@@ -144,6 +144,22 @@ struct CheckedModules<'p, 'a> {
     graph: Vec<Vec<Option<usize>>>,
 }
 
+/// ルートから到達するモジュールの呼び出しと、子を先に置いた処理順。
+pub(in crate::project::use_aliases::module_types) struct ClockedHierarchy<'p, 'a> {
+    /// ルートを添字0に置いた宣言位置の列。
+    pub positions: Vec<ModuleBodyPosition>,
+    /// 宣言ごとの検査結果。ルートから到達しない宣言は空欄になる。
+    pub modules: Vec<Option<ModuleCalls<'p, 'a>>>,
+    /// 呼び出し順の子モジュール添字。モジュール以外の呼び出しの欄は空になる。
+    pub graph: Vec<Vec<Option<usize>>>,
+    /// 子が親より前に来る宣言添字の列。未到達の宣言も含む。
+    pub order: Vec<usize>,
+    /// 宣言添字から処理順の位置を引く。
+    pub rank: Ghost<Seq<nat>>,
+    /// 宣言のファイル位置と索引位置から、この表の添字を引く。
+    pub vertices: BTreeMap<Position, usize>,
+}
+
 spec fn pending_matches(pending: Seq<Work>, size: nat) -> bool {
     forall|i: int| 0 <= i < pending.len() ==> {
         let item = #[trigger] pending[i];
@@ -270,6 +286,16 @@ fn module_cycle_sites<'p, 'a>(checked: &CheckedModules<'p, 'a>, edges: &[Depende
     path
 }
 
+spec fn cycle_sites_match(checked: &CheckedModules, edges: Seq<DependencyEdge>, path: Seq<LocatedName>) -> bool {
+    &&& path.len() == edges.len()
+    &&& forall|i: int| 0 <= i < path.len() ==> {
+        let site = #[trigger] path[i];
+        let edge = edges[i];
+        let signature = checked.modules@[edge.from as int]->Some_0.calls@[edge.field as int].inputs.ports.signature;
+        *site.source == *signature.source && site.span == signature.call.span
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn loaded_modules_match(&self, positions: Seq<ModuleBodyPosition>, width: u64, modules: Seq<Option<ModuleCalls>>) -> bool {
         &&& modules.len() == positions.len()
@@ -289,8 +315,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && loaded.modules@[0].is_some(),
             Ok(None) => self.module_calls_result(root, width, Ok(None)),
             Err(ClockedModuleError::Parent(error)) => self.module_calls_result(root, width, Err(error)),
-            Err(ClockedModuleError::Function { .. } | ClockedModuleError::PortLayout { .. }) => false,
-            Err(_) => true,
+            Err(ClockedModuleError::Child { .. } | ClockedModuleError::Unsupported(_)) => true,
+            Err(_) => false,
         },
     {
         let size = positions.len();
@@ -490,6 +516,159 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ok(Some(CheckedModules { modules, graph }))
     }
 
+    /// 階層の宣言位置、呼び出し結果、辺、および処理順の対応を表す。
+    #[verifier::opaque]
+    pub(in crate::project::use_aliases::module_types) closed spec fn clocked_hierarchy_matches(
+        &self, root: ModuleBodyPosition, width: u64, hierarchy: &ClockedHierarchy,
+    ) -> bool {
+        let positions = hierarchy.positions@;
+        let modules = hierarchy.modules@;
+        let graph = hierarchy.graph@;
+        let order = hierarchy.order@;
+        let rank = hierarchy.rank@;
+        let vertices = hierarchy.vertices@;
+        &&& positions.len() > 0 && positions[0] == root && modules[0].is_some()
+        &&& self.loaded_modules_match(positions, width, modules)
+        &&& slots_match(modules, graph) && dependency_graph_valid(graph) && graph_targets_loaded(graph, modules)
+        &&& obeys_cmp::<Position>()
+        &&& vertex_index_matches(positions, vertices) && edges_match(modules, graph, vertices)
+        &&& forall|at: Position| #[trigger] vertices.contains_key(at)
+            == (at == key(root) || module_key(self.targets.project_model().circuits_model(), at))
+        &&& dependencies_in_order(graph, rank) && completion_order_matches(order, rank)
+        &&& order.len() == positions.len()
+        &&& forall|node: int| #![trigger rank[node]] 0 <= node < positions.len() ==>
+            rank[node] < order.len() && order[rank[node] as int] == node
+    }
+
+    /// 宣言表の各欄から元の呼び出し検査結果を取り出せることを示す。
+    pub(in crate::project::use_aliases::module_types) proof fn clocked_hierarchy_evidence(
+        &self, root: ModuleBodyPosition, width: u64, hierarchy: &ClockedHierarchy,
+    )
+        requires self.clocked_hierarchy_matches(root, width, hierarchy),
+        ensures
+            hierarchy.positions@.len() > 0 && hierarchy.positions@[0] == root && hierarchy.modules@[0].is_some(),
+            hierarchy.positions@.len() == hierarchy.modules@.len() == hierarchy.graph@.len() == hierarchy.order@.len(),
+            completion_order_matches(hierarchy.order@, hierarchy.rank@),
+            dependencies_in_order(hierarchy.graph@, hierarchy.rank@),
+            forall|node: int| #![trigger hierarchy.rank@[node]] 0 <= node < hierarchy.positions@.len() ==>
+                hierarchy.rank@[node] < hierarchy.order@.len()
+                    && hierarchy.order@[hierarchy.rank@[node] as int] == node,
+            forall|node: int| 0 <= node < hierarchy.modules@.len() ==> {
+                let calls = #[trigger] hierarchy.modules@[node];
+                match calls {
+                    Some(loaded) => self.module_calls_result(hierarchy.positions@[node], width, Ok(Some(loaded)))
+                        && hierarchy.graph@[node]@.len() == loaded.calls@.len(),
+                    None => hierarchy.graph@[node]@.len() == 0,
+                }
+            },
+    {
+        reveal(UseAliases::clocked_hierarchy_matches);
+    }
+
+    /// 呼び出し順の一欄から、子モジュールの宣言位置と処理順を取り出す。
+    pub(in crate::project::use_aliases::module_types) proof fn clocked_hierarchy_edge(
+        &self, root: ModuleBodyPosition, width: u64, hierarchy: &ClockedHierarchy, node: int, call: int,
+    )
+        requires self.clocked_hierarchy_matches(root, width, hierarchy),
+            0 <= node < hierarchy.modules@.len(),
+            hierarchy.modules@[node].is_some(),
+            0 <= call < hierarchy.modules@[node]->Some_0.calls@.len(),
+        ensures ({
+            let target = hierarchy.modules@[node]->Some_0.calls@[call].inputs.ports.signature.target;
+            match hierarchy.graph@[node]@[call] {
+                Some(child) => {
+                    &&& child < hierarchy.positions@.len()
+                    &&& hierarchy.modules@[child as int].is_some()
+                    &&& hierarchy.rank@[child as int] < hierarchy.rank@[node]
+                    &&& target matches ModuleCallTarget::Routine { position, .. }
+                    &&& hierarchy.positions@[child as int] == position
+                },
+                None => target matches ModuleCallTarget::Routine { position, .. } ==>
+                    function_position(self.targets.project_model().circuits_model(), (position.file, position.entry)),
+            }
+        }),
+    {
+        reveal(UseAliases::clocked_hierarchy_matches);
+        let loaded = hierarchy.modules@[node]->Some_0;
+        let item = &loaded.calls@[call];
+        assert(hierarchy.graph@[node]@[call] == call_vertex(item, hierarchy.vertices@));
+        if let Some(child) = hierarchy.graph@[node]@[call] {
+            call_vertex_position(item, hierarchy.vertices@, hierarchy.positions@, child);
+            vstd::std_specs::vec::axiom_spec_len(&hierarchy.graph);
+            vstd::std_specs::vec::axiom_spec_len(&hierarchy.graph@[node]);
+            assert(node as usize as int == node && call as usize as int == call);
+            let edge = DependencyEdge { from: node as usize, to: child, field: call as usize };
+            assert(dependency_edge(hierarchy.graph@, edge));
+        } else if let ModuleCallTarget::Routine { position, .. } = item.inputs.ports.signature.target {
+            self.module_calls_item_evidence(hierarchy.positions@[node], width, &loaded, call);
+            self.module_call_ports_evidence(item.at, width, item.inputs.ports);
+            self.module_call_site_evidence(item.at, width, item.inputs.ports.signature);
+            assert(!hierarchy.vertices@.contains_key(key(position)));
+            assert(!module_key(self.targets.project_model().circuits_model(), key(position)));
+        }
+    }
+
+    /// 検査した宣言の呼び出しで閉路を作り、その順に各呼び出しの元ソース範囲を示す。
+    pub closed spec fn clocked_hierarchy_recursion(&self, root: ModuleBodyPosition, width: u64,
+        path: Seq<LocatedName>,
+    ) -> bool {
+        exists|positions: Seq<ModuleBodyPosition>, checked: CheckedModules, vertices: Map<Position, usize>,
+            cycle: Seq<DependencyEdge>|
+            #![trigger dependency_cycle(checked.graph@, cycle), vertex_index_matches(positions, vertices)]
+            dependency_cycle(checked.graph@, cycle)
+            && positions.len() > 0 && positions[0] == root && checked.modules@[0].is_some()
+            && self.loaded_modules_match(positions, width, checked.modules@)
+            && vertex_index_matches(positions, vertices) && edges_match(checked.modules@, checked.graph@, vertices)
+            && slots_match(checked.modules@, checked.graph@) && graph_targets_loaded(checked.graph@, checked.modules@)
+            && cycle_sites_match(&checked, cycle, path)
+    }
+
+    /// ルートから到達するモジュールの呼び出しを読み取り、子から親への処理順を求める。
+    ///
+    /// 指定位置にモジュールがなければ `None` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 呼び出しを検査してから宣言間の再帰を調べる。再帰は閉路を構成する呼び出しの位置で報告する。
+    pub(in crate::project::use_aliases::module_types) fn checked_clocked_hierarchy(
+        &self, owner: ModuleBodyPosition, width: u64,
+    ) -> (result: Result<Option<ClockedHierarchy<'p, 'a>>, ClockedModuleError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures match result {
+            Ok(Some(hierarchy)) => self.clocked_hierarchy_matches(owner, width, &hierarchy),
+            Ok(None) => self.module_calls_result(owner, width, Ok(None)),
+            Err(ClockedModuleError::Parent(error)) => self.module_calls_result(owner, width, Err(error)),
+            Err(ClockedModuleError::Recursion(path)) =>
+                path@.len() > 0 && self.clocked_hierarchy_recursion(owner, width, path@),
+            Err(ClockedModuleError::Child { .. } | ClockedModuleError::Unsupported(_)) => true,
+            Err(_) => false,
+        },
+    {
+        let (positions, vertices) = indexed_modules(self.targets.project(), owner);
+        let Some(checked) = self.reachable_modules(owner, &positions, &vertices, width)? else { return Ok(None); };
+        let order = match check_dependency_order(&checked.graph, true) {
+            Ok(order) => order,
+            Err(cycle) => {
+                let path = module_cycle_sites(&checked, &cycle);
+                assert(cycle_sites_match(&checked, cycle@, path@));
+                assert(self.clocked_hierarchy_recursion(owner, width, path@));
+                return Err(ClockedModuleError::Recursion(path));
+            },
+        };
+        let ghost rank = choose|rank: Seq<nat>|
+            #[trigger] dependencies_in_order(checked.graph@, rank)
+            && completion_order_matches(order@, rank)
+            && (forall|node: int| #![trigger rank[node]] 0 <= node < checked.graph@.len()
+                ==> rank[node] < order@.len() && order@[rank[node] as int] == node);
+        let hierarchy = ClockedHierarchy {
+            positions, modules: checked.modules, graph: checked.graph, order, rank: Ghost(rank), vertices,
+        };
+        assert(self.clocked_hierarchy_matches(owner, width, &hierarchy)) by {
+            reveal(UseAliases::clocked_hierarchy_matches);
+        };
+        Ok(Some(hierarchy))
+    }
+
     /// ルートから到達するモジュールを子から順に展開する。
     ///
     /// 平坦なビット配列の上限には `usize::MAX` を使う。
@@ -504,6 +683,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result == Ok(None) ==> self.module_calls_result(owner, width_limit, Ok(None)),
             result matches Err(ClockedModuleError::Parent(error)) ==>
                 self.module_calls_result(owner, width_limit, Err(error)),
+            result matches Err(ClockedModuleError::Recursion(path)) ==>
+                path@.len() > 0 && self.clocked_hierarchy_recursion(owner, width_limit, path@),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width_limit, usize::MAX, gate_limit, call, expansion),
             result matches Ok(Some(circuit)) ==> circuit.netlist_model().gates@.len() <= gate_limit
@@ -537,6 +718,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result == Ok(None) ==> self.module_calls_result(owner, width_limit, Ok(None)),
             result matches Err(ClockedModuleError::Parent(error)) ==>
                 self.module_calls_result(owner, width_limit, Err(error)),
+            result matches Err(ClockedModuleError::Recursion(path)) ==>
+                path@.len() > 0 && self.clocked_hierarchy_recursion(owner, width_limit, path@),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
             result matches Err(ClockedModuleError::PortLayout { direction, site, layout }) ==>
@@ -547,12 +730,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
                 && self.clocked_module_source_layout(owner, width_limit, &circuit.netlist_model()),
     {
-        let (positions, vertices) = indexed_modules(self.targets.project(), owner);
-        let Some(checked) = self.reachable_modules(owner, &positions, &vertices, width_limit)? else { return Ok(None); };
-        let order = match check_dependency_order(&checked.graph, true) {
-            Ok(order) => order,
-            Err(cycle) => return Err(ClockedModuleError::Recursion(module_cycle_sites(&checked, &cycle))),
-        };
+        let Some(hierarchy) = self.checked_clocked_hierarchy(owner, width_limit)? else { return Ok(None); };
+        proof {
+            self.clocked_hierarchy_evidence(owner, width_limit, &hierarchy);
+            assert({
+                let positions = hierarchy.positions@;
+                let modules = hierarchy.modules@;
+                let graph = hierarchy.graph@;
+                let vertices = hierarchy.vertices@;
+                &&& obeys_cmp::<Position>()
+                &&& self.loaded_modules_match(positions, width_limit, modules)
+                &&& slots_match(modules, graph) && graph_targets_loaded(graph, modules)
+                &&& vertex_index_matches(positions, vertices) && edges_match(modules, graph, vertices)
+                &&& forall|at: Position| #[trigger] vertices.contains_key(at)
+                    == (at == key(owner) || module_key(self.targets.project_model().circuits_model(), at))
+            }) by { reveal(UseAliases::clocked_hierarchy_matches); };
+        }
+        let ghost rank = hierarchy.rank@;
+        let positions = hierarchy.positions;
+        let order = hierarchy.order;
+        let _vertices = hierarchy.vertices;
+        let checked = CheckedModules { modules: hierarchy.modules, graph: hierarchy.graph };
         let builtin = match builtin_instance() {
             Ok(circuit) => circuit,
             Err(error) => return Err(ClockedModuleError::Netlist(error)),
@@ -568,11 +766,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             templates.push(None);
             i += 1;
         }
-        let ghost rank = choose|rank: Seq<nat>|
-            #[trigger] dependencies_in_order(checked.graph@, rank)
-            && completion_order_matches(order@, rank)
-            && (forall|node: int| #![trigger rank[node]] 0 <= node < checked.graph@.len()
-                ==> rank[node] < order@.len() && order@[rank[node] as int] == node);
         let ghost mut layouts = Seq::new(size as nat, |_: int| None::<ModuleSourceLayout>);
         proof { self.empty_source_table(positions@, width_limit, checked.modules@, rank, layouts); }
         let mut i = 0;
@@ -580,7 +773,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 self.can_resolve(), size == positions@.len() == templates@.len(), positions@[0] == owner,
                 obeys_cmp::<Position>(), self.clocked_functions_match(functions@, width_limit, bit_limit, gate_limit),
-                forall|at: Position| #[trigger] vertices@.contains_key(at)
+                forall|at: Position| #[trigger] _vertices@.contains_key(at)
                     == (at == key(owner) || module_key(self.targets.project_model().circuits_model(), at)),
                 self.loaded_modules_match(positions@, width_limit, checked.modules@),
                 slots_match(checked.modules@, checked.graph@), checked.modules@[0].is_some(),
@@ -589,7 +782,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> rank[vertex] < order@.len() && order@[rank[vertex] as int] == vertex,
                 dependencies_in_order(checked.graph@, rank), graph_targets_loaded(checked.graph@, checked.modules@),
                 completed_templates(checked.modules@, rank, templates@, layouts, positions@, i as int),
-                vertex_index_matches(positions@, vertices@), edges_match(checked.modules@, checked.graph@, vertices@),
+                vertex_index_matches(positions@, _vertices@), edges_match(checked.modules@, checked.graph@, _vertices@),
                 self.source_model_table(positions@, width_limit, checked.modules@, rank, layouts),
                 forall|j: int| 0 <= j < layouts.len() && (#[trigger] layouts[j]).is_some() ==> rank[j] < i,
                 builtin_nor_template(&builtin.netlist_model()),
@@ -607,8 +800,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         assert(field as usize as int == field);
                         let call = &loaded.calls@[field];
                         assert(edges@[field] == checked.graph@[node as int]@[field]);
-                        assert(call_vertex(call, vertices@) == Some(child));
-                        call_vertex_position(call, vertices@, positions@, child);
+                        assert(call_vertex(call, _vertices@) == Some(child));
+                        call_vertex_position(call, _vertices@, positions@, child);
                         let position = call.inputs.ports.signature.target->Routine_position;
                         let edge = DependencyEdge { from: node, to: child, field: field as usize };
                         assert(dependency_edge(checked.graph@, edge));
@@ -633,8 +826,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             self.module_call_ports_evidence(call.at, width_limit, call.inputs.ports);
                             self.module_call_site_evidence(call.at, width_limit, call.inputs.ports.signature);
                             assert(edges@[field] == checked.graph@[node as int]@[field]);
-                            assert(call_vertex(call, vertices@).is_none());
-                            assert(!vertices@.contains_key(target));
+                            assert(call_vertex(call, _vertices@).is_none());
+                            assert(!_vertices@.contains_key(target));
                             assert(!module_key(self.targets.project_model().circuits_model(), target));
                         }
                     };
@@ -655,8 +848,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             } else {
                                 let child = edges@[field]->Some_0;
                                 assert(edges@[field] == checked.graph@[node as int]@[field]);
-                                assert(call_vertex(&call, vertices@) == Some(child));
-                                call_vertex_position(&call, vertices@, positions@, child);
+                                assert(call_vertex(&call, _vertices@) == Some(child));
+                                call_vertex_position(&call, _vertices@, positions@, child);
                                 assert(call_layout_is_ready(&call, edges@[field], templates@, layouts));
                                 let edge = DependencyEdge { from: node, to: child, field: field as usize };
                                 assert(dependency_edge(checked.graph@, edge));
@@ -673,7 +866,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             #[trigger] positions@[a] != #[trigger] positions@[b] by {
                             let first = key(positions@[a]);
                             let second = key(positions@[b]);
-                            assert(vertices@[first] == a && vertices@[second] == b);
+                            assert(_vertices@[first] == a && _vertices@[second] == b);
                         };
                         self.source_model_for_root(owner, width_limit, positions@, checked.modules@, rank,
                             layouts.update(0, Some(layout)), &circuit.netlist_model());

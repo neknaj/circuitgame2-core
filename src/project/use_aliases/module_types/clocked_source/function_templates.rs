@@ -88,7 +88,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures
             self.clocked_functions_match(final(cache)@, width, bits, gates),
             result is Ok ==> function_templates_cover(calls, edges@, final(cache)@, calls.calls@.len() as int),
-            !(result matches Err(ClockedModuleError::Parent(_))),
+            !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
             !(result matches Err(ClockedModuleError::PortLayout { .. })),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width, bits, gates, call, expansion)
