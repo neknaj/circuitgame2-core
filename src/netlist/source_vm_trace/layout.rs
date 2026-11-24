@@ -6,7 +6,8 @@ use super::{
 };
 use crate::netlist::{
     ClockedStorageInputs, ClockedVm, NorNetlist, SourceGateId, Wire, clocked_storage_memory_width,
-    clocked_storage_output_width, clocked_storage_pin_values, clocked_storage_value_transition, clocked_vm_trace,
+    clocked_storage_output_width, clocked_storage_pin_values, clocked_storage_value_transition,
+    clocked_storage_width_concat, clocked_storage_width_push, clocked_vm_trace,
     output_values_match, wire_value,
 };
 use vstd::prelude::*;
@@ -71,6 +72,63 @@ pub(crate) open spec fn source_vm_storage_pair(
     }
     &&& source_vm_row_pair(external, wiring, layout, source.data, flat.data@)
     &&& source_vm_terminal_pair(external, wiring, layout, source.enable, flat.enable)
+}
+
+proof fn registered_ranges_separate(wiring: Seq<ClockedStorageInputs>, first: int, later: int)
+    requires 0 <= first < later < wiring.len(),
+    ensures clocked_storage_output_width(wiring.take(first)) + wiring[first].data@.len()
+        <= clocked_storage_output_width(wiring.take(later)),
+{
+    let prefix = wiring.take(first);
+    let through = wiring.take(first + 1);
+    assert(through =~= prefix.push(wiring[first]));
+    clocked_storage_width_push(prefix, wiring[first]);
+    let gap = wiring.subrange(first + 1, later);
+    assert(wiring.take(later) =~= through + gap);
+    clocked_storage_width_concat(through, gap);
+}
+
+proof fn paired_terminal_unique(
+    external: usize, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+    first: SourceVmWire, second: SourceVmWire, flat: Wire,
+)
+    requires
+        indexed(layout.devices, layout.device_index, layout.devices.to_set()),
+        source_vm_terminal_pair(external, wiring, layout, first, flat),
+        source_vm_terminal_pair(external, wiring, layout, second, flat),
+    ensures first == second,
+{
+    if let (SourceVmWire::Registered(a, left), SourceVmWire::Registered(b, right)) = (first, second) {
+        let i = layout.device_index[a];
+        let j = layout.device_index[b];
+        if i < j {
+            registered_ranges_separate(wiring, i, j);
+        } else if j < i {
+            registered_ranges_separate(wiring, j, i);
+        }
+        assert(i == j);
+        assert(layout.devices[i] == a && layout.devices[j] == b);
+        assert(left == right);
+    }
+}
+
+/// 同じ VM 配線列と対応する二つのソース配線列は、端子ごとに一致する。
+pub(crate) proof fn source_vm_paired_rows_agree(
+    external: usize, wiring: Seq<ClockedStorageInputs>, gates: Seq<SourceGateId>, devices: Seq<SourceDeviceId>,
+    first: Seq<SourceVmWire>, second: Seq<SourceVmWire>, flat: Seq<Wire>,
+)
+    requires
+        devices.no_duplicates(),
+        source_vm_row_pair(external, wiring, &source_vm_layout_for_orders(gates, devices), first, flat),
+        source_vm_row_pair(external, wiring, &source_vm_layout_for_orders(gates, devices), second, flat),
+    ensures first == second,
+{
+    index_by_order(devices);
+    let layout = source_vm_layout_for_orders(gates, devices);
+    assert forall|i: int| 0 <= i < flat.len() implies (#[trigger] first[i]) == second[i] by {
+        paired_terminal_unique(external, wiring, &layout, first[i], second[i], flat[i]);
+    };
+    assert(first =~= second);
 }
 
 /// 全ソース素子を一度ずつ配置し、端子と公開出力が対応する配線を読むことを表す。

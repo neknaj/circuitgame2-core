@@ -6,6 +6,8 @@ mod path_trace;
 #[cfg(verus_only)]
 mod source_ids;
 #[cfg(verus_only)]
+mod source_links;
+#[cfg(verus_only)]
 mod source_placement;
 #[cfg(verus_only)]
 pub use path_trace::ClockedModuleObservation;
@@ -39,7 +41,7 @@ use super::super::super::clocked_source::resolved_driver;
 use super::super::super::clocked_plan::{clocked_cycle_edge, clocked_wire_at, clocked_wire_cycle, clocked_wires_match};
 use crate::netlist::{ClockedNor, ClockedStatefulInstanceError, ClockedStorageInputs, NorGate, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
-use crate::netlist::{clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_width_concat,
+use crate::netlist::{clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_width_concat, clocked_wiring_valid,
     instance_outputs_match, output_ports_available};
 use crate::project::{LocatedName, ModuleCallTarget};
 use alloc::{boxed::Box, vec::Vec};
@@ -338,6 +340,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         exists|ports: ClockedModuleOutputs|
             #[trigger] self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports))
             && network.inputs == ports.inputs && network.outputs == ports.outputs
+            && clocked_wiring_valid(&network.circuit.netlist_model())
             && network.inputs.total_bits_model() + clocked_storage_output_width(network.storage@)
                 == network.circuit.netlist_model().input_count
             && (network._hierarchy_wiring@ matches Some(wiring)
@@ -440,6 +443,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let definitions = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@;
         &&& wiring.origins.len() == definitions.len() == ports.definitions.ranges_model().len()
         &&& wiring.definitions.len() == ports.definitions.total_bits_model()
+        &&& wiring.symbolic.len() == wiring.definitions.len()
         &&& clocked_wires_match(wiring.symbolic, wiring.definitions)
         &&& resolved_bits(row_model(ports.drivers@), wiring.definitions, outputs)
         &&& wiring.routines.len() == checked.calls@.len()
@@ -460,7 +464,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let parent = ports.definitions.ranges_model()[slot];
         let expected = wiring.definitions.subrange(parent.start as int, parent.end as int);
         let symbolic = wiring.symbolic.subrange(parent.start as int, parent.end as int);
-        match wiring.origins[slot] {
+        &&& parent.start <= parent.end <= wiring.definitions.len()
+        &&& match wiring.origins[slot] {
             HierarchyRowOrigin::Local(wires) => {
                 self.wire_definition_without_call_matches(checked, ports, slot as usize, Some(wires))
                     && wires@ == symbolic
@@ -481,7 +486,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             row_model(routine.argument_rows@), routine.state_inputs, routine.gates, symbolic)
                         &&& {
                             let child = routine.layout.ranges_model()[port];
-                            expected == routine.outputs.subrange(child.start as int, child.end as int)
+                            &&& child.start <= child.end <= routine.outputs.len()
+                            &&& expected == routine.outputs.subrange(child.start as int, child.end as int)
                         }
                     },
                 }
@@ -1802,6 +1808,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                                     placed.arguments@, placed.states, placed.gates, symbolic));
                                 assert(child_netlist_port_drivers_match(&routine.callee, &routine.layout, port,
                                     row_model(routine.argument_rows@), routine.state_inputs, routine.gates, symbolic));
+                                placement_model::placed_routine_evidence(captured, circuit.netlist_model().gates@,
+                                    routine_storage, first_state, total_inputs, index as int);
+                                assert(routine.outputs.len() == routine.callee.outputs@.len());
                             }
                         },
                         HierarchyRowOrigin::Local(wires) => {

@@ -63,6 +63,26 @@ pub(super) closed spec fn routines_pins_valid(routines: Seq<Option<RoutineWiring
         ==> routine_pins_valid(routine, inputs, gates))
 }
 
+/// 子に渡す実引数の端子は、親の増補入力列とゲート列の範囲内にある。
+pub(super) proof fn routine_external_pin_bounds(
+    routines: Seq<Option<RoutineWiring>>, inputs: usize, gates: nat, call: int,
+)
+    requires routines_pins_valid(routines, inputs, gates), 0 <= call < routines.len(), routines[call].is_some(),
+    ensures ({
+        let external = routines[call]->Some_0.external;
+        output_ports_available(external, inputs as nat, gates, external.len() as int)
+    }),
+{
+    reveal(routines_pins_valid);
+    let routine = routines[call]->Some_0;
+    let args = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+        clocked_storage_output_width(routine.devices));
+    assert forall|i: int| 0 <= i < routine.external.len() implies
+        wire_available(#[trigger] routine.external[i], inputs as nat, gates) by {
+        assert(routine.external[i] == args[i]);
+    };
+}
+
 pub(super) proof fn empty_routine_pins(inputs: usize, gates: nat)
     ensures routines_pins_valid(Seq::empty(), inputs, gates),
 {
