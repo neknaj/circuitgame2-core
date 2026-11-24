@@ -30,7 +30,8 @@ pub use clocked::{
     nor_traces_agree, reset_matches, tick_matches,
 };
 #[cfg(verus_only)]
-pub use clocked::{clocked_instance_inputs, clocked_instance_outputs_match, clocked_instance_result, clocked_instance_steps_match};
+pub use clocked::{clocked_instance_gate_updates_match, clocked_instance_inputs, clocked_instance_outputs_match,
+    clocked_instance_result, clocked_instance_steps_match};
 #[cfg(verus_only)]
 pub use instances::{instance_gates_at, instance_gates_in_extension, instance_outputs_match, instance_wire};
 pub use port_layout::{PortBitLayout, PortBitLayoutError};

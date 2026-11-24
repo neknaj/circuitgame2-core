@@ -317,12 +317,19 @@ impl ClockedNor {
                 let netlist = self.netlist_model();
                 let width = clocked_storage_output_width(child@);
                 let start = *old(next_state_input);
+                let base = old(caller)@.len() as usize;
+                let arguments = clocked_stateful_arguments(external@, start, width);
                 &&& external@.len() + width == netlist.input_count
                 &&& start + width == *final(next_state_input) <= inputs
                 &&& clocked_stateful_instance_result(&netlist, child@, old(caller)@,
-                    clocked_stateful_arguments(external@, start, width), inputs, planned, final(caller)@, Ok(instance))
-                &&& instance_outputs_match(netlist.outputs@, clocked_stateful_arguments(external@, start, width),
-                    old(caller)@.len() as usize, instance.outputs@)
+                    arguments, inputs, planned, final(caller)@, Ok(instance))
+                &&& final(caller)@.len() == base + netlist.gates@.len() <= planned
+                &&& final(caller)@.take(base as int) == old(caller)@
+                &&& instance_gates_at(netlist.gates@, arguments, base, final(caller)@)
+                &&& instance_outputs_match(netlist.outputs@, arguments, base, instance.outputs@)
+                &&& instance.storage@.len() == child@.len()
+                &&& forall|i: int| 0 <= i < instance.storage@.len() ==>
+                    child@[i].parent_placement_matches(arguments, base, &(#[trigger] instance.storage@[i]))
             },
             result matches Err(error) ==> {
                 let netlist = self.netlist_model();
@@ -371,6 +378,8 @@ impl ClockedNor {
                 let netlist = self.netlist_model();
                 let base = old(caller)@.len() as usize;
                 &&& final(caller)@.len() == base + netlist.gates@.len() <= planned
+                &&& final(caller)@.take(base as int) == old(caller)@
+                &&& instance_gates_at(netlist.gates@, arguments@, base, final(caller)@)
                 &&& instance.storage@.len() == child@.len()
                 &&& instance_outputs_match(netlist.outputs@, arguments@, base, instance.outputs@)
                 &&& forall|i: int| 0 <= i < instance.storage@.len() ==>
@@ -569,10 +578,30 @@ pub proof fn clocked_instance_steps_match(
             previous[base as int..base + callee.gates@.len()],
             frame.gates@[base as int..base + callee.gates@.len()]),
 {
-    let count = callee.gates@.len();
     vstd::std_specs::vec::axiom_spec_len(&parent.gates);
+    clocked_instance_gate_updates_match(callee, parent.gates@, arguments, base, input, previous, frame.gates@);
+}
+
+/// 増補入力を含む親の開始状態から更新したゲート列を、子のゲート区間へ射影する。
+pub proof fn clocked_instance_gate_updates_match(
+    callee: &NorNetlist, parent_gates: Seq<NorGate>, arguments: Seq<Wire>, base: usize,
+    input: Seq<bool>, previous: Seq<bool>, next: Seq<bool>,
+)
+    requires
+        clocked_wiring_valid(callee),
+        parent_gates.len() == previous.len() == next.len() <= usize::MAX,
+        clocked_gate_updates(parent_gates, input, previous, next),
+        callee.input_count == arguments.len(),
+        instance_gates_at(callee.gates@, arguments, base, parent_gates),
+        forall|i: int| 0 <= i < arguments.len() ==> wire_available(#[trigger] arguments[i], input.len(), previous.len()),
+    ensures
+        clocked_gate_updates(callee.gates@, clocked_instance_inputs(arguments, input, previous),
+            previous[base as int..base + callee.gates@.len()],
+            next[base as int..base + callee.gates@.len()]),
+{
+    let count = callee.gates@.len();
     let local_before = previous[base as int..base + count];
-    let local_after = frame.gates@[base as int..base + count];
+    let local_after = next[base as int..base + count];
     let inputs = clocked_instance_inputs(arguments, input, previous);
     assert forall|i: int| 0 <= i < local_after.len() implies {
         let gate = callee.gates@[i];
@@ -580,12 +609,12 @@ pub proof fn clocked_instance_steps_match(
             || wire_value(gate.right, inputs, local_before))
     } by {
         let gate = callee.gates@[i];
-        let mapped = parent.gates@[base + i];
+        let mapped = parent_gates[base + i];
         assert(mapped.left == instance_wire(gate.left, arguments, base));
         assert(mapped.right == instance_wire(gate.right, arguments, base));
         mapped_wire_value(gate.left, arguments, base, count, input, previous);
         mapped_wire_value(gate.right, arguments, base, count, input, previous);
-        assert(local_after[i] == frame.gates@[base + i]);
+        assert(local_after[i] == next[base + i]);
     };
 }
 

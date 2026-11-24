@@ -48,6 +48,7 @@ struct ClockedModuleNetwork<'p, 'a> {
     circuit: ClockedNor,
     storage: Vec<ClockedStorageInputs>,
     storage_sites: Vec<ClockedStoragePlacement<'p, 'a>>,
+    _hierarchy_wiring: Ghost<Option<hierarchy::HierarchyWiring>>,
 }
 
 /// モジュールを tick 実行用の VM に変換できなかった理由。
@@ -418,7 +419,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let ghost source_plan = plan;
         let network = ClockedModuleNetwork {
             inputs: plan.ports.inputs, outputs: plan.ports.outputs, circuit, storage,
-            storage_sites: plan.storage.instances,
+            storage_sites: plan.storage.instances, _hierarchy_wiring: Ghost(None),
         };
         proof { self.finish_network_wiring(limits, checked, &source_plan, &network, args, pins); }
         Ok(network)

@@ -54,6 +54,13 @@ struct HierarchyRows {
     _origins: Ghost<Seq<HierarchyRowOrigin>>,
 }
 
+/// 親の定義と公開ポートが参照する配線、および各呼び出しの移設済み出力。
+pub(super) struct HierarchyWiring {
+    definitions: Seq<Wire>,
+    origins: Seq<HierarchyRowOrigin>,
+    routine_outputs: Seq<Option<(PortBitLayout, Seq<Wire>)>>,
+}
+
 fn call_site<'p, 'a>(checked: &ModuleCalls<'p, 'a>, call: usize) -> (site: LocatedName<'p, 'a>)
     requires call < checked.calls@.len(),
     ensures site.source == checked.calls@[call as int].inputs.ports.signature.source
@@ -82,15 +89,61 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         false
     }
 
-    spec fn hierarchy_network_ports(
+    spec fn hierarchy_network_wiring(
         &self, checked: &ModuleCalls, limits: ClockedModuleVmLimits, network: &ClockedModuleNetwork,
     ) -> bool {
         exists|ports: ClockedModuleOutputs|
             #[trigger] self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports))
             && network.inputs == ports.inputs && network.outputs == ports.outputs
+            && (network._hierarchy_wiring@ matches Some(wiring)
+                && self.hierarchy_public_wiring(checked, &ports, &wiring, network.circuit.netlist_model().outputs@))
     }
 
-    /// VM の公開ポートが階層のルート宣言に対応し、組み立てたネットワークから初期化されることを表す。
+    #[verifier::opaque]
+    spec fn hierarchy_public_wiring(
+        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, wiring: &HierarchyWiring, outputs: Seq<Wire>,
+    ) -> bool {
+        let definitions = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@;
+        &&& wiring.origins.len() == definitions.len() == ports.definitions.ranges_model().len()
+        &&& wiring.definitions.len() == ports.definitions.total_bits_model()
+        &&& resolved_bits(row_model(ports.drivers@), wiring.definitions, outputs)
+        &&& wiring.routine_outputs.len() == checked.calls@.len()
+        &&& forall|call: int| 0 <= call < checked.calls@.len() ==>
+            ((#[trigger] wiring.routine_outputs[call]).is_some()
+                == (checked.calls@[call].inputs.ports.signature.target is Routine))
+        &&& forall|slot: int| 0 <= slot < definitions.len() ==> #[trigger]
+            self.hierarchy_definition_wiring(checked, ports, wiring, slot)
+    }
+
+    spec fn hierarchy_definition_wiring(
+        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, wiring: &HierarchyWiring, slot: int,
+    ) -> bool {
+        let parent = ports.definitions.ranges_model()[slot];
+        let expected = wiring.definitions.subrange(parent.start as int, parent.end as int);
+        match wiring.origins[slot] {
+            HierarchyRowOrigin::Local(wires) => {
+                self.wire_definition_without_call_matches(checked, ports, slot as usize, Some(wires))
+                    && resolved_bits(wires@, wiring.definitions, expected)
+            },
+            HierarchyRowOrigin::Call(call) => {
+                &&& self.source_vm_root_slot(checked, slot, call as int)
+                &&& call < wiring.routine_outputs.len()
+                &&& match wiring.routine_outputs[call as int] {
+                    None => self.source_vm_direct_slot(checked, slot, call as int),
+                    Some((layout, mapped)) => {
+                        let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index as int;
+                        &&& port < layout.ranges_model().len()
+                        &&& {
+                            let child = layout.ranges_model()[port];
+                            expected == mapped.subrange(child.start as int, child.end as int)
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    /// ルートの定義と公開ポートの配線に対応するネットワークから、VM が初期化されることを表す。
     pub closed spec fn clocked_module_hierarchy_vm(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, vm: &ClockedModuleVm,
     ) -> bool {
@@ -98,7 +151,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] self.clocked_hierarchy_matches(owner, limits.width, &hierarchy)
             && #[trigger] self.network_vm_on_reset(&network, limits.state_bits, vm)
             && hierarchy.modules@[0].is_some()
-            && self.hierarchy_network_ports(&hierarchy.modules@[0]->Some_0, limits, &network)
+            && self.hierarchy_network_wiring(&hierarchy.modules@[0]->Some_0, limits, &network)
             && network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits
     }
@@ -160,7 +213,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 index <= hierarchy.order@.len(), networks@.len() == count == hierarchy.positions@.len(),
                 forall|i: int| 0 <= i < index && hierarchy.modules@[hierarchy.order@[i] as int].is_some() ==>
                     (#[trigger] networks@[hierarchy.order@[i] as int]).is_some()
-                    && self.hierarchy_network_ports(&hierarchy.modules@[hierarchy.order@[i] as int]->Some_0,
+                    && self.hierarchy_network_wiring(&hierarchy.modules@[hierarchy.order@[i] as int]->Some_0,
                         limits, &networks@[hierarchy.order@[i] as int]->Some_0),
             decreases hierarchy.order@.len() - index,
         {
@@ -181,7 +234,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     };
                     assert forall|call: int| 0 <= call < hierarchy.graph@[node as int]@.len()
                         implies ((#[trigger] hierarchy.graph@[node as int]@[call]) matches Some(child)
-                            ==> child < networks@.len() && networks@[child as int].is_some()) by {
+                            ==> child < networks@.len() && networks@[child as int].is_some()
+                                && (checked.calls@[call].inputs.ports.signature.target is Routine)) by {
                         if let Some(child) = hierarchy.graph@[node as int]@[call] {
                             self.clocked_hierarchy_edge(owner, limits.width, &hierarchy, node as int, call);
                             let rank = hierarchy.rank@[child as int];
@@ -223,7 +277,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 networks.set(node, Some(network));
                 assert forall|i: int| 0 <= i <= index && hierarchy.modules@[hierarchy.order@[i] as int].is_some()
                     implies (#[trigger] networks@[hierarchy.order@[i] as int]).is_some()
-                        && self.hierarchy_network_ports(&hierarchy.modules@[hierarchy.order@[i] as int]->Some_0,
+                        && self.hierarchy_network_wiring(&hierarchy.modules@[hierarchy.order@[i] as int]->Some_0,
                             limits, &networks@[hierarchy.order@[i] as int]->Some_0) by {
                     if i < index {
                         let earlier = hierarchy.order@[i];
@@ -251,10 +305,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.clocked_functions_match(old(functions)@, limits.width, limits.wiring_bits, limits.gates),
             self.function_targets_are_declared(checked, edges@),
             forall|call: int| 0 <= call < edges@.len() ==> ((#[trigger] edges@[call]) matches Some(child)
-                ==> child < networks@.len() && networks@[child as int].is_some()),
+                ==> child < networks@.len() && networks@[child as int].is_some()
+                    && (checked.calls@[call].inputs.ports.signature.target is Routine)),
         ensures result matches Ok(network) ==> network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits,
-            result matches Ok(network) ==> self.hierarchy_network_ports(checked, limits, &network),
+            result matches Ok(network) ==> self.hierarchy_network_wiring(checked, limits, &network),
             self.clocked_functions_match(final(functions)@, limits.width, limits.wiring_bits, limits.gates),
             result matches Err(ClockedModuleVmError::ChildStateCapacity { used, width, capacity, .. }) ==>
                 capacity == limits.wiring_bits && used <= capacity && used + width > capacity,
@@ -298,8 +353,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 obeys_cmp::<(usize, usize)>(),
                 function_templates_cover(checked, edges@, functions@, count as int),
                 self.clocked_functions_match(functions@, limits.width, limits.wiring_bits, limits.gates),
+                forall|i: int| 0 <= i < call ==> (#[trigger] placements@[i]).is_some()
+                    == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 forall|i: int| 0 <= i < edges@.len() ==> ((#[trigger] edges@[i]) matches Some(child)
-                    ==> child < networks@.len() && networks@[child as int].is_some()),
+                    ==> child < networks@.len() && networks@[child as int].is_some()
+                        && (checked.calls@[i].inputs.ports.signature.target is Routine)),
             decreases count - call,
         {
             let mut placement = None;
@@ -344,7 +402,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
                 total_gates += 1;
             }
+            let ghost previous = placements@;
             placements.push(placement);
+            assert forall|i: int| 0 <= i <= call implies (#[trigger] placements@[i]).is_some()
+                == (checked.calls@[i].inputs.ports.signature.target is Routine) by {
+                if i < call { assert(placements@[i] == previous[i]); }
+            };
             call += 1;
         }
         let symbolic = self.bind_hierarchy_rows(owner, limits, checked, &ports, &direct, &placements)?;
@@ -569,7 +632,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             symbolic._origins@.len() == checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len(),
             forall|i: int| 0 <= i < symbolic._origins@.len() ==> #[trigger]
                 self.hierarchy_row_matches(checked, ports, calls@, symbolic.bits@, i, symbolic._origins@[i]),
-        ensures result matches Ok(definitions) ==> clocked_wires_match(symbolic.bits@, definitions@),
+        ensures result matches Ok(definitions) ==> definitions@.len() == symbolic.bits@.len()
+                && clocked_wires_match(symbolic.bits@, definitions@),
             !(result matches Err(ClockedModuleVmError::Hierarchy(_) | ClockedModuleVmError::ChildStateCapacity { .. })),
     {
         let expressions = &checked.module.expressions;
@@ -723,6 +787,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    spec fn captured_call_output(
+        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, calls: Seq<Option<CallPlacement>>,
+        rows: &HierarchyRows, definitions: Seq<Wire>, call: int, output: Option<(PortBitLayout, Seq<Wire>)>,
+    ) -> bool {
+        match (calls[call], output) {
+            (None, None) => true,
+            (Some(placed), Some((layout, mapped))) => {
+                &&& layout == *placed.outputs
+                &&& forall|slot: int| 0 <= slot < rows._origins@.len()
+                    && #[trigger] rows._origins@[slot] == HierarchyRowOrigin::Call(call as usize) ==> {
+                    let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index as int;
+                    let child = layout.ranges_model()[port];
+                    let parent = ports.definitions.ranges_model()[slot];
+                    definitions.subrange(parent.start as int, parent.end as int)
+                        == mapped.subrange(child.start as int, child.end as int)
+                }
+            },
+            _ => false,
+        }
+    }
+
     fn finish_hierarchy_network(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, checked: &ModuleCalls<'p, 'a>,
         ports: ClockedModuleOutputs, direct: ClockedStorageLayout<'p, 'a>,
@@ -731,19 +816,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
             self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports)),
             calls@.len() == checked.calls@.len(),
+            forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
+                == (checked.calls@[i].inputs.ports.signature.target is Routine),
             total_inputs <= limits.wiring_bits, total_gates <= limits.gates,
             clocked_wires_match(_rows.bits@, definitions@),
+            _rows._origins@.len() == checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len(),
+            _rows.bits@.len() == definitions@.len() == ports.definitions.total_bits_model(),
             forall|i: int| 0 <= i < _rows._origins@.len() ==> #[trigger]
                 self.hierarchy_row_matches(checked, &ports, calls@, _rows.bits@, i, _rows._origins@[i]),
         ensures result matches Ok(network) ==> network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits,
-            result matches Ok(network) ==> self.hierarchy_network_ports(checked, limits, &network),
+            result matches Ok(network) ==> self.hierarchy_network_wiring(checked, limits, &network),
             !(result matches Err(ClockedModuleVmError::Hierarchy(_) | ClockedModuleVmError::ChildStateCapacity { .. })),
     {
         let mut gates = Vec::new();
         let mut storage = Vec::new();
         let mut child_storage: Vec<ClockedStorageInputs> = Vec::new();
         let mut child_sites = Vec::new();
+        let ghost mut captured = Seq::<Option<(PortBitLayout, Seq<Wire>)>>::empty();
         let mut next_state = direct.augmented_inputs;
         if gates.try_reserve_exact(total_gates).is_err() || storage.try_reserve_exact(direct.instances.len()).is_err() {
             return Err(ClockedModuleVmError::Allocation);
@@ -752,13 +842,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while call < calls.len()
             invariant
                 call <= calls@.len() == checked.calls@.len(),
+                call == captured.len(),
+                forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
+                    == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
                 self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports)),
                 clocked_wires_match(_rows.bits@, definitions@),
+                forall|i: int| 0 <= i < call ==> #[trigger]
+                    self.captured_call_output(checked, &ports, calls@, _rows, definitions@, i, captured[i]),
                 forall|i: int| 0 <= i < _rows._origins@.len() ==> #[trigger]
                     self.hierarchy_row_matches(checked, &ports, calls@, _rows.bits@, i, _rows._origins@[i]),
             decreases calls@.len() - call,
         {
+            let ghost before = captured;
             if let Some(placement) = &calls[call] {
                 let mut arguments = Vec::new();
                 match append_row(&mut arguments, &placement.arguments, definitions) {
@@ -792,6 +888,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         placement.gates.start, instance.outputs@));
                     self.placed_outputs_match_definitions(checked, &ports, calls@, _rows, definitions@,
                         call, arguments@, instance.outputs@);
+                    let output = Some((*placement.outputs, instance.outputs@));
+                    assert(self.captured_call_output(checked, &ports, calls@, _rows, definitions@, call as int, output));
+                    captured = before.push(output);
                 }
                 if child_storage.try_reserve(instance.storage.len()).is_err()
                     || child_sites.try_reserve(instance.storage.len()).is_err() {
@@ -819,6 +918,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     i += 1;
                 }
             } else {
+                proof {
+                    assert(self.captured_call_output(checked, &ports, calls@, _rows, definitions@, call as int, None));
+                    captured = before.push(None);
+                }
                 let rows = match self.wire_call_arguments(owner, limits.width, limits.wiring_bits, checked, &ports, call) {
                     Ok(rows) => rows,
                     Err(error) => return Err(ClockedModuleVmError::Arguments(error)),
@@ -845,6 +948,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     storage.push(inputs);
                 }
             }
+            assert forall|i: int| 0 <= i <= call implies #[trigger]
+                self.captured_call_output(checked, &ports, calls@, _rows, definitions@, i, captured[i]) by {
+                if i < call { assert(captured[i] == before[i]); }
+            };
             call += 1;
         }
         if gates.len() != total_gates || next_state != total_inputs || storage.len() != direct.instances.len() {
@@ -870,8 +977,48 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(ClockedModuleVmError::Netlist(error)),
         };
         let ghost source_ports = ports;
-        let network = ClockedModuleNetwork { inputs: ports.inputs, outputs: ports.outputs, circuit, storage, storage_sites };
-        assert(self.hierarchy_network_ports(checked, limits, &network)) by {
+        let ghost wiring = HierarchyWiring { definitions: definitions@, origins: _rows._origins@, routine_outputs: captured };
+        proof {
+            self.module_calls_type_evidence(owner, limits.width, checked);
+            self.module_output_types_evidence(owner, limits.width, checked.module);
+            self.clocked_output_layouts(&checked.module, limits.width, limits.wiring_bits, &source_ports);
+            self.module_selections_evidence(owner, limits.width, checked.module.expressions);
+            self.clocked_definition_layout_evidence(&checked.module.expressions, limits.width, limits.wiring_bits,
+                &source_ports.definitions, 0);
+            assert(self.hierarchy_public_wiring(checked, &source_ports, &wiring, circuit.netlist_model().outputs@)) by {
+                reveal(UseAliases::hierarchy_public_wiring);
+                assert forall|i: int| 0 <= i < captured.len() implies
+                    (#[trigger] captured[i]).is_some() == (checked.calls@[i].inputs.ports.signature.target is Routine) by {
+                    assert(self.captured_call_output(checked, &source_ports, calls@, _rows, definitions@, i, captured[i]));
+                };
+                assert forall|slot: int| 0 <= slot < wiring.origins.len() implies #[trigger]
+                    self.hierarchy_definition_wiring(checked, &source_ports, &wiring, slot) by {
+                    assert(self.hierarchy_row_matches(checked, &source_ports, calls@, _rows.bits@, slot, _rows._origins@[slot]));
+                    reveal(UseAliases::hierarchy_row_matches);
+                    match _rows._origins@[slot] {
+                        HierarchyRowOrigin::Call(index) => {
+                            assert(self.captured_call_output(checked, &source_ports, calls@, _rows, definitions@, index as int, captured[index as int]));
+                        },
+                        HierarchyRowOrigin::Local(wires) => {
+                            let range = source_ports.definitions.ranges_model()[slot];
+                            let expected = definitions@.subrange(range.start as int, range.end as int);
+                            assert(expected.len() == wires@.len());
+                            assert forall|bit: int| 0 <= bit < expected.len() implies
+                                resolved_driver(wires@[bit], definitions@) == Some(#[trigger] expected[bit]) by {
+                                clocked_wire_at(_rows.bits@, definitions@, range.start + bit);
+                                assert(wires@[bit] == _rows.bits@[range.start + bit]);
+                                assert(expected[bit] == definitions@[range.start + bit]);
+                            };
+                            assert(resolved_bits(wires@, definitions@, expected));
+                        },
+                    }
+                };
+            };
+        }
+        let network = ClockedModuleNetwork {
+            inputs: ports.inputs, outputs: ports.outputs, circuit, storage, storage_sites, _hierarchy_wiring: Ghost(Some(wiring)),
+        };
+        assert(self.hierarchy_network_wiring(checked, limits, &network)) by {
             assert(self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(source_ports)));
         };
         Ok(network)

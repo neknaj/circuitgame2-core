@@ -5,7 +5,8 @@ pub use instances::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatef
 #[cfg(verus_only)]
 pub use instances::{clocked_stateful_arguments, clocked_stateful_instance_reads_match, clocked_stateful_instance_result};
 #[cfg(verus_only)]
-pub use instances::{clocked_instance_inputs, clocked_instance_outputs_match, clocked_instance_result, clocked_instance_steps_match};
+pub use instances::{clocked_instance_gate_updates_match, clocked_instance_inputs, clocked_instance_outputs_match,
+    clocked_instance_result, clocked_instance_steps_match};
 
 use super::{GateInput, NorNetlist, Wire, read_wire};
 #[cfg(verus_only)]
