@@ -207,6 +207,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// コンパイル時に得た RAM の対応を、公開の名前解決契約に結び付ける。
+    pub(super) proof fn resolved_vram_output_evidence(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, name: Seq<u8>, target: VramTarget,
+    )
+        requires self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            self.checked_vram_target(owner, checked, name, target),
+        ensures self.vram_output_resolution(owner, limit, name, Ok(Some(target))),
+    {
+        assert(self.checked_vram_result(owner, checked, name, Ok(target)));
+    }
+
     /// `read-output` をルート本体の RAM 呼び出しに解決する。
     ///
     /// 指定位置がモジュールを指さない場合は `Ok(None)` を返す。

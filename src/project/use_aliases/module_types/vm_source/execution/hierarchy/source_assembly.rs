@@ -6,11 +6,11 @@ use super::source_ids::{
 use super::source_model::hierarchy_child_ids;
 use super::source_widths::{HierarchyChildSource, hierarchy_child_sources_match};
 use super::{
-    ClockedFunctionTemplate, ClockedHierarchy, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits,
+    ClockedFunctionTemplate, ClockedHierarchy, ClockedModuleCompilation, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits,
     ModuleBodyPosition, UseAliases, function_target,
 };
 use crate::netlist::{
-    ClockedStorageInputs, ClockedVm, SourceVmCircuit, SourceVmFrame, SourceVmLayout, clocked_vm_trace,
+    ClockedStorageInputs, ClockedVm, SourceDeviceId, SourceVmCircuit, SourceVmFrame, SourceVmLayout, clocked_vm_trace,
     source_vm_layout_for_orders, source_vm_layout_matches, source_vm_layout_port_evidence, source_vm_project_trace, source_vm_stateless_model,
     source_vm_state_projection, source_vm_trace, source_vm_wiring_valid,
 };
@@ -228,6 +228,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             choose|hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
                 functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int|
                 #[trigger] self.hierarchy_compilation_snapshot(owner, limits, compiled, hierarchy, networks, functions, end);
+        self.hierarchy_source_layout_on_snapshot(owner, limits, compiled, hierarchy, networks, functions, end)
+    }
+
+    /// 保持した直接素子の位置と同じ階層展開から、参照回路を構成する。
+    pub(in crate::project::use_aliases::module_types::vm_source::execution) proof fn hierarchy_vram_source_layout(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, root: &ClockedModuleCompilation,
+    ) -> (model: (SourceVmCircuit, SourceVmLayout, Seq<ClockedStorageInputs>))
+        requires self.can_resolve(), self.hierarchy_compilation_retains_storage(owner, limits, root),
+        ensures
+            self.clocked_hierarchy_source_circuit(owner, limits, &root.compiled, &model.0, &model.1),
+            source_vm_wiring_valid(&model.0),
+            root.compiled.vm.layout_matches(root.compiled.vm.netlist_model(), model.0.input_count, model.2),
+            source_vm_layout_matches(&model.0, &root.compiled.vm.netlist_model(), model.2, &model.1),
+            Self::source_layout_keeps_root_devices(&model.1, root),
+    {
+        let (hierarchy, networks, functions, end) =
+            choose|hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+                functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int| {
+                &&& #[trigger] self.hierarchy_compilation_snapshot(owner, limits, &root.compiled, hierarchy, networks, functions, end)
+                &&& self.root_storage_on_network(limits, root, &networks[0]->Some_0)
+                &&& root._checked == hierarchy.modules@[0]->Some_0
+            };
+        self.hierarchy_source_layout_on_snapshot(owner, limits, &root.compiled, hierarchy, networks, functions, end)
+    }
+
+    proof fn hierarchy_source_layout_on_snapshot(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int,
+    ) -> (model: (SourceVmCircuit, SourceVmLayout, Seq<ClockedStorageInputs>))
+        requires self.can_resolve(), self.hierarchy_compilation_snapshot(owner, limits, compiled, hierarchy, networks, functions, end),
+        ensures
+            self.clocked_hierarchy_source_circuit(owner, limits, compiled, &model.0, &model.1),
+            source_vm_wiring_valid(&model.0),
+            compiled.vm.layout_matches(compiled.vm.netlist_model(), model.0.input_count, model.2),
+            source_vm_layout_matches(&model.0, &compiled.vm.netlist_model(), model.2, &model.1),
+            ({
+                let network = networks[0]->Some_0;
+                &&& network._direct_devices <= model.1.devices.len()
+                &&& network._direct_devices <= network.storage_sites@.len()
+                &&& forall|i: int| 0 <= i < network._direct_devices ==> (#[trigger] model.1.devices[i]) ==
+                    (SourceDeviceId { instance: Seq::empty(), call: network.storage_sites@[i].at })
+            }),
+    {
         let orders = self.hierarchy_source_order_prefix(owner, limits, &hierarchy, networks, functions, end, end);
         let sources = self.hierarchy_source_model_prefix(owner, limits, &hierarchy, networks, functions, end, orders, end);
         reveal(UseAliases::hierarchy_source_models);
@@ -237,6 +281,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(hierarchy.order@[end - 1] == 0);
         assert(self.clocked_hierarchy_source_circuit(owner, limits, compiled, &root.circuit, &layout));
         source_vm_layout_port_evidence(&root.circuit, &network.circuit.netlist_model(), network.storage@, &layout);
+        self.hierarchy_source_order_at(&hierarchy, networks, functions, orders, end - 1);
+        let checked = hierarchy.modules@[0]->Some_0;
+        let children = selected_source_children(&hierarchy, 0, orders.take(end - 1), functions);
+        assert(root.ids == orders[end - 1]);
+        assert forall|i: int| 0 <= i < network._direct_devices implies (#[trigger] layout.devices[i]) ==
+            (SourceDeviceId { instance: Seq::empty(), call: network.storage_sites@[i].at }) by {
+            self.hierarchy_direct_device_id(&checked, limits, &network, children, root.ids, i);
+        };
         (root.circuit, layout, network.storage@)
     }
 

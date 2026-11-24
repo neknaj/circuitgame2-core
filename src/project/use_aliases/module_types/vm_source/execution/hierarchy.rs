@@ -672,6 +672,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] self.hierarchy_compilation_snapshot(owner, limits, vm, hierarchy, networks, functions, end)
     }
 
+    pub(super) closed spec fn hierarchy_compilation_retains_storage(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, root: &ClockedModuleCompilation,
+    ) -> bool {
+        exists|hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+            functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int| {
+            &&& #[trigger] self.hierarchy_compilation_snapshot(owner, limits, &root.compiled, hierarchy, networks, functions, end)
+            &&& self.root_storage_on_network(limits, root, &networks[0]->Some_0)
+            &&& root._checked == hierarchy.modules@[0]->Some_0
+        }
+    }
+
     /// 失敗した関数の展開を、階層中の宣言と、そこで最初に失敗した呼び出しに対応付ける。
     pub closed spec fn clocked_hierarchy_function_failure(
         &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, failed: ModuleBodyPosition,
@@ -694,6 +705,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && root.compiled.vm.external_count() == root.compiled.inputs.total_bits_model()
                 && self.clocked_module_hierarchy_vm(owner, limits, &root.compiled)
                 && self.compilation_keeps_root_storage(owner, limits, &root),
+            result matches Ok(Some(root)) ==> self.hierarchy_compilation_retains_storage(owner, limits, &root),
             result matches Err(ClockedModuleVmError::Hierarchy(super::super::super::ClockedModuleError::Recursion(path))) ==>
                 self.clocked_hierarchy_recursion(owner, limits.width, path@),
             result matches Err(ClockedModuleVmError::InModule { owner: failed, reason }) ==>
@@ -791,12 +803,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     };
                     return match self.initialize_clocked_network(network, limits.state_bits, checked) {
                         Ok(root) => {
-                            assert(self.clocked_module_hierarchy_vm(owner, limits, &root.compiled)) by {
+                            proof {
                                 assert(self.network_vm_on_reset(&source, limits.state_bits, &root.compiled));
                                 assert(self.hierarchy_templates_through(&source_hierarchy, limits, index + 1, completed, functions@));
                                 assert(self.hierarchy_compilation_snapshot(owner, limits, &root.compiled, source_hierarchy,
                                     completed, functions@, index + 1));
-                            };
+                                assert(self.clocked_module_hierarchy_vm(owner, limits, &root.compiled));
+                                assert(self.root_storage_on_network(limits, &root, &source));
+                                assert(self.hierarchy_compilation_retains_storage(owner, limits, &root));
+                            }
                             assert(self.root_storage_matches(&root._checked, limits, &source));
                             Ok(Some(root))
                         },

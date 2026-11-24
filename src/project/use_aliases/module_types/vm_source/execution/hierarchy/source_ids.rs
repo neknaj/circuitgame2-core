@@ -250,6 +250,49 @@ proof fn device_owner_evidence(checked: &ModuleCalls, wiring: &HierarchyWiring,
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 直接素子の ID は、その格納位置に対応するルートの呼び出し位置を持つ。
+    pub(super) proof fn hierarchy_direct_device_id(
+        &self, checked: &ModuleCalls, limits: ClockedModuleVmLimits, network: &ClockedModuleNetwork,
+        children: Seq<Option<HierarchySourceIds>>, ids: HierarchySourceIds, index: int,
+    )
+        requires
+            self.hierarchy_network_wiring(checked, limits, network),
+            source_ids_match_network(ids, checked, network, children),
+            0 <= index < network._direct_devices,
+        ensures
+            index < ids.devices.len() && index < network.storage_sites@.len(),
+            ids.devices[index] == (SourceDeviceId { instance: Seq::empty(), call: network.storage_sites@[index].at }),
+    {
+        reveal(call_partition_matches);
+        let wiring = &network._hierarchy_wiring@->Some_0;
+        let end = super::CallBoundary {
+            gates: network.circuit.netlist_model().gates@.len(),
+            direct: wiring.direct_devices as nat,
+            child: (network.storage@.len() - wiring.direct_devices) as nat,
+        };
+        assert(call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, end));
+        assert(wiring.boundaries.last() == end);
+        let ports = choose|ports: super::ClockedModuleOutputs| {
+            &&& #[trigger] self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports))
+            &&& network._hierarchy_wiring@ matches Some(wiring)
+                && self.hierarchy_primitives_bound(checked, limits.width, &ports, wiring.definitions,
+                    wiring.primitives, network.circuit.netlist_model().gates@,
+                    network.storage@.take(wiring.direct_devices as int), network.storage_sites@.take(wiring.direct_devices as int))
+        };
+        owner_is_partition_call(wiring, PartitionArea::DirectStorage, index as nat);
+        let call = device_owner(wiring, index as nat);
+        reveal(UseAliases::hierarchy_primitives_bound);
+        assert(call_interval_matches(wiring.boundaries[call], wiring.boundaries[call + 1],
+            wiring.routines[call], wiring.primitives[call]));
+        assert(wiring.primitives[call]->Some_0.placement == super::PrimitivePlacement::Storage(index as usize));
+        let sites = network.storage_sites@.take(wiring.direct_devices as int);
+        assert(self.hierarchy_primitive_bound(checked, limits.width, &ports, wiring.definitions, call,
+            wiring.primitives[call], network.circuit.netlist_model().gates@,
+            network.storage@.take(wiring.direct_devices as int), sites));
+        assert(sites[index].at == checked.calls@[call].at);
+        assert(ids.devices[index] == parent_device_id(checked, wiring, children, index as nat));
+    }
+
     /// 階層順に構成した ID 列から、処理済みの一つの回路と各子の対応を取り出す。
     pub(super) proof fn hierarchy_source_order_at(
         &self, hierarchy: &ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,

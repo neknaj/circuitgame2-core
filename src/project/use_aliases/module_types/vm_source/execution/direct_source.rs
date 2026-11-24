@@ -291,37 +291,44 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && #[trigger] self.endpoints_on_checked(&checked, limits.width, limits.wiring_bits, limits.gates, &plan)
             && #[trigger] self.network_wiring_on_checked(limits, &checked, &plan, &network)
             && self.network_vm_on_reset(&network, limits.state_bits, compiled);
-        let gate_calls = self.direct_gate_call_order(&checked, &plan, limits.width, limits.wiring_bits, limits.gates);
+        let (gates, devices, gate_calls) = self.direct_ids_on_plan(owner, limits, &checked, &plan);
+        assert(self.clocked_direct_source_ids(owner, limits, compiled, gates, devices));
+        (gates, devices)
+    }
+
+    proof fn direct_ids_on_plan(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, checked: &ModuleCalls, plan: &ClockedModuleEndpoints,
+    ) -> (ids: (Seq<SourceGateId>, Seq<SourceDeviceId>, Seq<int>))
+        requires self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
+            self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, plan),
+        ensures
+            ids.2.len() == plan.gate_count,
+            gate_call_order(plan.gate_by_call@, checked.calls@.len() as int, ids.2),
+            ids.0 == ids.2.map_values(|call: int| SourceGateId { instance: Seq::empty(), gate: checked.calls@[call].at }),
+            ids.1 == direct_device_ids(plan),
+            ids.0.no_duplicates() && ids.1.no_duplicates(),
+    {
+        let gate_calls = self.direct_gate_call_order(checked, plan, limits.width, limits.wiring_bits, limits.gates);
         let gates = gate_calls.map_values(|call: int| SourceGateId { instance: Seq::empty(), gate: checked.calls@[call].at });
-        let placed = plan.storage.instances@;
-        let devices = direct_device_ids(&plan);
+        let devices = direct_device_ids(plan);
         assert forall|i: int, j: int| 0 <= i < j < gates.len() implies (#[trigger] gates[i]) != (#[trigger] gates[j]) by {
             let a = gate_calls[i];
             let b = gate_calls[j];
             assert(plan.gate_by_call@[a] == Some(i as usize) && plan.gate_by_call@[b] == Some(j as usize));
             assert(i < j < gate_calls.len() <= usize::MAX);
             if a < b {
-                self.module_call_sites_distinct(owner, limits.width, &checked, a, b);
+                self.module_call_sites_distinct(owner, limits.width, checked, a, b);
             } else {
                 assert(b < a);
-                self.module_call_sites_distinct(owner, limits.width, &checked, b, a);
+                self.module_call_sites_distinct(owner, limits.width, checked, b, a);
             }
         };
         assert forall|i: int, j: int| 0 <= i < j < devices.len() implies (#[trigger] devices[i]) != (#[trigger] devices[j]) by {
             self.storage_placements_on_calls_distinct(owner, limits.width, plan.ports.inputs.total_bits_model(),
-                limits.wiring_bits, &checked, &plan.storage, i, j);
+                limits.wiring_bits, checked, &plan.storage, i, j);
         };
         assert(gates.no_duplicates() && devices.no_duplicates());
-        let (_, pins) = choose|arguments: Seq<Vec<Vec<super::ClockedWireDriver>>>, pins: Seq<Vec<super::Wire>>| {
-            &&& #[trigger] self.vm_calls_bound(limits, &checked, &plan, arguments, pins,
-                network.circuit.netlist_model().gates@, network.storage@)
-            &&& pins.len() == checked.calls@.len()
-            &&& network.circuit.netlist_model().gates@.len() == plan.gate_count
-            &&& network.storage@.len() == placed.len()
-        };
-        assert(pins.len() == checked.calls@.len());
-        assert(self.clocked_direct_source_ids(owner, limits, compiled, gates, devices));
-        (gates, devices)
+        (gates, devices, gate_calls)
     }
 
     proof fn direct_storage_widths_on_plan(
@@ -617,18 +624,53 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             compiled.vm.layout_matches(compiled.vm.netlist_model(), model.0.input_count, model.2),
             source_vm_layout_matches(&model.0, &compiled.vm.netlist_model(), model.2, &model.1),
     {
-        let (gates, devices) = self.clocked_direct_source_id_order(owner, limits, compiled);
-        let (checked, plan, network, order) =
-            choose|checked: ModuleCalls, plan: ClockedModuleEndpoints, network: ClockedModuleNetwork, order: Seq<int>| {
+        let (checked, plan, network) =
+            choose|checked: ModuleCalls, plan: ClockedModuleEndpoints, network: ClockedModuleNetwork| {
                 &&& #[trigger] self.module_calls_result(owner, limits.width, Ok(Some(checked)))
                 &&& #[trigger] self.endpoints_on_checked(&checked, limits.width, limits.wiring_bits, limits.gates, &plan)
                 &&& #[trigger] self.network_wiring_on_checked(limits, &checked, &plan, &network)
                 &&& self.network_vm_on_reset(&network, limits.state_bits, compiled)
-                &&& #[trigger] gate_call_order(plan.gate_by_call@, checked.calls@.len() as int, order)
-                &&& order.len() == plan.gate_count
-                &&& gates == order.map_values(|call: int| SourceGateId { instance: Seq::empty(), gate: checked.calls@[call].at })
-                &&& devices == direct_device_ids(&plan)
             };
+        self.direct_source_layout_on_network(owner, limits, compiled, &checked, &plan, &network)
+    }
+
+    /// 保持した直接素子の位置と同じ配置から、参照回路を構成する。
+    pub(super) proof fn direct_vram_source_layout(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, root: &super::ClockedModuleCompilation,
+    ) -> (model: (SourceVmCircuit, SourceVmLayout, Seq<ClockedStorageInputs>))
+        requires self.can_resolve(), self.direct_compilation_retains_storage(owner, limits, root),
+        ensures
+            self.clocked_direct_source_circuit(owner, limits, &model.0, &model.1),
+            source_vm_wiring_valid(&model.0),
+            root.compiled.vm.layout_matches(root.compiled.vm.netlist_model(), model.0.input_count, model.2),
+            source_vm_layout_matches(&model.0, &root.compiled.vm.netlist_model(), model.2, &model.1),
+            Self::source_layout_keeps_root_devices(&model.1, root),
+    {
+        let (plan, network) = choose|plan: ClockedModuleEndpoints, network: ClockedModuleNetwork| {
+            &&& #[trigger] self.endpoints_on_checked(&root._checked, limits.width, limits.wiring_bits, limits.gates, &plan)
+            &&& #[trigger] self.network_wiring_on_checked(limits, &root._checked, &plan, &network)
+            &&& self.root_storage_on_network(limits, root, &network)
+        };
+        self.direct_source_layout_on_network(owner, limits, &root.compiled, &root._checked, &plan, &network)
+    }
+
+    proof fn direct_source_layout_on_network(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        checked: &ModuleCalls, plan: &ClockedModuleEndpoints, network: &ClockedModuleNetwork,
+    ) -> (model: (SourceVmCircuit, SourceVmLayout, Seq<ClockedStorageInputs>))
+        requires self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
+            self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, plan),
+            self.network_wiring_on_checked(limits, checked, plan, network),
+            self.network_vm_on_reset(network, limits.state_bits, compiled),
+        ensures
+            self.clocked_direct_source_circuit(owner, limits, &model.0, &model.1),
+            source_vm_wiring_valid(&model.0),
+            compiled.vm.layout_matches(compiled.vm.netlist_model(), model.0.input_count, model.2),
+            source_vm_layout_matches(&model.0, &compiled.vm.netlist_model(), model.2, &model.1),
+            model.1.devices == network.storage_sites@.map_values(|site: super::ClockedStoragePlacement|
+                SourceDeviceId { instance: Seq::empty(), call: site.at }),
+    {
+        let (gates, devices, order) = self.direct_ids_on_plan(owner, limits, checked, plan);
         let netlist = network.circuit.netlist_model();
         let storage = network.storage@;
         let placed = plan.storage.instances@;

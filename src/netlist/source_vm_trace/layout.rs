@@ -162,6 +162,9 @@ pub(crate) proof fn source_vm_layout_port_evidence(
     requires source_vm_layout_matches(source, netlist, wiring, layout),
     ensures
         layout.gates.len() == netlist.gates@.len() && layout.devices.len() == wiring.len(),
+        layout.device_index.dom() == source.storage.dom(),
+        forall|i: int| 0 <= i < layout.devices.len() ==> source.storage.contains_key(#[trigger] layout.devices[i])
+            && layout.device_index[layout.devices[i]] == i,
         source.input_count + clocked_storage_output_width(wiring) == netlist.input_count,
         forall|i: int| 0 <= i < netlist.gates@.len() ==> {
             let flat = #[trigger] netlist.gates@[i];

@@ -8,6 +8,9 @@ use crate::netlist::{ClockedStorageInputs, PortBitLayout, TickInputError};
 #[cfg(verus_only)]
 use crate::netlist::{ClockedStorage, ClockedVm, clocked_storage_memory_width};
 #[cfg(verus_only)]
+use crate::netlist::{SourceDeviceId, SourceVmCircuit, SourceVmFrame, SourceVmLayout, clocked_vm_trace,
+    source_vm_layout_port_evidence, source_vm_project_trace, source_vm_state_projection, source_vm_trace, source_vm_wiring_valid};
+#[cfg(verus_only)]
 use crate::project::{ResolvedPortType, StructureLayouts};
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -76,6 +79,9 @@ impl<'n, 'p, 'a> ClockedVramVm<'n, 'p, 'a> {
 
     /// 現在の VM 状態を表す。
     pub closed spec fn vm_model(&self) -> ClockedVm { self.module.vm }
+
+    /// コンパイル時のポート配置と現在の VM 状態を表す。
+    pub closed spec fn module_model(&self) -> ClockedModuleVm { self.module }
 
     /// 公開名と格納位置の対応が同じであることを表す。
     pub closed spec fn same_vram_configuration(&self, other: &Self) -> bool {
@@ -184,10 +190,118 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         exists|root: ClockedModuleCompilation| {
             &&& #[trigger] self.compilation_keeps_root_storage(owner, limits, &root)
+            &&& (self.direct_compilation_retains_storage(owner, limits, &root)
+                || self.hierarchy_compilation_retains_storage(owner, limits, &root))
             &&& root.compiled == vm.module
             &&& vm.bindings@.len() == declarations.len()
             &&& self.vram_declarations_placed(owner, limits, &root, declarations, vm.bindings@)
         }
+    }
+
+    /// リセット直後と各 tick の公開出力および VRAM の全記憶が、ソースの参照実行と一致する。
+    pub proof fn clocked_vram_source_trace(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, declarations: Seq<VramDeclaration>,
+        initial: &ClockedVramVm, inputs: Seq<Seq<bool>>, states: Seq<ClockedVramVm>, outputs: Seq<Seq<bool>>,
+    ) -> (reference: (SourceVmCircuit, SourceVmLayout, Seq<SourceVmFrame>))
+        requires
+            self.can_resolve(), self.clocked_vram_configured(owner, limits, declarations, initial),
+            clocked_vm_trace(inputs, states.map_values(|state: ClockedVramVm| state.vm_model()), outputs),
+            states[0].vm_model().same_layout(&initial.vm_model()),
+            forall|i: int| 0 <= i < states.len() ==> (#[trigger] states[i]).same_vram_configuration(initial),
+        ensures
+            self.clocked_compiled_source_model(owner, limits, &initial.module_model(), &reference.0, &reference.1),
+            source_vm_wiring_valid(&reference.0),
+            source_vm_trace(&reference.0, inputs, reference.2),
+            reference.2.map_values(|frame: SourceVmFrame| frame.outputs) == outputs,
+            forall|i: int, name: Seq<u8>| 0 <= i < states.len()
+                && #[trigger] states[i].vram_view_matches(name, None) ==>
+                    forall|slot: int| 0 <= slot < declarations.len() ==>
+                        (#[trigger] declarations[slot]).name.spec_bytes() != name,
+            forall|i: int, name: Seq<u8>, view: VramView| 0 <= i < states.len()
+                && #[trigger] states[i].vram_view_matches(name, Some(view)) ==> {
+                    let id = SourceDeviceId { instance: Seq::empty(), call: view.target.call };
+                    &&& reference.2[i].state.storage.contains_key(id)
+                    &&& reference.2[i].state.storage[id].memory == Some(view.bits@)
+                    &&& exists|slot: int| {
+                        &&& 0 <= slot < declarations.len() && (#[trigger] declarations[slot]).name.spec_bytes() == name
+                        &&& forall|earlier: int| 0 <= earlier < slot ==> (#[trigger] declarations[earlier]).name.spec_bytes() != name
+                        &&& self.vram_output_resolution(owner, limits.width, declarations[slot].read_output.spec_bytes(),
+                            Ok(Some(*view.target)))
+                    }
+                },
+    {
+        let root = choose|root: ClockedModuleCompilation| {
+            &&& #[trigger] self.compilation_keeps_root_storage(owner, limits, &root)
+            &&& (self.direct_compilation_retains_storage(owner, limits, &root)
+                || self.hierarchy_compilation_retains_storage(owner, limits, &root))
+            &&& root.compiled == initial.module
+            &&& initial.bindings@.len() == declarations.len()
+            &&& self.vram_declarations_placed(owner, limits, &root, declarations, initial.bindings@)
+        };
+        let vm = &root.compiled.vm;
+        let (source, layout, wiring) = if self.direct_compilation_retains_storage(owner, limits, &root) {
+            let model = self.direct_vram_source_layout(owner, limits, &root);
+            assert(self.clocked_module_vm_wiring(owner, limits, &root.compiled));
+            model
+        } else {
+            self.hierarchy_vram_source_layout(owner, limits, &root)
+        };
+        assert(self.clocked_compiled_source_model(owner, limits, &initial.module, &source, &layout));
+        let vms = states.map_values(|state: ClockedVramVm| state.vm_model());
+        vms[0].reset_snapshot(outputs[0]);
+        vms[0].preserve_layout_evidence(vm, vm.netlist_model(), source.input_count, wiring);
+        let frames = source_vm_project_trace(&source, inputs, vms, outputs, wiring, &layout);
+        source_vm_layout_port_evidence(&source, &vm.netlist_model(), wiring, &layout);
+        assert forall|i: int, name: Seq<u8>| 0 <= i < states.len()
+            && #[trigger] states[i].vram_view_matches(name, None) implies
+                forall|slot: int| 0 <= slot < declarations.len() ==> (#[trigger] declarations[slot]).name.spec_bytes() != name
+        by {
+            let state = &states[i];
+            assert(state.bindings@ == initial.bindings@);
+            assert forall|slot: int| 0 <= slot < declarations.len() implies
+                (#[trigger] declarations[slot]).name.spec_bytes() != name by {
+                assert(state.bindings@[slot] == initial.bindings@[slot]);
+                assert(state.bindings@[slot].name == declarations[slot].name);
+            };
+        };
+        assert forall|i: int, name: Seq<u8>, view: VramView| 0 <= i < states.len()
+            && #[trigger] states[i].vram_view_matches(name, Some(view)) implies {
+                let id = SourceDeviceId { instance: Seq::empty(), call: view.target.call };
+                &&& frames[i].state.storage.contains_key(id)
+                &&& frames[i].state.storage[id].memory == Some(view.bits@)
+                &&& exists|slot: int| {
+                    &&& 0 <= slot < declarations.len() && (#[trigger] declarations[slot]).name.spec_bytes() == name
+                    &&& forall|earlier: int| 0 <= earlier < slot ==> (#[trigger] declarations[earlier]).name.spec_bytes() != name
+                    &&& self.vram_output_resolution(owner, limits.width, declarations[slot].read_output.spec_bytes(),
+                        Ok(Some(*view.target)))
+                }
+            } by {
+            let state = &states[i];
+            let slot = choose|slot: int| {
+                let binding = #[trigger] state.bindings@[slot];
+                &&& 0 <= slot < state.bindings@.len() && binding.name.spec_bytes() == name
+                &&& forall|earlier: int| 0 <= earlier < slot ==> (#[trigger] state.bindings@[earlier]).name.spec_bytes() != name
+                &&& *view.target == binding.target
+                &&& state.module.vm.storage_model()[binding.index as int].memory_model() == Some(view.bits@)
+            };
+            assert(state.bindings@ == initial.bindings@);
+            let binding = initial.bindings@[slot];
+            let index = binding.index as int;
+            let id = SourceDeviceId { instance: Seq::empty(), call: view.target.call };
+            assert(self.vram_storage_matches(owner, limits, &root, declarations[slot].read_output.spec_bytes(),
+                binding.target, binding.index));
+            self.resolved_vram_output_evidence(owner, limits.width, &root._checked,
+                declarations[slot].read_output.spec_bytes(), binding.target);
+            assert forall|earlier: int| 0 <= earlier < slot implies
+                (#[trigger] declarations[earlier]).name.spec_bytes() != name by {
+                assert(state.bindings@[earlier] == initial.bindings@[earlier]);
+                assert(state.bindings@[earlier].name == declarations[earlier].name);
+            };
+            assert(layout.devices[index] == id);
+            assert(layout.device_index[id] == index);
+            assert(frames[i].state == source_vm_state_projection(&vms[i], &layout));
+        };
+        (source, layout, frames)
     }
 
     /// 設定順で最初に解決できなかった読み出し信号と診断を表す。
@@ -236,6 +350,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while i < declarations.len()
             invariant
                 self.can_resolve(), self.compilation_keeps_root_storage(owner, limits, &root),
+                self.direct_compilation_retains_storage(owner, limits, &root)
+                    || self.hierarchy_compilation_retains_storage(owner, limits, &root),
                 root.compiled.vm.initial(),
                 i == bindings@.len() <= declarations@.len(),
                 self.vram_declarations_placed(owner, limits, &root, declarations@, bindings@),

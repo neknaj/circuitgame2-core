@@ -24,7 +24,7 @@ use crate::project::use_aliases::module_types::clocked_source::resolved_driver;
 #[cfg(verus_only)]
 use crate::netlist::{clocked_storage_output_width, clocked_vm_result};
 #[cfg(verus_only)]
-use crate::netlist::{SourceVmCircuit, SourceVmFrame, SourceVmLayout, clocked_vm_trace, source_vm_state_projection, source_vm_trace,
+use crate::netlist::{SourceDeviceId, SourceVmCircuit, SourceVmFrame, SourceVmLayout, clocked_vm_trace, source_vm_state_projection, source_vm_trace,
     source_vm_wiring_valid};
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -304,6 +304,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         &&& network.inputs == plan.ports.inputs && network.outputs == plan.ports.outputs
         &&& network.storage_sites@ == plan.storage.instances@
+        &&& network._direct_devices == network.storage_sites@.len()
         &&& self.root_storage_matches(checked, limits, network)
         &&& exists|arguments: Seq<Vec<Vec<ClockedWireDriver>>>, pins: Seq<Vec<Wire>>| {
             let netlist = network.circuit.netlist_model();
@@ -514,6 +515,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    spec fn root_storage_on_network(
+        &self, limits: ClockedModuleVmLimits, root: &ClockedModuleCompilation, network: &ClockedModuleNetwork,
+    ) -> bool {
+        &&& self.network_vm_on_reset(network, limits.state_bits, &root.compiled)
+        &&& root._storage_sites@ == network.storage_sites@
+        &&& root._direct_devices == network._direct_devices
+    }
+
+    spec fn direct_compilation_retains_storage(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, root: &ClockedModuleCompilation,
+    ) -> bool {
+        &&& self.module_calls_result(owner, limits.width, Ok(Some(root._checked)))
+        &&& exists|plan: ClockedModuleEndpoints, network: ClockedModuleNetwork| {
+            &&& #[trigger] self.endpoints_on_checked(&root._checked, limits.width, limits.wiring_bits, limits.gates, &plan)
+            &&& #[trigger] self.network_wiring_on_checked(limits, &root._checked, &plan, &network)
+            &&& self.root_storage_on_network(limits, root, &network)
+        }
+    }
+
+    spec fn source_layout_keeps_root_devices(layout: &SourceVmLayout, root: &ClockedModuleCompilation) -> bool {
+        &&& root._direct_devices <= layout.devices.len()
+        &&& root._direct_devices <= root._storage_sites@.len()
+        &&& forall|i: int| 0 <= i < root._direct_devices ==> (#[trigger] layout.devices[i]) ==
+            (SourceDeviceId { instance: Seq::empty(), call: root._storage_sites@[i].at })
+    }
+
     /// 実行時のゲート、状態素子、公開出力が、ソースで指定した配線を読むことを表す。
     pub closed spec fn clocked_module_vm_wiring(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, vm: &ClockedModuleVm,
@@ -619,6 +646,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && (self.clocked_module_vm_wiring(owner, limits, &root.compiled)
                     || self.clocked_module_hierarchy_vm(owner, limits, &root.compiled))
                 && self.compilation_keeps_root_storage(owner, limits, &root),
+            result matches Ok(Some(root)) ==> self.direct_compilation_retains_storage(owner, limits, &root)
+                || self.hierarchy_compilation_retains_storage(owner, limits, &root),
             result matches Err(ClockedModuleVmError::Hierarchy(super::super::ClockedModuleError::Recursion(path))) ==>
                 self.clocked_hierarchy_recursion(owner, limits.width, path@),
             result matches Err(ClockedModuleVmError::InModule { owner: failed, reason }) ==>
@@ -651,6 +680,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(root) => {
                 assert(self.network_wiring_on_checked(limits, &root._checked, &endpoints, &source_network));
                 assert(self.root_storage_matches(&root._checked, limits, &source_network));
+                assert(self.root_storage_on_network(limits, &root, &source_network));
+                assert(self.direct_compilation_retains_storage(owner, limits, &root));
                 Ok(Some(root))
             },
             Err(error) => Err(error),
