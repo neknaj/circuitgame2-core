@@ -4,6 +4,7 @@
 
 mod clocked;
 mod clocked_storage;
+mod clocked_vm;
 pub(crate) mod instances;
 mod port_layout;
 mod state_elements;
@@ -15,6 +16,9 @@ pub use clocked::ClockedInstanceError;
 pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInputs};
 #[cfg(verus_only)]
 pub use clocked_storage::clocked_storage_result;
+pub use clocked_vm::{ClockedVm, ClockedVmError};
+#[cfg(verus_only)]
+pub use clocked_vm::{clocked_vm_result, clocked_vm_trace, clocked_vm_trace_from_reset, clocked_vm_trace_push_tick};
 pub(crate) use clocked::wire_within;
 #[cfg(verus_only)]
 pub(crate) use clocked::{clocked_wiring_endpoints, clocked_wiring_from_endpoints};

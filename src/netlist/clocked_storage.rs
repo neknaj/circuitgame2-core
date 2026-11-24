@@ -85,11 +85,16 @@ spec fn storage_wires_valid(wiring: &ClockedStorageInputs, inputs: usize, gates:
     &&& wire_available(wiring.enable, inputs as nat, gates as nat)
 }
 
-spec fn storage_capacity(wiring: &ClockedStorageInputs) -> nat {
+pub(super) open spec fn storage_capacity(wiring: &ClockedStorageInputs) -> nat {
     match wiring.address {
         Some(address) => ram_resident_bits(address@.len(), wiring.data@.len()),
         None => wiring.data@.len(),
     }
+}
+
+pub(super) closed spec fn storage_fits(wiring: &ClockedStorageInputs, inputs: usize, gates: usize, limit: usize) -> bool {
+    storage_wires_valid(wiring, inputs, gates) && wiring.data@.len() > 0
+        && state_bits_fit(storage_capacity(wiring), limit)
 }
 
 impl StorageState {
@@ -205,6 +210,38 @@ pub closed spec fn clocked_storage_result(
     }
 }
 
+pub(super) proof fn storage_bound(
+    wiring: &ClockedStorageInputs, inputs: usize, gates: usize, budget: usize, device: ClockedStorage,
+)
+    requires clocked_storage_result(wiring, inputs, gates, budget, Ok(device)),
+    ensures
+        storage_fits(wiring, inputs, gates, budget),
+        device.input_count_model() == inputs, device.gate_count_model() == gates,
+        device.wiring_model() == *wiring,
+        device.output_model() == Seq::new(wiring.data@.len(), |_: int| false),
+        device.memory_model() matches Some(memory) ==> memory == Seq::new(memory.len(), |_: int| false),
+        device.output_model().len() + (match device.memory_model() { Some(memory) => memory.len(), None => 0nat })
+            == storage_capacity(wiring), storage_capacity(wiring) <= budget,
+{
+    if wiring.address.is_some() {
+        assert(storage_capacity(wiring) >= wiring.data@.len()) by (nonlinear_arith)
+            requires storage_capacity(wiring) == (vstd::arithmetic::power2::pow2(wiring.address->Some_0@.len()) + 1)
+                * wiring.data@.len(),
+        {}
+    }
+}
+
+pub(super) proof fn storage_tick_shape(old: &ClockedStorage, next: &ClockedStorage, input: Seq<bool>, gates: Seq<bool>)
+    requires
+        next.storage_tick_matches(old, input, gates),
+        old.output_model().len() == old.wiring_model().data@.len(),
+    ensures
+        next.input_count_model() == old.input_count_model(), next.gate_count_model() == old.gate_count_model(),
+        next.wiring_model() == old.wiring_model(),
+        next.output_model().len() == next.wiring_model().data@.len(),
+{
+}
+
 impl ClockedStorage {
     #[verifier::type_invariant]
     spec fn valid(&self) -> bool {
@@ -272,10 +309,22 @@ impl ClockedStorage {
         Ok(Self { wiring, inputs, gates, state })
     }
 
+    pub(super) fn resident_bits(&self) -> (bits: usize)
+        ensures bits == self.output_model().len() + match self.memory_model() {
+            Some(memory) => memory.len(), None => 0nat,
+        },
+    {
+        match &self.state {
+            StorageState::Latch(latch) => latch.output().len(),
+            StorageState::Ram(ram) => ram.resident_bits(),
+        }
+    }
+
     /// 現在の出力を低位ビットから返す。
     pub fn output(&self) -> (bits: &[bool])
-        ensures bits@ == self.output_model(),
+        ensures bits@ == self.output_model(), bits@.len() == self.wiring_model().data@.len(),
     {
+        proof { use_type_invariant(self); }
         match &self.state {
             StorageState::Latch(latch) => latch.output(),
             StorageState::Ram(ram) => ram.output(),

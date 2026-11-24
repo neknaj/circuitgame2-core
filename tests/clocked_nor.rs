@@ -296,23 +296,45 @@ fn identifies_the_source_output_in_a_child_passthrough_cycle() {
 
 #[test]
 fn latch_and_nor_read_the_same_previous_tick() {
-    use circuitgame2_core::netlist::{ClockedStorage, ClockedStorageInputs};
+    use circuitgame2_core::netlist::{ClockedStorageInputs, ClockedVm};
 
     let nor = ClockedNor::check(NorNetlist {
         input_count: 1,
         gates: vec![NorGate { left: Wire::Input(0), right: Wire::Constant(false) }],
-        outputs: vec![Wire::Gate(0)],
+        outputs: vec![Wire::Gate(0), Wire::Input(0), Wire::Constant(true)],
     }).unwrap();
-    let mut latch = ClockedStorage::bind(ClockedStorageInputs {
+    let mut vm = ClockedVm::new(nor, 0, vec![ClockedStorageInputs {
         address: None, data: vec![Wire::Gate(0)], enable: Wire::Constant(true),
-    }, 1, 1, 1).unwrap();
-    let mut frame = nor.reset();
+    }], 1).unwrap();
+    assert_eq!(vm.reset(), [false, false, true]);
     for (gate, held) in [(true, false), (true, true), (false, true), (false, false)] {
-        let previous_latch = [latch.output()[0]];
-        let next = nor.step(&frame.gates, &previous_latch).unwrap();
-        latch.step(&previous_latch, &frame.gates).unwrap();
-        assert_eq!(next.outputs, [gate]);
-        assert_eq!(latch.output(), &[held]);
-        frame = next;
+        assert_eq!(vm.step(&[]).unwrap(), [gate, held, true]);
     }
+}
+
+#[test]
+fn mixed_vm_observes_read_first_and_keeps_two_ram_instances_separate() {
+    use circuitgame2_core::netlist::{
+        ClockedStorageError, ClockedStorageInputs, ClockedVm, ClockedVmError, StateAllocationError, TickInputError,
+    };
+
+    let circuit = || ClockedNor::check(NorNetlist {
+        input_count: 6, gates: vec![], outputs: vec![Wire::Input(4), Wire::Input(5)],
+    }).unwrap();
+    let wiring = || [Wire::Input(3), Wire::Constant(false)].into_iter().map(|enable| ClockedStorageInputs {
+        address: Some(vec![Wire::Input(0), Wire::Input(1)]),
+        data: vec![Wire::Input(2)],
+        enable,
+    }).collect();
+    assert!(matches!(ClockedVm::new(circuit(), 4, wiring(), 9),
+        Err(ClockedVmError::Storage { instance: 1, error: ClockedStorageError::State(StateAllocationError::Capacity) })));
+
+    let mut vm = ClockedVm::new(circuit(), 4, wiring(), 10).unwrap();
+    assert_eq!(vm.reset(), [false, false]);
+    assert_eq!(vm.step(&[true, false, true, true]).unwrap(), [false, false]);
+    assert_eq!(vm.step(&[true]), Err(TickInputError::InputCount));
+    assert_eq!(vm.step(&[true, false, false, false]).unwrap(), [true, false]);
+    assert_eq!(vm.step(&[false, true, false, false]).unwrap(), [false, false]);
+    assert_eq!(vm.reset(), [false, false]);
+    assert_eq!(vm.step(&[true, false, false, false]).unwrap(), [false, false]);
 }

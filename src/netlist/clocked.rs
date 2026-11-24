@@ -422,6 +422,22 @@ impl ClockedNor {
         if previous.len() != n {
             return Err(TickInputError::GateCount);
         }
+        let gates = self.next_gates(previous, input);
+        let outputs = observe(self.netlist.outputs.as_slice(), input, gates.as_slice());
+        Ok(TickFrame { gates, outputs })
+    }
+
+    // 混在回路はゲートを更新した後、状態素子の確定出力と合わせて観測する。
+    pub(super) fn next_gates(&self, previous: &[bool], input: &[bool]) -> (gates: Vec<bool>)
+        requires
+            clocked_wiring_valid(&self.netlist_model()),
+            input@.len() == self.netlist_model().input_count,
+            previous@.len() == self.netlist_model().gates@.len(),
+        ensures
+            gates@.len() == self.netlist_model().gates@.len(),
+            clocked_gate_updates(self.netlist_model().gates@, input@, previous@, gates@),
+    {
+        let n = self.netlist.gates.len();
         let mut gates = Vec::with_capacity(n);
         let mut i = 0;
         while i < n
@@ -449,8 +465,7 @@ impl ClockedNor {
             };
             i += 1;
         }
-        let outputs = observe(self.netlist.outputs.as_slice(), input, gates.as_slice());
-        Ok(TickFrame { gates, outputs })
+        gates
     }
 }
 

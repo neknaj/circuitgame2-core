@@ -332,6 +332,7 @@ impl RamState {
         &&& self.word_bits > 0
         &&& self.memory@.len() == self.words * self.word_bits
         &&& self.output@.len() == self.word_bits
+        &&& self.memory@.len() + self.output@.len() <= isize::MAX
     }
 
     /// `2^address_bits` 語の記憶部と読み出し出力を0に初期化する。
@@ -382,10 +383,18 @@ impl RamState {
         Ok(Self { address_bits, words, word_bits, memory, output })
     }
 
+    pub(super) fn resident_bits(&self) -> (bits: usize)
+        ensures bits == self.memory_model().len() + self.output_model().len(),
+    {
+        proof { use_type_invariant(self); }
+        self.memory.len() + self.output.len()
+    }
+
     /// 最新の tick で読み出した値を返す。初期化と reset の直後は0を返す。
     pub fn output(&self) -> (bits: &[bool])
-        ensures bits@ == self.output_model(),
+        ensures bits@ == self.output_model(), bits@.len() == self.word_bits_model(),
     {
+        proof { use_type_invariant(self); }
         self.output.as_slice()
     }
 
