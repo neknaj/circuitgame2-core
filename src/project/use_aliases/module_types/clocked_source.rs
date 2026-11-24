@@ -244,7 +244,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)
     }
 
-    fn source_driver_location(&self, _owner: ModuleBodyPosition, _limit: u64, drivers: &crate::project::ModuleDrivers<'p, 'a>, index: usize)
+    pub(super) fn source_driver_location(&self, _owner: ModuleBodyPosition, _limit: u64, drivers: &crate::project::ModuleDrivers<'p, 'a>, index: usize)
         -> (site: LocatedName<'p, 'a>)
         requires self.can_resolve(), self.module_drivers_result(_owner, _limit, Ok(Some(*drivers))),
             index < drivers.definitions@.len(),

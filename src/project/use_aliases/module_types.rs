@@ -14,6 +14,8 @@ pub use clocked_plan::{clocked_link_plan_result, clocked_regions_cover, clocked_
     clocked_wire_solutions_agree, clocked_wires_match};
 mod calls;
 pub use calls::{CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError};
+mod definition_layout;
+pub use definition_layout::ClockedDefinitionLayoutError;
 mod concats;
 pub use concats::{ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError};
 mod outputs;
@@ -262,6 +264,54 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ((#[trigger] typed.types@[i]) matches Some(ty) ==> location_in_source(ty.origin)),
     {
         reveal(UseAliases::root_types_prefix);
+    }
+
+    /// 右辺の型として得た構造体が、呼び出し先の名前解決済みの宣言を指すことを示す。
+    pub(super) proof fn module_root_type_declarations(
+        &self, owner: ModuleBodyPosition, limit: u64, typed: ModuleRootTypes,
+    )
+        requires self.module_root_types_result(owner, limit, Ok(Some(typed))),
+        ensures self.module_types_declared(typed.types@),
+    {
+        reveal(UseAliases::root_types_prefix);
+        assert forall|i: int| 0 <= i < typed.types@.len() implies
+            ((#[trigger] typed.types@[i]) matches Some(ty) ==> self.declared_port_type(ty.ty)) by {
+            if let Some(ty) = typed.types@[i] {
+                let wiring = typed.wiring;
+                let at = wiring.drivers.origins@[i];
+                let driver = wiring.drivers.definitions@[i];
+                assert(self.root_type(at, driver, limit, Ok(Some(ty))));
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[at.file as int];
+                let source = &project.sources_model()[at.file as int];
+                let row = parsed.definitions@[driver.definition as int];
+                if ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int) {
+                    let first = parsed.entry_ranges@[at.entry as int].definitions.start;
+                    let reference = DefinitionPosition { file: at.file, entry: at.entry,
+                        definition: (driver.definition - first) as usize, reference: 0 };
+                    let call = choose|call: ModuleCallPorts|
+                        #[trigger] self.module_call_ports_result(reference, limit, Ok(Some(call)))
+                        && direct_output_type(&call, driver.result_index, ty);
+                    let port = choose|port: crate::project::CallPortType|
+                        #[trigger] call.signature.target.port_matches(PortDirection::Output, driver.result_index, Some(port))
+                        && ty.ty == port.ty
+                        && ty.origin == match port.annotation {
+                            Some(annotation) => *annotation,
+                            None => LocatedName { source: call.signature.source, span: call.signature.call.span },
+                        };
+                    self.module_call_ports_evidence(reference, limit, call);
+                    self.module_call_port_type_declared(reference, limit, call.signature, PortDirection::Output, driver.result_index, port);
+                } else {
+                    assert(ty.ty is Bits);
+                }
+            }
+        };
+    }
+
+    /// 型表にある各構造体型が、このプロジェクトの宣言を指す。
+    pub(super) open spec fn module_types_declared(&self, types: Seq<Option<SignalType>>) -> bool {
+        forall|i: int| 0 <= i < types.len() ==>
+            ((#[trigger] types[i]) matches Some(ty) ==> self.declared_port_type(ty.ty))
     }
 
     /// 全断片の右辺全体を占める通常呼び出しやビット選択から、左辺の型を求める。

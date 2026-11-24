@@ -343,7 +343,33 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 入出力数と実引数の順序、または最初の違反の根拠を定める。
+    /// ポートに現れる構造体型は、名前解決済みのプロジェクト内の宣言を指す。
+    pub(in crate::project::use_aliases) proof fn module_call_port_type_declared(
+        &self, at: DefinitionPosition, limit: u64, call: ModuleCallSignature,
+        direction: PortDirection, index: usize, port: CallPortType,
+    )
+        requires
+            self.module_call_signature_result(at, limit, Ok(Some(call))),
+            call.target.port_matches(direction, index, Some(port)),
+        ensures self.declared_port_type(port.ty),
+    {
+        self.module_call_site_evidence(at, limit, call);
+        match call.target {
+            ModuleCallTarget::Routine { position, signature, .. } => {
+                self.typed_signature_types_declared(position.file, position.entry, limit, signature);
+                if direction is Input {
+                    assert(signature.inputs@[index as int].ty == port.ty);
+                } else {
+                    assert(signature.outputs@[index as int].ty == port.ty);
+                }
+            },
+            ModuleCallTarget::StateElement { position, storage, .. } =>
+                self.storage_signature_sites(position.file, position.entry, limit, storage),
+            ModuleCallTarget::Nor => {},
+        }
+    }
+
+    /// 入出力数と実引数の順序、または最初に見つかった違反の根拠を定める。
     pub closed spec fn module_call_ports_result(
         &self, at: DefinitionPosition, max_width: u64, result: Result<Option<ModuleCallPorts>, ModuleCallPortsError>,
     ) -> bool {

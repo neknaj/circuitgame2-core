@@ -82,7 +82,7 @@ pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes,
     CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError, PrimitiveModuleError,
     ModuleOutputTypes, ModuleOutputTypesError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
-pub use use_aliases::{ClockedLinkPlan, ClockedModuleError, ClockedPlanError, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement, ClockedWireDriver, plan_clocked_links};
+pub use use_aliases::{ClockedDefinitionLayoutError, ClockedLinkPlan, ClockedModuleError, ClockedPlanError, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement, ClockedWireDriver, plan_clocked_links};
 #[cfg(verus_only)]
 pub use use_aliases::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,
     clocked_wire_solutions_agree, clocked_wires_match};

@@ -558,8 +558,8 @@ fn checks_storage_calls_with_types_from_their_declaration_scope() {
 
 #[test]
 fn places_struct_ram_outputs_in_call_order_across_module_parts() {
-    use circuitgame2_core::netlist::{ClockedNor, ClockedVm, NorNetlist, Wire};
-    use circuitgame2_core::project::{ClockedStorageLayoutError, ModuleBodyPosition};
+    use circuitgame2_core::netlist::{ClockedNor, ClockedVm, NorNetlist, PortBitLayoutError, Wire};
+    use circuitgame2_core::project::{ClockedDefinitionLayoutError, ClockedStorageLayoutError, ModuleBodyPosition};
 
     let input = [
         SourceSnapshot { path: "main.ncg2", revision: 5,
@@ -575,6 +575,15 @@ fn places_struct_ram_outputs_in_call_order_across_module_parts() {
     let aliases = check_use_aliases(&targets).unwrap();
     let entry = project.circuits()[0].syntax.entries.iter().position(|entry| entry.head == Head::Module).unwrap();
     let owner = ModuleBodyPosition { file: 0, entry };
+    let definitions = aliases.plan_clocked_definitions(owner, 16, 16).unwrap().unwrap();
+    assert_eq!(definitions.ranges(), [0..8, 8..16]);
+    let Err(ClockedDefinitionLayoutError::Capacity {
+        definition,
+        layout: PortBitLayoutError::CapacityExceeded { port: 1, used: 8, width: 8, capacity: 15 },
+    }) = aliases.plan_clocked_definitions(owner, 16, 15) else { panic!("the second definition exceeds the limit"); };
+    assert_eq!(definition.source.revision, 7);
+    assert_eq!(&definition.source.text[definition.span], "second");
+
     let plan = aliases.plan_clocked_storage(owner, 16, 11, 27).unwrap().unwrap();
     let [first, second] = plan.instances.as_slice() else { panic!("expected two calls"); };
     assert_eq!((first.call.source.revision, second.call.source.revision), (5, 7));

@@ -615,6 +615,93 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_alias_types_evidence(owner, limit, checked.typed);
     }
 
+    proof fn concat_inference_keeps_declarations(
+        &self, typed: &ModuleAliasTypes, limit: u64, before: Vec<Option<SignalType>>,
+        after: Vec<Option<SignalType>>, index: usize,
+    )
+        requires
+            self.inference_step(typed, limit, before, after, index),
+            before@.len() == typed.sources.aliases@.len(),
+            self.module_types_declared(before@),
+            ({
+                let inputs = typed.sources.roots.wiring.drivers.signature.inputs@;
+                forall|i: int| 0 <= i < inputs.len() ==> self.declared_port_type((#[trigger] inputs[i]).ty)
+            }),
+            ({
+                let inputs = typed.sources.roots.wiring.drivers.signature.inputs@;
+                typed.sources.aliases@[index as int] matches Some(alias) ==> match alias.driver {
+                    OutputDriver::Input(port) => port < inputs.len(),
+                    OutputDriver::Definition(slot) => slot < before@.len(),
+                }
+            }),
+        ensures self.module_types_declared(after@),
+    {
+        let new = after@[index as int];
+        let value = new->Some_0;
+        match typed.sources.aliases@[index as int] {
+            Some(alias) => {
+                assert(new == bound_type(typed, before@, alias.driver));
+                if let OutputDriver::Definition(slot) = alias.driver {
+                    assert(before@[slot as int] == new);
+                }
+            },
+            None => {
+                let checked = choose|checked: Result<Option<ModuleConcat>, ModuleConcatsError>|
+                    #[trigger] self.concat_at(typed, &before, index as int, limit, checked)
+                    && new == match checked { Ok(Some(concat)) => Some(concat.result), _ => None };
+                assert(checked matches Ok(Some(concat)) && concat.result == value);
+                assert(value.ty is Bits);
+            },
+        }
+        assert(self.declared_port_type(value.ty));
+        assert forall|i: int| 0 <= i < after@.len() implies
+            ((#[trigger] after@[i]) matches Some(ty) ==> self.declared_port_type(ty.ty)) by {
+            if i != index { assert(after@[i] == before@[i]); }
+        };
+    }
+
+    proof fn concat_derivation_keeps_declarations(
+        &self, owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes,
+        trail: Seq<(usize, Vec<Option<SignalType>>)>, result: Vec<Option<SignalType>>, step: int,
+    )
+        requires
+            self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+            self.derivation(typed, limit, trail, result),
+            0 <= step < trail.len(),
+        ensures
+            trail[step].1@.len() == typed.types@.len(),
+            self.module_types_declared(trail[step].1@),
+        decreases step,
+    {
+        reveal(UseAliases::derivation);
+        if step == 0 {
+            self.module_alias_type_declarations(owner, limit, *typed);
+        } else {
+            self.concat_derivation_keeps_declarations(owner, limit, typed, trail, result, step - 1);
+            let row = trail[step];
+            let before = trail[step - 1].1;
+            self.module_alias_types_evidence(owner, limit, *typed);
+            self.module_type_sources_bounds(owner, limit, typed.sources);
+            let wiring = typed.sources.roots.wiring;
+            self.module_wiring_keeps_drivers(owner, limit, wiring);
+            self.module_output_driver(owner, limit, wiring.drivers, 0);
+            self.typed_signature_types_declared(owner.file, owner.entry, limit, wiring.drivers.signature);
+            assert(self.inference_step(typed, limit, before, row.1, row.0));
+            self.concat_inference_keeps_declarations(typed, limit, before, row.1, row.0);
+        }
+    }
+
+    /// 連接を推論するときも、構造体型は入力または右辺から引き継いだ元の宣言を指す。
+    pub(super) proof fn module_concat_type_declarations(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleConcats)
+        requires self.module_concats_result(owner, limit, Ok(Some(checked))),
+        ensures self.module_types_declared(checked.types@),
+    {
+        let trail = choose|trail: Seq<(usize, Vec<Option<SignalType>>)>|
+            #[trigger] self.derivation(&checked.typed, limit, trail, checked.types);
+        reveal(UseAliases::derivation);
+        self.concat_derivation_keeps_declarations(owner, limit, &checked.typed, trail, checked.types, trail.len() - 1);
+    }
+
     /// 右辺全体を占める連接の幅を、型が分かった信号名とリテラルから求める。
     ///
     /// 連接の幅を別名や別の連接へ伝え、追加の型が得られなくなったときの結果を返す。

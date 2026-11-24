@@ -253,6 +253,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_wiring_keeps_drivers(owner, limit, checked.typed.sources.roots.wiring);
     }
 
+    /// ビット選択後の型表にある構造体型が、このプロジェクトの宣言を参照することを示す。
+    pub(super) proof fn module_selection_type_declarations(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections)
+        requires self.module_selections_result(owner, limit, Ok(Some(checked))),
+        ensures self.module_types_declared(checked.types@),
+    {
+        self.module_concat_type_declarations(owner, limit, ModuleConcats {
+            typed: checked.typed, types: checked.types, concats: checked.concats,
+        });
+    }
+
     /// 右辺全体がビット選択で、選択をたどると型が判明した信号に行き着く定義を検査する。
     ///
     /// 選択を内側から検査し、元の信号のビット位置へ合成する。ほかの式の選択は後段で扱う。
