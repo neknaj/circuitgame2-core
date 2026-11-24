@@ -1,5 +1,8 @@
 //! 各呼び出しが占める区間と、親回路に移した実際の配線を対応付ける。
 
+#[cfg(verus_only)]
+pub(super) mod trace;
+
 use crate::netlist::{ClockedStorageInputs, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
 use crate::netlist::{ClockedVm, NorGate, clocked_gate_updates, clocked_instance_gate_updates_match,
@@ -409,7 +412,9 @@ pub(super) proof fn routine_tick_observation(
             let new_gates = vm.gate_values_model().subrange(start, end);
             let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
                 clocked_storage_output_width(routine.devices));
+            &&& routine.external.len() + clocked_storage_output_width(routine.devices) == routine.callee.input_count
             &&& result.0.len() == result.1.len() == routine.callee.input_count
+            &&& old_gates.len() == new_gates.len() == routine.callee.gates@.len()
             &&& clocked_gate_updates(routine.callee.gates@, result.0, old_gates, new_gates)
             &&& result.2.len() == routine.callee.outputs@.len()
             &&& output_values_match(result.1, new_gates, routine.callee.outputs@, result.2)
