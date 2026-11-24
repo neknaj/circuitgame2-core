@@ -148,6 +148,9 @@ pub use use_aliases::{
     single_bit_source_outputs_evaluations_agree,
 };
 
+pub use use_aliases::clocked_nor_settling_bound;
+#[cfg(verus_only)]
+pub use use_aliases::{clocked_nor_bound_matches, clocked_nor_depths, clocked_nor_has_cycle, clocked_nor_states_settle, fixed_nor_states};
 pub use use_aliases::{CheckedSingleBitFunc, SingleBitDefinition, SingleBitFuncError, SingleBitOperand, SingleBitRhs, UnsupportedSingleBitFunc};
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,

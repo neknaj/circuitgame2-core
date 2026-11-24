@@ -3,6 +3,33 @@ use circuitgame2_core::project::{ClockedModuleError, ClockedPlanError, ClockedWi
     check_use_aliases, index_use_targets, parse_circuit_project, plan_clocked_links};
 
 #[test]
+fn settling_bound_covers_reversed_dependencies_and_unobserved_gates() {
+    use circuitgame2_core::project::clocked_nor_settling_bound;
+
+    let empty = ClockedNor::check(NorNetlist {
+        input_count: 1, gates: Vec::new(), outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    assert_eq!(clocked_nor_settling_bound(&empty), Some(0));
+
+    let chain = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![
+            NorGate { left: Wire::Gate(1), right: Wire::Constant(false) },
+            NorGate { left: Wire::Input(0), right: Wire::Input(0) },
+        ],
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    assert_eq!(clocked_nor_settling_bound(&chain), Some(2));
+
+    let hidden_oscillator = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![NorGate { left: Wire::Gate(0), right: Wire::Constant(false) }],
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    assert_eq!(clocked_nor_settling_bound(&hidden_oscillator), None);
+}
+
+#[test]
 fn oscillator_and_constant_are_observed_from_reset() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 0,
