@@ -57,7 +57,7 @@ spec fn literal_atom(form: Form) -> bool {
     form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal || form->Atom_kind is Natural)
 }
 
-spec fn literal_wires(bytes: Seq<u8>, width: u64, result: Result<Vec<ClockedWireDriver>, ClockedDriverBitsError>) -> bool {
+pub(super) open spec fn literal_wires(bytes: Seq<u8>, width: u64, result: Result<Vec<ClockedWireDriver>, ClockedDriverBitsError>) -> bool {
     match result {
         Ok(wires) => wires@.len() == width <= driver_bits_capacity()
             && (forall|i: int| 0 <= i < width ==> (#[trigger] wires@[i]) ==
@@ -70,7 +70,7 @@ spec fn literal_wires(bytes: Seq<u8>, width: u64, result: Result<Vec<ClockedWire
     }
 }
 
-fn wire_literal(word: &str, width: u64, _limit: u64)
+pub(super) fn wire_literal(word: &str, width: u64, _limit: u64)
     -> (result: Result<Vec<ClockedWireDriver>, ClockedDriverBitsError>)
     requires circuit_literal_width_matches(word.spec_bytes(), Some(width), _limit, Ok(width)),
     ensures literal_wires(word.spec_bytes(), width, result),

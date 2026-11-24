@@ -64,6 +64,12 @@ pub(super) proof fn concat_prefix_width_step(widths: Seq<u64>, count: nat)
     reveal(concat_prefix_width);
 }
 
+pub(super) proof fn concat_prefix_width_zero(widths: Seq<u64>)
+    ensures concat_prefix_width(widths, 0) == 0,
+{
+    reveal(concat_prefix_width);
+}
+
 pub(super) proof fn concat_prefix_width_bounds(widths: Seq<u64>, first: nat, last: nat)
     requires first <= last <= widths.len(),
     ensures 0 <= concat_prefix_width(widths, first) <= concat_prefix_width(widths, last),
@@ -189,6 +195,13 @@ pub closed spec fn concat_result_width_matches(
             }
         },
     }
+}
+
+/// 期待幅のない連接で得た幅を、各引数の幅の合計と上限に結び付ける。
+pub(super) proof fn concat_result_width_total(widths: Seq<u64>, limit: u64, width: u64)
+    requires concat_result_width_matches(widths, None, limit, Ok(width)),
+    ensures 0 < width <= limit, width == concat_prefix_width(widths, widths.len()),
+{
 }
 
 /// 同じ引数と上限からは、合計幅または最初の違反が一意に定まる。

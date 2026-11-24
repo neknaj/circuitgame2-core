@@ -733,6 +733,49 @@ fn reports_projection_cycle_at_the_selected_signal_across_parts() {
 }
 
 #[test]
+fn lowers_a_definition_concat_in_low_to_high_operand_order() {
+    use circuitgame2_core::project::{ClockedModuleVmLimits, ModuleBodyPosition};
+
+    let input = [SourceSnapshot { path: "root.ncg2", revision: 3, text:
+        "(using nor) (module root (in (data (bits 2))) (out (joined (bits 7)))
+           (def joined (concat #xA data 1)))" }];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let entry = project.circuits()[0].syntax.entries.iter().position(|entry| entry.head == Head::Module).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry };
+    let limits = ClockedModuleVmLimits { width: 7, wiring_bits: 7, gates: 0, state_bits: 0 };
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.reset(), [false, true, false, true, false, false, true]);
+    assert_eq!(compiled.vm.step(&[true, false]).unwrap(), [false, true, false, true, true, false, true]);
+}
+
+#[test]
+fn locates_the_second_occurrence_of_a_repeated_concat_operand_in_a_cycle() {
+    use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits};
+
+    let input = [
+        SourceSnapshot { path: "root.ncg2", revision: 3, text:
+            "(using nor) (module root (in) (out (pair (bits 2))) (def pair (concat a a)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9, text:
+            "(module-part root (def a (bit pair 1)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let limits = ClockedModuleVmLimits { width: 2, wiring_bits: 3, gates: 0, state_bits: 0 };
+    let Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites))) =
+        aliases.lower_clocked_vm(owner, limits) else { panic!("expected a wire cycle") };
+    assert_eq!(sites.len(), 2);
+    let concat = sites.iter().find(|site| site.source.revision == 3).unwrap();
+    let second = input[0].text.find("(concat a a)").unwrap() + "(concat a ".len();
+    assert_eq!(concat.span, second..second + 1);
+    let selection = sites.iter().find(|site| site.source.revision == 9).unwrap();
+    assert_eq!(&selection.source.text[selection.span.clone()], "pair");
+}
+
+#[test]
 fn reports_selection_in_a_call_at_the_argument_and_input_declaration() {
     use circuitgame2_core::project::{ClockedArgumentWiringError, ClockedModuleVmError, ClockedModuleVmLimits};
 

@@ -130,6 +130,18 @@ pub(super) proof fn successful_literal_widths_agree(
     }
 }
 
+/// 期待幅なしで求めた幅を期待幅に指定しても、同じ定数をその幅で受理する。
+pub(super) proof fn inferred_literal_width_is_accepted(bytes: Seq<u8>, limit: u64, width: u64)
+    requires circuit_literal_width_matches(bytes, None, limit, Ok(width)),
+    ensures circuit_literal_width_matches(bytes, Some(width), limit, Ok(width)),
+{
+    if !fixed_bit(bytes) {
+        let size = choose|size: BitLiteralSize| #[trigger] bit_literal_size_matches(bytes, Some(size))
+            && width_for(false, size.written_bits, size.required_bits, None, limit, Ok(width));
+        assert(width_for(false, size.written_bits, size.required_bits, Some(width), limit, Ok(width)));
+    }
+}
+
 pub(super) proof fn fixed_bit_literal_width(
     bytes: Seq<u8>, expected: Option<u64>, limit: u64, width: u64,
 )

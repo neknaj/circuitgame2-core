@@ -2,12 +2,13 @@
 
 use super::{ModuleAliasTypes, ModuleAliasTypesError, ModuleConcat, ModuleConcatsError, UseAliases, aliases::find_member};
 #[cfg(verus_only)]
-use super::{ModuleConcats, propagation::type_sites_valid};
+use super::{ModuleConcatOperand, ModuleConcats, propagation::type_sites_valid};
 use crate::project::{CheckedBitSelection, LocatedName, ModuleBodyPosition, OutputDriver, ResolvedPortType,
     SelectionArgumentError, SignalType, circuits::form_location};
 use crate::project::use_aliases::{function_atoms::{copy_location, copy_signal_type}, selection_arguments::check_selection_chain};
 #[cfg(verus_only)]
-use crate::project::{ProjectSource, circuits::{is_form_location, parsed_index_evidence}};
+use crate::project::{ProjectSource, concat_prefix_width, concat_result_width_matches,
+    concatenation::concat_result_width_total, circuits::{is_form_location, parsed_index_evidence}};
 #[cfg(verus_only)]
 use crate::project::use_aliases::selection_arguments::selection_chain_arguments_match;
 use crate::syntax::{AtomKind, Form, circuit::bit_selection_chain};
@@ -253,12 +254,86 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_drivers_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring.drivers))),
             checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
             checked.selections@.len() == checked.types@.len(),
+            checked.concats@.len() == checked.types@.len(),
             type_sites_valid(checked.types@),
     {
         let inferred = ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats };
         self.module_concats_evidence(owner, limit, inferred);
         self.module_alias_types_evidence(owner, limit, checked.typed);
         self.module_wiring_keeps_drivers(owner, limit, checked.typed.sources.roots.wiring);
+    }
+
+    /// 連接の定義に記録された引数順と結果幅の契約を取り出す。
+    pub(super) proof fn module_concat_slot(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections, slot: usize,
+    )
+        requires self.can_resolve(), self.module_selections_result(owner, limit, Ok(Some(checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+            checked.types@[slot as int].is_some(),
+        ensures ({
+            let concat = checked.concats@[slot as int]->Some_0;
+            let widths = concat.operands@.map_values(|item: ModuleConcatOperand| item.width);
+            &&& concat.result.ty is Bits
+            &&& checked.types@[slot as int]->Some_0.ty == concat.result.ty
+            &&& concat_result_width_matches(widths, None, limit, Ok(concat.result.ty->Bits_0))
+            &&& 0 < concat.result.ty->Bits_0 <= limit
+            &&& concat.result.ty->Bits_0 == concat_prefix_width(widths, widths.len())
+        }),
+    {
+        let inferred = ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats };
+        self.checked_concat_width(owner, limit, &inferred, slot);
+        self.checked_concat_table_width(owner, limit, &inferred, slot);
+        let concat = checked.concats@[slot as int]->Some_0;
+        concat_result_width_total(concat.operands@.map_values(|item: ModuleConcatOperand| item.width), limit, concat.result.ty->Bits_0);
+    }
+
+    /// 連接の引数位置から、同じ型表での駆動元またはリテラルの根拠を取り出す。
+    pub(super) proof fn module_concat_operand_evidence(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections, slot: usize, index: usize,
+    )
+        requires self.can_resolve(), self.module_selections_result(owner, limit, Ok(Some(checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+            index < checked.concats@[slot as int]->Some_0.operands@.len(),
+        ensures self.concat_operand_in_source(&checked.typed, checked.types@, slot as int,
+            checked.concats@[slot as int]->Some_0.operands@[index as int], limit),
+    {
+        let inferred = ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats };
+        self.checked_concat_operand(owner, limit, &inferred, slot, index);
+    }
+
+    /// 連接の引数に対応する元ソース範囲を表す。
+    pub(super) open spec fn module_concat_operand_site_at(
+        &self, checked: &ModuleSelections, slot: int, index: int, site: LocatedName,
+    ) -> bool {
+        let project = self.targets.project_model();
+        let file = checked.typed.sources.roots.wiring.drivers.origins@[slot].file as int;
+        let operand = checked.concats@[slot]->Some_0.operands@[index];
+        &&& checked.concats@[slot].is_some()
+        &&& 0 <= index < checked.concats@[slot]->Some_0.operands@.len()
+        &&& is_form_location(&project.sources_model()[file],
+            project.circuits_model()[file].syntax.forms@[operand.form as int], site)
+    }
+
+    /// 連接の一引数を指定し、元ソースでその引数が占める範囲を返す。
+    pub(super) fn module_concat_operand_site(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleSelections<'p, 'a>, slot: usize, index: usize,
+    ) -> (site: LocatedName<'p, 'a>)
+        requires self.can_resolve(), self.module_selections_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+            index < checked.concats@[slot as int]->Some_0.operands@.len(),
+        ensures self.module_concat_operand_site_at(checked, slot as int, index as int, site),
+    {
+        proof {
+            self.module_selections_evidence(owner, limit, *checked);
+            self.module_driver_sites(owner, limit, checked.typed.sources.roots.wiring.drivers, slot as int);
+            self.module_concat_operand_evidence(owner, limit, *checked, slot, index);
+        }
+        let at = checked.typed.sources.roots.wiring.drivers.origins[slot];
+        let project = self.targets.project();
+        let source = &project.sources()[at.file];
+        let parsed = &project.circuits()[at.file];
+        let Some(concat) = &checked.concats[slot] else { unreachable!() };
+        form_location(source, parsed.syntax.forms.as_slice(), concat.operands[index].form)
     }
 
     /// 同じ定義を検査した結果から、選択の起点と合成した射影の根拠を取り出す。

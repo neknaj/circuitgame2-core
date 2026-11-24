@@ -12,12 +12,16 @@ use crate::project::{circuit_literal_width_matches, concat_result_width_matches,
 use super::{propagation::type_sites_valid, selections::bound_type};
 #[cfg(verus_only)]
 use crate::project::use_aliases::selection_arguments::selection_parameters_match;
+#[cfg(verus_only)]
+use crate::project::{concat_result_widths_agree, literal_width::successful_literal_widths_agree};
 use crate::syntax::{AtomKind, Form, circuit::{NamedBuildCircuit, concat_argument_range,
     definition_target_atoms, next_call_argument}};
 #[cfg(verus_only)]
-use crate::syntax::{complete_list_indices, form_span, nested_list_indices, circuit::{build_definition_scope_evidence,
+use crate::syntax::{complete_list_indices, form_span, form_spans_valid, nested_list_indices, circuit::{build_definition_scope_evidence,
     bit_selection_shape_matches, bit_selection_shape_positions, BitSelectionShape,
-    concat_arguments_evidence, concat_arguments_match, definition_signal_positions_in_order, definition_target_range,
+    concat_argument_ranges_agree, concat_arguments_evidence, concat_arguments_match, concat_excludes_other_shapes,
+    definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
+    ordinary_call_at, ordinary_call_excludes_special_forms,
     direct_form_in_range, expression_region, following_concat_argument, indexed_concat_argument_signal}};
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -192,6 +196,39 @@ spec fn operand_prefix(context: &ConcatContext, arguments: Range<usize>, cursor:
         &&& arguments.start <= item.form < argument_end(forms, item.form as int) <= cursor <= arguments.end
         &&& item.form == if i == 0 { arguments.start as int } else { argument_end(forms, operands[i - 1].form as int) }
         &&& concat_operand(context, item.form, limit, Ok(Some(item)))
+    }
+}
+
+/// 成功した最初の引数から指定した位置まで、一つずつアトムが並ぶことを示す。
+proof fn concat_atomic_operand(
+    context: &ConcatContext, arguments: Range<usize>, cursor: usize, limit: u64,
+    operands: Seq<ModuleConcatOperand>, index: int,
+)
+    requires operand_prefix(context, arguments, cursor, limit, operands),
+        arguments.end <= context.parsed.syntax.forms@.len(), 0 <= index < operands.len(),
+    ensures
+        operands[index].form == arguments.start + index,
+        context.parsed.syntax.forms@[operands[index].form as int] is Atom,
+    decreases index,
+{
+    reveal(operand_prefix);
+    let item = operands[index];
+    assert(concat_operand(context, item.form, limit, Ok(Some(item))));
+    if index > 0 {
+        concat_atomic_operand(context, arguments, cursor, limit, operands, index - 1);
+    }
+}
+
+proof fn concat_atomic_prefix_len(
+    context: &ConcatContext, arguments: Range<usize>, cursor: usize, limit: u64, operands: Seq<ModuleConcatOperand>,
+)
+    requires operand_prefix(context, arguments, cursor, limit, operands),
+        arguments.end <= context.parsed.syntax.forms@.len(),
+    ensures cursor == arguments.start + operands.len(),
+{
+    reveal(operand_prefix);
+    if operands.len() > 0 {
+        concat_atomic_operand(context, arguments, cursor, limit, operands, operands.len() - 1);
     }
 }
 
@@ -480,6 +517,60 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 途中で判明した型は、後続の連接や裸名の推論で変化しない。
+    proof fn concat_derivation_preserves_known(
+        &self, typed: &ModuleAliasTypes, limit: u64, trail: Seq<(usize, Vec<Option<SignalType>>)>,
+        types: Vec<Option<SignalType>>, first: int, last: int,
+    )
+        requires self.derivation(typed, limit, trail, types), 0 <= first <= last < trail.len(),
+        ensures
+            trail[first].1@.len() == trail[last].1@.len(),
+            forall|i: int| 0 <= i < trail[first].1@.len() && (#[trigger] trail[first].1@[i]).is_some()
+                ==> trail[last].1@[i] == trail[first].1@[i],
+        decreases last - first,
+    {
+        reveal(UseAliases::derivation);
+        if first < last {
+            self.concat_derivation_preserves_known(typed, limit, trail, types, first, last - 1);
+            let before = trail[last - 1].1;
+            let (updated, after) = trail[last];
+            assert(self.inference_step(typed, limit, before, after, updated));
+            assert forall|i: int| 0 <= i < trail[first].1@.len() && (#[trigger] trail[first].1@[i]).is_some()
+                implies after@[i] == trail[first].1@[i] by {
+                assert(before@[i] == trail[first].1@[i]);
+                assert(i != updated);
+            };
+        }
+    }
+
+    /// 最後に残った型が、どの推論で初めて判明したかを取り出す。
+    proof fn concat_derivation_discovered_type(
+        &self, typed: &ModuleAliasTypes, limit: u64, trail: Seq<(usize, Vec<Option<SignalType>>)>,
+        types: Vec<Option<SignalType>>, slot: usize, last: int,
+    ) -> (step: int)
+        requires self.derivation(typed, limit, trail, types), 0 <= last < trail.len(),
+            slot < typed.types@.len(), typed.types@[slot as int].is_none(), trail[last].1@[slot as int].is_some(),
+        ensures
+            0 < step <= last,
+            trail[step - 1].1@.len() == typed.types@.len(),
+            trail[step].1@[slot as int] == trail[last].1@[slot as int],
+            self.inference_step(typed, limit, trail[step - 1].1, trail[step].1, slot),
+        decreases last,
+    {
+        reveal(UseAliases::derivation);
+        assert(last > 0);
+        let (updated, after) = trail[last];
+        let before = trail[last - 1].1;
+        assert(self.inference_step(typed, limit, before, after, updated));
+        self.concat_derivation_preserves_known(typed, limit, trail, types, 0, last);
+        if updated == slot {
+            last
+        } else {
+            assert(before@[slot as int] == after@[slot as int]);
+            self.concat_derivation_discovered_type(typed, limit, trail, types, slot, last - 1)
+        }
+    }
+
     proof fn record_inference(&self, typed: &ModuleAliasTypes, limit: u64,
         trail: Seq<(usize, Vec<Option<SignalType>>)>, before: Vec<Option<SignalType>>, after: Vec<Option<SignalType>>, index: usize,
     )
@@ -620,9 +711,380 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures
             self.module_alias_types_result(owner, limit, Ok(Some(checked.typed))),
             checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
+            checked.concats@.len() == checked.types@.len(),
             type_sites_valid(checked.types@),
     {
         self.module_alias_types_evidence(owner, limit, checked.typed);
+    }
+
+    proof fn successful_concat_context<'w>(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &'w ModuleConcats<'p, 'a>, slot: usize,
+    ) -> (evidence: (ConcatContext<'w, 'p, 'a>, Range<usize>))
+        requires self.can_resolve(), self.module_concats_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+        ensures ({
+            let (context, arguments) = evidence;
+            let project = self.targets.project_model();
+            let wiring = checked.typed.sources.roots.wiring;
+            let at = wiring.drivers.origins@[slot as int];
+            let row = context.parsed.definitions@[context.definition as int];
+            let forms = context.parsed.syntax.forms@;
+            &&& context.typed == &checked.typed && context.types == &checked.types
+            &&& context.body == at
+            &&& context.definition == wiring.drivers.definitions@[slot as int].definition
+            &&& context.member < wiring.drivers.body.members@.len()
+            &&& wiring.drivers.body.members@[context.member as int] == at
+            &&& at.file < project.sources_model().len() && at.file < project.circuits_model().len()
+            &&& *context.source == project.sources_model()[at.file as int]
+            &&& *context.parsed == project.circuits_model()[at.file as int]
+            &&& self.concat_context(owner, limit, &context)
+            &&& form_spans_valid(context.source.text, forms, context.source.text.spec_bytes().len() as int)
+            &&& concat_arguments_match(context.source.text, forms, row.expression.start as int, arguments)
+            &&& arguments.end <= forms.len()
+            &&& self.concat_result(&context, row.expression.start, arguments, limit, Ok(checked.concats@[slot as int]))
+        }),
+    {
+        self.module_concats_evidence(owner, limit, *checked);
+        self.module_alias_types_evidence(owner, limit, checked.typed);
+        let wiring = checked.typed.sources.roots.wiring;
+        self.module_wiring_keeps_drivers(owner, limit, wiring);
+        self.module_driver_sites(owner, limit, wiring.drivers, slot as int);
+        reveal(UseAliases::concat_prefix);
+        let body = wiring.drivers.origins@[slot as int];
+        let definition = wiring.drivers.definitions@[slot as int].definition;
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[body.file as int];
+        let parsed = &project.circuits_model()[body.file as int];
+        let row = parsed.definitions@[definition as int];
+        let forms = parsed.syntax.forms@;
+        let root = row.expression.start;
+        let result = Ok(checked.concats@[slot as int]);
+        assert(self.concat_at(&checked.typed, &checked.types, slot as int, limit, result));
+        let (arguments, member) = choose|arguments: Range<usize>, member: usize|
+            #[trigger] concat_arguments_match(source.text, forms, root as int, arguments)
+            && (#[trigger] wiring.drivers.body.members@[member as int]) == body
+            && member < wiring.drivers.body.members@.len()
+            && self.concat_result(&ConcatContext { typed: &checked.typed, types: &checked.types,
+                body, member, definition, source, parsed }, root, arguments, limit, result);
+        self.targets.parsed_project_model();
+        parsed_index_evidence(*source, *parsed);
+        build_definition_scope_evidence(source.text, &parsed.build_model(), body.entry as int, definition as int);
+        concat_arguments_evidence(source.text, forms, root as int, row.expression.end as int, arguments);
+        (ConcatContext { typed: &checked.typed, types: &checked.types, body, member, definition, source, parsed }, arguments)
+    }
+
+    /// 連接幅は、ソース順に並ぶ各引数の幅から決まる。
+    pub(super) proof fn checked_concat_width(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleConcats, slot: usize,
+    )
+        requires self.can_resolve(), self.module_concats_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+        ensures ({
+            let concat = checked.concats@[slot as int]->Some_0;
+            &&& concat.result.ty is Bits
+            &&& concat_result_width_matches(concat.operands@.map_values(|item: ModuleConcatOperand| item.width),
+                None, limit, Ok(concat.result.ty->Bits_0))
+        }),
+    {
+        self.successful_concat_context(owner, limit, checked, slot);
+    }
+
+    /// 連接の型は、根の検査や裸名の伝播では決まらない。
+    proof fn concat_has_no_seed_type(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleConcats, slot: usize,
+        context: &ConcatContext, arguments: Range<usize>,
+    )
+        requires self.can_resolve(), self.module_concats_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(), self.concat_context(owner, limit, context),
+            ({
+                let drivers = checked.typed.sources.roots.wiring.drivers;
+                let row = context.parsed.definitions@[context.definition as int];
+                &&& context.body == drivers.origins@[slot as int]
+                &&& context.definition == drivers.definitions@[slot as int].definition
+                &&& concat_arguments_match(context.source.text, context.parsed.syntax.forms@, row.expression.start as int, arguments)
+            }),
+        ensures checked.typed.types@[slot as int].is_none(), checked.typed.sources.aliases@[slot as int].is_none(),
+    {
+        let sources = checked.typed.sources;
+        let roots = sources.roots;
+        let at = roots.wiring.drivers.origins@[slot as int];
+        let driver = roots.wiring.drivers.definitions@[slot as int];
+        let row = context.parsed.definitions@[context.definition as int];
+        let root = row.expression.start;
+        let forms = context.parsed.syntax.forms@;
+        let source = context.source.text;
+        self.module_concats_evidence(owner, limit, *checked);
+        self.module_alias_types_evidence(owner, limit, checked.typed);
+        self.module_type_sources_bounds(owner, limit, sources);
+        self.module_root_types_evidence(owner, limit, roots);
+        concat_excludes_other_shapes(source, forms, root as int, arguments);
+        if ordinary_call_at(source, forms, root as int, row.expression.end as int) {
+            ordinary_call_excludes_special_forms(source, forms, root as int, row.expression.end as int);
+            assert(false);
+        }
+        self.module_list_rhs_has_no_alias(owner, limit, sources, slot);
+        reveal(UseAliases::root_types_prefix);
+        assert(self.root_type(at, driver, limit, Ok(roots.types@[slot as int])));
+        assert(super::selection_root_type(context.source, forms, row, Ok(roots.types@[slot as int])));
+        assert(roots.types@[slot as int].is_none());
+        self.module_alias_keeps_root_type(owner, limit, checked.typed, slot);
+    }
+
+    /// 確定した連接の型と、その型を求めた時点の表を取り出す。
+    proof fn concat_type_before_assignment(
+        &self, limit: u64, checked: &ModuleConcats, slot: usize,
+    ) -> (evidence: (Vec<Option<SignalType>>, ModuleConcat))
+        requires self.fixed_point(&checked.typed, limit, checked.types),
+            slot < checked.types@.len(), checked.types@[slot as int].is_some(),
+            checked.typed.types@[slot as int].is_none(), checked.typed.sources.aliases@[slot as int].is_none(),
+        ensures ({
+            let (before, concat) = evidence;
+            &&& before@.len() == checked.types@.len()
+            &&& checked.types@[slot as int] == Some(concat.result)
+            &&& self.concat_at(&checked.typed, &before, slot as int, limit, Ok(Some(concat)))
+            &&& forall|i: int| 0 <= i < before@.len() && (#[trigger] before@[i]).is_some()
+                ==> checked.types@[i] == before@[i]
+        }),
+    {
+        let trail = choose|trail: Seq<(usize, Vec<Option<SignalType>>)>|
+            #[trigger] self.derivation(&checked.typed, limit, trail, checked.types);
+        reveal(UseAliases::derivation);
+        let last = trail.len() - 1;
+        let step = self.concat_derivation_discovered_type(&checked.typed, limit, trail, checked.types, slot, last);
+        let known = trail[step - 1].1;
+        let outcome = choose|outcome: Result<Option<ModuleConcat>, ModuleConcatsError>|
+            #[trigger] self.concat_at(&checked.typed, &known, slot as int, limit, outcome)
+            && checked.types@[slot as int] == match outcome { Ok(Some(found)) => Some(found.result), _ => None };
+        let old = outcome->Ok_0->Some_0;
+        self.concat_derivation_preserves_known(&checked.typed, limit, trail, checked.types, step - 1, last);
+        (known, old)
+    }
+
+    /// 型が確定した連接は、現在の引数幅の合計をその定義の型に持つ。
+    pub(super) proof fn checked_concat_table_width(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleConcats, slot: usize,
+    )
+        requires self.can_resolve(), self.module_concats_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+            checked.types@[slot as int].is_some(),
+        ensures checked.types@[slot as int]->Some_0.ty == checked.concats@[slot as int]->Some_0.result.ty,
+    {
+        self.module_concats_evidence(owner, limit, *checked);
+        let (context, arguments) = self.successful_concat_context(owner, limit, checked, slot);
+        self.concat_has_no_seed_type(owner, limit, checked, slot, &context, arguments);
+        let (known, old) = self.concat_type_before_assignment(limit, checked, slot);
+        let concat = checked.concats@[slot as int]->Some_0;
+        self.concat_result_same_context(owner, limit, checked, &context, arguments, slot, &known, Ok(Some(old)));
+        let before = ConcatContext { typed: context.typed, types: &known, body: context.body,
+            member: context.member, definition: context.definition, source: context.source, parsed: context.parsed };
+        assert(self.concat_context(owner, limit, &before));
+        assert(operand_prefix(&before, arguments, arguments.end, limit, old.operands@));
+        assert(operand_prefix(&context, arguments, arguments.end, limit, concat.operands@));
+        concat_atomic_prefix_len(&before, arguments, arguments.end, limit, old.operands@);
+        concat_atomic_prefix_len(&context, arguments, arguments.end, limit, concat.operands@);
+        let old_widths = old.operands@.map_values(|item: ModuleConcatOperand| item.width);
+        let widths = concat.operands@.map_values(|item: ModuleConcatOperand| item.width);
+        assert forall|i: int| 0 <= i < widths.len() implies widths[i] == old_widths[i] by {
+            concat_atomic_operand(&before, arguments, arguments.end, limit, old.operands@, i);
+            concat_atomic_operand(&context, arguments, arguments.end, limit, concat.operands@, i);
+            let earlier = old.operands@[i];
+            let current = concat.operands@[i];
+            reveal(operand_prefix);
+            assert(concat_operand(&before, current.form, limit, Ok(Some(earlier))));
+            assert(concat_operand(&context, current.form, limit, Ok(Some(current))));
+            self.concat_known_operand_width(owner, limit, &before, &context, current.form, earlier, current);
+        };
+        assert(widths =~= old_widths);
+        concat_result_widths_agree(widths, None, limit, Ok(old.result.ty->Bits_0), Ok(concat.result.ty->Bits_0));
+    }
+
+    /// 連接の各引数を、元のフォームと、型が合う駆動元またはリテラルの幅に結び付ける。
+    pub(super) proof fn checked_concat_operand(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleConcats, slot: usize, index: usize,
+    )
+        requires self.can_resolve(), self.module_concats_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(), checked.concats@[slot as int].is_some(),
+            index < checked.concats@[slot as int]->Some_0.operands@.len(),
+        ensures self.concat_operand_in_source(&checked.typed, checked.types@, slot as int,
+            checked.concats@[slot as int]->Some_0.operands@[index as int], limit),
+    {
+        let (context, arguments) = self.successful_concat_context(owner, limit, checked, slot);
+        let wiring = checked.typed.sources.roots.wiring;
+        self.module_alias_types_evidence(owner, limit, checked.typed);
+        let concat = checked.concats@[slot as int]->Some_0;
+        let item = concat.operands@[index as int];
+        let parsed = context.parsed;
+        let source = context.source;
+        let row = parsed.definitions@[context.definition as int];
+        let forms = parsed.syntax.forms@;
+        assert(operand_prefix(&context, arguments, arguments.end, limit, concat.operands@));
+        reveal(operand_prefix);
+        assert(concat_operand(&context, item.form, limit, Ok(Some(item))));
+        assert(arguments.start <= item.form < arguments.end);
+        assert(item.form < forms.len());
+        let atom = forms[item.form as int];
+        assert(atom is Atom);
+        if atom->Atom_kind is Name {
+            let frame = parsed.entry_ranges@[context.body.entry as int].signals;
+            let position = choose|i: int| row.signals.start <= i < row.signals.end
+                && (#[trigger] parsed.signals@[i]) == item.form
+                && {
+                    let bound = wiring.signals@[context.member as int]@[i - frame.start];
+                    &&& bound.form == item.form && item.driver == Some(bound.driver)
+                    &&& bound_type(&checked.typed, checked.types@, bound.driver) matches Some(ty)
+                    &&& ty.ty == ResolvedPortType::Bits(item.width)
+                };
+            parsed_index_evidence(*source, *parsed);
+            build_definition_scope_evidence(source.text, &parsed.build_model(),
+                context.body.entry as int, context.definition as int);
+            assert(frame.start <= position < frame.end);
+            self.module_signal_index_item(owner, limit, wiring, context.member as int, position);
+            let bound = wiring.signals@[context.member as int]@[position - frame.start];
+            assert(item.driver == Some(bound.driver));
+            assert(match bound.driver {
+                OutputDriver::Input(index) => index < wiring.drivers.signature.inputs@.len(),
+                OutputDriver::Definition(index) => index < wiring.drivers.definitions@.len(),
+            });
+        } else {
+            assert(item.driver.is_none());
+        }
+    }
+
+    proof fn concat_result_same_context(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleConcats, context: &ConcatContext,
+        arguments: Range<usize>, slot: usize, types: &Vec<Option<SignalType>>,
+        result: Result<Option<ModuleConcat>, ModuleConcatsError>,
+    )
+        requires
+            self.concat_context(owner, limit, context), context.typed == &checked.typed,
+            self.module_concats_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.concats@.len(),
+            ({
+                let drivers = checked.typed.sources.roots.wiring.drivers;
+                let root = context.parsed.definitions@[context.definition as int].expression.start as int;
+                &&& context.definition == drivers.definitions@[slot as int].definition
+                &&& context.body == drivers.origins@[slot as int]
+                &&& concat_arguments_match(context.source.text, context.parsed.syntax.forms@, root, arguments)
+            }),
+            self.concat_at(&checked.typed, types, slot as int, limit, result),
+        ensures ({
+            let root = context.parsed.definitions@[context.definition as int].expression.start;
+            self.concat_result(&ConcatContext { typed: context.typed, types, body: context.body,
+                member: context.member, definition: context.definition, source: context.source,
+                parsed: context.parsed }, root, arguments, limit, result)
+        }),
+    {
+        let wiring = checked.typed.sources.roots.wiring;
+        self.module_concats_evidence(owner, limit, *checked);
+        self.module_alias_types_evidence(owner, limit, checked.typed);
+        self.module_wiring_keeps_drivers(owner, limit, wiring);
+        self.module_driver_sites(owner, limit, wiring.drivers, slot as int);
+        self.checked_module_driver_body(owner, limit, wiring.drivers);
+        let root = context.parsed.definitions@[context.definition as int].expression.start;
+        let forms = context.parsed.syntax.forms@;
+        let source = context.source;
+        let (range, member) = choose|range: Range<usize>, member: usize|
+            #[trigger] concat_arguments_match(source.text, forms, root as int, range)
+            && (#[trigger] wiring.drivers.body.members@[member as int]) == context.body
+            && member < wiring.drivers.body.members@.len()
+            && self.concat_result(&ConcatContext { typed: context.typed, types, body: context.body,
+                member, definition: context.definition, source, parsed: context.parsed },
+                root, range, limit, result);
+        concat_argument_ranges_agree(source.text, forms, root as int, arguments, range);
+        if member != context.member {
+            let (first, last) = if member < context.member { (member, context.member) } else { (context.member, member) };
+            self.targets.module_body_members_distinct(&wiring.drivers.body, first as int, last as int);
+            assert(false);
+        }
+    }
+
+    proof fn concat_known_operand_width(
+        &self, owner: ModuleBodyPosition, limit: u64, before: &ConcatContext, after: &ConcatContext,
+        form: usize, known: ModuleConcatOperand, other: ModuleConcatOperand,
+    )
+        requires
+            self.concat_context(owner, limit, before), self.concat_context(owner, limit, after),
+            before.typed == after.typed && before.body == after.body && before.definition == after.definition
+                && before.member == after.member && before.parsed == after.parsed && before.source == after.source,
+            form < before.parsed.syntax.forms@.len(),
+            concat_operand(before, form, limit, Ok(Some(known))),
+            concat_operand(after, form, limit, Ok(Some(other))),
+            forall|i: int| 0 <= i < before.types@.len() && (#[trigger] before.types@[i]).is_some()
+                ==> after.types@[i] == before.types@[i],
+        ensures known.width == other.width,
+    {
+        let forms = before.parsed.syntax.forms@;
+        let form = forms[form as int];
+        if form->Atom_kind is Name {
+            self.module_alias_types_evidence(owner, limit, *before.typed);
+            let wiring = before.typed.sources.roots.wiring;
+            let parsed = before.parsed;
+            let source = before.source;
+            let row = parsed.definitions@[before.definition as int];
+            let frame = parsed.entry_ranges@[before.body.entry as int].signals;
+            let left = choose|i: int| row.signals.start <= i < row.signals.end
+                && (#[trigger] parsed.signals@[i]) == known.form
+                && {
+                    let bound = wiring.signals@[before.member as int]@[i - frame.start];
+                    &&& bound.form == known.form && known.driver == Some(bound.driver)
+                    &&& bound_type(before.typed, before.types@, bound.driver) matches Some(ty)
+                    &&& ty.ty == ResolvedPortType::Bits(known.width)
+                };
+            let right = choose|i: int| row.signals.start <= i < row.signals.end
+                && (#[trigger] parsed.signals@[i]) == known.form
+                && {
+                    let bound = wiring.signals@[before.member as int]@[i - frame.start];
+                    &&& bound.form == other.form && other.driver == Some(bound.driver)
+                    &&& bound_type(after.typed, after.types@, bound.driver) matches Some(ty)
+                    &&& ty.ty == ResolvedPortType::Bits(other.width)
+                };
+            parsed_index_evidence(*source, *parsed);
+            build_definition_scope_evidence(source.text, &parsed.build_model(), before.body.entry as int, before.definition as int);
+            definition_signal_positions_agree(source.text, &parsed.build_model(), before.body.entry as int,
+                before.definition as int, left, right);
+            self.module_signal_index_item(owner, limit, wiring, before.member as int, left);
+            let driver = wiring.signals@[before.member as int]@[left - frame.start].driver;
+            if let OutputDriver::Definition(index) = driver {
+                assert(before.types@[index as int].is_some());
+                assert(after.types@[index as int] == before.types@[index as int]);
+            }
+        } else {
+            let span = form_span(form);
+            let bytes = before.source.text.spec_bytes()[span.start as int..span.end as int];
+            successful_literal_widths_agree(bytes, None, limit, known.width, other.width);
+        }
+    }
+
+    pub(super) open spec fn concat_operand_in_source(
+        &self, typed: &ModuleAliasTypes, types: Seq<Option<SignalType>>, slot: int, item: ModuleConcatOperand, limit: u64,
+    ) -> bool {
+        let project = self.targets.project_model();
+        let drivers = typed.sources.roots.wiring.drivers;
+        let at = drivers.origins@[slot];
+        let parsed = &project.circuits_model()[at.file as int];
+        let source = &project.sources_model()[at.file as int];
+        let forms = parsed.syntax.forms@;
+        let atom = forms[item.form as int];
+        &&& at.file < project.sources_model().len() && at.file < project.circuits_model().len()
+        &&& item.form < forms.len() && atom is Atom
+        &&& form_spans_valid(source.text, forms, source.text.spec_bytes().len() as int)
+        &&& match item.driver {
+            Some(driver) => {
+                &&& atom->Atom_kind is Name
+                &&& match driver {
+                    OutputDriver::Input(index) => index < drivers.signature.inputs@.len(),
+                    OutputDriver::Definition(index) => index < drivers.definitions@.len(),
+                }
+                &&& bound_type(typed, types, driver) matches Some(ty)
+                &&& ty.ty == ResolvedPortType::Bits(item.width)
+            },
+            None => {
+                let span = form_span(atom);
+                &&& atom->Atom_kind is Natural || atom->Atom_kind is Binary || atom->Atom_kind is Hexadecimal
+                &&& circuit_literal_width_matches(source.text.spec_bytes()[span.start as int..span.end as int],
+                    None, limit, Ok(item.width))
+            },
+        }
     }
 
     proof fn alias_binding_along_inference(

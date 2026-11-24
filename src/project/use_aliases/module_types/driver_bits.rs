@@ -142,6 +142,20 @@ pub(super) proof fn clocked_whole_port_bits(
 {
 }
 
+/// 配置済みの信号を全幅で展開するとき、残る失敗は配線列の容量または確保である。
+pub(super) proof fn checked_whole_port_wiring_error(
+    inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver, error: ClockedDriverBitsError,
+)
+    requires
+        (match driver {
+            OutputDriver::Input(port) => port < inputs.ranges_model().len(),
+            OutputDriver::Definition(slot) => slot < definitions.ranges_model().len(),
+        }),
+        clocked_driver_bits_result(inputs, definitions, driver, None, Err(error)),
+    ensures error is Capacity || error is Allocation,
+{
+}
+
 /// 基底信号の配置幅に選択範囲が収まることを表す。
 pub(super) open spec fn clocked_selected_port_ready(
     inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver, selection: CheckedBitSelection,

@@ -408,7 +408,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && self.vm_wiring_on_checked(limits, &checked, &plan, vm)
     }
 
-    /// 直結と選択が作る閉路を、閉路順のソース位置に対応付ける。
+    /// 直結、選択、連接が作る閉路を、閉路順のソース位置に対応付ける。
     pub closed spec fn clocked_module_vm_projection_cycle(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, sites: Seq<LocatedName>,
     ) -> bool {
@@ -418,13 +418,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// 直接の基底 NOR、ラッチ、RAM の呼び出しから tick 実行用の VM を初期化する。
     ///
-    /// 定義の右辺には信号名の直結と、信号名を起点とするビット選択も書ける。後続の定義も参照できる。
+    /// 右辺には信号名の直結、信号名を起点とするビット選択、信号名やリテラルの連接も書ける。
     /// 実引数には裸の信号名、ビットリテラル、信号名からのビット選択を使える。
     /// 指定位置がモジュール本体を指さない場合は `Ok(None)` を返す。
     ///
     /// # Errors
     ///
-    /// 型、定義と出力の配置、直結と選択の配線、直接呼び出しの入力、ネットリスト、状態メモリの順に検査する。
+    /// 型、定義と出力の配置、直結、選択、連接の配線、直接呼び出しの入力、ネットリスト、状態メモリの順に検査する。
     pub fn lower_clocked_vm(&self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits)
         -> (result: Result<Option<ClockedModuleVm>, ClockedModuleVmError<'p, 'a>>)
         requires self.can_resolve(),
