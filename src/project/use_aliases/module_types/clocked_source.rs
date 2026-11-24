@@ -9,7 +9,7 @@ use function_templates::function_templates_cover;
 use vstd::laws_cmp::obeys_cmp;
 #[cfg(verus_only)]
 use crate::project::use_aliases::bit_func::ClockedFunctionTemplate;
-use crate::project::use_aliases::bit_func::ExpandFunctionsError;
+use crate::project::use_aliases::bit_func::{ExpandFunctionsError, RoutineBitLayoutError};
 #[cfg(verus_only)]
 mod semantics;
 
@@ -55,6 +55,17 @@ pub enum ClockedModuleError<'p, 'a> {
         call: LocatedName<'p, 'a>,
         /// 関数側の展開診断。
         expansion: ExpandFunctionsError<'p, 'a>,
+    },
+    /// 入出力の型が参照する構造体を配置できない。
+    StructureLayout(crate::project::StructureTypeError<'p, 'a>),
+    /// 入出力のポートに平坦なビット範囲を割り当てられない。
+    PortLayout {
+        /// 入力または出力。
+        direction: crate::project::PortDirection,
+        /// 失敗したポートの型注釈。
+        site: LocatedName<'p, 'a>,
+        /// ポート番号、幅、容量を含む診断。
+        layout: crate::netlist::PortBitLayoutError,
     },
     /// 現在の変換対象に含まれない型、回路呼び出し、または式。
     Unsupported(LocatedName<'p, 'a>),
@@ -318,19 +329,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Err(form_location(source, forms, root))
     }
 
-    fn prepare_module_instances<'s>(&self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>,
-        edges: &[Option<usize>], templates: &'s [Option<ClockedNor>], functions: &'s FunctionTemplates, builtin: &'s ClockedNor,
+    fn prepare_module_instances<'s>(&self, owner: ModuleBodyPosition, limit: u64, _bits: usize, _gates: usize, checked: &ModuleCalls<'p, 'a>,
+        edges: &[Option<usize>], templates: &'s [Option<ClockedNor>], functions: &'s FunctionTemplates<'p, 'a>, builtin: &'s ClockedNor,
     ) -> (result: Result<(Vec<SourceInstance<'s, 'p, 'a>>, Vec<usize>), ClockedModuleError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
             edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
             function_templates_cover(checked, edges@, functions@, checked.calls@.len() as int),
+            self.clocked_functions_match(functions@, limit, _bits, _gates),
         ensures
             result matches Ok((instances, counts)) ==> instance_counts_match(instances@, counts@)
                 && instances@.len() == checked.calls@.len()
                 && instance_output_slots(instances@, checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len() as int)
                 && self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
             !(result matches Err(ClockedModuleError::Parent(_))),
-            !(result matches Err(ClockedModuleError::Function { .. })),
+            !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
     {
         let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
         proof {
@@ -351,6 +363,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 *project == self.targets.project_model(),
                 edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
                 function_templates_cover(checked, edges@, functions@, checked.calls@.len() as int),
+                self.clocked_functions_match(functions@, limit, _bits, _gates),
                 index <= checked.calls@.len(), index == counts@.len() == instances@.len(),
                 instance_counts_match(instances@, counts@),
                 self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
@@ -394,10 +407,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         let key = (position.file, position.entry);
                         assert(function_templates::function_target(checked, edges@, index as int) == Some(key));
                         let function = functions.get(&key).unwrap();
-                        if function.inputs.total_bits() != typed.inputs.len()
-                            || function.outputs.total_bits() != typed.outputs.len()
-                        {
-                            return Err(ClockedModuleError::Unsupported(site));
+                        proof {
+                            self.clocked_function_ports_evidence(key, limit, _bits, _gates, function, *typed);
+                            self.routine_single_bit_layout_counts(*typed, limit, _bits, &function.inputs, &function.outputs);
+                            assert(function.circuit.netlist_model().input_count == typed.inputs@.len());
+                            assert(function.circuit.netlist_model().outputs@.len() == typed.outputs@.len());
                         }
                         &function.circuit
                     }
@@ -514,7 +528,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     fn lower_checked_module(&self, owner: ModuleBodyPosition, width_limit: u64, bit_limit: usize, gate_limit: usize,
         checked: &ModuleCalls<'p, 'a>, edges: &[Option<usize>], templates: &[Option<ClockedNor>],
-        functions: &mut FunctionTemplates, builtin: &ClockedNor,
+        functions: &mut FunctionTemplates<'p, 'a>, builtin: &ClockedNor,
     ) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(owner, width_limit, Ok(Some(*checked))),
             edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
@@ -526,7 +540,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             !(result matches Err(ClockedModuleError::Parent(_))),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
+            result matches Err(ClockedModuleError::PortLayout { direction, site, layout }) ==>
+                self.clocked_module_port_error(width_limit, bit_limit, direction, site, layout),
             result matches Ok(circuit) ==> circuit.netlist_model().gates@.len() <= gate_limit
+                && circuit.netlist_model().input_count <= bit_limit && circuit.netlist_model().outputs@.len() <= bit_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
                 && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
                 && self.clocked_checked_assembly_matches(checked, edges@, templates@, final(functions)@, builtin, circuit.netlist_model()),
@@ -542,9 +559,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let outputs = drivers.signature.outputs.as_slice();
         if let Some(i) = unsupported_port(inputs) { return Err(ClockedModuleError::Unsupported(copy_location(&inputs[i].annotation))); }
         if let Some(i) = unsupported_port(outputs) { return Err(ClockedModuleError::Unsupported(copy_location(&outputs[i].annotation))); }
+        let (input_layout, _output_layout) = match self.prepare_routine_bit_layouts(
+            (owner.file, owner.entry), &drivers.signature, width_limit, bit_limit,
+        ) {
+            Ok(layouts) => layouts,
+            Err(RoutineBitLayoutError::Structure(error)) => return Err(ClockedModuleError::StructureLayout(error)),
+            Err(RoutineBitLayoutError::Port(direction, site, layout)) => {
+                assert(self.clocked_module_port_error(width_limit, bit_limit, direction, site, layout));
+                return Err(ClockedModuleError::PortLayout { direction, site, layout });
+            },
+        };
+        proof {
+            self.routine_single_bit_layout_counts(drivers.signature, width_limit, bit_limit, &input_layout, &_output_layout);
+        }
         self.prepare_clocked_functions(owner, width_limit, bit_limit, gate_limit, checked, edges, functions)?;
-        let (instances, counts) = self.prepare_module_instances(owner, width_limit, checked, edges, templates, functions, builtin)?;
-        let circuit = assemble_source_instances(&instances, &counts, inputs.len(), &drivers.outputs, gate_limit)?;
+        let (instances, counts) = self.prepare_module_instances(owner, width_limit, bit_limit, gate_limit, checked, edges, templates, functions, builtin)?;
+        let circuit = assemble_source_instances(&instances, &counts, input_layout.total_bits(), &drivers.outputs, gate_limit)?;
         assert(instances@.len() == checked.calls@.len());
         assert(self.clocked_checked_assembly_matches(checked, edges@, templates@, functions@, builtin, circuit.netlist_model())) by {
             let input_count = checked.module.expressions.typed.sources.roots.wiring.drivers.signature.inputs@.len() as usize;
@@ -554,6 +584,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(source_assembly_matches(instances@, counts@, input_count, drivers.outputs@, circuit.netlist_model()));
         };
         Ok(circuit)
+    }
+
+    /// 範囲の割り当てに失敗したポートを、検査済みのモジュールの署名に対応付ける。
+    pub closed spec fn clocked_module_port_error(
+        &self, width: u64, bits: usize, direction: crate::project::PortDirection,
+        site: LocatedName, layout: crate::netlist::PortBitLayoutError,
+    ) -> bool {
+        exists|owner: ModuleBodyPosition, checked: ModuleCalls| {
+            &&& #[trigger] self.module_calls_result(owner, width, Ok(Some(checked)))
+            &&& self.routine_bit_layout_failure(checked.module.expressions.typed.sources.roots.wiring.drivers.signature,
+                width, bits, direction, site, layout)
+        }
     }
 
     /// 変換後の入出力ビット数が、検査済みの親モジュールのポート宣言と対応する。
@@ -691,7 +733,7 @@ fn resolve_instance_arguments<'p, 'a>(instance: &SourceInstance<'_, 'p, 'a>, wir
     ensures
         result matches Ok(arguments) ==> arguments@ == resolved_arguments(*instance, wires@) && arguments_valid(*instance, wires@),
         !(result matches Err(ClockedModuleError::Parent(_))),
-        !(result matches Err(ClockedModuleError::Function { .. })),
+        !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
 {
     let mut arguments: Vec<Wire> = Vec::new();
     let mut j = 0;
@@ -731,7 +773,7 @@ fn assemble_child_drivers<'p, 'a>(
         result matches Ok((drivers, sites)) ==> sites@.len() == drivers@.len()
             && child_drivers_match(instances@, regions@, instances@.len() as int, drivers@),
         !(result matches Err(ClockedModuleError::Parent(_))),
-        !(result matches Err(ClockedModuleError::Function { .. })),
+        !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
 {
     let mut drivers: Vec<ClockedWireDriver> = Vec::new();
     let mut sites = Vec::new();
@@ -806,7 +848,7 @@ fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], c
             && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
             && source_assembly_matches(instances@, counts@, inputs, output_drivers@, circuit.netlist_model()),
         !(result matches Err(ClockedModuleError::Parent(_))),
-        !(result matches Err(ClockedModuleError::Function { .. })),
+        !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
 {
     let (regions, total) = match clocked_reserve(counts, limit) {
         Ok(plan) => plan,

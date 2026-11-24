@@ -11,7 +11,7 @@ use vstd::laws_cmp::obeys_cmp;
 
 verus! {
 
-pub(super) type FunctionTemplates = BTreeMap<(usize, usize), ClockedFunctionTemplate>;
+pub(super) type FunctionTemplates<'p, 'a> = BTreeMap<(usize, usize), ClockedFunctionTemplate<'p, 'a>>;
 
 /// モジュールの依存辺を持たない通常呼び出しが参照する宣言位置。
 pub(super) open spec fn function_target(calls: &ModuleCalls, edges: Seq<Option<usize>>, i: int) -> Option<(usize, usize)> {
@@ -78,7 +78,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ///
     /// 展開に失敗した最初の関数呼び出しの位置と、関数側の診断を返す。
     pub(super) fn prepare_clocked_functions(&self, _owner: ModuleBodyPosition, width: u64, bits: usize, gates: usize,
-        calls: &ModuleCalls<'p, 'a>, edges: &[Option<usize>], cache: &mut FunctionTemplates,
+        calls: &ModuleCalls<'p, 'a>, edges: &[Option<usize>], cache: &mut FunctionTemplates<'p, 'a>,
     ) -> (result: Result<(), ClockedModuleError<'p, 'a>>)
         requires
             self.can_resolve(), self.module_calls_result(_owner, width, Ok(Some(*calls))),
@@ -89,6 +89,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.clocked_functions_match(final(cache)@, width, bits, gates),
             result is Ok ==> function_templates_cover(calls, edges@, final(cache)@, calls.calls@.len() as int),
             !(result matches Err(ClockedModuleError::Parent(_))),
+            !(result matches Err(ClockedModuleError::PortLayout { .. })),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width, bits, gates, call, expansion)
                     && self.function_expansion_stops_at(calls, edges@, final(cache)@, width, bits, gates, call, expansion),

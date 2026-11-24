@@ -229,6 +229,7 @@ pub proof fn port_bit_layout_size(widths: Seq<u64>, capacity: usize, layout: &Po
     ensures
         layout.ranges_model().len() == widths.len() <= usize::MAX,
         layout.total_bits_model() == preceding_port_bits(widths, widths.len()),
+        layout.total_bits_model() <= capacity,
 {
     vstd::std_specs::vec::axiom_spec_len(&layout.ranges);
 }

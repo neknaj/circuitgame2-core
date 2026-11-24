@@ -191,19 +191,28 @@ fn a_module_observes_delayed_function_gates_and_immediate_wires() {
                  (def echo (direct a))
                  (def other (buffer 0)))
                (func invert (in a) (out y) (def y (nor a a)))
-               (func buffer (in a) (out y) (def n (invert a)) (def y (invert n)))
+               (func buffer (in a) (out y) (def n (invert a)) (def passthrough n) (def y (invert passthrough)) (def copy a))
                (func direct (in a) (out a))",
     }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
     let owner = ModuleBodyPosition { file: 0, entry: 1 };
+    let Err(ClockedModuleError::PortLayout { direction, site, layout }) =
+        aliases.lower_clocked_module_with_limits(owner, 8, 2, 4)
+    else { panic!("module output bits must respect the configured limit"); };
+    assert!(matches!(direction, circuitgame2_core::project::PortDirection::Output));
+    assert!(matches!(layout, circuitgame2_core::netlist::PortBitLayoutError::CapacityExceeded {
+        port: 2, width: 1, used: 2, capacity: 2,
+    }));
+    assert_eq!(&site.source.text[site.span], "other");
+
     let Err(ClockedModuleError::Function { call, expansion }) =
-        aliases.lower_clocked_module_with_limits(owner, 8, 1, 4)
+        aliases.lower_clocked_module_with_limits(owner, 8, 3, 4)
     else { panic!("function definition bits must respect the configured limit"); };
     assert_eq!((call.source.revision, &call.source.text[call.span]), (4, "(buffer a)"));
     assert!(matches!(expansion, circuitgame2_core::project::ExpandFunctionsError::Function { position: (0, 3), .. }));
 
-    let circuit = aliases.lower_clocked_module_with_limits(owner, 8, 2, 4).unwrap().unwrap();
+    let circuit = aliases.lower_clocked_module_with_limits(owner, 8, 4, 4).unwrap().unwrap();
     let mut frame = circuit.reset();
     assert_eq!(frame.gates.len(), 4);
     assert_eq!(frame.outputs, [false, false, false]);

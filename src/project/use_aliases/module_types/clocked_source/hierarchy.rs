@@ -289,7 +289,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && loaded.modules@[0].is_some(),
             Ok(None) => self.module_calls_result(root, width, Ok(None)),
             Err(ClockedModuleError::Parent(error)) => self.module_calls_result(root, width, Err(error)),
-            Err(ClockedModuleError::Function { .. }) => false,
+            Err(ClockedModuleError::Function { .. } | ClockedModuleError::PortLayout { .. }) => false,
             Err(_) => true,
         },
     {
@@ -492,7 +492,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// ルートから到達するモジュールを子から順に展開する。
     ///
-    /// 関数内で平坦化するビット配列の上限には `usize::MAX` を使う。
+    /// 平坦なビット配列の上限には `usize::MAX` を使う。
     ///
     /// # Errors
     ///
@@ -517,7 +517,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// ルートから到達するモジュールを子から順に展開する。
     ///
     /// 入出力は単一ビットで、各右辺は信号名か定数を直接渡すモジュール、関数、基底 NOR のいずれかの呼び出しとする。
-    /// `bit_limit` は関数展開中の入力・定義・出力それぞれのビット配列に適用する。
+    /// `bit_limit` はモジュールの入力と出力、および関数の入力・定義・出力の各ビット配列に適用する。
     /// モジュールと、モジュールから直接呼ぶ関数の展開結果は宣言ごとに共有する。
     /// ゲート番号は呼び出しごとに割り当てる。
     /// 返した回路をソースの参照回路と同じ入力列で実行すると、reset 直後と各 tick の公開出力が一致する。
@@ -539,7 +539,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.module_calls_result(owner, width_limit, Err(error)),
             result matches Err(ClockedModuleError::Function { call, expansion }) ==>
                 self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
+            result matches Err(ClockedModuleError::PortLayout { direction, site, layout }) ==>
+                self.clocked_module_port_error(width_limit, bit_limit, direction, site, layout),
             result matches Ok(Some(circuit)) ==> circuit.netlist_model().gates@.len() <= gate_limit
+                && circuit.netlist_model().input_count <= bit_limit && circuit.netlist_model().outputs@.len() <= bit_limit
                 && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
                 && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
                 && self.clocked_module_source_layout(owner, width_limit, &circuit.netlist_model()),

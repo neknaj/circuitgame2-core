@@ -309,6 +309,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),
         ensures
             drivers.outputs@.len() == drivers.signature.outputs@.len(),
+            self.typed_signature_evidence(owner.file, owner.entry, limit, Ok(Some(drivers.signature))),
             0 <= index < drivers.outputs@.len() ==> {
                 let port = drivers.signature.outputs@[index];
                 &&& crate::project::location_in_source(port.annotation)

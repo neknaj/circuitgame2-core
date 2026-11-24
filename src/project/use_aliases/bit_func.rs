@@ -11,6 +11,7 @@ mod lowering;
 mod semantics;
 
 pub use frontend::{BitFuncError, UnsupportedBitFunc};
+pub(super) use frontend::RoutineBitLayoutError;
 pub use lowering::{BitFuncLowerError, LoweredBitFunc};
 #[cfg(verus_only)]
 pub use lowering::{bit_func_lowering_preserves_evaluation, lowered_bit_func_result, port_values};

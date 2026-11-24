@@ -309,6 +309,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::function_template_matches);
     }
 
+    /// 完成したテンプレートのポート型を、同じ宣言の署名検査に結び付ける。
+    pub(super) proof fn template_signature_evidence(&self, position: (usize, usize), limit: u64, template: &FunctionTemplate)
+        requires self.template_abi_matches(position, limit, template),
+        ensures self.typed_signature_evidence(position.0, position.1, limit, Ok(Some(template.signature_model()))),
+    {
+    }
+
     /// 署名の各ポート幅が、保存したネットリストの入出力配置に対応することを示す。
     pub(super) proof fn template_circuit_evidence(
         &self, position: (usize, usize), limit: u64, template: &FunctionTemplate,
@@ -595,6 +602,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& table.slots_model()[vertex as int] == Some(template)
             &&& plan.position_model(rank) matches Some(position)
             &&& body.circuit == *template.circuit_model()
+            &&& self.template_abi_matches(position, width_limit, &template)
+            &&& template.bit_limit_model() == bit_limit
             &&& self.prepared_expansion_body_matches(*plan, position.0, position.1, width_limit, &prepared)
             &&& self.expanded_body_lowering_result(plan, &prior, (position.0, position.1, width_limit),
                 &prepared, bit_limit, gate_limit, Ok(body))
