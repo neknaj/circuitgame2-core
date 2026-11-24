@@ -237,7 +237,7 @@ pub(crate) fn wire_within(wire: Wire, inputs: usize, gates: usize) -> (valid: bo
     }
 }
 
-fn observe(ports: &[Wire], input: &[bool], gates: &[bool]) -> (output: Vec<bool>)
+pub(super) fn observe(ports: &[Wire], input: &[bool], gates: &[bool]) -> (output: Vec<bool>)
     requires output_ports_available(ports@, input@.len(), gates@.len(), ports@.len() as int),
     ensures output@.len() == ports@.len(), output_values_match(input@, gates@, ports@, output@),
 {

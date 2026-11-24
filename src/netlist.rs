@@ -3,6 +3,7 @@
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
 mod clocked;
+mod clocked_storage;
 pub(crate) mod instances;
 mod port_layout;
 mod state_elements;
@@ -11,6 +12,9 @@ mod source_trace;
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 pub use clocked::ClockedInstanceError;
+pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInputs};
+#[cfg(verus_only)]
+pub use clocked_storage::clocked_storage_result;
 pub(crate) use clocked::wire_within;
 #[cfg(verus_only)]
 pub(crate) use clocked::{clocked_wiring_endpoints, clocked_wiring_from_endpoints};
@@ -26,7 +30,7 @@ pub use instances::{instance_gates_at, instance_gates_in_extension, instance_out
 pub use port_layout::{PortBitLayout, PortBitLayoutError};
 pub use state_elements::{LatchState, RamState, StateAllocationError, StateInputError};
 #[cfg(verus_only)]
-pub use state_elements::{latch_next, ram_next_memory, ram_read_word, ram_resident_bits, state_bits_fit};
+pub use state_elements::{latch_next, ram_address_value, ram_next_memory, ram_read_word, ram_resident_bits, state_bits_fit};
 #[cfg(verus_only)]
 pub use source_trace::{
     SourceGateId, SourceNor, SourceTickCircuit, SourceTickFrame, SourceWire, source_clocked_layout, source_clocked_layout_valid,

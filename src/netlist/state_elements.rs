@@ -23,7 +23,7 @@ pub enum StateAllocationError {
 pub enum StateInputError {
     /// 入力データの長さが宣言されたビット幅と異なる。
     Width,
-    /// 指定された RAM のアドレスが範囲外だった。
+    /// RAM のアドレス値が範囲外か、アドレス列のビット幅が宣言と異なる。
     Address,
 }
 
@@ -154,6 +154,7 @@ impl LatchState {
     /// 現在の保持値を0に戻す。ビット幅は変わらない。
     pub fn reset(&mut self)
         ensures final(self).value() == Seq::new(old(self).value().len(), |_: int| false),
+        no_unwind
     {
         clear_bits(&mut self.bits);
     }
@@ -170,6 +171,7 @@ impl LatchState {
             Err(error) => error == StateInputError::Width && data@.len() != old(self).value().len()
                 && final(self).value() == old(self).value(),
         },
+        no_unwind
     {
         if data.len() != self.bits.len() {
             return Err(StateInputError::Width);
@@ -244,8 +246,53 @@ fn ram_layout(address_bits: u64, word_bits: usize, bit_limit: usize) -> (result:
     Some((words, size))
 }
 
+/// 最下位ビットから並べたアドレス列が表す非負整数。
+pub open spec fn ram_address_value(bits: Seq<bool>) -> nat
+    decreases bits.len(),
+{
+    if bits.len() == 0 { 0 } else {
+        2 * ram_address_value(bits.drop_first()) + if bits[0] { 1nat } else { 0nat }
+    }
+}
+
+fn decode_ram_address(bits: &[bool], _words: Ghost<usize>) -> (address: usize)
+    requires pow2(bits@.len()) == _words@,
+    ensures address == ram_address_value(bits@) && address < _words@,
+    no_unwind
+{
+    let length = bits.len();
+    let mut remaining = length;
+    let mut address: usize = 0;
+    proof { assert(pow2(0) == 1) by { reveal(vstd::arithmetic::power::pow); }; }
+    while remaining > 0
+        invariant
+            remaining <= length == bits@.len(),
+            pow2(bits@.len()) == _words@,
+            address == ram_address_value(bits@.subrange(remaining as int, length as int)),
+            address < pow2((length - remaining) as nat),
+        decreases remaining,
+    {
+        let ghost prev = remaining;
+        remaining -= 1;
+        let bit = bits[remaining];
+        proof {
+            let width = (length - remaining) as nat;
+            let suffix = bits@.subrange(remaining as int, length as int);
+            assert(suffix.drop_first() =~= bits@.subrange(prev as int, length as int));
+            assert(suffix[0] == bit);
+            lemma_pow2_unfold(width);
+            if width < length { lemma_pow2_strictly_increases(width, length as nat); }
+            assert(2 * address + 1 < pow2(width) <= _words@);
+        }
+        address = address * 2 + if bit { 1 } else { 0 };
+    }
+    assert(bits@.subrange(0, length as int) =~= bits@);
+    address
+}
+
 /// 同期 RAM 1インスタンスの記憶部と登録読み出し出力。
 pub struct RamState {
+    address_bits: u64,
     words: usize,
     word_bits: usize,
     memory: Vec<bool>,
@@ -253,6 +300,11 @@ pub struct RamState {
 }
 
 impl RamState {
+    /// アドレス入力に必要なビット数。
+    pub closed spec fn address_bits_model(&self) -> nat {
+        self.address_bits as nat
+    }
+
     /// アドレスの個数。
     pub closed spec fn words_model(&self) -> nat {
         self.words as nat
@@ -276,6 +328,7 @@ impl RamState {
     #[verifier::type_invariant]
     spec fn valid(&self) -> bool {
         &&& self.words > 0
+        &&& self.words == pow2(self.address_bits as nat)
         &&& self.word_bits > 0
         &&& self.memory@.len() == self.words * self.word_bits
         &&& self.output@.len() == self.word_bits
@@ -294,15 +347,16 @@ impl RamState {
     /// ```
     /// use circuitgame2_core::netlist::RamState;
     ///
-    /// let mut ram = RamState::new(1, 2, 6).unwrap();
+    /// let mut ram = RamState::new(2, 2, 10).unwrap();
     /// ram.step(1, &[true, false], true).unwrap();
     /// assert_eq!(ram.output(), &[false, false]);
-    /// ram.step(1, &[false, false], false).unwrap();
+    /// ram.step_bits(&[true, false], &[false, false], false).unwrap();
     /// assert_eq!(ram.output(), &[true, false]);
     /// ```
     pub fn new(address_bits: u64, word_bits: usize, bit_limit: usize) -> (result: Result<Self, StateAllocationError>)
         ensures match result {
             Ok(state) => word_bits > 0 && state_bits_fit(ram_resident_bits(address_bits as nat, word_bits as nat), bit_limit)
+                && state.address_bits_model() == address_bits
                 && state.words_model() == pow2(address_bits as nat) && state.word_bits_model() == word_bits
                 && state.memory_model() == Seq::new(pow2(address_bits as nat) * word_bits as nat, |_: int| false)
                 && state.output_model() == Seq::new(word_bits as nat, |_: int| false),
@@ -325,7 +379,7 @@ impl RamState {
         }
         let memory = zero_bits(size)?;
         let output = zero_bits(word_bits)?;
-        Ok(Self { words, word_bits, memory, output })
+        Ok(Self { address_bits, words, word_bits, memory, output })
     }
 
     /// 最新の tick で読み出した値を返す。初期化と reset の直後は0を返す。
@@ -338,10 +392,12 @@ impl RamState {
     /// 記憶部と読み出し出力を0に戻す。語数とビット幅は変わらない。
     pub fn reset(&mut self)
         ensures
+            final(self).address_bits_model() == old(self).address_bits_model(),
             final(self).words_model() == old(self).words_model(),
             final(self).word_bits_model() == old(self).word_bits_model(),
             final(self).memory_model() == Seq::new(old(self).memory_model().len(), |_: int| false),
             final(self).output_model() == Seq::new(old(self).output_model().len(), |_: int| false),
+        no_unwind
     {
         proof { use_type_invariant(&*self); }
         clear_bits(&mut self.memory);
@@ -357,6 +413,7 @@ impl RamState {
     /// エラーの場合は記憶部と読み出し出力を保持する。
     pub fn step(&mut self, address: usize, data: &[bool], write: bool) -> (result: Result<(), StateInputError>)
         ensures
+            final(self).address_bits_model() == old(self).address_bits_model(),
             final(self).words_model() == old(self).words_model(),
             final(self).word_bits_model() == old(self).word_bits_model(),
             match result {
@@ -372,6 +429,7 @@ impl RamState {
                         error == StateInputError::Width && data@.len() != old(self).word_bits_model()
                     },
             },
+        no_unwind
     {
         proof { use_type_invariant(&*self); }
         if address >= self.words {
@@ -391,6 +449,53 @@ impl RamState {
         update_ram_word(&mut self.memory, &mut self.output, Ghost(address), start, data, write);
         Ok(())
     }
+    /// 最下位ビットから並べたアドレス列を使い、1 tick 進める。
+    ///
+    /// 対象語は書き込み前に読み出す。アドレス幅が0の場合、空の列はアドレス0を表す。
+    ///
+    /// # Errors
+    ///
+    /// アドレスとデータの順にビット幅を確認し、最初の不一致を返す。
+    /// エラーの場合は記憶部と読み出し出力を保持する。
+    pub fn step_bits(&mut self, address: &[bool], data: &[bool], write: bool)
+        -> (result: Result<(), StateInputError>)
+        ensures
+            final(self).address_bits_model() == old(self).address_bits_model(),
+            final(self).words_model() == old(self).words_model(),
+            final(self).word_bits_model() == old(self).word_bits_model(),
+            ({
+                let index = ram_address_value(address@);
+                if address@.len() != old(self).address_bits_model() {
+                    result == Err(StateInputError::Address)
+                        && final(self).memory_model() == old(self).memory_model()
+                        && final(self).output_model() == old(self).output_model()
+                } else if data@.len() != old(self).word_bits_model() {
+                    result == Err(StateInputError::Width)
+                        && final(self).memory_model() == old(self).memory_model()
+                        && final(self).output_model() == old(self).output_model()
+                } else {
+                    result == Ok(())
+                        && index < old(self).words_model()
+                        && index * data@.len() + data@.len() <= old(self).memory_model().len()
+                        && final(self).output_model() == ram_read_word(old(self).memory_model(), index, data@.len())
+                        && final(self).memory_model() == ram_next_memory(old(self).memory_model(), index, data@, write)
+                }
+            }),
+        no_unwind
+    {
+        proof { use_type_invariant(&*self); }
+        if address.len() as u64 != self.address_bits {
+            return Err(StateInputError::Address);
+        }
+        if data.len() != self.word_bits {
+            return Err(StateInputError::Width);
+        }
+        let index = decode_ram_address(address, Ghost(self.words));
+        let _result = self.step(index, data, write);
+        assert(_result.is_ok());
+        Ok(())
+    }
+
 }
 
 fn update_ram_word(memory: &mut Vec<bool>, output: &mut Vec<bool>, _address: Ghost<usize>, start: usize,

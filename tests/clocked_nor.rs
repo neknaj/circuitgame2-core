@@ -292,3 +292,27 @@ fn identifies_the_source_output_in_a_child_passthrough_cycle() {
     let start = output.source.text.find("(def (z n)").unwrap() + "(def (".len();
     assert_eq!(output.span, start..start + 1);
 }
+
+
+#[test]
+fn latch_and_nor_read_the_same_previous_tick() {
+    use circuitgame2_core::netlist::{ClockedStorage, ClockedStorageInputs};
+
+    let nor = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![NorGate { left: Wire::Input(0), right: Wire::Constant(false) }],
+        outputs: vec![Wire::Gate(0)],
+    }).unwrap();
+    let mut latch = ClockedStorage::bind(ClockedStorageInputs {
+        address: None, data: vec![Wire::Gate(0)], enable: Wire::Constant(true),
+    }, 1, 1, 1).unwrap();
+    let mut frame = nor.reset();
+    for (gate, held) in [(true, false), (true, true), (false, true), (false, false)] {
+        let previous_latch = [latch.output()[0]];
+        let next = nor.step(&frame.gates, &previous_latch).unwrap();
+        latch.step(&previous_latch, &frame.gates).unwrap();
+        assert_eq!(next.outputs, [gate]);
+        assert_eq!(latch.output(), &[held]);
+        frame = next;
+    }
+}
