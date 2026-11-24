@@ -1,5 +1,8 @@
 //! エディタから受け取った UTF-8 ソースの置換を検査する。
 
+mod lines;
+pub use lines::{LineBounds, LineIndex};
+
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
