@@ -7,6 +7,8 @@ pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod clocked_plan;
 mod clocked_source;
 mod source_arguments;
+mod vm_source;
+pub use vm_source::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
 mod storage_placement;
 pub use storage_placement::{ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement};
 pub use clocked_source::ClockedModuleError;

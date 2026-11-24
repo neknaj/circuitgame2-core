@@ -211,6 +211,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 解決した配線の行数が、ソースに書かれた実引数の数に等しいことを示す。
+    pub(super) proof fn call_wires_count(
+        &self, checked: &ModuleCalls, limit: u64, plan: &ClockedModuleOutputs, index: usize, wires: Vec<Vec<ClockedWireDriver>>,
+    )
+        requires self.call_wires_result(checked, limit, plan, index, Ok(wires)),
+        ensures wires@.len() == checked.calls@[index as int].inputs.ports.arguments@.len(),
+    {
+    }
+
     /// 実引数の配線数が呼び出し先の入力ポートの表現幅に一致することを示す。
     pub(super) proof fn clocked_call_argument_port(
         &self, owner: ModuleBodyPosition, limit: u64, capacity: usize, checked: &ModuleCalls, plan: &ClockedModuleOutputs,

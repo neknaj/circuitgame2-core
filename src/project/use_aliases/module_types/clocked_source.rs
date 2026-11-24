@@ -137,7 +137,7 @@ fn symbolic_driver(driver: OutputDriver) -> (wire: ClockedWireDriver)
     }
 }
 
-spec fn resolved_driver(driver: ClockedWireDriver, wires: Seq<Wire>) -> Option<Wire> {
+pub(super) open spec fn resolved_driver(driver: ClockedWireDriver, wires: Seq<Wire>) -> Option<Wire> {
     match driver {
         ClockedWireDriver::Terminal(wire) => Some(wire),
         ClockedWireDriver::Alias(slot) if slot < wires.len() => Some(wires[slot as int]),
@@ -145,7 +145,7 @@ spec fn resolved_driver(driver: ClockedWireDriver, wires: Seq<Wire>) -> Option<W
     }
 }
 
-fn resolve_driver(driver: ClockedWireDriver, wires: &[Wire]) -> (wire: Option<Wire>)
+pub(super) fn resolve_driver(driver: ClockedWireDriver, wires: &[Wire]) -> (wire: Option<Wire>)
     ensures wire == resolved_driver(driver, wires@),
 {
     match driver {

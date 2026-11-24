@@ -354,7 +354,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     #[verifier::opaque]
-    spec fn storage_on_checked(&self, checked: &ModuleCalls, limit: u64, external: usize, capacity: usize,
+    /// 配置または診断を、同じモジュールの呼び出し一覧に対応付ける。
+    pub(super) closed spec fn storage_on_checked(&self, checked: &ModuleCalls, limit: u64, external: usize, capacity: usize,
         result: Result<ClockedStorageLayout, ClockedStorageLayoutError>,
     ) -> bool {
         match result {
@@ -374,6 +375,46 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         &&& forall|j: int| 0 <= j < i ==> !#[trigger] requires_structure(checked, j)
                     },
             _ => false,
+        }
+    }
+
+    /// 呼び出し番号から、同じ状態素子に割り当てた増補入力の範囲を取り出す。
+    pub(super) proof fn storage_layout_call(
+        &self, checked: &ModuleCalls, limit: u64, external: usize, capacity: usize,
+        layout: &ClockedStorageLayout, call: usize,
+    )
+        requires
+            self.storage_on_checked(checked, limit, external, capacity, Ok(*layout)),
+            call < checked.calls@.len(),
+        ensures
+            layout.by_call@.len() == checked.calls@.len(),
+            layout.external_inputs == external,
+            layout.augmented_inputs <= capacity,
+            layout.by_call@[call as int].is_some() <==>
+                checked.calls@[call as int].inputs.ports.signature.target is StateElement,
+            layout.by_call@[call as int] matches Some(index) ==> {
+                &&& index < layout.instances@.len()
+                &&& layout.instances@[index as int].call_index == call
+                &&& layout.instances@[index as int].at == checked.calls@[call as int].at
+                &&& external <= layout.instances@[index as int].outputs.start < layout.instances@[index as int].outputs.end
+                    <= layout.augmented_inputs
+            },
+    {
+        reveal(UseAliases::storage_on_checked);
+        reveal(UseAliases::placed_prefix);
+        let instances = layout.instances@;
+        if let Some(index) = layout.by_call@[call as int] {
+            let item = instances[index as int];
+            reveal(UseAliases::placement_matches);
+            if index == 0 {
+                reveal(ranges_follow);
+            } else {
+                ordered_storage_ranges(instances, external, 0, index as int);
+                reveal(ranges_follow);
+            }
+            if index as int + 1 < instances.len() {
+                ordered_storage_ranges(instances, external, index as int, instances.len() - 1);
+            }
         }
     }
 
@@ -404,8 +445,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::storage_capacity_failure);
     }
 
+    /// 名前と型を検査した呼び出しから、状態素子の出力範囲を決める。
     #[verifier::spinoff_prover]
-    fn place_clocked_storage(
+    pub(super) fn place_clocked_storage(
         &self, _owner: ModuleBodyPosition, checked: &ModuleCalls<'p, 'a>, limit: u64, external: usize, capacity: usize,
     ) -> (result: Result<ClockedStorageLayout<'p, 'a>, ClockedStorageLayoutError<'p, 'a>>)
         requires self.can_resolve(), self.module_calls_result(_owner, limit, Ok(Some(*checked))), external <= capacity,

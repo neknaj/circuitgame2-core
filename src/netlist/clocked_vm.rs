@@ -447,7 +447,7 @@ impl ClockedVm {
         -> (result: Result<Self, ClockedVmError>)
         ensures
             clocked_vm_result(&circuit, external, wiring@, state_bit_limit, result),
-            result matches Ok(vm) ==> vm.valid() && vm.initial(),
+            result matches Ok(vm) ==> vm.valid() && vm.initial() && vm.external_count() == external,
     {
         let netlist = circuit.checked_netlist();
         let inputs = netlist.input_count;

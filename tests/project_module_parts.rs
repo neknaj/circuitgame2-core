@@ -558,9 +558,10 @@ fn checks_storage_calls_with_types_from_their_declaration_scope() {
 
 #[test]
 fn places_struct_ram_outputs_in_call_order_across_module_parts() {
-    use circuitgame2_core::netlist::{ClockedNor, ClockedVm, NorNetlist, PortBitLayoutError, Wire};
+    use circuitgame2_core::netlist::{ClockedVmError, PortBitLayoutError, Wire};
     use circuitgame2_core::project::{
-        ClockedDefinitionLayoutError, ClockedStorageLayoutError, ClockedWireDriver, ModuleBodyPosition,
+        ClockedDefinitionLayoutError, ClockedModuleVmError, ClockedModuleVmLimits, ClockedStorageLayoutError,
+        ClockedWireDriver, ModuleBodyPosition,
     };
 
     let input = [
@@ -602,29 +603,45 @@ fn places_struct_ram_outputs_in_call_order_across_module_parts() {
     assert_eq!((call.source.revision, annotation.source.revision), (7, 5));
     assert_eq!(&annotation.source.text[annotation.span], "Word");
 
-    let storage = plan.instances.iter().map(|instance| {
-        let (_, arguments) = aliases.plan_clocked_call_arguments(owner, 16, 18, instance.call_index).unwrap().unwrap();
-        let wires: Vec<_> = arguments.into_iter().flatten().map(|driver| {
-            let ClockedWireDriver::Terminal(wire) = driver else { panic!("expected an input or constant"); };
-            wire
-        }).collect();
-        let expected_address = if instance.call_index == 0 {
-            [Wire::Input(0), Wire::Input(1)]
-        } else {
-            [Wire::Constant(true), Wire::Constant(false)]
-        };
-        assert_eq!(wires[..2], expected_address);
-        instance.storage_inputs(&wires).unwrap()
-    }).collect();
-    let circuit = ClockedNor::check(NorNetlist {
-        input_count: plan.augmented_inputs, gates: vec![],
-        outputs: vec![first.output_wire(0).unwrap(), second.output_wire(0).unwrap()],
-    }).unwrap();
-    let mut vm = ClockedVm::new(circuit, plan.external_inputs, storage, 80).unwrap();
+    let limits = ClockedModuleVmLimits { width: 16, wiring_bits: 27, gates: 0, state_bits: 80 };
+    let Err(ClockedModuleVmError::Vm(ClockedVmError::Storage { instance: 1, .. }, Some(site))) =
+        aliases.lower_clocked_vm(owner, ClockedModuleVmLimits { state_bits: 40, ..limits })
+    else { panic!("the second RAM exceeds the state budget"); };
+    assert_eq!(site.source.revision, 7);
+    assert_eq!(&site.source.text[site.span], "(bank #b1 d we)");
+
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.outputs.ranges(), [0..2, 2..10, 10..18]);
+    assert_eq!(compiled.vm.reset(), [false; 18]);
     let mut frame = [false; 11];
     frame[2] = true;
     frame[10] = true;
-    assert_eq!(vm.step(&frame).unwrap(), [false, false]);
+    assert_eq!(compiled.vm.step(&frame).unwrap(), [false; 18]);
     frame[10] = false;
-    assert_eq!(vm.step(&frame).unwrap(), [true, true]);
+    let mut expected = [false; 18];
+    expected[2] = true;
+    expected[10] = true;
+    assert_eq!(compiled.vm.step(&frame).unwrap(), expected);
+}
+
+#[test]
+fn lowers_nor_and_latch_to_one_tick_machine() {
+    use circuitgame2_core::project::{ClockedModuleVmLimits, ModuleBodyPosition};
+
+    let input = [SourceSnapshot { path: "main.ncg2", revision: 5,
+        text: "(using nor)
+            (latch hold (width 1))
+            (module root (in d we) (out q mixed)
+              (def q (hold d we))
+              (def mixed (nor q 0)))" }];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let entry = project.circuits()[0].syntax.entries.iter().position(|entry| entry.head == Head::Module).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry };
+    let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 8, gates: 1, state_bits: 1 };
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.reset(), [false, false]);
+    assert_eq!(compiled.vm.step(&[true, true]).unwrap(), [true, true]);
+    assert_eq!(compiled.vm.step(&[false, false]).unwrap(), [true, false]);
 }
