@@ -3,7 +3,7 @@
 use super::clocked::observe;
 use super::{ClockedNor, ClockedStorage, ClockedStorageError, ClockedStorageInputs, TickInputError};
 #[cfg(verus_only)]
-use super::{clocked_gate_updates, clocked_storage_result, clocked_wiring_endpoints, clocked_wiring_valid,
+use super::{NorNetlist, clocked_gate_updates, clocked_storage_result, clocked_wiring_endpoints, clocked_wiring_valid,
     output_values_match};
 #[cfg(verus_only)]
 use super::clocked_storage::{storage_capacity, storage_fits};
@@ -489,6 +489,83 @@ impl ClockedVm {
     /// この回路の外部入力ビット数。
     pub closed spec fn external_count(&self) -> usize { self.external }
 
+    /// 状態素子を、増補入力に登録出力を並べる順に表す。
+    pub closed spec fn storage_model(&self) -> Seq<ClockedStorage> { self.storage@ }
+
+    /// ゲートの登録値をネットリスト順に並べた列。
+    pub closed spec fn gate_values_model(&self) -> Seq<bool> { self.gates@ }
+
+    /// ゲートと公開出力が参照する回路のネットリスト。
+    pub closed spec fn netlist_model(&self) -> NorNetlist { self.circuit.netlist_model() }
+
+    /// 指定した状態素子の登録出力を読む、増補入力上の半開区間。
+    pub closed spec fn storage_input_range_model(&self, device: int) -> core::ops::Range<usize>
+        recommends 0 <= device < self.storage_model().len(),
+    {
+        core::ops::Range { start: self.starts@[device], end: self.starts@[device + 1] }
+    }
+
+    proof fn state_start_is_prefix(&self, index: nat)
+        requires self.valid(), index <= self.storage@.len(),
+        ensures self.starts@[index as int] == self.external + wiring_width(
+            self.storage@.map_values(|device: ClockedStorage| device.wiring_model()), index),
+        decreases index,
+    {
+        let wiring = self.storage@.map_values(|device: ClockedStorage| device.wiring_model());
+        if index == 0 {
+            wiring_width_zero(wiring);
+        } else {
+            let previous = (index - 1) as nat;
+            self.state_start_is_prefix(previous);
+            wiring_width_step(wiring, previous);
+            let device = self.storage@[previous as int];
+            assert(wiring[previous as int] == device.wiring_model());
+            assert(self.starts@[index as int] == self.starts@[previous as int] + device.output_model().len());
+        }
+    }
+
+    /// VM が使う状態素子の区間は、外部入力と手前の登録出力を足し合わせた位置にある。
+    pub proof fn storage_input_range_evidence(&self, device: int)
+        requires self.valid(), 0 <= device < self.storage_model().len(),
+        ensures
+            ({
+                let range = self.storage_input_range_model(device);
+                let wiring = self.storage_model().map_values(|item: ClockedStorage| item.wiring_model());
+                &&& range.start == self.external_count() + clocked_storage_output_width(wiring.take(device))
+                &&& range.end == range.start + wiring[device].data@.len()
+                &&& range.end <= self.netlist_model().input_count
+            }),
+    {
+        let wiring = self.storage@.map_values(|item: ClockedStorage| item.wiring_model());
+        let prefix = wiring.take(device);
+        self.state_start_is_prefix(device as nat);
+        assert forall|i: int| 0 <= i < device implies (#[trigger] prefix[i]).data@.len() == (#[trigger] wiring[i]).data@.len() by {
+            assert(prefix[i] == wiring[i]);
+        };
+        equal_wiring_prefix_width(prefix, wiring, device as nat);
+        assert(wiring[device] == self.storage@[device].wiring_model());
+    }
+
+    /// 外部入力の後に、この状態の各素子の登録出力を並べた増補入力を表す。
+    pub closed spec fn augmented_input_matches(&self, input: Seq<bool>, bits: Seq<bool>) -> bool {
+        input_snapshot(input, self.storage@, self.starts@, self.storage@.len(), bits)
+    }
+
+    /// 指定した素子の登録出力を、増補入力の実際の区間から取り出せることを示す。
+    pub proof fn augmented_storage_segment(&self, input: Seq<bool>, bits: Seq<bool>, device: int)
+        requires self.valid(), self.augmented_input_matches(input, bits),
+            0 <= device < self.storage_model().len(),
+        ensures
+            ({
+                let range = self.storage_input_range_model(device);
+                &&& range.start <= range.end <= bits.len()
+                &&& bits.subrange(range.start as int, range.end as int) == self.storage_model()[device].output_model()
+            }),
+    {
+        reveal(input_snapshot);
+        assert(snapshot_segment(bits, self.starts@, device, self.storage@[device].output_model()));
+    }
+
     /// ゼロに初期化した NOR、ラッチ、RAM の状態。
     pub closed spec fn initial(&self) -> bool {
         &&& self.valid()
@@ -511,6 +588,45 @@ impl ClockedVm {
             &&& output.len() == netlist.outputs@.len()
             &&& output_values_match(new_inputs, self.gates@, netlist.outputs@, output)
         }
+    }
+
+    /// 1 tick の遷移から、更新に使った旧状態と公開出力に使った新状態の増補入力を取り出す。
+    pub proof fn tick_snapshots(&self, previous: &Self, input: Seq<bool>, output: Seq<bool>)
+        -> (snapshots: (Seq<bool>, Seq<bool>))
+        requires self.tick_matches(previous, input, output),
+        ensures
+            self.valid() && previous.valid(),
+            self.same_layout(previous),
+            previous.augmented_input_matches(input, snapshots.0),
+            self.augmented_input_matches(input, snapshots.1),
+            input.len() == self.external_count(),
+            snapshots.0.len() == snapshots.1.len() == self.netlist_model().input_count,
+            snapshots.0.take(input.len() as int) == input && snapshots.1.take(input.len() as int) == input,
+            previous.gate_values_model().len() == self.gate_values_model().len() == self.netlist_model().gates@.len(),
+            clocked_gate_updates(self.netlist_model().gates@, snapshots.0,
+                previous.gate_values_model(), self.gate_values_model()),
+            forall|i: int| 0 <= i < self.storage_model().len() ==>
+                (#[trigger] self.storage_model()[i]).storage_tick_matches(
+                    &previous.storage_model()[i], snapshots.0, previous.gate_values_model()),
+            output.len() == self.netlist_model().outputs@.len(),
+            output_values_match(snapshots.1, self.gate_values_model(), self.netlist_model().outputs@, output),
+    {
+        let netlist = self.circuit.netlist_model();
+        let snapshots = choose|old_inputs: Seq<bool>, new_inputs: Seq<bool>| {
+            &&& #[trigger] input_snapshot(input, previous.storage@, self.starts@, previous.storage@.len(), old_inputs)
+            &&& #[trigger] input_snapshot(input, self.storage@, self.starts@, self.storage@.len(), new_inputs)
+            &&& clocked_gate_updates(netlist.gates@, old_inputs, previous.gates@, self.gates@)
+            &&& forall|i: int| 0 <= i < self.storage@.len() ==>
+                (#[trigger] self.storage@[i]).storage_tick_matches(&previous.storage@[i], old_inputs, previous.gates@)
+            &&& output_values_match(new_inputs, self.gates@, netlist.outputs@, output)
+        };
+        reveal(input_snapshot);
+        assert forall|i: int| 0 <= i < self.storage@.len() implies
+            (#[trigger] self.storage@[i]).wiring_model() == previous.storage@[i].wiring_model() by {
+            super::clocked_storage::storage_tick_shape(&previous.storage@[i], &self.storage@[i],
+                snapshots.0, previous.gates@);
+        };
+        snapshots
     }
 
     /// 回路を束ね、NOR と全状態素子をゼロで初期化する。
@@ -548,6 +664,33 @@ impl ClockedVm {
             (#[trigger] self.storage@[i]).wiring_model() == previous.storage@[i].wiring_model()
     }
 
+    /// VM の配線を、展開時に渡したネットリストと状態素子の並びに対応付ける。
+    pub open spec fn layout_matches(&self, netlist: NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>) -> bool {
+        &&& self.valid()
+        &&& self.netlist_model() == netlist
+        &&& self.external_count() == external
+        &&& self.storage_model().map_values(|device: ClockedStorage| device.wiring_model()) == wiring
+    }
+
+    /// 初期化に成功した VM の配線は、初期化に渡した配線と一致する。
+    pub proof fn initialized_layout_evidence(&self, circuit: &ClockedNor, external: usize,
+        wiring: Seq<ClockedStorageInputs>, limit: usize)
+        requires clocked_vm_result(circuit, external, wiring, limit, Ok(*self)),
+        ensures self.layout_matches(circuit.netlist_model(), external, wiring),
+    {
+        assert(self.storage@.map_values(|device: ClockedStorage| device.wiring_model()) =~= wiring);
+    }
+
+    /// reset や tick を挟んでも、同じ展開結果に状態を対応付けられる。
+    pub proof fn preserve_layout_evidence(&self, previous: &Self, netlist: NorNetlist, external: usize,
+        wiring: Seq<ClockedStorageInputs>)
+        requires self.valid(), self.same_layout(previous), previous.layout_matches(netlist, external, wiring),
+        ensures self.layout_matches(netlist, external, wiring),
+    {
+        assert(self.storage@.map_values(|device: ClockedStorage| device.wiring_model())
+            =~= previous.storage@.map_values(|device: ClockedStorage| device.wiring_model()));
+    }
+
     /// reset 直後に、ゼロ入力と初期状態から公開出力を読んだことを表す。
     pub closed spec fn reset_matches(&self, output: Seq<bool>) -> bool {
         let netlist = self.circuit.netlist_model();
@@ -555,6 +698,37 @@ impl ClockedVm {
         &&& output.len() == netlist.outputs@.len()
         &&& output_values_match(Seq::new(netlist.input_count as nat, |_: int| false),
             self.gates@, netlist.outputs@, output)
+    }
+
+    /// reset 後の観測に使う増補入力は、ゼロ入力と初期化した素子の登録出力からなる。
+    pub proof fn reset_snapshot(&self, output: Seq<bool>) -> (bits: Seq<bool>)
+        requires self.reset_matches(output),
+        ensures
+            self.initial(),
+            bits.len() == self.netlist_model().input_count,
+            self.augmented_input_matches(Seq::new(self.external_count() as nat, |_: int| false), bits),
+            self.gate_values_model() == Seq::new(self.netlist_model().gates@.len(), |_: int| false),
+            output.len() == self.netlist_model().outputs@.len(),
+            output_values_match(bits, self.gate_values_model(), self.netlist_model().outputs@, output),
+    {
+        let bits = Seq::new(self.netlist_model().input_count as nat, |_: int| false);
+        let input = Seq::new(self.external as nat, |_: int| false);
+        let count = self.storage@.len();
+        reveal(input_snapshot);
+        self.state_start_is_prefix(count);
+        assert(self.starts@[count as int] == bits.len());
+        assert(input.len() <= bits.len());
+        assert(bits.take(input.len() as int) =~= input);
+        assert forall|i: int| 0 <= i < count implies
+            snapshot_segment(bits, self.starts@, i, (#[trigger] self.storage@[i]).output_model()) by {
+            let start = self.starts@[i];
+            let end = self.starts@[i + 1];
+            let registered = self.storage@[i].output_model();
+            assert(start <= end <= bits.len());
+            assert(bits.subrange(start as int, end as int) =~= registered);
+        };
+        assert(input_snapshot(input, self.storage@, self.starts@, count, bits));
+        bits
     }
 
     /// 全素子を初期状態に戻し、外部入力がゼロのときの公開出力を返す。

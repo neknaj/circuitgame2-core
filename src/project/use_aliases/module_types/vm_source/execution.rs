@@ -315,6 +315,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         &&& vm.inputs == network.inputs && vm.outputs == network.outputs
         &&& clocked_vm_result(&network.circuit, network.inputs.total_bits_model(), network.storage@, state_limit, Ok(vm.vm))
+        &&& vm.vm.layout_matches(network.circuit.netlist_model(), network.inputs.total_bits_model(), network.storage@)
     }
 
     /// 配線を組み立て、永続状態の確保は VM の初期化まで待つ。
@@ -438,8 +439,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result matches Err(error) ==> error is Vm,
     {
         let external = network.inputs.total_bits();
+        let ghost source = network;
         match ClockedVm::new(network.circuit, external, network.storage, state_limit) {
-            Ok(vm) => Ok(ClockedModuleVm { inputs: network.inputs, outputs: network.outputs, vm }),
+            Ok(vm) => {
+                proof { vm.initialized_layout_evidence(&source.circuit, external, source.storage@, state_limit); }
+                Ok(ClockedModuleVm { inputs: network.inputs, outputs: network.outputs, vm })
+            },
             Err(error) => {
                 let site = if let ClockedVmError::Storage { instance, .. } = error {
                     if instance < network.storage_sites.len() {

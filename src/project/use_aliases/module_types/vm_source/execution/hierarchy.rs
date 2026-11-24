@@ -7,10 +7,14 @@ use placement_model::RoutineWiring;
 use placement_model::{empty_routines, extend_routines, join_routine_input_offsets, routine_placed,
     routine_vm_input_offsets, routines_placed};
 use super::super::super::{ClockedModuleOutputs, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement,
-    ClockedWireDriver, clocked_source::ClockedHierarchy, copy_location};
+    ClockedWireDriver, copy_location};
+#[cfg(verus_only)]
+use super::super::super::clocked_source::ClockedHierarchy;
 use super::super::super::clocked_source::function_templates::FunctionTemplates;
 #[cfg(verus_only)]
-use super::super::super::clocked_source::function_templates::{function_target, function_templates_cover};
+use super::super::super::clocked_source::function_templates::{function_cache_extends, function_target, function_templates_cover};
+#[cfg(verus_only)]
+use crate::project::use_aliases::bit_func::ClockedFunctionTemplate;
 use super::super::{ClockedEndpointError, ClockedPlanError, clocked_resolve};
 use super::{ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits,
     ModuleBodyPosition, ModuleCalls, ResolveRowError, ResolveRowsError, UseAliases, append_row, resolve_rows};
@@ -160,13 +164,159 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    // 子モジュールは依存先の展開結果、関数は解決済み宣言の展開結果を使う。
+    spec fn routine_uses_selected_template(
+        checked: &ModuleCalls, edges: Seq<Option<usize>>, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, call: int,
+        callee: NorNetlist, inputs: PortBitLayout, outputs: PortBitLayout, devices: Seq<ClockedStorageInputs>,
+    ) -> bool {
+        match edges[call] {
+            Some(child) => child < networks.len() && (networks[child as int] matches Some(network) && {
+                &&& callee == network.circuit.netlist_model()
+                &&& inputs == network.inputs && outputs == network.outputs
+                &&& devices == network.storage@
+            }),
+            None => function_target(checked, edges, call) matches Some(key) && {
+                let template = functions[key];
+                &&& functions.contains_key(key)
+                &&& callee == template.circuit.netlist_model()
+                &&& inputs == template.inputs && outputs == template.outputs
+                &&& devices.len() == 0
+            },
+        }
+    }
+
+    #[verifier::opaque]
+    spec fn network_uses_selected_templates(
+        checked: &ModuleCalls, edges: Seq<Option<usize>>, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, network: &ClockedModuleNetwork,
+    ) -> bool {
+        &&& edges.len() == checked.calls@.len()
+        &&& network._hierarchy_wiring@ matches Some(wiring)
+        &&& wiring.routines.len() == checked.calls@.len()
+        &&& forall|i: int| 0 <= i < wiring.routines.len() ==> ((#[trigger] wiring.routines[i]) matches Some(routine)
+            ==> Self::routine_uses_selected_template(checked, edges, networks, functions, i, routine.callee,
+                routine.inputs, routine.layout, routine.devices))
+    }
+
+    proof fn selected_templates_survive_extension(
+        checked: &ModuleCalls, edges: Seq<Option<usize>>, old_networks: Seq<Option<ClockedModuleNetwork>>,
+        new_networks: Seq<Option<ClockedModuleNetwork>>, old_functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        new_functions: Map<(usize, usize), ClockedFunctionTemplate>, network: &ClockedModuleNetwork,
+    )
+        requires
+            Self::network_uses_selected_templates(checked, edges, old_networks, old_functions, network),
+            old_networks.len() == new_networks.len(),
+            function_cache_extends(old_functions, new_functions),
+            forall|i: int| 0 <= i < edges.len() ==> ((#[trigger] edges[i]) matches Some(child)
+                ==> child < old_networks.len() && old_networks[child as int] == new_networks[child as int]),
+        ensures Self::network_uses_selected_templates(checked, edges, new_networks, new_functions, network),
+    {
+        reveal(UseAliases::network_uses_selected_templates);
+        let wiring = network._hierarchy_wiring@->Some_0;
+        assert forall|i: int| 0 <= i < wiring.routines.len() implies ((#[trigger] wiring.routines[i]) matches Some(routine)
+            ==> Self::routine_uses_selected_template(checked, edges, new_networks, new_functions, i,
+                routine.callee, routine.inputs, routine.layout, routine.devices)) by {
+            if let Some(routine) = wiring.routines[i] {
+                assert(Self::routine_uses_selected_template(checked, edges, old_networks, old_functions, i,
+                    routine.callee, routine.inputs, routine.layout, routine.devices));
+            }
+        };
+    }
+
+    // 処理済みの宣言が、その依存先として記録した展開結果を参照する。
+    #[verifier::opaque]
+    spec fn hierarchy_templates_through(
+        &self, hierarchy: &ClockedHierarchy, limits: ClockedModuleVmLimits, end: int,
+        networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+    ) -> bool {
+        &&& 0 <= end <= hierarchy.order@.len()
+        &&& networks.len() == hierarchy.positions@.len()
+        &&& forall|i: int| 0 <= i < end ==> {
+            let node = #[trigger] hierarchy.order@[i] as int;
+            &&& 0 <= node < networks.len()
+            &&& (hierarchy.modules@[node] matches Some(checked) ==> networks[node] matches Some(network) && {
+                &&& self.hierarchy_network_wiring(&checked, limits, &network)
+                &&& Self::network_uses_selected_templates(&checked, hierarchy.graph@[node]@, networks, functions, &network)
+            })
+        }
+    }
+
+    proof fn append_hierarchy_template(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
+        index: int, before: Seq<Option<ClockedModuleNetwork>>, after: Seq<Option<ClockedModuleNetwork>>,
+        old_functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, compiled: Option<ClockedModuleNetwork>,
+    )
+        requires
+            self.clocked_hierarchy_matches(owner, limits.width, hierarchy),
+            self.hierarchy_templates_through(hierarchy, limits, index, before, old_functions),
+            function_cache_extends(old_functions, functions),
+            0 <= index < hierarchy.order@.len(),
+            ({
+                let node = hierarchy.order@[index] as int;
+                &&& 0 <= node < before.len()
+                &&& match (hierarchy.modules@[node], compiled) {
+                    (None, None) => after == before,
+                    (Some(checked), Some(network)) => after == before.update(node, Some(network))
+                        && self.hierarchy_network_wiring(&checked, limits, &network)
+                        && Self::network_uses_selected_templates(&checked, hierarchy.graph@[node]@, before, functions, &network),
+                    _ => false,
+                }
+            }),
+        ensures self.hierarchy_templates_through(hierarchy, limits, index + 1, after, functions),
+    {
+        reveal(UseAliases::hierarchy_templates_through);
+        self.clocked_hierarchy_evidence(owner, limits.width, hierarchy);
+        let node = hierarchy.order@[index] as int;
+        assert(hierarchy.rank@[node] == index);
+        assert forall|i: int| 0 <= i <= index implies {
+            let loaded = #[trigger] hierarchy.order@[i] as int;
+            &&& 0 <= loaded < after.len()
+            &&& (hierarchy.modules@[loaded] matches Some(checked) ==> after[loaded] matches Some(network) && {
+                &&& self.hierarchy_network_wiring(&checked, limits, &network)
+                &&& Self::network_uses_selected_templates(&checked, hierarchy.graph@[loaded]@, after, functions, &network)
+            })
+        } by {
+            let loaded = hierarchy.order@[i] as int;
+            assert(hierarchy.rank@[loaded] == i);
+            if i < index {
+                assert(loaded != node);
+                assert(after[loaded] == before[loaded]);
+            }
+            if let Some(checked) = hierarchy.modules@[loaded] {
+                let network = after[loaded]->Some_0;
+                let edges = hierarchy.graph@[loaded]@;
+                assert forall|call: int| 0 <= call < edges.len() implies ((#[trigger] edges[call]) matches Some(child)
+                    ==> child < before.len() && after[child as int] == before[child as int]) by {
+                    if let Some(child) = edges[call] {
+                        self.clocked_hierarchy_edge(owner, limits.width, hierarchy, loaded, call);
+                        assert(hierarchy.rank@[child as int] < i);
+                        assert(child as int != node);
+                        assert(after[child as int] == before[child as int]);
+                    }
+                };
+                if i == index {
+                    Self::selected_templates_survive_extension(&checked, edges, before, after, functions, functions, &network);
+                } else {
+                    Self::selected_templates_survive_extension(&checked, edges, before, after, old_functions, functions, &network);
+                }
+            }
+        };
+    }
+
     /// ルートの定義と公開ポートの配線に対応するネットワークから、VM が初期化されることを表す。
     pub closed spec fn clocked_module_hierarchy_vm(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, vm: &ClockedModuleVm,
     ) -> bool {
-        exists|hierarchy: ClockedHierarchy, network: ClockedModuleNetwork|
+        exists|hierarchy: ClockedHierarchy, network: ClockedModuleNetwork, networks: Seq<Option<ClockedModuleNetwork>>,
+            functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int|
             #[trigger] self.clocked_hierarchy_matches(owner, limits.width, &hierarchy)
             && #[trigger] self.network_vm_on_reset(&network, limits.state_bits, vm)
+            && #[trigger] self.hierarchy_templates_through(&hierarchy, limits, end, networks, functions)
+            && self.clocked_functions_match(functions, limits.width, limits.wiring_bits, limits.gates)
+            && 0 < end && hierarchy.order@[end - 1] == 0
+            && networks[0] == Some(network)
             && hierarchy.modules@[0].is_some()
             && self.hierarchy_network_wiring(&hierarchy.modules@[0]->Some_0, limits, &network)
             && (network._hierarchy_wiring@ matches Some(wiring)
@@ -225,16 +375,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             index += 1;
         }
         let mut index = 0;
+        assert(self.hierarchy_templates_through(&hierarchy, limits, 0, networks@, functions@)) by {
+            reveal(UseAliases::hierarchy_templates_through);
+        };
         while index < hierarchy.order.len()
             invariant
                 self.can_resolve(), self.clocked_hierarchy_matches(owner, limits.width, &hierarchy),
                 obeys_cmp::<(usize, usize)>(),
                 self.clocked_functions_match(functions@, limits.width, limits.wiring_bits, limits.gates),
                 index <= hierarchy.order@.len(), networks@.len() == count == hierarchy.positions@.len(),
-                forall|i: int| 0 <= i < index && hierarchy.modules@[hierarchy.order@[i] as int].is_some() ==>
-                    (#[trigger] networks@[hierarchy.order@[i] as int]).is_some()
-                    && self.hierarchy_network_wiring(&hierarchy.modules@[hierarchy.order@[i] as int]->Some_0,
-                        limits, &networks@[hierarchy.order@[i] as int]->Some_0),
+                self.hierarchy_templates_through(&hierarchy, limits, index as int, networks@, functions@),
             decreases hierarchy.order@.len() - index,
         {
             proof { self.clocked_hierarchy_evidence(owner, limits.width, &hierarchy); }
@@ -242,6 +392,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if node >= count { return Err(ClockedModuleVmError::InstanceCount); }
             if let Some(checked) = &hierarchy.modules[node] {
                 let position = hierarchy.positions[node];
+                let ghost old_functions = functions@;
                 proof {
                     assert(hierarchy.rank@[node as int] == index);
                     assert(self.function_targets_are_declared(checked, hierarchy.graph@[node as int]@)) by {
@@ -260,7 +411,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             self.clocked_hierarchy_edge(owner, limits.width, &hierarchy, node as int, call);
                             let rank = hierarchy.rank@[child as int];
                             assert(hierarchy.order@[rank as int] == child);
-                            assert(networks@[hierarchy.order@[rank as int] as int].is_some());
+                            assert(networks@[hierarchy.order@[rank as int] as int].is_some()) by {
+                                reveal(UseAliases::hierarchy_templates_through);
+                            };
                         }
                     };
                 }
@@ -280,6 +433,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 };
                 if node == 0 {
                     let ghost source = network;
+                    let ghost completed = networks@.update(0, Some(source));
+                    proof {
+                        self.append_hierarchy_template(owner, limits, &hierarchy, index as int, networks@, completed,
+                            old_functions, functions@, Some(source));
+                    }
                     return match self.initialize_clocked_network(network, limits.state_bits) {
                         Ok(vm) => {
                             proof {
@@ -291,6 +449,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             }
                             assert(self.clocked_module_hierarchy_vm(owner, limits, &vm)) by {
                                 assert(self.network_vm_on_reset(&source, limits.state_bits, &vm));
+                                assert(self.hierarchy_templates_through(&hierarchy, limits, index + 1, completed, functions@));
                             };
                             Ok(Some(vm))
                         },
@@ -301,20 +460,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     };
                 }
                 let ghost previous = networks@;
+                let ghost source = network;
                 networks.set(node, Some(network));
-                assert forall|i: int| 0 <= i <= index && hierarchy.modules@[hierarchy.order@[i] as int].is_some()
-                    implies (#[trigger] networks@[hierarchy.order@[i] as int]).is_some()
-                        && self.hierarchy_network_wiring(&hierarchy.modules@[hierarchy.order@[i] as int]->Some_0,
-                            limits, &networks@[hierarchy.order@[i] as int]->Some_0) by {
-                    if i < index {
-                        let earlier = hierarchy.order@[i];
-                        assert(hierarchy.rank@[earlier as int] == i);
-                        assert(earlier != node);
-                        assert(networks@[earlier as int] == previous[earlier as int]);
-                    }
-                };
+                proof {
+                    self.append_hierarchy_template(owner, limits, &hierarchy, index as int, previous, networks@,
+                        old_functions, functions@, Some(source));
+                }
             } else {
                 assert(hierarchy.modules@[node as int].is_none());
+                proof {
+                    self.append_hierarchy_template(owner, limits, &hierarchy, index as int, networks@, networks@,
+                        functions@, functions@, None);
+                }
             }
             index += 1;
         }
@@ -338,6 +495,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && network.circuit.netlist_model().input_count <= limits.wiring_bits,
             result matches Ok(network) ==> self.hierarchy_network_wiring(checked, limits, &network),
             self.clocked_functions_match(final(functions)@, limits.width, limits.wiring_bits, limits.gates),
+            function_cache_extends(old(functions)@, final(functions)@),
+            result matches Ok(network) ==> Self::network_uses_selected_templates(checked, edges@,
+                networks@, final(functions)@, &network),
             result matches Err(ClockedModuleVmError::ChildStateCapacity { used, width, capacity, .. }) ==>
                 capacity == limits.wiring_bits && used <= capacity && used + width > capacity,
             result matches Err(ClockedModuleVmError::Hierarchy(super::super::super::ClockedModuleError::Function { call, expansion })) ==>
@@ -380,12 +540,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 obeys_cmp::<(usize, usize)>(),
                 function_templates_cover(checked, edges@, functions@, count as int),
                 self.clocked_functions_match(functions@, limits.width, limits.wiring_bits, limits.gates),
+                function_cache_extends(old(functions)@, functions@),
                 forall|i: int| 0 <= i < call ==> (#[trigger] placements@[i]).is_some()
                     == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 forall|i: int| 0 <= i < call ==> ((#[trigger] placements@[i]) matches Some(placed) ==> {
                     &&& self.call_wires_result(checked, limits.width, &ports, i as usize, Ok(placed._argument_rows@))
                     &&& row_model(placed._argument_rows@@) == placed.arguments@
                 }),
+                forall|i: int| 0 <= i < call ==> ((#[trigger] placements@[i]) matches Some(placed) ==>
+                    Self::routine_uses_selected_template(checked, edges@, networks@, functions@, i,
+                        placed.circuit.netlist_model(), *placed.inputs, *placed.outputs, placed.storage@)),
                 forall|i: int| 0 <= i < edges@.len() ==> ((#[trigger] edges@[i]) matches Some(child)
                     ==> child < networks@.len() && networks@[child as int].is_some()
                         && (checked.calls@[i].inputs.ports.signature.target is Routine)),
@@ -404,6 +568,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 None
             };
             if let Some((circuit, inputs, outputs, storage, storage_sites)) = routine {
+                assert(Self::routine_uses_selected_template(checked, edges@, networks@, functions@, call as int,
+                    circuit.netlist_model(), *inputs, *outputs, storage@));
                 let template = circuit.checked_netlist();
                 let child_external = inputs.total_bits();
                 if child_external > template.input_count { return Err(ClockedModuleVmError::InstanceCount); }
@@ -445,11 +611,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }) by {
                 if i < call { assert(placements@[i] == previous[i]); }
             };
+            assert forall|i: int| 0 <= i <= call implies ((#[trigger] placements@[i]) matches Some(placed) ==>
+                Self::routine_uses_selected_template(checked, edges@, networks@, functions@, i,
+                    placed.circuit.netlist_model(), *placed.inputs, *placed.outputs, placed.storage@)) by {
+                if i < call { assert(placements@[i] == previous[i]); }
+            };
             call += 1;
         }
         let symbolic = self.bind_hierarchy_rows(owner, limits, checked, &ports, &direct, &placements)?;
         let definitions = self.resolve_hierarchy_rows(owner, limits, checked, &ports, &symbolic, &placements, total_inputs, total_gates)?;
-        self.finish_hierarchy_network(owner, limits, checked, ports, direct, &placements, &symbolic, &definitions, total_inputs, total_gates)
+        let result = self.finish_hierarchy_network(owner, limits, checked, ports, direct, &placements, &symbolic, &definitions, total_inputs, total_gates);
+        proof {
+            if let Ok(network) = &result {
+                assert(Self::network_uses_selected_templates(checked, edges@, networks@, functions@, network)) by {
+                    reveal(UseAliases::network_uses_selected_templates);
+                    let wiring = network._hierarchy_wiring@->Some_0;
+                    assert forall|i: int| 0 <= i < wiring.routines.len() implies ((#[trigger] wiring.routines[i]) matches Some(routine)
+                        ==> Self::routine_uses_selected_template(checked, edges@, networks@, functions@, i,
+                            routine.callee, routine.inputs, routine.layout, routine.devices)) by {
+                        if let Some(routine) = wiring.routines[i] {
+                            let placed = placements@[i]->Some_0;
+                            assert(Self::routine_uses_selected_template(checked, edges@, networks@, functions@, i,
+                                placed.circuit.netlist_model(), *placed.inputs, *placed.outputs, placed.storage@));
+                        }
+                    };
+                };
+            }
+        }
+        result
     }
 
     fn flatten_clocked_arguments(
@@ -832,6 +1021,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             (None, None) => true,
             (Some(placed), Some(routine)) => {
                 &&& routine.layout == *placed.outputs
+                &&& routine.inputs == *placed.inputs
                 &&& routine.callee == placed.circuit.netlist_model()
                 &&& routine.devices == placed.storage@
                 &&& routine.gates == placed.gates && routine.state_inputs == placed.states
@@ -873,6 +1063,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures result matches Ok(network) ==> network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits,
             result matches Ok(network) ==> self.hierarchy_network_wiring(checked, limits, &network),
+            result matches Ok(network) ==> (network._hierarchy_wiring@ matches Some(wiring) && {
+                &&& wiring.routines.len() == calls@.len()
+                &&& forall|i: int| 0 <= i < wiring.routines.len() ==> ((#[trigger] wiring.routines[i]) matches Some(routine) ==> {
+                    &&& calls@[i] matches Some(placed)
+                    &&& routine.callee == placed.circuit.netlist_model()
+                    &&& routine.inputs == *placed.inputs && routine.layout == *placed.outputs
+                    &&& routine.devices == placed.storage@
+                })
+            }),
             !(result matches Err(ClockedModuleVmError::Hierarchy(_) | ClockedModuleVmError::ChildStateCapacity { .. })),
     {
         let mut gates = Vec::new();
@@ -960,7 +1159,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 proof {
                     vstd::std_specs::vec::axiom_spec_len(&child_storage);
                     let routine = RoutineWiring {
-                        layout: *placement.outputs, outputs: instance.outputs@,
+                        inputs: *placement.inputs, layout: *placement.outputs, outputs: instance.outputs@,
                         callee: placement.circuit.netlist_model(), devices: placement.storage@, external: arguments@,
                         gates: placement.gates, state_inputs: placement.states,
                         argument_rows: placement._argument_rows@,
@@ -1123,6 +1322,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         assert(self.hierarchy_network_wiring(checked, limits, &network)) by {
             assert(self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(source_ports)));
+        };
+        assert forall|i: int| 0 <= i < captured.len() implies ((#[trigger] captured[i]) matches Some(routine) ==> {
+            &&& calls@[i] matches Some(placed)
+            &&& routine.callee == placed.circuit.netlist_model()
+            &&& routine.inputs == *placed.inputs && routine.layout == *placed.outputs
+            &&& routine.devices == placed.storage@
+        }) by {
+            assert(self.captured_call_output(checked, &source_ports, calls@, _rows, definitions@, i, captured[i]));
         };
         Ok(network)
     }

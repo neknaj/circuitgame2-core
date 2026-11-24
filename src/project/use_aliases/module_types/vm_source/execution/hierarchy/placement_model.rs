@@ -14,6 +14,7 @@ verus! {
 
 /// 子のポートと、親回路におけるゲート・状態出力・状態素子の配置。
 pub(super) struct RoutineWiring {
+    pub inputs: PortBitLayout,
     pub layout: PortBitLayout,
     pub outputs: Seq<Wire>,
     pub callee: NorNetlist,

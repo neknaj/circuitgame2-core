@@ -13,6 +13,14 @@ verus! {
 
 pub(in crate::project::use_aliases::module_types) type FunctionTemplates<'p, 'a> = BTreeMap<(usize, usize), ClockedFunctionTemplate<'p, 'a>>;
 
+/// キャッシュにあった展開結果が、その後も同じ宣言位置から得られることを表す。
+pub(in crate::project::use_aliases::module_types) open spec fn function_cache_extends(
+    before: Map<(usize, usize), ClockedFunctionTemplate>, after: Map<(usize, usize), ClockedFunctionTemplate>,
+) -> bool {
+    forall|key: (usize, usize)| #[trigger] before.contains_key(key) ==>
+        after.contains_key(key) && after[key] == before[key]
+}
+
 /// モジュールの依存辺を持たない通常呼び出しが参照する宣言位置。
 pub(in crate::project::use_aliases::module_types) open spec fn function_target(calls: &ModuleCalls, edges: Seq<Option<usize>>, i: int) -> Option<(usize, usize)> {
     match calls.calls@[i].inputs.ports.signature.target {
@@ -87,6 +95,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.function_targets_are_declared(calls, edges@),
         ensures
             self.clocked_functions_match(final(cache)@, width, bits, gates),
+            function_cache_extends(old(cache)@, final(cache)@),
             result is Ok ==> function_templates_cover(calls, edges@, final(cache)@, calls.calls@.len() as int),
             !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
             !(result matches Err(ClockedModuleError::PortLayout { .. })),
@@ -100,6 +109,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.can_resolve(), self.module_calls_result(_owner, width, Ok(Some(*calls))),
                 i <= calls.calls@.len() == edges@.len(), obeys_cmp::<(usize, usize)>(),
                 self.clocked_functions_match(cache@, width, bits, gates),
+                function_cache_extends(old(cache)@, cache@),
                 self.function_targets_are_declared(calls, edges@),
                 function_templates_cover(calls, edges@, cache@, i as int),
             decreases calls.calls@.len() - i,
@@ -123,6 +133,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         };
                         let _ = cache.insert(target, template);
                         assert(cache@ == before.insert(target, template));
+                        assert(function_cache_extends(old(cache)@, cache@)) by {
+                            assert forall|key: (usize, usize)| #[trigger] old(cache)@.contains_key(key) implies
+                                cache@.contains_key(key) && cache@[key] == old(cache)@[key] by {
+                                assert(before.contains_key(key));
+                                assert(key != target);
+                            };
+                        };
                         assert(self.clocked_functions_match(cache@, width, bits, gates)) by {
                             assert forall|key: (usize, usize)| cache@.contains_key(key) implies
                                 self.clocked_function_template_matches(key, width, bits, gates, &#[trigger] cache@[key]) by {
