@@ -1,6 +1,8 @@
 //! 呼び出しと公開出力が読む配線を解決し、tick 実行用の VM を初期化する。
 
 mod child_outputs;
+#[cfg(verus_only)]
+mod direct_source;
 mod hierarchy;
 #[cfg(verus_only)]
 pub use hierarchy::ClockedModuleObservation;

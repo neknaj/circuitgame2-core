@@ -644,10 +644,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let checked = choose|checked: ModuleCalls|
             #[trigger] self.module_calls_result(owner, limit, Ok(Some(checked)))
                 && self.storage_on_checked(&checked, limit, external, capacity, Ok(*plan));
+        self.storage_placements_on_calls_distinct(owner, limit, external, capacity, &checked, plan, first, later);
+    }
+
+    /// 同じ型検査結果を使い、二つの配置が異なる呼び出しを指すことを示す。
+    pub(super) proof fn storage_placements_on_calls_distinct(
+        &self, owner: ModuleBodyPosition, limit: u64, external: usize, capacity: usize,
+        checked: &ModuleCalls, plan: &ClockedStorageLayout, first: int, later: int,
+    )
+        requires
+            self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            self.storage_on_checked(checked, limit, external, capacity, Ok(*plan)),
+            0 <= first < later < plan.instances@.len(),
+        ensures
+            plan.instances@[first].at != plan.instances@[later].at,
+            plan.instances@[first].outputs.end <= plan.instances@[later].outputs.start,
+    {
+        reveal(UseAliases::storage_on_checked);
+        reveal(UseAliases::placed_prefix);
+        reveal(UseAliases::placement_matches);
         ordered_storage_ranges(plan.instances@, external, first, later);
         let a = plan.instances@[first].call_index as int;
         let b = plan.instances@[later].call_index as int;
-        self.module_call_sites_distinct(owner, limit, &checked, a, b);
+        self.module_call_sites_distinct(owner, limit, checked, a, b);
     }
 
     /// モジュールが直接呼び出す状態素子の出力を増補入力列に配置する。
