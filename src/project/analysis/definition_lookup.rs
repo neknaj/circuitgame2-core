@@ -3,7 +3,7 @@
 use super::{DefinitionAnalysis, UseAliasReport};
 use crate::project::{
     AbsoluteTarget, DefinitionBinding, IndexedDefinitionBinding, LocatedName, ResolvedUse,
-    VirtualPath,
+    UseTargets, VirtualPath,
 };
 use vstd::prelude::*;
 
@@ -44,12 +44,12 @@ spec fn alias_at<'p, 'a>(item: &ResolvedUse<'p, 'a>, file: &VirtualPath, offset:
     }
 }
 
-impl<'p, 'a> UseAliasReport<'p, 'a> {
+impl<'p, 'a> UseTargets<'p, 'a> {
     /// 対象ファイルの参照位置を含む最初の `use` が指す宣言を表す。
     pub closed spec fn alias_location_matches(
         &self, file: &VirtualPath, offset: usize, location: Option<LocatedName>,
     ) -> bool {
-        let uses = self.targets.directives_model();
+        let uses = self.directives_model();
         match location {
             Some(_) => exists|i: int| {
                 &&& 0 <= i < uses.len() && alias_at(&(#[trigger] uses[i]), file, offset) == location
@@ -62,16 +62,17 @@ impl<'p, 'a> UseAliasReport<'p, 'a> {
     /// `use` の参照先または別名を指すバイト位置から、解決済みの宣言位置を返す。
     ///
     /// 指定位置を含む `use` がない場合は `None` を返す。
+    /// 別名同士の衝突は [`crate::project::check_use_aliases`] で検査する。
     pub fn alias_location(
         &self, file: &VirtualPath, offset: usize,
     ) -> (location: Option<LocatedName<'p, 'a>>)
         ensures self.alias_location_matches(file, offset, location),
     {
-        let uses = self.targets.directives();
+        let uses = self.directives();
         let mut i = 0usize;
         while i < uses.len()
             invariant
-                uses@ == self.targets.directives_model(),
+                uses@ == self.directives_model(),
                 i <= uses@.len(),
                 forall|j: int| 0 <= j < i ==> alias_at(&(#[trigger] uses@[j]), file, offset).is_none(),
             decreases uses@.len() - i,
@@ -97,6 +98,26 @@ impl<'p, 'a> UseAliasReport<'p, 'a> {
             i += 1;
         }
         None
+    }
+}
+
+impl<'p, 'a> UseAliasReport<'p, 'a> {
+    /// 対象ファイルの参照位置を含む最初の `use` が指す宣言を表す。
+    pub closed spec fn alias_location_matches(
+        &self, file: &VirtualPath, offset: usize, location: Option<LocatedName>,
+    ) -> bool {
+        self.targets.alias_location_matches(file, offset, location)
+    }
+
+    /// `use` の参照先または別名を指すバイト位置から、解決済みの宣言位置を返す。
+    ///
+    /// 指定位置を含む `use` がない場合は `None` を返す。
+    pub fn alias_location(
+        &self, file: &VirtualPath, offset: usize,
+    ) -> (location: Option<LocatedName<'p, 'a>>)
+        ensures self.alias_location_matches(file, offset, location),
+    {
+        self.targets.alias_location(file, offset)
     }
 }
 
