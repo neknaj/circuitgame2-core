@@ -1,5 +1,6 @@
 //! 呼び出しと公開出力が読む配線を解決し、tick 実行用の VM を初期化する。
 
+use super::super::ClockedStoragePlacement;
 use super::{ClockedEndpointError, ClockedModuleEndpoints, ModuleBodyPosition, ModuleCalls, UseAliases};
 use crate::netlist::{ClockedNor, ClockedNorError, ClockedStorageInputs, ClockedVm, ClockedVmError,
     NorGate, NorNetlist, PortBitLayout, Wire};
@@ -35,6 +36,15 @@ pub struct ClockedModuleVm {
     pub outputs: PortBitLayout,
     /// 回路の状態と tick 実行機能。
     pub vm: ClockedVm,
+}
+
+/// ソースから組み立てた配線。状態領域は、この回路を初期化するときに割り当てる。
+struct ClockedModuleNetwork<'p, 'a> {
+    inputs: PortBitLayout,
+    outputs: PortBitLayout,
+    circuit: ClockedNor,
+    storage: Vec<ClockedStorageInputs>,
+    storage_sites: Vec<ClockedStoragePlacement<'p, 'a>>,
 }
 
 /// モジュールを tick 実行用の VM に変換できなかった理由。
@@ -243,51 +253,55 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
-    spec fn vm_wiring_on_checked(
+    spec fn network_wiring_on_checked(
         &self, limits: ClockedModuleVmLimits, checked: &ModuleCalls, plan: &ClockedModuleEndpoints,
-        vm: &ClockedModuleVm,
+        network: &ClockedModuleNetwork,
     ) -> bool {
-        let external = plan.ports.inputs.total_bits_model();
-        &&& vm.inputs == plan.ports.inputs && vm.outputs == plan.ports.outputs
-        &&& exists|circuit: ClockedNor, storage: Seq<ClockedStorageInputs>,
-            arguments: Seq<Vec<Vec<ClockedWireDriver>>>, pins: Seq<Vec<Wire>>| {
-            &&& #[trigger] self.vm_calls_bound(limits, checked, plan, arguments, pins, circuit.netlist_model().gates@, storage)
-            &&& #[trigger] clocked_vm_result(&circuit, external, storage, limits.state_bits, Ok(vm.vm))
+        &&& network.inputs == plan.ports.inputs && network.outputs == plan.ports.outputs
+        &&& network.storage_sites@ == plan.storage.instances@
+        &&& exists|arguments: Seq<Vec<Vec<ClockedWireDriver>>>, pins: Seq<Vec<Wire>>| {
+            let netlist = network.circuit.netlist_model();
+            &&& #[trigger] self.vm_calls_bound(limits, checked, plan, arguments, pins, network.circuit.netlist_model().gates@, network.storage@)
             &&& pins.len() == checked.calls@.len()
-            &&& circuit.netlist_model().gates@.len() == plan.gate_count && storage.len() == plan.storage.instances@.len()
-            &&& circuit.netlist_model().input_count == plan.storage.augmented_inputs
-            &&& resolved_bits(row_model(plan.ports.drivers@), plan.definitions@, circuit.netlist_model().outputs@)
+            &&& netlist.gates@.len() == plan.gate_count && network.storage@.len() == plan.storage.instances@.len()
+            &&& netlist.input_count == plan.storage.augmented_inputs
+            &&& resolved_bits(row_model(plan.ports.drivers@), plan.definitions@, netlist.outputs@)
         }
     }
 
-    proof fn finish_vm_wiring(
+    proof fn finish_network_wiring(
         &self, limits: ClockedModuleVmLimits, checked: &ModuleCalls, plan: &ClockedModuleEndpoints,
-        vm: &ClockedModuleVm, circuit: &ClockedNor, storage: Seq<ClockedStorageInputs>,
-        arguments: Seq<Vec<Vec<ClockedWireDriver>>>, pins: Seq<Vec<Wire>>,
+        network: &ClockedModuleNetwork, arguments: Seq<Vec<Vec<ClockedWireDriver>>>, pins: Seq<Vec<Wire>>,
     )
         requires
-            vm.inputs == plan.ports.inputs, vm.outputs == plan.ports.outputs,
-            self.vm_calls_bound(limits, checked, plan, arguments, pins, circuit.netlist_model().gates@, storage),
-            clocked_vm_result(circuit, plan.ports.inputs.total_bits_model(), storage, limits.state_bits, Ok(vm.vm)),
+            network.inputs == plan.ports.inputs, network.outputs == plan.ports.outputs,
+            network.storage_sites@ == plan.storage.instances@,
+            self.vm_calls_bound(limits, checked, plan, arguments, pins, network.circuit.netlist_model().gates@, network.storage@),
             pins.len() == checked.calls@.len(),
-            circuit.netlist_model().gates@.len() == plan.gate_count,
-            storage.len() == plan.storage.instances@.len(),
-            circuit.netlist_model().input_count == plan.storage.augmented_inputs,
-            resolved_bits(row_model(plan.ports.drivers@), plan.definitions@, circuit.netlist_model().outputs@),
-        ensures self.vm_wiring_on_checked(limits, checked, plan, vm),
+            network.circuit.netlist_model().gates@.len() == plan.gate_count,
+            network.storage@.len() == plan.storage.instances@.len(),
+            network.circuit.netlist_model().input_count == plan.storage.augmented_inputs,
+            resolved_bits(row_model(plan.ports.drivers@), plan.definitions@, network.circuit.netlist_model().outputs@),
+        ensures self.network_wiring_on_checked(limits, checked, plan, network),
     {
     }
 
-    fn assemble_direct_vm(
+    spec fn network_vm_on_reset(
+        &self, network: &ClockedModuleNetwork, state_limit: usize, vm: &ClockedModuleVm,
+    ) -> bool {
+        &&& vm.inputs == network.inputs && vm.outputs == network.outputs
+        &&& clocked_vm_result(&network.circuit, network.inputs.total_bits_model(), network.storage@, state_limit, Ok(vm.vm))
+    }
+
+    /// 配線を組み立て、永続状態の確保は VM の初期化まで待つ。
+    fn assemble_direct_network(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, checked: &ModuleCalls<'p, 'a>,
         plan: ClockedModuleEndpoints<'p, 'a>,
-    ) -> (result: Result<ClockedModuleVm, ClockedModuleVmError<'p, 'a>>)
+    ) -> (result: Result<ClockedModuleNetwork<'p, 'a>, ClockedModuleVmError<'p, 'a>>)
         requires
             self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
             self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, &plan),
-        ensures result matches Ok(compiled) ==> compiled.vm.valid() && compiled.vm.initial()
-            && compiled.vm.external_count() == compiled.inputs.total_bits_model()
-            && self.vm_wiring_on_checked(limits, checked, &plan, &compiled),
+        ensures result matches Ok(network) ==> self.network_wiring_on_checked(limits, checked, &plan, &network),
             !(result matches Err(ClockedModuleVmError::Endpoints(_))),
     {
         let mut gates = Vec::new();
@@ -377,20 +391,32 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(circuit) => circuit,
             Err(error) => return Err(ClockedModuleVmError::Netlist(error)),
         };
-        let external = plan.ports.inputs.total_bits();
         let ghost source_plan = plan;
-        let ghost built = circuit;
-        let ghost boards = storage@;
-        match ClockedVm::new(circuit, external, storage, limits.state_bits) {
-            Ok(vm) => {
-                let result = ClockedModuleVm { inputs: plan.ports.inputs, outputs: plan.ports.outputs, vm };
-                proof { self.finish_vm_wiring(limits, checked, &source_plan, &result, &built, boards, args, pins); }
-                Ok(result)
-            },
+        let network = ClockedModuleNetwork {
+            inputs: plan.ports.inputs, outputs: plan.ports.outputs, circuit, storage,
+            storage_sites: plan.storage.instances,
+        };
+        proof { self.finish_network_wiring(limits, checked, &source_plan, &network, args, pins); }
+        Ok(network)
+    }
+
+    /// 配線が参照する各状態素子を、出現順に初期化する。
+    fn initialize_clocked_network(
+        &self, network: ClockedModuleNetwork<'p, 'a>, state_limit: usize,
+    ) -> (result: Result<ClockedModuleVm, ClockedModuleVmError<'p, 'a>>)
+        ensures
+            result matches Ok(compiled) ==> compiled.vm.valid() && compiled.vm.initial()
+                && compiled.vm.external_count() == compiled.inputs.total_bits_model()
+                && self.network_vm_on_reset(&network, state_limit, &compiled),
+            result matches Err(error) ==> error is Vm,
+    {
+        let external = network.inputs.total_bits();
+        match ClockedVm::new(network.circuit, external, network.storage, state_limit) {
+            Ok(vm) => Ok(ClockedModuleVm { inputs: network.inputs, outputs: network.outputs, vm }),
             Err(error) => {
                 let site = if let ClockedVmError::Storage { instance, .. } = error {
-                    if instance < plan.storage.instances.len() {
-                        Some(super::super::copy_location(&plan.storage.instances[instance].call))
+                    if instance < network.storage_sites.len() {
+                        Some(super::super::copy_location(&network.storage_sites[instance].call))
                     } else { None }
                 } else { None };
                 Err(ClockedModuleVmError::Vm(error, site))
@@ -402,10 +428,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub closed spec fn clocked_module_vm_wiring(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, vm: &ClockedModuleVm,
     ) -> bool {
-        exists|checked: ModuleCalls, plan: ClockedModuleEndpoints|
+        exists|checked: ModuleCalls, plan: ClockedModuleEndpoints, network: ClockedModuleNetwork|
             #[trigger] self.module_calls_result(owner, limits.width, Ok(Some(checked)))
             && #[trigger] self.endpoints_on_checked(&checked, limits.width, limits.wiring_bits, limits.gates, &plan)
-            && self.vm_wiring_on_checked(limits, &checked, &plan, vm)
+            && #[trigger] self.network_wiring_on_checked(limits, &checked, &plan, &network)
+            && self.network_vm_on_reset(&network, limits.state_bits, vm)
     }
 
     /// 直結、選択、連接が作る閉路を、閉路順のソース位置に対応付ける。
@@ -446,7 +473,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(plan) => plan,
             Err(error) => return Err(ClockedModuleVmError::Endpoints(error)),
         };
-        match self.assemble_direct_vm(owner, limits, &checked, plan) {
+        let network = self.assemble_direct_network(owner, limits, &checked, plan)?;
+        match self.initialize_clocked_network(network, limits.state_bits) {
             Ok(vm) => Ok(Some(vm)),
             Err(error) => Err(error),
         }

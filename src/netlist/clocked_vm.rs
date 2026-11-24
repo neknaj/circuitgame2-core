@@ -91,7 +91,7 @@ spec fn starts_model(wiring: Seq<ClockedStorageInputs>, starts: Seq<usize>, exte
 }
 
 #[verifier::opaque]
-spec fn wiring_width(wiring: Seq<ClockedStorageInputs>, count: nat) -> nat
+pub(super) open spec fn wiring_width(wiring: Seq<ClockedStorageInputs>, count: nat) -> nat
     recommends count <= wiring.len(),
     decreases count,
 {
@@ -100,7 +100,30 @@ spec fn wiring_width(wiring: Seq<ClockedStorageInputs>, count: nat) -> nat
     }
 }
 
-proof fn wiring_width_grows(wiring: Seq<ClockedStorageInputs>, before: nat, end: nat)
+/// 増補入力列で、状態素子の登録出力が占めるビット数を表す。
+pub closed spec fn clocked_storage_output_width(wiring: Seq<ClockedStorageInputs>) -> nat {
+    wiring_width(wiring, wiring.len())
+}
+
+pub(super) proof fn storage_output_width_total(wiring: Seq<ClockedStorageInputs>)
+    ensures clocked_storage_output_width(wiring) == wiring_width(wiring, wiring.len()),
+{
+}
+
+pub(super) proof fn wiring_width_zero(wiring: Seq<ClockedStorageInputs>)
+    ensures wiring_width(wiring, 0) == 0,
+{
+    reveal(wiring_width);
+}
+
+pub(super) proof fn wiring_width_step(wiring: Seq<ClockedStorageInputs>, i: nat)
+    requires i < wiring.len(),
+    ensures wiring_width(wiring, i + 1) == wiring_width(wiring, i) + wiring[i as int].data@.len(),
+{
+    reveal(wiring_width);
+}
+
+pub(super) proof fn wiring_width_grows(wiring: Seq<ClockedStorageInputs>, before: nat, end: nat)
     requires before <= end <= wiring.len(),
     ensures wiring_width(wiring, before) <= wiring_width(wiring, end),
     decreases end - before,
@@ -115,7 +138,7 @@ fn plan_inputs(wiring: &[ClockedStorageInputs], external: usize, inputs: usize) 
         result matches Some(starts) ==> starts@.len() == wiring@.len() + 1 && starts@.last() == inputs
             && starts_model(wiring@, starts@, external, inputs),
 {
-    assert(wiring_width(wiring@, 0) == 0) by { reveal(wiring_width); };
+    proof { wiring_width_zero(wiring@); }
     if external > inputs || inputs > isize::MAX as usize { return None; }
     let mut starts = Vec::new();
     let mut used = external;
@@ -129,9 +152,7 @@ fn plan_inputs(wiring: &[ClockedStorageInputs], external: usize, inputs: usize) 
         decreases wiring@.len() - i,
     {
         let width = wiring[i].data.len();
-        assert(wiring_width(wiring@, (i + 1) as nat) == wiring_width(wiring@, i as nat) + width) by {
-            reveal(wiring_width);
-        };
+        proof { wiring_width_step(wiring@, i as nat); }
         if width > inputs - used {
             proof { wiring_width_grows(wiring@, (i + 1) as nat, wiring@.len()); }
             return None;

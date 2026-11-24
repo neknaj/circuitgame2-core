@@ -1,7 +1,9 @@
 //! NOR ゲートの出力を tick ごとに同時更新する。
 
 mod instances;
-pub use instances::ClockedInstanceError;
+pub use instances::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatefulInstanceError};
+#[cfg(verus_only)]
+pub use instances::{clocked_stateful_arguments, clocked_stateful_instance_reads_match, clocked_stateful_instance_result};
 #[cfg(verus_only)]
 pub use instances::{clocked_instance_inputs, clocked_instance_outputs_match, clocked_instance_result, clocked_instance_steps_match};
 

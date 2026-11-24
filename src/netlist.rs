@@ -12,13 +12,15 @@ mod state_elements;
 mod source_trace;
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
-pub use clocked::ClockedInstanceError;
+pub use clocked::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatefulInstanceError};
+#[cfg(verus_only)]
+pub use clocked::{clocked_stateful_arguments, clocked_stateful_instance_reads_match, clocked_stateful_instance_result};
 pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInputs};
 #[cfg(verus_only)]
-pub use clocked_storage::clocked_storage_result;
+pub use clocked_storage::{clocked_storage_pin_values, clocked_storage_result, clocked_storage_steps_agree};
 pub use clocked_vm::{ClockedVm, ClockedVmError};
 #[cfg(verus_only)]
-pub use clocked_vm::{clocked_vm_result, clocked_vm_trace, clocked_vm_trace_from_reset, clocked_vm_trace_push_tick};
+pub use clocked_vm::{clocked_storage_output_width, clocked_vm_result, clocked_vm_trace, clocked_vm_trace_from_reset, clocked_vm_trace_push_tick};
 pub(crate) use clocked::wire_within;
 #[cfg(verus_only)]
 pub(crate) use clocked::{clocked_wiring_endpoints, clocked_wiring_from_endpoints};

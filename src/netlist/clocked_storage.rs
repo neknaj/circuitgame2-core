@@ -1,5 +1,7 @@
 //! tick 開始時の配線から状態素子の入力を採取する。
 
+mod placement;
+
 use super::clocked::{observe, wire_within};
 use super::{LatchState, RamState, StateAllocationError, TickInputError, Wire, read_wire};
 #[cfg(verus_only)]
@@ -79,10 +81,7 @@ fn invalid_wire(wires: &[Wire], inputs: usize, gates: usize) -> (result: Option<
 }
 
 spec fn storage_wires_valid(wiring: &ClockedStorageInputs, inputs: usize, gates: usize) -> bool {
-    &&& (wiring.address matches Some(address) ==>
-        output_ports_available(address@, inputs as nat, gates as nat, address@.len() as int))
-    &&& output_ports_available(wiring.data@, inputs as nat, gates as nat, wiring.data@.len() as int)
-    &&& wire_available(wiring.enable, inputs as nat, gates as nat)
+    wiring.pins_available(inputs as nat, gates as nat)
 }
 
 pub(super) open spec fn storage_capacity(wiring: &ClockedStorageInputs) -> nat {
@@ -175,6 +174,18 @@ spec fn storage_transition(
             &&& next.memory_bits() == Some(ram_next_memory(memory, a, data, enabled))
         },
     }
+}
+
+/// 状態素子が tick 開始時に読むアドレス、データ、許可の値を表す。
+pub open spec fn clocked_storage_pin_values(
+    wiring: &ClockedStorageInputs, input: Seq<bool>, gates: Seq<bool>,
+) -> (Option<Seq<bool>>, Seq<bool>, bool) {
+    let address = match wiring.address {
+        Some(pins) => Some(Seq::new(pins@.len(), |i: int| wire_value(pins@[i], input, gates))),
+        None => None,
+    };
+    (address, Seq::new(wiring.data@.len(), |i: int| wire_value(wiring.data@[i], input, gates)),
+        wire_value(wiring.enable, input, gates))
 }
 
 /// 検査済みの配線と初期状態、または最初の構築エラーの根拠を表す。
@@ -352,16 +363,12 @@ impl ClockedStorage {
         &self, previous: &Self, input: Seq<bool>, gates: Seq<bool>,
     ) -> bool {
         let wiring = &self.wiring;
-        let data = Seq::new(wiring.data@.len(), |i: int| wire_value(wiring.data@[i], input, gates));
-        let enabled = wire_value(wiring.enable, input, gates);
+        let (address, data, enabled) = clocked_storage_pin_values(wiring, input, gates);
         &&& storage_wires_valid(wiring, previous.inputs, previous.gates)
         &&& previous.inputs == input.len() && previous.gates == gates.len()
         &&& self.wiring == previous.wiring
         &&& self.inputs == previous.inputs && self.gates == previous.gates
-        &&& storage_transition(&previous.state, &self.state, match wiring.address {
-            None => None,
-            Some(address) => Some(Seq::new(address@.len(), |i: int| wire_value(address@[i], input, gates))),
-        }, data, enabled)
+        &&& storage_transition(&previous.state, &self.state, address, data, enabled)
     }
 
     /// 回路で共有する tick 開始時の入力値と NOR 出力を読み、状態を1 tick 進める。
@@ -403,6 +410,23 @@ impl ClockedStorage {
         self.state.step(address_bits, data.as_slice(), enabled);
         Ok(())
     }
+}
+
+/// 同じ旧状態と端子値から進めた素子は、同じ出力と記憶内容を得る。
+pub proof fn clocked_storage_steps_agree(
+    previous: &ClockedStorage, next: &ClockedStorage, previous_mapped: &ClockedStorage, next_mapped: &ClockedStorage,
+    input: Seq<bool>, gates: Seq<bool>, mapped_input: Seq<bool>, mapped_gates: Seq<bool>,
+)
+    requires
+        next.storage_tick_matches(previous, input, gates),
+        next_mapped.storage_tick_matches(previous_mapped, mapped_input, mapped_gates),
+        previous.output_model() == previous_mapped.output_model(),
+        previous.memory_model() == previous_mapped.memory_model(),
+        clocked_storage_pin_values(&previous.wiring_model(), input, gates)
+            == clocked_storage_pin_values(&previous_mapped.wiring_model(), mapped_input, mapped_gates),
+    ensures next.output_model() == next_mapped.output_model()
+        && next.memory_model() == next_mapped.memory_model(),
+{
 }
 
 } // verus!

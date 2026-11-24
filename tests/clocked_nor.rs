@@ -367,3 +367,69 @@ fn selects_clocked_driver_bits_in_the_signal_port() {
     assert_eq!(clocked_driver_bits(&oversized, &definitions, OutputDriver::Input(1), None).unwrap(),
         [usize::MAX - 2, usize::MAX - 1].map(|bit| ClockedWireDriver::Terminal(Wire::Input(bit))));
 }
+
+#[test]
+fn two_instances_of_a_clocked_ram_child_have_separate_state() {
+    use circuitgame2_core::netlist::{ClockedStorageInputs, ClockedVm};
+
+    let child = ClockedNor::check(NorNetlist {
+        input_count: 4,
+        gates: vec![NorGate { left: Wire::Input(1), right: Wire::Constant(false) }],
+        outputs: vec![Wire::Input(3), Wire::Gate(0)],
+    }).unwrap();
+    let storage = [ClockedStorageInputs {
+        address: Some(vec![Wire::Input(0)]), data: vec![Wire::Input(1)], enable: Wire::Input(2),
+    }];
+    let mut gates = Vec::new();
+    let mut next_state_input = 6;
+    let first = child.append_stateful_instance(&mut gates, &storage,
+        &[Wire::Input(0), Wire::Input(1), Wire::Input(2)], &mut next_state_input, 8, 2).unwrap();
+    assert_eq!(next_state_input, 7);
+    let second = child.append_stateful_instance(&mut gates, &storage,
+        &[Wire::Input(3), Wire::Input(4), Wire::Input(5)], &mut next_state_input, 8, 2).unwrap();
+    assert_eq!(next_state_input, 8);
+    assert_eq!(first.outputs, [Wire::Input(6), Wire::Gate(0)]);
+    assert_eq!(second.outputs, [Wire::Input(7), Wire::Gate(1)]);
+    let parent = ClockedNor::check(NorNetlist {
+        input_count: 8, gates, outputs: first.outputs.into_iter().chain(second.outputs).collect(),
+    }).unwrap();
+    let mut vm = ClockedVm::new(parent, 6, first.storage.into_iter().chain(second.storage).collect(), 6).unwrap();
+
+    assert_eq!(vm.reset(), [false, false, false, false]);
+    assert_eq!(vm.step(&[false, true, true, false, false, false]).unwrap(), [false, false, false, true]);
+    assert_eq!(vm.step(&[false, false, false, false, false, false]).unwrap(), [true, true, false, true]);
+    assert_eq!(vm.step(&[false, false, false, false, true, true]).unwrap(), [true, true, false, false]);
+    assert_eq!(vm.step(&[false, false, false, false, false, false]).unwrap(), [true, true, true, true]);
+    assert_eq!(vm.reset(), [false, false, false, false]);
+}
+
+#[test]
+fn rejects_invalid_child_storage_before_adding_any_gates() {
+    use circuitgame2_core::netlist::{ClockedStatefulInstanceError, ClockedStorageInputs};
+
+    let child = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![NorGate { left: Wire::Input(0), right: Wire::Constant(false) }],
+        outputs: vec![Wire::Gate(0)],
+    }).unwrap();
+    let bad = ClockedStorageInputs { address: None, data: vec![Wire::Input(1)], enable: Wire::Constant(true) };
+    let mut next_state_input = 1;
+    let mut gates = vec![NorGate { left: Wire::Constant(true), right: Wire::Constant(false) }];
+    let prior = gates.clone();
+    assert!(matches!(
+        child.append_stateful_instance(&mut gates, core::slice::from_ref(&bad), &[Wire::Input(0)],
+            &mut next_state_input, 2, 2),
+        Err(ClockedStatefulInstanceError::InputLayout)
+    ));
+    assert!(matches!(
+        child.append_stateful_instance(&mut gates, core::slice::from_ref(&bad), &[],
+            &mut next_state_input, 1, 2),
+        Err(ClockedStatefulInstanceError::StorageCapacity)
+    ));
+    assert!(matches!(
+        child.append_stateful_instance(&mut gates, &[bad], &[], &mut next_state_input, 2, 2),
+        Err(ClockedStatefulInstanceError::StoragePins(0))
+    ));
+    assert_eq!(gates, prior);
+    assert_eq!(next_state_input, 1);
+}
