@@ -2,7 +2,10 @@
 
 use super::{ClockedModuleEndpoints, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits, ModuleBodyPosition,
     ModuleCalls, UseAliases};
-use crate::netlist::{SourceDeviceId, SourceGateId};
+use crate::netlist::{
+    ClockedStorage, ClockedStorageInputs, SourceDeviceId, SourceGateId, SourceVmWire, Wire,
+    source_vm_layout_for_orders, source_vm_terminal_pair,
+};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -57,6 +60,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures
             order.len() == plan._gate_cursors@[slot],
             gate_call_order(plan.gate_by_call@, plan._call_cursors@[slot] as int, order),
+            forall|i: int| 0 <= i < plan._call_cursors@[slot] && (#[trigger] plan.gate_by_call@[i]).is_some() ==>
+                checked.calls@[i].inputs.ports.signature.target is Nor,
         decreases slot,
     {
         reveal(UseAliases::endpoint_prefix);
@@ -73,6 +78,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             before
         } else {
             assert(plan._call_cursors@[slot] == call + 1);
+            assert forall|i: int| 0 <= i < plan._call_cursors@[slot] && (#[trigger] plan.gate_by_call@[i]).is_some()
+                implies checked.calls@[i].inputs.ports.signature.target is Nor by {
+                if i == call {
+                    assert(plan.gate_by_call@[call].is_some());
+                }
+            };
             extend_gate_call_order(plan.gate_by_call@, call, before)
         }
     }
@@ -85,6 +96,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.endpoints_on_checked(checked, width_limit, wire_limit, gate_limit, plan),
         ensures order.len() == plan.gate_count,
             gate_call_order(plan.gate_by_call@, checked.calls@.len() as int, order),
+            forall|i: int| 0 <= i < checked.calls@.len() && (#[trigger] plan.gate_by_call@[i]).is_some() ==>
+                checked.calls@[i].inputs.ports.signature.target is Nor,
     {
         reveal(UseAliases::endpoint_prefix);
         let slot = plan._call_cursors@.len() - 1;
@@ -165,6 +178,71 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(pins.len() == checked.calls@.len());
         assert(self.clocked_direct_source_ids(owner, limits, compiled, gates, devices));
         (gates, devices)
+    }
+
+    /// 直接コンパイルした状態素子の登録出力を、ソース ID とビット番号で指定する。
+    ///
+    /// 返した入力配線は、外部入力と先行する状態素子の出力の後にある。
+    pub(crate) proof fn clocked_direct_registered_wire(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        gates: Seq<SourceGateId>, devices: Seq<SourceDeviceId>, index: int, bit: usize,
+    ) -> (wire: Wire)
+        requires
+            self.can_resolve(), self.clocked_direct_source_ids(owner, limits, compiled, gates, devices),
+            devices.no_duplicates(),
+            0 <= index < devices.len() == compiled.vm.storage_model().len(),
+            bit < compiled.vm.storage_model()[index].wiring_model().data@.len(),
+        ensures source_vm_terminal_pair(
+            compiled.vm.external_count(),
+            compiled.vm.storage_model().map_values(|device: ClockedStorage| device.wiring_model()),
+            &source_vm_layout_for_orders(gates, devices), SourceVmWire::Registered(devices[index], bit), wire),
+    {
+        let (checked, plan, network, order) =
+            choose|checked: ModuleCalls, plan: ClockedModuleEndpoints, network: ClockedModuleNetwork, order: Seq<int>| {
+                &&& #[trigger] self.module_calls_result(owner, limits.width, Ok(Some(checked)))
+                &&& #[trigger] self.endpoints_on_checked(&checked, limits.width, limits.wiring_bits, limits.gates, &plan)
+                &&& #[trigger] self.network_wiring_on_checked(limits, &checked, &plan, &network)
+                &&& self.network_vm_on_reset(&network, limits.state_bits, compiled)
+                &&& #[trigger] gate_call_order(plan.gate_by_call@, checked.calls@.len() as int, order)
+                &&& order.len() == plan.gate_count
+                &&& gates == order.map_values(|call: int| SourceGateId { instance: Seq::empty(), gate: checked.calls@[call].at })
+                &&& devices == plan.storage.instances@.map_values(|item: super::ClockedStoragePlacement| SourceDeviceId {
+                    instance: Seq::empty(), call: item.at,
+                })
+            };
+        let wiring = network.storage@;
+        let netlist = network.circuit.netlist_model();
+        let external = plan.ports.inputs.total_bits_model();
+        let placed = plan.storage.instances@;
+        let (arguments, pins) = choose|arguments: Seq<Vec<Vec<super::ClockedWireDriver>>>, pins: Seq<Vec<Wire>>| {
+            &&& #[trigger] self.vm_calls_bound(limits, &checked, &plan, arguments, pins, netlist.gates@, wiring)
+            &&& pins.len() == checked.calls@.len()
+            &&& netlist.gates@.len() == plan.gate_count && wiring.len() == placed.len()
+        };
+        self.direct_gate_call_order(&checked, &plan, limits.width, limits.wiring_bits, limits.gates);
+        reveal(UseAliases::vm_calls_bound);
+        assert forall|i: int| 0 <= i < wiring.len() implies
+            (#[trigger] placed[i]).outputs.start + (#[trigger] wiring[i]).data@.len() == placed[i].outputs.end by {
+            let call = self.storage_layout_call_for_instance(&checked, limits.width, external, limits.wiring_bits, &plan.storage, i);
+            self.storage_layout_call(&checked, limits.width, external, limits.wiring_bits, &plan.storage, call as usize);
+            assert(checked.calls@[call].inputs.ports.signature.target is StateElement);
+            assert(plan.gate_by_call@[call].is_none());
+            assert(placed[i].storage_inputs_match(pins[call]@, Some(wiring[i])));
+            placed[i].storage_inputs_width(pins[call]@, wiring[i]);
+        };
+        self.placed_storage_range_evidence(&checked, limits.width, external, limits.wiring_bits, &plan.storage, wiring, index);
+        assert(compiled.vm.storage_model().map_values(|device: ClockedStorage| device.wiring_model()) =~= wiring);
+        devices.to_set_ensures();
+        let layout = source_vm_layout_for_orders(gates, devices);
+        let id = devices[index];
+        assert(layout.device_index.contains_key(id));
+        assert(devices[layout.device_index[id]] == id);
+        assert(layout.device_index[id] == index);
+        let start = placed[index].outputs.start;
+        assert(compiled.vm.storage_model()[index].wiring_model() == wiring[index]);
+        assert(start + wiring[index].data@.len() == placed[index].outputs.end);
+        assert(start + bit < placed[index].outputs.end);
+        Wire::Input((start + bit) as usize)
     }
 }
 

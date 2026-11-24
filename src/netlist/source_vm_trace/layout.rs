@@ -31,7 +31,8 @@ spec fn indexed<K>(order: Seq<K>, index: Map<K, int>, domain: Set<K>) -> bool {
     &&& forall|i: int| 0 <= i < order.len() ==> domain.contains(#[trigger] order[i]) && index[order[i]] == i
 }
 
-spec fn wire_pair(
+/// 端子が指すソースのビットと VM の配線が対応する。
+pub(crate) open spec fn source_vm_terminal_pair(
     external: usize, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout, source: SourceVmWire, flat: Wire,
 ) -> bool {
     match (source, flat) {
@@ -50,23 +51,26 @@ spec fn wire_pair(
     }
 }
 
-spec fn row_pair(
+/// 端子の本数と順序を保って、各ビットの配線を対応付ける。
+pub(crate) open spec fn source_vm_row_pair(
     external: usize, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout, source: Seq<SourceVmWire>, lowered: Seq<Wire>,
 ) -> bool {
     &&& source.len() == lowered.len()
-    &&& forall|i: int| 0 <= i < lowered.len() ==> wire_pair(external, wiring, layout, source[i], #[trigger] lowered[i])
+    &&& forall|i: int| 0 <= i < lowered.len() ==>
+        source_vm_terminal_pair(external, wiring, layout, source[i], #[trigger] lowered[i])
 }
 
-spec fn storage_pair(
+/// ラッチまたは RAM の全入力端子を、役割とビット順を保って対応付ける。
+pub(crate) open spec fn source_vm_storage_pair(
     external: usize, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout, source: SourceStorage, flat: ClockedStorageInputs,
 ) -> bool {
     &&& match (source.address, flat.address) {
         (None, None) => true,
-        (Some(a), Some(b)) => row_pair(external, wiring, layout, a, b@),
+        (Some(a), Some(b)) => source_vm_row_pair(external, wiring, layout, a, b@),
         _ => false,
     }
-    &&& row_pair(external, wiring, layout, source.data, flat.data@)
-    &&& wire_pair(external, wiring, layout, source.enable, flat.enable)
+    &&& source_vm_row_pair(external, wiring, layout, source.data, flat.data@)
+    &&& source_vm_terminal_pair(external, wiring, layout, source.enable, flat.enable)
 }
 
 /// 全ソース素子を一度ずつ配置し、端子と公開出力が対応する配線を読むことを表す。
@@ -82,15 +86,76 @@ pub closed spec fn source_vm_layout_matches(
     &&& forall|i: int| 0 <= i < netlist.gates@.len() ==> {
         let flat = #[trigger] netlist.gates@[i];
         let original = source.gates[layout.gates[i]];
-        &&& wire_pair(source.input_count, wiring, layout, original.left, flat.left)
-        &&& wire_pair(source.input_count, wiring, layout, original.right, flat.right)
+        &&& source_vm_terminal_pair(source.input_count, wiring, layout, original.left, flat.left)
+        &&& source_vm_terminal_pair(source.input_count, wiring, layout, original.right, flat.right)
     }
     &&& forall|i: int| 0 <= i < wiring.len() ==> {
         let flat = #[trigger] wiring[i];
         let original = source.storage[layout.devices[i]];
-        storage_pair(source.input_count, wiring, layout, original, flat)
+        source_vm_storage_pair(source.input_count, wiring, layout, original, flat)
     }
-    &&& row_pair(source.input_count, wiring, layout, source.outputs, netlist.outputs@)
+    &&& source_vm_row_pair(source.input_count, wiring, layout, source.outputs, netlist.outputs@)
+}
+
+/// 素子 ID を VM の配列順に並べた列から、位置の逆引きを定める。
+pub(crate) open spec fn source_vm_layout_for_orders(
+    gates: Seq<SourceGateId>, devices: Seq<SourceDeviceId>,
+) -> SourceVmLayout {
+    SourceVmLayout {
+        gates,
+        gate_index: Map::new(gates.to_set(), |id: SourceGateId| gates.index_of(id)),
+        devices,
+        device_index: Map::new(devices.to_set(), |id: SourceDeviceId| devices.index_of(id)),
+    }
+}
+
+proof fn index_by_order<K>(order: Seq<K>)
+    requires order.no_duplicates(),
+    ensures indexed(order, Map::new(order.to_set(), |id: K| order.index_of(id)), order.to_set()),
+{
+    order.to_set_ensures();
+    let index = Map::new(order.to_set(), |id: K| order.index_of(id));
+    assert forall|id: K| order.to_set().contains(id) implies 0 <= #[trigger] index[id] < order.len()
+        && order[index[id]] == id by {
+        assert(order.contains(id));
+    };
+    assert forall|i: int| 0 <= i < order.len() implies order.to_set().contains(#[trigger] order[i])
+        && index[order[i]] == i by {
+        let id = order[i];
+        assert(order.to_set().contains(id));
+        assert(order[index[id]] == id);
+    };
+}
+
+/// ソースの端子と VM 配線の照合から、実行全体で使う対応関係を組み立てる。
+///
+/// ソース回路と素子の順序は呼び出し側が与える。ゲート、状態素子、公開出力の全端子を照合する。
+pub(crate) proof fn source_vm_layout_from_pairs(
+    source: &SourceVmCircuit, netlist: &NorNetlist, wiring: Seq<ClockedStorageInputs>,
+    gates: Seq<SourceGateId>, devices: Seq<SourceDeviceId>,
+)
+    requires
+        source_vm_wiring_valid(source),
+        gates.no_duplicates() && devices.no_duplicates(),
+        source.gates.dom() == gates.to_set() && source.storage.dom() == devices.to_set(),
+        gates.len() == netlist.gates@.len() && devices.len() == wiring.len(),
+        source.input_count + clocked_storage_output_width(wiring) == netlist.input_count,
+        forall|i: int| 0 <= i < gates.len() ==> {
+            let layout = source_vm_layout_for_orders(gates, devices);
+            let original = source.gates[gates[i]];
+            let lowered = #[trigger] netlist.gates@[i];
+            &&& source_vm_terminal_pair(source.input_count, wiring, &layout, original.left, lowered.left)
+            &&& source_vm_terminal_pair(source.input_count, wiring, &layout, original.right, lowered.right)
+        },
+        forall|i: int| 0 <= i < devices.len() ==>
+            source_vm_storage_pair(source.input_count, wiring, &source_vm_layout_for_orders(gates, devices),
+                source.storage[devices[i]], #[trigger] wiring[i]),
+        source_vm_row_pair(source.input_count, wiring, &source_vm_layout_for_orders(gates, devices),
+            source.outputs, netlist.outputs@),
+    ensures source_vm_layout_matches(source, netlist, wiring, &source_vm_layout_for_orders(gates, devices)),
+{
+    index_by_order(gates);
+    index_by_order(devices);
 }
 
 /// VM の状態を、添字に対応するソース ID から引ける形にする。
@@ -121,7 +186,7 @@ proof fn source_state_has_shape(
         let index = layout.device_index[id];
         let flat = vm.storage_model()[index].wiring_model();
         assert(flat == wiring[index]);
-        assert(storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
+        assert(source_vm_storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
         vm.storage_shape_evidence(index);
         assert(super::storage_memory_width(source.storage[id]) == clocked_storage_memory_width(&flat));
     };
@@ -166,7 +231,7 @@ pub closed spec fn source_vm_wire_matches(
     source: &SourceVmCircuit, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
     original: SourceVmWire, lowered: Wire,
 ) -> bool {
-    wire_pair(source.input_count, wiring, layout, original, lowered)
+    source_vm_terminal_pair(source.input_count, wiring, layout, original, lowered)
 }
 
 /// ソースの配線からビットを読む。
@@ -237,7 +302,7 @@ pub proof fn source_vm_project_reset(
         vm.initial_storage_values(index);
         let flat = vm.storage_model()[index].wiring_model();
         assert(flat == wiring[index]);
-        assert(storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
+        assert(source_vm_storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
         assert(super::storage_memory_width(source.storage[id])
             == match frame.state.storage[id].memory { Some(bits) => Some(bits.len()), None => None });
     };
@@ -251,7 +316,7 @@ proof fn mapped_row_values(
     requires source_vm_layout_matches(source, &vm.netlist_model(), wiring, layout),
         vm.layout_matches(vm.netlist_model(), source.input_count, wiring),
         vm.augmented_input_matches(input, augmented),
-        row_pair(source.input_count, wiring, layout, original, flat),
+        source_vm_row_pair(source.input_count, wiring, layout, original, flat),
     ensures
         original.map_values(|pin: SourceVmWire| super::wire_value(pin, input, source_vm_state_projection(vm, layout)))
             == Seq::new(flat.len(), |i: int| wire_value(flat[i], augmented, vm.gate_values_model())),
@@ -274,7 +339,7 @@ proof fn mapped_storage_pins(
     requires source_vm_layout_matches(source, &vm.netlist_model(), wiring, layout),
         vm.layout_matches(vm.netlist_model(), source.input_count, wiring),
         vm.augmented_input_matches(input, augmented),
-        storage_pair(source.input_count, wiring, layout, original, *flat),
+        source_vm_storage_pair(source.input_count, wiring, layout, original, *flat),
     ensures super::read_pins(original, input, source_vm_state_projection(vm, layout))
         == clocked_storage_pin_values(flat, augmented, vm.gate_values_model()),
 {
@@ -338,7 +403,7 @@ pub proof fn source_vm_project_step(
         let flat = old.wiring_model();
         assert(layout.devices[i] == id && 0 <= i < wiring.len());
         assert(flat == wiring[i]);
-        assert(storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
+        assert(source_vm_storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
         mapped_storage_pins(source, previous, wiring, layout, input, old_inputs, source.storage[id], &flat);
         new.tick_values(&old, old_inputs, previous.gate_values_model());
     };

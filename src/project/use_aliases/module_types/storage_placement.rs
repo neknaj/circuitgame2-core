@@ -217,6 +217,17 @@ proof fn storage_neighbor(instances: Seq<ClockedStoragePlacement>, external: usi
     reveal(ranges_follow);
 }
 
+proof fn storage_index_within_call_order(instances: Seq<ClockedStoragePlacement>, external: usize, i: int)
+    requires ranges_follow(instances, external), 0 <= i < instances.len(),
+    ensures i <= instances[i].call_index,
+    decreases i,
+{
+    if i > 0 {
+        storage_index_within_call_order(instances, external, i - 1);
+        storage_neighbor(instances, external, i - 1);
+    }
+}
+
 proof fn placed_output_width(instances: Seq<ClockedStoragePlacement>, external: usize,
     wiring: Seq<ClockedStorageInputs>, count: nat)
     requires
@@ -430,6 +441,55 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::placed_prefix);
         placed_output_width(plan.instances@, external, wiring, wiring.len());
         assert(wiring.take(wiring.len() as int) =~= wiring);
+    }
+
+    /// 配置の添字から呼び出しへ戻ると、同じ状態素子の添字が得られる。
+    pub(super) proof fn storage_layout_call_for_instance(
+        &self, checked: &ModuleCalls, limit: u64, external: usize, capacity: usize,
+        plan: &ClockedStorageLayout, index: int,
+    ) -> (call: int)
+        requires
+            self.storage_on_checked(checked, limit, external, capacity, Ok(*plan)),
+            0 <= index < plan.instances@.len(),
+        ensures
+            0 <= index <= call < checked.calls@.len(),
+            call == plan.instances@[index].call_index,
+            plan.by_call@[call] == Some(index as usize),
+    {
+        reveal(UseAliases::storage_on_checked);
+        reveal(UseAliases::placed_prefix);
+        let instances = plan.instances@;
+        storage_index_within_call_order(instances, external, index);
+        instances[index].call_index as int
+    }
+
+    /// 状態素子の区間が、外部入力と先行する素子の登録出力の直後から始まることを示す。
+    pub(super) proof fn placed_storage_range_evidence(
+        &self, checked: &ModuleCalls, limit: u64, external: usize, capacity: usize,
+        plan: &ClockedStorageLayout, wiring: Seq<ClockedStorageInputs>, index: int,
+    )
+        requires
+            self.storage_on_checked(checked, limit, external, capacity, Ok(*plan)),
+            wiring.len() == plan.instances@.len(),
+            0 <= index < wiring.len(),
+            forall|i: int| 0 <= i < wiring.len() ==>
+                (#[trigger] plan.instances@[i]).outputs.start + (#[trigger] wiring[i]).data@.len()
+                    == plan.instances@[i].outputs.end,
+        ensures
+            plan.instances@[index].outputs.start == external + clocked_storage_output_width(wiring.take(index)),
+            plan.instances@[index].outputs.start < plan.instances@[index].outputs.end,
+    {
+        reveal(UseAliases::storage_on_checked);
+        reveal(UseAliases::placed_prefix);
+        reveal(ranges_follow);
+        let instances = plan.instances@;
+        placed_output_width(instances, external, wiring, index as nat);
+        if index == 0 {
+            assert(instances[index].outputs.start == external);
+        } else {
+            storage_neighbor(instances, external, index - 1);
+            assert(instances[index].outputs.start == instances[index - 1].outputs.end);
+        }
     }
 
     /// 呼び出し番号から、同じ状態素子に割り当てた増補入力の範囲を取り出す。

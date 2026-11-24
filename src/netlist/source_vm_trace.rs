@@ -6,6 +6,10 @@ use vstd::arithmetic::power2::{lemma_pow2_unfold, pow2};
 use vstd::prelude::*;
 
 mod layout;
+pub(crate) use layout::{
+    source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_row_pair, source_vm_storage_pair,
+    source_vm_terminal_pair,
+};
 pub use layout::{
     SourceVmLayout, source_vm_layout_matches, source_vm_mapped_wire_value, source_vm_outputs_match,
     source_vm_project_observation, source_vm_project_reset, source_vm_project_step, source_vm_project_trace,
