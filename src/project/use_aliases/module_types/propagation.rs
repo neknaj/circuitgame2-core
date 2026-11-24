@@ -379,6 +379,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_root_types_evidence(owner, limit, checked.sources.roots);
     }
 
+    /// 初期の型伝播で、裸名の定義が駆動元から型と根拠位置を引き継ぐことを示す。
+    pub(super) proof fn initial_module_alias_binding(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleAliasTypes, slot: usize,
+    )
+        requires self.module_alias_types_result(owner, limit, Ok(Some(checked))),
+            slot < checked.sources.aliases@.len(),
+        ensures checked.sources.aliases@[slot as int] matches Some(alias) ==>
+            checked.types@[slot as int] == super::selections::bound_type(&checked, checked.types@, alias.driver),
+    {
+        let sources = checked.sources;
+        let inputs = sources.roots.wiring.drivers.signature.inputs@;
+        let i = slot as int;
+        assert(checked.types@[i] == inherited_type(inputs, sources.roots.types@, sources.aliases@, checked.types@, i));
+    }
+
     /// 別名が引き継いだ構造体型も、入力または右辺が参照する元の宣言を指す。
     pub(super) proof fn module_alias_type_declarations(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleAliasTypes)
         requires self.module_alias_types_result(owner, limit, Ok(Some(checked))),

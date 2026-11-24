@@ -430,6 +430,54 @@ pub(super) closed spec fn clocked_resolution_result(drivers: Seq<ClockedWireDriv
     }
 }
 
+pub(super) enum TerminalResolution {
+    Wires(Vec<Wire>),
+    FirstInvalid(usize),
+    Allocation,
+    HasAlias,
+}
+
+/// 直結を含まない場合は依存グラフを作らず、同じ配線を順に取り出す。
+pub(super) fn resolve_terminal_wires(drivers: &[ClockedWireDriver], inputs: usize, gates: usize)
+    -> (result: TerminalResolution)
+    ensures match result {
+        TerminalResolution::Wires(wires) => wires@.len() == drivers@.len()
+            && clocked_resolution_result(drivers@, inputs, gates, Ok(wires)),
+        TerminalResolution::FirstInvalid(i) => i < drivers@.len()
+            && clocked_resolution_result(drivers@, inputs, gates, Err(ClockedPlanError::Wire(i))),
+        TerminalResolution::HasAlias => exists|i: int| 0 <= i < drivers@.len()
+            && (#[trigger] drivers@[i]) is Alias,
+        TerminalResolution::Allocation => true,
+    },
+{
+    let mut wires = Vec::new();
+    if wires.try_reserve_exact(drivers.len()).is_err() { return TerminalResolution::Allocation; }
+    let mut i = 0usize;
+    while i < drivers.len()
+        invariant
+            i == wires@.len() <= drivers@.len(),
+            forall|j: int| 0 <= j < i ==> (#[trigger] drivers@[j]) == ClockedWireDriver::Terminal(wires@[j as int]),
+            valid_drivers_prefix(drivers@, inputs, gates, i as int),
+        decreases drivers@.len() - i,
+    {
+        let ClockedWireDriver::Terminal(wire) = drivers[i] else { return TerminalResolution::HasAlias; };
+        if !wire_within(wire, inputs, gates) { return TerminalResolution::FirstInvalid(i); }
+        let ghost before = wires@;
+        wires.push(wire);
+        assert forall|j: int| 0 <= j <= i implies
+            (#[trigger] drivers@[j]) == ClockedWireDriver::Terminal(wires@[j as int]) by {
+            if j < i { assert(wires@[j] == before[j]); }
+        };
+        i += 1;
+    }
+    proof {
+        let rank = Seq::new(drivers@.len(), |j: int| 0nat);
+        assert(wire_rank(drivers@, rank));
+        assert(clocked_wires_match(drivers@, wires@));
+    }
+    TerminalResolution::Wires(wires)
+}
+
 pub(super) fn clocked_resolve(drivers: &[ClockedWireDriver], inputs: usize, gates: usize)
     -> (result: Result<Vec<Wire>, ClockedPlanError>)
     ensures

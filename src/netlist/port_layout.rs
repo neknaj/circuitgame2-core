@@ -103,9 +103,13 @@ pub(crate) proof fn preceding_port_bits_grow(widths: Seq<u64>, first: nat, last:
 impl PortBitLayout {
     #[verifier::type_invariant]
     spec fn valid_port_ranges(&self) -> bool {
-        forall|i: int| 0 <= i < self.ranges@.len() ==> {
+        &&& (self.ranges@.len() == 0 <==> self.total_bits == 0)
+        &&& self.ranges@.len() > 0 ==> self.ranges@[0].start == 0
+            && self.ranges@[self.ranges@.len() - 1].end == self.total_bits
+        &&& forall|i: int| 0 <= i < self.ranges@.len() ==> {
             let range = #[trigger] self.ranges@[i];
-            range.start < range.end <= self.total_bits
+            &&& range.start < range.end <= self.total_bits
+            &&& i > 0 ==> self.ranges@[i - 1].end == range.start
         }
     }
 
@@ -169,6 +173,16 @@ impl PortBitLayout {
             total = next;
             port += 1;
         }
+        if port > 0 {
+            assert(ranges@[0].start == 0);
+            assert(ranges@[port - 1].end == total);
+            assert(total > 0);
+        }
+        assert forall|i: int| 0 < i < ranges@.len() implies
+            (#[trigger] ranges@[i]).start == ranges@[i - 1].end by {
+            assert(ranges@[i].start == preceding_port_bits(widths@, i as nat));
+            assert(ranges@[i - 1].end == preceding_port_bits(widths@, i as nat));
+        };
         Ok(Self { ranges, total_bits: total })
     }
 
@@ -218,6 +232,43 @@ impl PortBitLayout {
         } else {
             Some(range.start + bit)
         }
+    }
+
+    /// 平坦なビット添字を、そのビットを含むポートの添字に戻す。
+    ///
+    /// 添字が総ビット数以上なら `None` を返す。
+    pub fn port_at_bit(&self, bit: usize) -> (port: Option<usize>)
+        ensures
+            port.is_none() <==> bit >= self.total_bits_model(),
+            port matches Some(i) ==> i < self.ranges_model().len()
+                && self.ranges_model()[i as int].start <= bit < self.ranges_model()[i as int].end,
+    {
+        if bit >= self.total_bits { return None; }
+        proof { use_type_invariant(self); }
+        let mut first = 0usize;
+        let mut end = self.ranges.len();
+        while first < end
+            invariant
+                0 <= first < end <= self.ranges@.len(),
+                self.valid_port_ranges(),
+                self.ranges@[first as int].start <= bit < self.ranges@[end - 1].end,
+            decreases end - first,
+        {
+            let middle = first + (end - first) / 2;
+            let range = &self.ranges[middle];
+            if bit < range.start {
+                assert(first < middle);
+                assert(self.ranges@[middle - 1].end == range.start);
+                end = middle;
+            } else if bit >= range.end {
+                assert(middle + 1 < end);
+                assert(self.ranges@[(middle + 1) as int].start == range.end);
+                first = middle + 1;
+            } else {
+                return Some(middle);
+            }
+        }
+        unreachable!()
     }
 
     /// 宣言順に並ぶ半開ビット範囲を表す。

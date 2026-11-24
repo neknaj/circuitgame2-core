@@ -622,6 +622,72 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_alias_types_evidence(owner, limit, checked.typed);
     }
 
+    proof fn alias_binding_along_inference(
+        &self, owner: ModuleBodyPosition, limit: u64, typed: &ModuleAliasTypes,
+        trail: Seq<(usize, Vec<Option<SignalType>>)>, result: Vec<Option<SignalType>>, step: int, slot: usize,
+    )
+        requires
+            self.module_alias_types_result(owner, limit, Ok(Some(*typed))),
+            self.derivation(typed, limit, trail, result),
+            0 <= step < trail.len(),
+            slot < typed.sources.aliases@.len(),
+        ensures
+            trail[step].1@.len() == typed.sources.aliases@.len(),
+            typed.sources.aliases@[slot as int] matches Some(alias) ==>
+                (trail[step].1@[slot as int].is_some() ==> trail[step].1@[slot as int]
+                    == bound_type(typed, trail[step].1@, alias.driver)),
+        decreases step,
+    {
+        reveal(UseAliases::derivation);
+        if step == 0 {
+            self.module_alias_types_evidence(owner, limit, *typed);
+            self.module_type_sources_bounds(owner, limit, typed.sources);
+            self.initial_module_alias_binding(owner, limit, *typed, slot);
+        } else {
+            self.alias_binding_along_inference(owner, limit, typed, trail, result, step - 1, slot);
+            let before = trail[step - 1].1;
+            let (updated, after) = trail[step];
+            assert(self.inference_step(typed, limit, before, after, updated));
+            if let Some(alias) = typed.sources.aliases@[slot as int] {
+                if after@[slot as int].is_some() {
+                    if updated == slot {
+                        assert(after@[slot as int] == bound_type(typed, before@, alias.driver));
+                    } else {
+                        assert(after@[slot as int] == before@[slot as int]);
+                        assert(before@[slot as int] == bound_type(typed, before@, alias.driver));
+                    }
+                    match alias.driver {
+                        OutputDriver::Input(_) => {},
+                        OutputDriver::Definition(driver) => {
+                            self.module_alias_types_evidence(owner, limit, *typed);
+                            self.module_type_sources_bounds(owner, limit, typed.sources);
+                            assert(before@[driver as int] == after@[slot as int]);
+                            assert(before@[driver as int].is_some());
+                            assert(updated != driver);
+                            assert(after@[driver as int] == before@[driver as int]);
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    /// 連接から型を推論した後も、型が確定した裸名の定義は駆動元と型が一致する。
+    pub(super) proof fn module_concat_alias_binding(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleConcats, slot: usize,
+    )
+        requires self.module_concats_result(owner, limit, Ok(Some(checked))),
+            slot < checked.typed.sources.aliases@.len(),
+        ensures checked.typed.sources.aliases@[slot as int] matches Some(alias) ==>
+            (checked.types@[slot as int].is_some() ==> checked.types@[slot as int]
+                == bound_type(&checked.typed, checked.types@, alias.driver)),
+    {
+        let trail = choose|trail: Seq<(usize, Vec<Option<SignalType>>)>|
+            #[trigger] self.derivation(&checked.typed, limit, trail, checked.types);
+        reveal(UseAliases::derivation);
+        self.alias_binding_along_inference(owner, limit, &checked.typed, trail, checked.types, trail.len() - 1, slot);
+    }
+
     proof fn concat_inference_keeps_declarations(
         &self, typed: &ModuleAliasTypes, limit: u64, before: Vec<Option<SignalType>>,
         after: Vec<Option<SignalType>>, index: usize,

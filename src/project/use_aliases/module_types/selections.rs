@@ -242,6 +242,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) proof fn module_selections_evidence(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections)
         requires self.module_selections_result(owner, limit, Ok(Some(checked))),
         ensures
+            self.module_alias_types_result(owner, limit, Ok(Some(checked.typed))),
             self.module_wiring_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring))),
             self.module_drivers_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring.drivers))),
             checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
@@ -251,6 +252,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_concats_evidence(owner, limit, inferred);
         self.module_alias_types_evidence(owner, limit, checked.typed);
         self.module_wiring_keeps_drivers(owner, limit, checked.typed.sources.roots.wiring);
+    }
+
+    /// 選択検査が保持する型表から、裸名の定義と駆動元の型の一致を取り出す。
+    pub(super) proof fn module_selection_alias_binding(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections, slot: usize,
+    )
+        requires self.module_selections_result(owner, limit, Ok(Some(checked))),
+            slot < checked.typed.sources.aliases@.len(),
+        ensures checked.typed.sources.aliases@[slot as int] matches Some(alias) ==>
+            (checked.types@[slot as int].is_some() ==> checked.types@[slot as int]
+                == bound_type(&checked.typed, checked.types@, alias.driver)),
+    {
+        self.module_concat_alias_binding(owner, limit,
+            ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats }, slot);
     }
 
     /// ビット選択後の型表にある構造体型が、このプロジェクトの宣言を参照することを示す。

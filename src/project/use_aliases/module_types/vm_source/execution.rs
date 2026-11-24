@@ -288,6 +288,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures result matches Ok(compiled) ==> compiled.vm.valid() && compiled.vm.initial()
             && compiled.vm.external_count() == compiled.inputs.total_bits_model()
             && self.vm_wiring_on_checked(limits, checked, &plan, &compiled),
+            !(result matches Err(ClockedModuleVmError::Endpoints(_))),
     {
         let mut gates = Vec::new();
         let mut storage: Vec<ClockedStorageInputs> = Vec::new();
@@ -409,18 +410,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     /// 直接の基底 NOR、ラッチ、RAM の呼び出しから tick 実行用の VM を初期化する。
     ///
+    /// 定義の右辺には信号名の直結も書ける。直結は tick を進めず、後続の定義も参照できる。
     /// 実引数には裸の信号名、ビットリテラル、信号名からのビット選択を使える。
     /// 指定位置がモジュール本体を指さない場合は `Ok(None)` を返す。
     ///
     /// # Errors
     ///
-    /// 型、定義と出力の配置、直接呼び出しの入力、ネットリスト、状態メモリの順に検査する。
+    /// 型、定義と出力の配置、直結の解決、直接呼び出しの入力、ネットリスト、状態メモリの順に検査する。
     pub fn lower_clocked_vm(&self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits)
         -> (result: Result<Option<ClockedModuleVm>, ClockedModuleVmError<'p, 'a>>)
         requires self.can_resolve(),
-        ensures result matches Ok(Some(compiled)) ==> compiled.vm.valid() && compiled.vm.initial()
-            && compiled.vm.external_count() == compiled.inputs.total_bits_model()
-            && self.clocked_module_vm_wiring(owner, limits, &compiled),
+        ensures
+            result matches Ok(Some(compiled)) ==> compiled.vm.valid() && compiled.vm.initial()
+                && compiled.vm.external_count() == compiled.inputs.total_bits_model()
+                && self.clocked_module_vm_wiring(owner, limits, &compiled),
+            result matches Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::Calls(error))) ==>
+                self.module_calls_result(owner, limits.width, Err(error)),
     {
         let checked = match self.check_module_calls(owner, limits.width) {
             Ok(Some(checked)) => checked,

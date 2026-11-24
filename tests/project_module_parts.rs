@@ -425,6 +425,21 @@ fn reports_every_reference_in_a_bare_wire_cycle_across_files() {
     )).collect();
     sites.sort_unstable();
     assert_eq!(sites, [(0, 4, "y"), (1, 9, "x")]);
+
+    use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits,
+        ModuleCallsError, ModuleOutputTypesError};
+    let limits = ClockedModuleVmLimits { width: 16, wiring_bits: 2, gates: 0, state_bits: 0 };
+    let Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::Calls(ModuleCallsError::Module(
+        ModuleOutputTypesError::Expressions(ModuleSelectionsError::Types(ModuleAliasTypesError::Cycle(compiled_steps))),
+    )))) = aliases.lower_clocked_vm(owner, limits) else {
+        panic!("the checked circuit must report the source alias cycle");
+    };
+    assert_eq!(compiled_steps.len(), steps.len());
+    for (actual, expected) in compiled_steps.iter().zip(&steps) {
+        assert_eq!(actual.definition, expected.definition);
+        assert_eq!(actual.reference.source.revision, expected.reference.source.revision);
+        assert_eq!(actual.reference.span, expected.reference.span);
+    }
 }
 
 #[test]
@@ -644,6 +659,31 @@ fn lowers_nor_and_latch_to_one_tick_machine() {
     assert_eq!(compiled.vm.reset(), [false, false]);
     assert_eq!(compiled.vm.step(&[false, false, false, true, true]).unwrap(), [true, true]);
     assert_eq!(compiled.vm.step(&[false, false, false, false, false]).unwrap(), [true, false]);
+}
+
+#[test]
+fn lowers_forward_aliases_across_parts_without_consuming_calls() {
+    use circuitgame2_core::project::ClockedModuleVmLimits;
+
+    let input = [
+        SourceSnapshot { path: "root.ncg2", revision: 3, text:
+            "(using nor) (latch hold (width 2))
+             (module root (in (data (bits 2)) enable) (out (q-copy (bits 2)) n)
+               (def q-copy q) (def d data))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9, text:
+            "(module-part root
+               (def q (hold d enable))
+               (def n (nor (bit q-copy 1) 0)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let limits = ClockedModuleVmLimits { width: 2, wiring_bits: 8, gates: 1, state_bits: 2 };
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.reset(), [false, false, false]);
+    assert_eq!(compiled.vm.step(&[false, true, true]).unwrap(), [false, true, true]);
+    assert_eq!(compiled.vm.step(&[true, false, false]).unwrap(), [false, true, false]);
 }
 
 #[test]
