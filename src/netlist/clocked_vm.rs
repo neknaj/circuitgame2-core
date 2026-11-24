@@ -615,6 +615,14 @@ impl ClockedVm {
         assert(initialized(self.storage@[index]));
     }
 
+    /// 実行中も、状態素子の登録出力幅と記憶容量は配線に対応する。
+    pub proof fn storage_shape_evidence(&self, index: int)
+        requires self.valid(), 0 <= index < self.storage_model().len(),
+        ensures self.storage_model()[index].memory_shape(),
+            self.storage_model()[index].output_model().len() == self.storage_model()[index].wiring_model().data@.len(),
+    {
+    }
+
     /// すべての更新が同じ旧状態を読み、観測が更新後の状態を読むことを表す。
     pub closed spec fn tick_matches(&self, previous: &Self, input: Seq<bool>, output: Seq<bool>) -> bool {
         let netlist = self.circuit.netlist_model();

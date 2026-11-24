@@ -5,6 +5,13 @@ use crate::project::DefinitionPosition;
 use vstd::arithmetic::power2::{lemma_pow2_unfold, pow2};
 use vstd::prelude::*;
 
+mod layout;
+pub use layout::{
+    SourceVmLayout, source_vm_layout_matches, source_vm_mapped_wire_value, source_vm_outputs_match,
+    source_vm_project_observation, source_vm_project_reset, source_vm_read_wire, source_vm_state_projection,
+    source_vm_wire_matches,
+};
+
 verus! {
 
 /// 状態素子を呼んだ位置と、ルートからそこへ至る呼び出し位置の列。
