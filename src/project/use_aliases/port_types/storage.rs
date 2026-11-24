@@ -64,7 +64,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         && match (declared_data, data) {
                             (DeclaredPortType::Bits(width), ResolvedPortType::Bits(actual)) => actual == width,
                             (DeclaredPortType::Named { form: atom }, ResolvedPortType::Struct { source, form }) =>
-                                form.head is Struct && exists|context: PortContext|
+                                self.declared_port_type(data) && exists|context: PortContext|
                                     #[trigger] self.port_context_evidence(file, entry, &context)
                                         && #[trigger] self.port_binding_evidence(&context, atom, Ok(DefinitionBinding::Declaration { source, form })),
                             _ => false,
@@ -110,9 +110,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     )
         requires self.storage_signature_result(file, entry, limit, Ok(Some(signature))),
         ensures match signature {
-            StorageSignature::Latch { annotation, .. } => location_in_source(annotation),
-            StorageSignature::Memory { address_annotation, data_annotation, .. } =>
-                location_in_source(address_annotation) && location_in_source(data_annotation),
+            StorageSignature::Latch { annotation, width } => location_in_source(annotation) && 0 < width <= limit,
+            StorageSignature::Memory { address, address_annotation, data, data_annotation } =>
+                location_in_source(address_annotation) && location_in_source(data_annotation)
+                    && 0 < address <= limit && self.declared_port_type(data)
+                    && (data matches ResolvedPortType::Bits(width) ==> 0 < width <= limit),
         },
     {
         let project = &self.targets.project_model();

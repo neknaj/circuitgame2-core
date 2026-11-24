@@ -276,7 +276,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && reference_kind(context.forms@[at as int]->Atom_kind),
             form_spans_valid(context.source.text, context.forms@, context.source.text.spec_bytes().len() as int),
         ensures match result {
-            Ok((ResolvedPortType::Struct { source, form }, reference)) => form.head is Struct
+            Ok((ResolvedPortType::Struct { source, form }, reference)) => self.declared_port_type(ResolvedPortType::Struct { source, form })
                 && self.type_reference_location(context, at, reference)
                 && self.port_binding_evidence(context, at,
                     Ok(DefinitionBinding::Declaration { source, form })),
@@ -294,6 +294,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(binding) => {
                 proof { self.struct_binding_is_struct(context.file, request, context.namespace, atom_kind, binding); }
                 let DefinitionBinding::Declaration { source: origin, form: declaration } = binding else { unreachable!() };
+                proof {
+                    self.binding_declaration_origin(context.file, request, context.namespace, atom_kind, origin, declaration);
+                }
                 Ok((ResolvedPortType::Struct { source: origin, form: declaration }, reference))
             },
             Err(reason) => Err((reference, reason)),

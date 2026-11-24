@@ -554,3 +554,47 @@ fn checks_storage_calls_with_types_from_their_declaration_scope() {
     let output = latch.inputs.ports.signature.target.port(PortDirection::Output, 0).unwrap();
     assert!(matches!(output.ty, ResolvedPortType::Bits(2)));
 }
+
+
+#[test]
+fn places_struct_ram_outputs_in_call_order_across_module_parts() {
+    use circuitgame2_core::netlist::{ClockedNor, ClockedVm, NorNetlist, Wire};
+    use circuitgame2_core::project::{ClockedStorageLayoutError, ModuleBodyPosition};
+
+    let input = [
+        SourceSnapshot { path: "main.ncg2", revision: 5,
+            text: "(using nor)
+                (struct Word (width 8))
+                (memory bank (address 2) (data Word))
+                (module root (in (a (bits 2)) (d Word) we) (out (first Word) (second Word))
+                  (def first (bank a d we)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 7, text: "(module-part root (def second (bank a d we)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let entry = project.circuits()[0].syntax.entries.iter().position(|entry| entry.head == Head::Module).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry };
+    let plan = aliases.plan_clocked_storage(owner, 16, 11, 27).unwrap().unwrap();
+    let [first, second] = plan.instances.as_slice() else { panic!("expected two calls"); };
+    assert_eq!((first.call.source.revision, second.call.source.revision), (5, 7));
+    assert_eq!((first.outputs.clone(), second.outputs.clone()), (11..19, 19..27));
+    let Err(ClockedStorageLayoutError::Capacity { call, annotation, used: 19, width: 8 }) =
+        aliases.plan_clocked_storage(owner, 16, 11, 26) else { panic!("the second call exceeds the limit"); };
+    assert_eq!((call.source.revision, annotation.source.revision), (7, 5));
+    assert_eq!(&annotation.source.text[annotation.span], "Word");
+
+    let wires: Vec<_> = (0..plan.external_inputs).map(Wire::Input).collect();
+    let storage = plan.instances.iter().map(|instance| instance.storage_inputs(&wires).unwrap()).collect();
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: plan.augmented_inputs, gates: vec![],
+        outputs: vec![first.output_wire(0).unwrap(), second.output_wire(0).unwrap()],
+    }).unwrap();
+    let mut vm = ClockedVm::new(circuit, plan.external_inputs, storage, 80).unwrap();
+    let mut frame = [false; 11];
+    frame[2] = true;
+    frame[10] = true;
+    assert_eq!(vm.step(&frame).unwrap(), [false, false]);
+    frame[10] = false;
+    assert_eq!(vm.step(&frame).unwrap(), [true, true]);
+}

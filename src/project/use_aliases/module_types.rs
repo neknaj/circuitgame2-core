@@ -4,6 +4,8 @@ mod aliases;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod clocked_plan;
 mod clocked_source;
+mod storage_placement;
+pub use storage_placement::{ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement};
 pub use clocked_source::ClockedModuleError;
 pub use clocked_plan::{ClockedLinkPlan, ClockedPlanError, ClockedWireDriver, plan_clocked_links};
 #[cfg(verus_only)]
