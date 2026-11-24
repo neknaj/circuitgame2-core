@@ -80,12 +80,149 @@ struct PrimitiveWiring {
     outputs: Seq<Wire>,
 }
 
+/// 呼び出し境界までに配置したゲート、直接素子、子回路内の状態素子の数。
+struct CallBoundary {
+    gates: nat,
+    direct: nat,
+    child: nat,
+}
+
+/// 所有する呼び出しを探す配列。子の状態素子番号は直接素子の直後を起点とする。
+enum PartitionArea {
+    Gate,
+    DirectStorage,
+    ChildStorage,
+}
+
+spec fn boundary_position(boundary: CallBoundary, area: PartitionArea) -> nat {
+    match area {
+        PartitionArea::Gate => boundary.gates,
+        PartitionArea::DirectStorage => boundary.direct,
+        PartitionArea::ChildStorage => boundary.child,
+    }
+}
+
+spec fn call_interval_matches(
+    first: CallBoundary, last: CallBoundary, routine: Option<RoutineWiring>, primitive: Option<PrimitiveWiring>,
+) -> bool {
+    match (routine, primitive) {
+        (Some(item), None) => {
+            &&& item.gates.start == first.gates && item.gates.end == last.gates
+            &&& first.gates <= last.gates
+            &&& item.storage.start == first.child && item.storage.end == last.child
+            &&& first.child <= last.child
+            &&& first.direct == last.direct
+        },
+        (None, Some(item)) => match item.placement {
+            PrimitivePlacement::Nor(gate) => gate == first.gates && last.gates == first.gates + 1
+                && last.direct == first.direct && last.child == first.child,
+            PrimitivePlacement::Storage(index) => index == first.direct && last.direct == first.direct + 1
+                && last.gates == first.gates && last.child == first.child,
+        },
+        _ => false,
+    }
+}
+
+/// 各配列を、先頭から末尾までソース上の呼び出し順に区切る。
+#[verifier::opaque]
+spec fn call_partition_matches(
+    boundaries: Seq<CallBoundary>, routines: Seq<Option<RoutineWiring>>,
+    primitives: Seq<Option<PrimitiveWiring>>, end: CallBoundary,
+) -> bool {
+    &&& boundaries.len() == routines.len() + 1
+    &&& routines.len() == primitives.len()
+    &&& boundaries[0] == (CallBoundary { gates: 0, direct: 0, child: 0 })
+    &&& boundaries.last() == end
+    &&& forall|i: int| 0 <= i < routines.len() ==>
+        call_interval_matches(boundaries[i], boundaries[i + 1], #[trigger] routines[i], primitives[i])
+}
+
+proof fn extend_call_partition(
+    boundaries: Seq<CallBoundary>, routines: Seq<Option<RoutineWiring>>,
+    primitives: Seq<Option<PrimitiveWiring>>, before: CallBoundary, after: CallBoundary,
+    routine: Option<RoutineWiring>, primitive: Option<PrimitiveWiring>,
+)
+    requires
+        call_partition_matches(boundaries, routines, primitives, before),
+        call_interval_matches(before, after, routine, primitive),
+    ensures call_partition_matches(boundaries.push(after), routines.push(routine), primitives.push(primitive), after),
+{
+    reveal(call_partition_matches);
+    let following = boundaries.push(after);
+    let new_routines = routines.push(routine);
+    let new_primitives = primitives.push(primitive);
+    assert forall|i: int| 0 <= i < new_routines.len() implies
+        call_interval_matches(following[i], following[i + 1], #[trigger] new_routines[i], new_primitives[i]) by {
+        if i < routines.len() {
+            assert(new_routines[i] == routines[i] && new_primitives[i] == primitives[i]);
+            assert(following[i] == boundaries[i] && following[i + 1] == boundaries[i + 1]);
+        } else {
+            assert(following[i] == before);
+        }
+    };
+}
+
+proof fn partition_boundary_order(
+    boundaries: Seq<CallBoundary>, routines: Seq<Option<RoutineWiring>>,
+    primitives: Seq<Option<PrimitiveWiring>>, area: PartitionArea, start: int, end: int,
+)
+    requires 0 <= start <= end < boundaries.len(),
+        call_partition_matches(boundaries, routines, primitives, boundaries.last()),
+    ensures boundary_position(boundaries[start], area) <= boundary_position(boundaries[end], area),
+    decreases end - start,
+{
+    reveal(call_partition_matches);
+    if start < end {
+        let previous = end - 1;
+        assert(previous < routines.len());
+        assert(call_interval_matches(boundaries[previous], boundaries[previous + 1], routines[previous], primitives[previous]));
+        assert(boundary_position(boundaries[previous], area) <= boundary_position(boundaries[end], area));
+        partition_boundary_order(boundaries, routines, primitives, area, start, previous);
+    }
+}
+
+/// 実配列の添字は、空でないただ一つの呼び出し区間に属する。
+proof fn partition_owner(
+    boundaries: Seq<CallBoundary>, routines: Seq<Option<RoutineWiring>>,
+    primitives: Seq<Option<PrimitiveWiring>>, area: PartitionArea, index: nat, end: int,
+) -> (call: int)
+    requires 0 <= end < boundaries.len(),
+        call_partition_matches(boundaries, routines, primitives, boundaries.last()),
+        index < boundary_position(boundaries[end], area),
+    ensures 0 <= call < end,
+        boundary_position(boundaries[call], area) <= index < boundary_position(boundaries[call + 1], area),
+        forall|i: int| 0 <= i < routines.len() && i != call ==>
+            #[trigger] boundary_position(boundaries[i + 1], area) <= index
+                || index < #[trigger] boundary_position(boundaries[i], area),
+        call_interval_matches(boundaries[call], boundaries[call + 1], routines[call], primitives[call]),
+    decreases end,
+{
+    reveal(call_partition_matches);
+    assert(end > 0);
+    if index < boundary_position(boundaries[end - 1], area) {
+        partition_owner(boundaries, routines, primitives, area, index, end - 1)
+    } else {
+        let call = end - 1;
+        assert forall|i: int| 0 <= i < routines.len() && i != call implies
+            #[trigger] boundary_position(boundaries[i + 1], area) <= index
+                || index < #[trigger] boundary_position(boundaries[i], area) by {
+            if i < call {
+                partition_boundary_order(boundaries, routines, primitives, area, i + 1, call);
+            } else {
+                partition_boundary_order(boundaries, routines, primitives, area, call + 1, i);
+            }
+        };
+        call
+    }
+}
+
 /// 親の定義と公開ポートが参照する配線、および各呼び出しの移設済み出力。
 pub(super) struct HierarchyWiring {
     definitions: Seq<Wire>,
     origins: Seq<HierarchyRowOrigin>,
     routines: Seq<Option<RoutineWiring>>,
     primitives: Seq<Option<PrimitiveWiring>>,
+    boundaries: Seq<CallBoundary>,
     direct_devices: usize,
     first_child_input: usize,
 }
@@ -199,6 +336,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     network.storage@.take(wiring.direct_devices as int), network.storage_sites@.take(wiring.direct_devices as int))
                 && wiring.primitives.len() == checked.calls@.len()
                 && wiring.direct_devices <= network.storage@.len()
+                && call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, CallBoundary {
+                    gates: network.circuit.netlist_model().gates@.len(),
+                    direct: wiring.direct_devices as nat,
+                    child: (network.storage@.len() - wiring.direct_devices) as nat,
+                })
                 && routine_vm_input_offsets(wiring.routines, network.storage@, wiring.direct_devices,
                     network.inputs.total_bits_model())
                 && routines_placed(wiring.routines, network.circuit.netlist_model().gates@,
@@ -1283,11 +1425,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut child_sites = Vec::new();
         let ghost mut captured = Seq::<Option<RoutineWiring>>::empty();
         let ghost mut primitives = Seq::<Option<PrimitiveWiring>>::empty();
+        let ghost mut boundaries = seq![CallBoundary { gates: 0, direct: 0, child: 0 }];
         let first_state = direct.augmented_inputs;
         let mut next_state = first_state;
         proof {
             gate_cursor_zero(checked, calls@);
             empty_routines(first_state);
+            assert(call_partition_matches(boundaries, captured, primitives,
+                CallBoundary { gates: 0, direct: 0, child: 0 })) by { reveal(call_partition_matches); };
             assert(self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
                 gates@, storage@, direct.instances@)) by { reveal(UseAliases::hierarchy_primitives_bound); };
         }
@@ -1300,6 +1445,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 call <= calls@.len() == checked.calls@.len(),
                 call == captured.len(),
                 call == primitives.len(),
+                call_partition_matches(boundaries, captured, primitives,
+                    CallBoundary { gates: gates@.len(), direct: storage@.len(), child: child_storage@.len() }),
                 gates@.len() == gate_cursor(checked, calls@, call as nat),
                 forall|i: int| 0 <= i < call ==> primitive_follows_plan(
                     checked, calls@, &direct, i, #[trigger] primitives[i]),
@@ -1327,6 +1474,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let ghost prior_storage = child_storage@;
             let ghost prior_state = next_state;
             let ghost prior_direct = storage@;
+            let ghost first = CallBoundary { gates: prior_gates.len(), direct: prior_direct.len(), child: prior_storage.len() };
             let ghost mut primitive = None::<PrimitiveWiring>;
             proof { vstd::std_specs::vec::axiom_spec_len(&child_storage); }
             if let Some(placement) = &calls[call] {
@@ -1498,6 +1646,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     if i < call { assert(next[i] == primitives[i]); }
                     else { assert(next[i] == primitive); }
                 };
+                let last = CallBoundary { gates: gates@.len(), direct: storage@.len(), child: child_storage@.len() };
+                assert(captured == before.push(captured.last()));
+                assert(call_interval_matches(first, last, captured.last(), primitive));
+                extend_call_partition(boundaries, before, primitives, first, last, captured.last(), primitive);
+                boundaries = boundaries.push(last);
                 primitives = next;
             }
             assert forall|i: int| 0 <= i <= call implies #[trigger]
@@ -1550,7 +1703,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let ghost source_ports = ports;
         let ghost wiring = HierarchyWiring {
             definitions: definitions@, origins: _rows._origins@, routines: captured, primitives,
-            direct_devices, first_child_input: first_state,
+            boundaries, direct_devices, first_child_input: first_state,
         };
         proof {
             self.module_calls_type_evidence(owner, limits.width, checked);
