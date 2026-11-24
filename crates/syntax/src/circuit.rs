@@ -27,6 +27,7 @@ mod index;
 mod names;
 mod ports;
 mod selection_shapes;
+mod storage_sites;
 mod structure;
 mod structure_expressions;
 #[cfg(verus_only)]
@@ -36,6 +37,9 @@ mod test_values;
 #[cfg(verus_only)]
 pub use body::routine_expansion_evidence;
 use body::validate_routine_arguments;
+pub use storage_sites::{StorageSites, storage_sites};
+#[cfg(verus_only)]
+pub use storage_sites::{storage_site_evidence, storage_sites_match};
 pub use body::{DefinitionReferences, first_routine_expansion};
 pub use concat_arguments::concat_argument_range;
 #[cfg(verus_only)]

@@ -20,7 +20,7 @@ use crate::{complete_list_indices, nested_list_indices, AtomKind};
 
 verus! {
 
-/// 構造体のフィールドが指定する型の構文位置。
+/// 構造体のフィールドや RAM のデータ型を指定する構文位置。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FieldTypeSite {
     /// ビット列を指定する。

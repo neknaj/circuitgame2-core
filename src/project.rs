@@ -14,6 +14,7 @@ mod path;
 mod resolution;
 mod signatures;
 mod sources;
+mod storage_declarations;
 mod structure_declarations;
 mod use_aliases;
 mod use_targets;
@@ -96,6 +97,9 @@ pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
 };
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
+pub use storage_declarations::{StorageDeclaration, check_storage_declaration};
+#[cfg(verus_only)]
+pub use storage_declarations::storage_declaration_result;
 pub use structure_declarations::{
     DeclaredField, DeclaredFieldType, StructureDeclaration, StructureNumber, StructureNumberError, StructureNumberErrorKind,
     check_structure_declaration,
