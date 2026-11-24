@@ -4,7 +4,7 @@ use crate::netlist::{ClockedStorageInputs, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
 use crate::netlist::{ClockedVm, NorGate, clocked_gate_updates, clocked_instance_gate_updates_match,
     clocked_instance_inputs, clocked_instance_outputs_match, clocked_mapped_storage_reads_match,
-    clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_pin_values,
+    clocked_stateful_arguments, clocked_storage_memory_width, clocked_storage_output_width, clocked_storage_pin_values,
     clocked_storage_pins_valid, clocked_storage_value_transition, output_ports_available, output_values_match,
     clocked_storage_width_concat, clocked_storage_widths_agree, instance_gates_at, wire_value,
     instance_gates_in_extension, instance_outputs_match, clocked_wiring_valid, wire_available};
@@ -487,6 +487,94 @@ pub(super) proof fn routine_tick_observation(
             vm.storage_model()[parent].tick_values(&previous.storage_model()[parent], snapshots.0, old_gates);
         };
     (old_input, new_input, observed)
+}
+
+/// reset で子のゲートと状態素子が初期化され、その時点の親の配線から子の出力を読める。
+///
+/// ルートの外部入力はゼロになる。子の実引数は親の配線を読むため、定数に接続したビットはその値を取る。
+pub(super) proof fn routine_reset_observation(
+    vm: &ClockedVm, output: Seq<bool>, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
+) -> (result: (Seq<bool>, Seq<bool>))
+    requires
+        vm.layout_matches(vm.netlist_model(), vm.external_count(), wiring),
+        vm.reset_matches(output),
+        routines_placed(routines, vm.netlist_model().gates@, wiring.skip(direct as int), first_state,
+            vm.netlist_model().input_count),
+        routine_vm_input_offsets(routines, wiring, direct, vm.external_count()),
+        routines_pins_valid(routines, vm.netlist_model().input_count, vm.netlist_model().gates@.len()),
+        0 <= call < routines.len(),
+        routines[call].is_some(),
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            let parent_bits = Seq::new(vm.netlist_model().input_count as nat, |_: int| false);
+            let gates = vm.gate_values_model();
+            let local_gates = gates.subrange(routine.gates.start as int, routine.gates.end as int);
+            let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+                clocked_storage_output_width(routine.devices));
+            &&& local_gates == Seq::new(routine.callee.gates@.len(), |_: int| false)
+            &&& result.0.len() == routine.callee.input_count
+            &&& result.0 == clocked_instance_inputs(pins, parent_bits, gates)
+            &&& result.1.len() == routine.callee.outputs@.len()
+            &&& result.1 == clocked_instance_inputs(routine.outputs, parent_bits, gates)
+            &&& output_values_match(result.0, local_gates, routine.callee.outputs@, result.1)
+            &&& forall|device: int| #![trigger routine.devices[device]]
+                0 <= device < routine.devices.len() ==> {
+                    let parent = direct + routine.storage.start + device;
+                    let stored = vm.storage_model()[parent];
+                    let width = routine.devices[device].data@.len();
+                    let start = routine.external.len() as int + clocked_storage_output_width(routine.devices.take(device));
+                    &&& 0 <= parent < vm.storage_model().len()
+                    &&& start + width <= result.0.len()
+                    &&& result.0.subrange(start, start + width) == stored.output_model()
+                    &&& stored.output_model() == Seq::new(width, |_: int| false)
+                    &&& stored.memory_model() == match clocked_storage_memory_width(&routine.devices[device]) {
+                        Some(size) => Some(Seq::new(size, |_: int| false)),
+                        None => None,
+                    }
+                }
+        }),
+{
+    reveal(routines_placed);
+    reveal(routines_pins_valid);
+    let routine = routines[call]->Some_0;
+    let netlist = vm.netlist_model();
+    let source_input = Seq::new(vm.external_count() as nat, |_: int| false);
+    let bits = vm.reset_snapshot(output);
+    assert(bits =~= Seq::new(netlist.input_count as nat, |_: int| false));
+    let child = routine_augmented_snapshot(vm, source_input, bits, wiring, routines, direct, first_state, call);
+    let width = clocked_storage_output_width(routine.devices);
+    let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start, width);
+    let gates = vm.gate_values_model();
+    let local = gates.subrange(routine.gates.start as int, routine.gates.end as int);
+    vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
+    assert(local =~= Seq::new(routine.callee.gates@.len(), |_: int| false));
+    let observed = clocked_instance_inputs(routine.outputs, bits, gates);
+    assert(output_values_match(bits, gates, routine.outputs, observed));
+    clocked_instance_outputs_match(&routine.callee, pins, routine.outputs, routine.gates.start, bits, gates, observed);
+    let suffix = wiring.skip(direct as int);
+    assert forall|device: int| #![trigger routine.devices[device]]
+        0 <= device < routine.devices.len() implies {
+            let parent = direct + routine.storage.start + device;
+            let stored = vm.storage_model()[parent];
+            let width = routine.devices[device].data@.len();
+            &&& stored.output_model() == Seq::new(width, |_: int| false)
+            &&& stored.memory_model() == match clocked_storage_memory_width(&routine.devices[device]) {
+                Some(size) => Some(Seq::new(size, |_: int| false)),
+                None => None,
+            }
+        } by {
+        let relative = routine.storage.start + device;
+        let parent = direct + relative;
+        let mapped = vm.storage_model()[parent].wiring_model();
+        assert(mapped == wiring[parent]);
+        assert(wiring[parent] == suffix[relative]);
+        assert(routine.devices[device].parent_placement_matches(pins, routine.gates.start, &mapped));
+        assert(clocked_storage_memory_width(&routine.devices[device]) == clocked_storage_memory_width(&mapped));
+        vm.initial_storage_values(parent);
+    };
+    (child, observed)
 }
 
 } // verus!

@@ -18,7 +18,7 @@ pub use clocked::{clocked_mapped_storage_reads_match, clocked_stateful_arguments
     clocked_storage_pins_valid};
 pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInputs};
 #[cfg(verus_only)]
-pub use clocked_storage::{clocked_storage_pin_values, clocked_storage_result, clocked_storage_steps_agree,
+pub use clocked_storage::{clocked_storage_memory_width, clocked_storage_pin_values, clocked_storage_result, clocked_storage_steps_agree,
     clocked_storage_value_transition};
 pub use clocked_vm::{ClockedVm, ClockedVmError};
 #[cfg(verus_only)]

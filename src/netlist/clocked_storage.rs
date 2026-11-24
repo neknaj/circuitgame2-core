@@ -200,6 +200,14 @@ pub open spec fn clocked_storage_pin_values(
         wire_value(wiring.enable, input, gates))
 }
 
+/// RAM の記憶部のビット数。ラッチには登録出力とは別の記憶部がない。
+pub open spec fn clocked_storage_memory_width(wiring: &ClockedStorageInputs) -> Option<nat> {
+    match wiring.address {
+        Some(address) => Some(vstd::arithmetic::power2::pow2(address@.len()) * wiring.data@.len()),
+        None => None,
+    }
+}
+
 /// 検査済みの配線と初期状態、または最初の構築エラーの根拠を表す。
 pub closed spec fn clocked_storage_result(
     wiring: &ClockedStorageInputs, inputs: usize, gates: usize, bit_limit: usize,
@@ -241,6 +249,7 @@ pub(super) proof fn storage_bound(
         storage_fits(wiring, inputs, gates, budget),
         device.input_count_model() == inputs, device.gate_count_model() == gates,
         device.wiring_model() == *wiring,
+        device.memory_shape(),
         device.output_model() == Seq::new(wiring.data@.len(), |_: int| false),
         device.memory_model() matches Some(memory) ==> memory == Seq::new(memory.len(), |_: int| false),
         device.output_model().len() + (match device.memory_model() { Some(memory) => memory.len(), None => 0nat })
@@ -251,6 +260,12 @@ pub(super) proof fn storage_bound(
             requires storage_capacity(wiring) == (vstd::arithmetic::power2::pow2(wiring.address->Some_0@.len()) + 1)
                 * wiring.data@.len(),
         {}
+        assert(storage_capacity(wiring) - wiring.data@.len()
+            == vstd::arithmetic::power2::pow2(wiring.address->Some_0@.len()) * wiring.data@.len())
+            by (nonlinear_arith)
+            requires storage_capacity(wiring) == (vstd::arithmetic::power2::pow2(wiring.address->Some_0@.len()) + 1)
+                * wiring.data@.len(),
+            {}
     }
 }
 
@@ -258,10 +273,12 @@ pub(super) proof fn storage_tick_shape(old: &ClockedStorage, next: &ClockedStora
     requires
         next.storage_tick_matches(old, input, gates),
         old.output_model().len() == old.wiring_model().data@.len(),
+        old.memory_shape(),
     ensures
         next.input_count_model() == old.input_count_model(), next.gate_count_model() == old.gate_count_model(),
         next.wiring_model() == old.wiring_model(),
         next.output_model().len() == next.wiring_model().data@.len(),
+        next.memory_shape(),
 {
 }
 
@@ -288,6 +305,12 @@ impl ClockedStorage {
     /// RAM の記憶部。ラッチの状態はその保持出力に含まれる。
     pub closed spec fn memory_model(&self) -> Option<Seq<bool>> {
         self.state.memory_bits()
+    }
+
+    /// ラッチと RAM の区別および RAM の記憶容量が、宣言された端子幅に従う。
+    pub open spec fn memory_shape(&self) -> bool {
+        (match self.memory_model() { Some(bits) => Some(bits.len()), None => None })
+            == clocked_storage_memory_width(&self.wiring_model())
     }
 
     /// 配線元の添字を検査し、状態素子を0に初期化する。

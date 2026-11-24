@@ -53,6 +53,7 @@ spec fn laid_out(storage: Seq<ClockedStorage>, starts: Seq<usize>, external: usi
         &&& device.input_count_model() == inputs
         &&& device.gate_count_model() == gates
         &&& device.output_model().len() == device.wiring_model().data@.len()
+        &&& device.memory_shape()
         &&& starts[i + 1] == starts[i] + device.output_model().len()
         &&& starts[i + 1] <= inputs
     }
@@ -68,6 +69,7 @@ proof fn update_layout(storage: Seq<ClockedStorage>, starts: Seq<usize>, externa
         next.gate_count_model() == storage[index].gate_count_model(),
         next.wiring_model() == storage[index].wiring_model(),
         next.output_model().len() == storage[index].output_model().len(),
+        next.memory_shape(),
     ensures laid_out(storage.update(index, next), starts, external, inputs, gates),
 {
     let updated = storage.update(index, next);
@@ -76,6 +78,7 @@ proof fn update_layout(storage: Seq<ClockedStorage>, starts: Seq<usize>, externa
         &&& device.input_count_model() == inputs
         &&& device.gate_count_model() == gates
         &&& device.output_model().len() == device.wiring_model().data@.len()
+        &&& device.memory_shape()
         &&& starts[j + 1] == starts[j] + device.output_model().len()
         &&& starts[j + 1] <= inputs
     } by {
@@ -475,6 +478,7 @@ fn bind_storage(circuit: &ClockedNor, _external: usize, mut pending: Vec<Clocked
                     &&& device.input_count_model() == inputs
                     &&& device.gate_count_model() == gates
                     &&& device.output_model().len() == device.wiring_model().data@.len()
+                    &&& device.memory_shape()
                     &&& _starts@.take(i + 2)[j + 1] == _starts@.take(i + 2)[j] + device.output_model().len()
                     &&& _starts@.take(i + 2)[j + 1] <= inputs
                 } by {
@@ -594,6 +598,21 @@ impl ClockedVm {
         &&& self.valid()
         &&& self.gates@ == Seq::new(self.gates@.len(), |_: int| false)
         &&& forall|i: int| 0 <= i < self.storage@.len() ==> initialized(#[trigger] self.storage@[i])
+    }
+
+    /// 初期状態では、指定した素子の登録出力と RAM の全記憶ビットがゼロになる。
+    pub proof fn initial_storage_values(&self, index: int)
+        requires self.initial(), 0 <= index < self.storage_model().len(),
+        ensures
+            ({
+                let device = self.storage_model()[index];
+                &&& device.output_model() == Seq::new(device.wiring_model().data@.len(), |_: int| false)
+                &&& device.memory_shape()
+                &&& (device.memory_model() matches Some(memory) ==>
+                    memory == Seq::new(memory.len(), |_: int| false))
+            }),
+    {
+        assert(initialized(self.storage@[index]));
     }
 
     /// すべての更新が同じ旧状態を読み、観測が更新後の状態を読むことを表す。
@@ -728,7 +747,7 @@ impl ClockedVm {
         requires self.reset_matches(output),
         ensures
             self.initial(),
-            bits.len() == self.netlist_model().input_count,
+            bits == Seq::new(self.netlist_model().input_count as nat, |_: int| false),
             self.augmented_input_matches(Seq::new(self.external_count() as nat, |_: int| false), bits),
             self.gate_values_model() == Seq::new(self.netlist_model().gates@.len(), |_: int| false),
             output.len() == self.netlist_model().outputs@.len(),
