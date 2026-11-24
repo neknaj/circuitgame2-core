@@ -2,8 +2,8 @@
 
 use crate::netlist::{ClockedStorageInputs, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
-use crate::netlist::{NorGate, clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_width_concat,
-    clocked_storage_widths_agree, instance_gates_at,
+use crate::netlist::{ClockedVm, NorGate, clocked_instance_inputs, clocked_stateful_arguments, clocked_storage_output_width,
+    clocked_storage_width_concat, clocked_storage_widths_agree, instance_gates_at, wire_value,
     instance_gates_in_extension, instance_outputs_match};
 use core::ops::Range;
 use alloc::vec::Vec;
@@ -197,6 +197,150 @@ pub(super) proof fn join_routine_input_offsets(
             clocked_storage_width_concat(prefix, previous);
         }
     };
+}
+
+/// 子の登録出力を、親 VM のスナップショットから同じビット順で取り出す。
+///
+/// `device` は子が持つ状態素子の添字。親の添字には直接素子と先行する子の素子を加える。
+pub(super) proof fn routine_storage_snapshot(
+    vm: &ClockedVm, input: Seq<bool>, bits: Seq<bool>, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int, device: int,
+)
+    requires
+        vm.layout_matches(vm.netlist_model(), vm.external_count(), wiring),
+        vm.augmented_input_matches(input, bits),
+        routines_placed(routines, vm.netlist_model().gates@, wiring.skip(direct as int), first_state,
+            vm.netlist_model().input_count),
+        routine_vm_input_offsets(routines, wiring, direct, vm.external_count()),
+        0 <= call < routines.len(),
+        routines[call] matches Some(routine) && 0 <= device < routine.devices.len(),
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            let parent = direct + routine.storage.start + device;
+            let relative_start = clocked_storage_output_width(routine.devices.take(device));
+            let relative_end = relative_start + routine.devices[device].data@.len();
+            let range = vm.storage_input_range_model(parent);
+            &&& 0 <= parent < vm.storage_model().len()
+            &&& range.start == routine.state_inputs.start + relative_start
+            &&& range.end == routine.state_inputs.start + relative_end
+            &&& range.end <= routine.state_inputs.end <= bits.len()
+            &&& bits.subrange(routine.state_inputs.start as int, routine.state_inputs.end as int)
+                .subrange(relative_start as int, relative_end as int) == vm.storage_model()[parent].output_model()
+        }),
+{
+    reveal(routines_placed);
+    let routine = routines[call]->Some_0;
+    let suffix = wiring.skip(direct as int);
+    assert(routine_placed(routine, vm.netlist_model().gates@, suffix, vm.netlist_model().input_count));
+    let base = direct + routine.storage.start;
+    let parent = base + device;
+    let mapped = wiring.skip(base).take(device);
+    let local = routine.devices.take(device);
+    let width = clocked_storage_output_width(routine.devices);
+    let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start, width);
+    assert(base + routine.devices.len() <= wiring.len());
+    assert forall|i: int| 0 <= i < device implies (#[trigger] mapped[i]).data@.len() == (#[trigger] local[i]).data@.len() by {
+        assert(mapped[i] == suffix[routine.storage.start + i]);
+        assert(local[i].parent_placement_matches(pins, routine.gates.start, &mapped[i]));
+    };
+    clocked_storage_widths_agree(mapped, local);
+    let prior = wiring.take(base);
+    clocked_storage_width_concat(prior, mapped);
+    assert(prior + mapped =~= wiring.take(parent));
+    assert(wiring[parent] == suffix[routine.storage.start + device]);
+    assert(routine.devices[device].parent_placement_matches(pins, routine.gates.start, &wiring[parent]));
+    assert(wiring[parent].data@.len() == routine.devices[device].data@.len());
+    vm.storage_input_range_evidence(parent);
+    vm.augmented_storage_segment(input, bits, parent);
+    vm.augmented_input_shape(input, bits);
+    let relative_start = clocked_storage_output_width(local);
+    let relative_end = relative_start + routine.devices[device].data@.len();
+    let through_device = routine.devices.take(device + 1);
+    assert(local.push(routine.devices[device]) =~= through_device);
+    crate::netlist::clocked_storage_width_push(local, routine.devices[device]);
+    let trailing = routine.devices.skip(device + 1);
+    clocked_storage_width_concat(through_device, trailing);
+    assert(through_device + trailing =~= routine.devices);
+    assert(relative_end <= width);
+    let range = vm.storage_input_range_model(parent);
+    let child_bits = bits.subrange(routine.state_inputs.start as int, routine.state_inputs.end as int);
+    assert(child_bits.subrange(relative_start as int, relative_end as int)
+        =~= bits.subrange(range.start as int, range.end as int));
+}
+
+/// 子の増補入力は、親の状態で読んだ実引数に、子の各素子の登録出力を続けた列になる。
+pub(super) proof fn routine_augmented_snapshot(
+    vm: &ClockedVm, input: Seq<bool>, bits: Seq<bool>, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
+) -> (child: Seq<bool>)
+    requires
+        vm.layout_matches(vm.netlist_model(), vm.external_count(), wiring),
+        vm.augmented_input_matches(input, bits),
+        routines_placed(routines, vm.netlist_model().gates@, wiring.skip(direct as int), first_state,
+            vm.netlist_model().input_count),
+        routine_vm_input_offsets(routines, wiring, direct, vm.external_count()),
+        0 <= call < routines.len(),
+        routines[call].is_some(),
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            let width = clocked_storage_output_width(routine.devices);
+            let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start, width);
+            let external = routine.external.len() as int;
+            &&& child.len() == routine.callee.input_count
+            &&& child == clocked_instance_inputs(pins, bits, vm.gate_values_model())
+            &&& child.take(external) == clocked_instance_inputs(routine.external, bits, vm.gate_values_model())
+            &&& forall|device: int| #![trigger routine.devices[device]]
+                0 <= device < routine.devices.len() ==> {
+                let start = external + clocked_storage_output_width(routine.devices.take(device));
+                let end = start + routine.devices[device].data@.len();
+                let parent = direct + routine.storage.start + device;
+                &&& 0 <= parent < vm.storage_model().len()
+                &&& end <= child.len()
+                &&& child.subrange(start, end) == vm.storage_model()[parent].output_model()
+            }
+        }),
+{
+    reveal(routines_placed);
+    let routine = routines[call]->Some_0;
+    let width = clocked_storage_output_width(routine.devices);
+    let wires = routine.external;
+    let gates = vm.gate_values_model();
+    let pins = clocked_stateful_arguments(wires, routine.state_inputs.start, width);
+    let external = clocked_instance_inputs(wires, bits, gates);
+    let local_storage = bits.subrange(routine.state_inputs.start as int, routine.state_inputs.end as int);
+    let child = external + local_storage;
+    assert(routine_placed(routine, vm.netlist_model().gates@, wiring.skip(direct as int), vm.netlist_model().input_count));
+    vm.augmented_input_shape(input, bits);
+    assert(child.take(wires.len() as int) =~= external);
+    let mapped = clocked_instance_inputs(pins, bits, gates);
+    assert forall|i: int| 0 <= i < child.len() implies (#[trigger] child[i]) == mapped[i] by {
+        if i < external.len() {
+            assert(pins[i] == wires[i]);
+        } else {
+            let j = i - external.len();
+            assert(pins[i] == Wire::Input((routine.state_inputs.start + j) as usize));
+            assert(wire_value(pins[i], bits, gates) == local_storage[j]);
+        }
+    };
+    assert(child =~= mapped);
+    assert forall|device: int| #![trigger routine.devices[device]]
+        0 <= device < routine.devices.len() implies {
+        let relative = clocked_storage_output_width(routine.devices.take(device));
+        let start = external.len() as int + relative;
+        let end = start + routine.devices[device].data@.len();
+        let parent = direct + routine.storage.start + device;
+        &&& 0 <= parent < vm.storage_model().len()
+        &&& end <= child.len()
+        &&& child.subrange(start, end) == vm.storage_model()[parent].output_model()
+    } by {
+        routine_storage_snapshot(vm, input, bits, wiring, routines, direct, first_state, call, device);
+        let start = clocked_storage_output_width(routine.devices.take(device)) as int;
+        let end = start + routine.devices[device].data@.len();
+        assert(child.subrange(external.len() + start, external.len() + end) =~= local_storage.subrange(start, end));
+    };
+    child
 }
 
 } // verus!

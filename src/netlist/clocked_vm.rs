@@ -565,6 +565,15 @@ impl ClockedVm {
         input_snapshot(input, self.storage@, self.starts@, self.storage@.len(), bits)
     }
 
+    /// 増補入力の幅はネットリストに従い、先頭は外部入力のままである。
+    pub proof fn augmented_input_shape(&self, input: Seq<bool>, bits: Seq<bool>)
+        requires self.valid(), self.augmented_input_matches(input, bits),
+        ensures input.len() == self.external_count(), bits.len() == self.netlist_model().input_count,
+            bits.take(input.len() as int) == input,
+    {
+        reveal(input_snapshot);
+    }
+
     /// 指定した素子の登録出力を、増補入力の実際の区間から取り出せることを示す。
     pub proof fn augmented_storage_segment(&self, input: Seq<bool>, bits: Seq<bool>, device: int)
         requires self.valid(), self.augmented_input_matches(input, bits),
