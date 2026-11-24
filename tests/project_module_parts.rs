@@ -544,6 +544,7 @@ fn lowers_two_calls_to_the_same_ram_module_from_separate_fragments() {
 
     let mut compiled = aliases.lower_clocked_vm(parts[0].module_position, limits).unwrap().unwrap();
 
+    assert_eq!(compiled.vm.settling_bound(), None);
     assert_eq!(compiled.vm.reset(), [false; 6]);
     let frames = [
         (

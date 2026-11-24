@@ -256,6 +256,7 @@ fn a_module_observes_delayed_function_gates_and_immediate_wires() {
     assert_eq!(frame.gates.len(), 4);
     assert_eq!(frame.outputs, [false, false, false]);
     let mut vm = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap().vm;
+    assert_eq!(vm.settling_bound(), Some(2));
     assert_eq!(vm.reset(), frame.outputs);
     for (input, expected) in [
         (true, [true, true, true]),

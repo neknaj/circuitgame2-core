@@ -2,11 +2,14 @@
 
 use super::clocked::observe;
 use super::{ClockedNor, ClockedStorage, ClockedStorageError, ClockedStorageInputs, TickInputError};
+use crate::project::clocked_nor_settling_bound;
 #[cfg(verus_only)]
 use super::{NorNetlist, clocked_gate_updates, clocked_storage_result, clocked_wiring_endpoints, clocked_wiring_valid,
     output_values_match};
 #[cfg(verus_only)]
 use super::clocked_storage::{storage_capacity, storage_fits};
+#[cfg(verus_only)]
+use crate::project::{clocked_nor_bound_matches, clocked_nor_states_settle, fixed_nor_states};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -512,6 +515,84 @@ impl ClockedVm {
 
     /// 状態素子を、増補入力に登録出力を並べる順に表す。
     pub closed spec fn storage_model(&self) -> Seq<ClockedStorage> { self.storage@ }
+
+    /// 展開後の配線と状態素子の有無から、定常化の上界を定める。
+    pub closed spec fn settling_bound_matches(&self, bound: Option<usize>) -> bool {
+        if self.storage_model().len() == 0 {
+            clocked_nor_bound_matches(&self.netlist_model(), bound)
+        } else {
+            bound.is_none()
+        }
+    }
+
+    /// 固定入力で定常化するまでの tick 数の上界を返す。
+    ///
+    /// 階層展開後のすべてのゲートを調べる。ラッチや RAM がある回路と、ゲート間に閉路がある回路には
+    /// `None` を返す。ゲートも状態素子もない回路には `Some(0)` を返す。
+    pub fn settling_bound(&self) -> (bound: Option<usize>)
+        ensures self.settling_bound_matches(bound),
+    {
+        if self.storage.is_empty() {
+            clocked_nor_settling_bound(&self.circuit)
+        } else {
+            None
+        }
+    }
+
+    /// 任意の初期状態から、各 tick に同じ入力を与えて進めた VM の状態列。
+    pub open spec fn fixed_input_states(&self, input: Seq<bool>, states: Seq<ClockedVm>) -> bool {
+        &&& input.len() == self.external_count()
+        &&& forall|i: int| 0 <= i < states.len() ==> (#[trigger] states[i]).valid() && states[i].same_layout(self)
+        &&& forall|i: int| 0 < i < states.len() ==> {
+            let current = #[trigger] states[i];
+            exists|output: Seq<bool>| #[trigger] current.tick_matches(&states[i - 1], input, output)
+        }
+    }
+
+    proof fn gate_only_history(&self, input: Seq<bool>, states: Seq<ClockedVm>)
+        requires self.valid(), self.storage_model().len() == 0, self.fixed_input_states(input, states),
+        ensures fixed_nor_states(&self.netlist_model(), input,
+            states.map_values(|state: ClockedVm| state.gate_values_model())),
+    {
+        let netlist = self.netlist_model();
+        let gates = states.map_values(|state: ClockedVm| state.gate_values_model());
+        assert(self.starts@.len() == 1 && self.starts@[0] == netlist.input_count);
+        assert forall|i: int| 0 <= i < gates.len() implies (#[trigger] gates[i]).len() == netlist.gates@.len() by {
+            assert(gates[i] == states[i].gate_values_model());
+            assert(states[i].netlist_model() == netlist);
+        };
+        assert forall|i: int| 0 < i < gates.len() implies
+            #[trigger] clocked_gate_updates(netlist.gates@, input, gates[i - 1], gates[i]) by {
+            let current = &states[i];
+            let previous = &states[i - 1];
+            let output = choose|output: Seq<bool>| #[trigger] current.tick_matches(previous, input, output);
+            let (old_inputs, _) = current.tick_snapshots(previous, input, output);
+            assert(current.netlist_model() == netlist);
+            assert(old_inputs.take(input.len() as int) =~= old_inputs);
+        };
+    }
+
+    /// 同じ固定入力で進めた二つの履歴で、定常化の上界以降の VM 状態が一致する。
+    ///
+    /// 初期ゲート値や比較時点までの経過 tick 数が異なる履歴も比較できる。
+    pub proof fn settling_states_agree(
+        &self, bound: usize, input: Seq<bool>, first: Seq<ClockedVm>, second: Seq<ClockedVm>, a: int, b: int,
+    )
+        requires self.valid(), self.settling_bound_matches(Some(bound)),
+            self.fixed_input_states(input, first), self.fixed_input_states(input, second),
+            bound <= a < first.len(), bound <= b < second.len(),
+        ensures
+            first[a].same_layout(&second[b]),
+            first[a].storage_model().len() == 0 && second[b].storage_model().len() == 0,
+            first[a].gate_values_model() == second[b].gate_values_model(),
+    {
+        self.gate_only_history(input, first);
+        self.gate_only_history(input, second);
+        let first_gates = first.map_values(|state: ClockedVm| state.gate_values_model());
+        let second_gates = second.map_values(|state: ClockedVm| state.gate_values_model());
+        clocked_nor_states_settle(&self.netlist_model(), bound, input, first_gates, second_gates, a, b);
+        assert(first[a].same_layout(self) && second[b].same_layout(self));
+    }
 
     /// 指定した状態素子の RAM 記憶部を読み取る。
     ///
