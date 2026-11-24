@@ -503,6 +503,71 @@ fn reports_an_unexpanded_macro_in_a_fragment() {
 }
 
 #[test]
+fn lowers_two_calls_to_the_same_ram_module_from_separate_fragments() {
+    use circuitgame2_core::project::{ClockedModuleVmError, ClockedModuleVmLimits};
+
+    let project = parse_circuit_project(&[
+        SourceSnapshot {
+            path: "main.ncg2",
+            revision: 8,
+            text: "(using nor)
+                   (memory bank (address 1) (data (bits 2)))
+                   (module storage (in address (data (bits 2)) enable)
+                     (out (read-data (bits 2)) address)
+                     (def read-data (bank address data enable)))
+                   (module main
+                     (in address (left-data (bits 2)) (right-data (bits 2)) left-enable right-enable)
+                     (out (left-read (bits 2)) left-address (right-read (bits 2)) right-address)
+                     (def (left-read left-address) (storage selected left-data left-enable)))",
+        },
+        SourceSnapshot {
+            path: "part.ncg2",
+            revision: 9,
+            text: "(module-part main
+                     (def (right-read right-address) (storage selected right-data right-enable))
+                     (def selected address))",
+        },
+    ]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let parts = targets.collect_module_parts().unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 11, gates: 0, state_bits: 12 };
+    let Err(ClockedModuleVmError::InModule { owner, reason }) =
+        aliases.lower_clocked_vm(parts[0].module_position, ClockedModuleVmLimits { wiring_bits: 10, ..limits })
+    else { panic!("both children must fit in the augmented inputs"); };
+    assert_eq!(owner, parts[0].module_position);
+    let ClockedModuleVmError::ChildStateCapacity { call, used, width, capacity } = *reason
+    else { panic!("the second occurrence must exceed the wiring limit"); };
+    assert_eq!((used, width, capacity), (9, 2, 10));
+    assert_eq!(call.source.revision, 9);
+    assert_eq!(&call.source.text[call.span], "(storage selected right-data right-enable)");
+
+    let mut compiled = aliases.lower_clocked_vm(parts[0].module_position, limits).unwrap().unwrap();
+
+    assert_eq!(compiled.vm.reset(), [false; 6]);
+    let frames = [
+        (
+            [true, true, false, false, true, true, true],
+            [false, false, true, false, false, true],
+        ),
+        (
+            [true, false, false, false, false, true, false],
+            [true, false, true, false, true, true],
+        ),
+        (
+            [true, false, false, false, false, false, false],
+            [false, false, true, false, true, true],
+        ),
+        ([false; 7], [false; 6]),
+    ];
+    for (input, expected) in frames {
+        assert_eq!(compiled.vm.step(&input).unwrap(), expected);
+    }
+    assert_eq!(compiled.vm.reset(), [false; 6]);
+    assert_eq!(compiled.vm.step(&frames[2].0).unwrap(), frames[0].1);
+}
+
+#[test]
 fn module_part_owner_ignores_aliases_and_reports_other_declaration_kinds() {
     let input = [SourceSnapshot {
         path: "wrong.ncg2", revision: 1,

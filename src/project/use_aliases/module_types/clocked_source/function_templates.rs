@@ -11,30 +11,30 @@ use vstd::laws_cmp::obeys_cmp;
 
 verus! {
 
-pub(super) type FunctionTemplates<'p, 'a> = BTreeMap<(usize, usize), ClockedFunctionTemplate<'p, 'a>>;
+pub(in crate::project::use_aliases::module_types) type FunctionTemplates<'p, 'a> = BTreeMap<(usize, usize), ClockedFunctionTemplate<'p, 'a>>;
 
 /// モジュールの依存辺を持たない通常呼び出しが参照する宣言位置。
-pub(super) open spec fn function_target(calls: &ModuleCalls, edges: Seq<Option<usize>>, i: int) -> Option<(usize, usize)> {
+pub(in crate::project::use_aliases::module_types) open spec fn function_target(calls: &ModuleCalls, edges: Seq<Option<usize>>, i: int) -> Option<(usize, usize)> {
     match calls.calls@[i].inputs.ports.signature.target {
         ModuleCallTarget::Routine { position, .. } if edges[i].is_none() => Some((position.file, position.entry)),
         _ => None,
     }
 }
 
-pub(super) open spec fn function_templates_cover(calls: &ModuleCalls, edges: Seq<Option<usize>>,
+pub(in crate::project::use_aliases::module_types) open spec fn function_templates_cover(calls: &ModuleCalls, edges: Seq<Option<usize>>,
     functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int) -> bool {
     forall|i: int| 0 <= i < end && #[trigger] function_target(calls, edges, i) is Some ==>
         functions.contains_key(function_target(calls, edges, i)->Some_0)
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    pub(super) open spec fn function_targets_are_declared(&self, calls: &ModuleCalls, edges: Seq<Option<usize>>) -> bool {
+    pub(in crate::project::use_aliases::module_types) open spec fn function_targets_are_declared(&self, calls: &ModuleCalls, edges: Seq<Option<usize>>) -> bool {
         forall|i: int| 0 <= i < calls.calls@.len() ==>
             ((#[trigger] function_target(calls, edges, i)) matches Some(target)
                 ==> function_position(self.targets.project_model().circuits_model(), target))
     }
 
-    pub(super) open spec fn clocked_functions_match(
+    pub(in crate::project::use_aliases::module_types) open spec fn clocked_functions_match(
         &self, cache: Map<(usize, usize), ClockedFunctionTemplate>, width: u64, bits: usize, gates: usize,
     ) -> bool {
         forall|target: (usize, usize)| cache.contains_key(target) ==>
@@ -58,7 +58,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// それ以前の関数呼び出しの展開がそろった段階で見つかった失敗を表す。
-    pub(super) closed spec fn function_expansion_stops_at(
+    pub(in crate::project::use_aliases::module_types) closed spec fn function_expansion_stops_at(
         &self, calls: &ModuleCalls, edges: Seq<Option<usize>>, cache: Map<(usize, usize), ClockedFunctionTemplate>,
         width: u64, bits: usize, gates: usize, site: LocatedName, expansion: crate::project::ExpandFunctionsError,
     ) -> bool {
@@ -77,7 +77,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// # Errors
     ///
     /// 展開に失敗した最初の関数呼び出しの位置と、関数側の診断を返す。
-    pub(super) fn prepare_clocked_functions(&self, _owner: ModuleBodyPosition, width: u64, bits: usize, gates: usize,
+    pub(in crate::project::use_aliases::module_types) fn prepare_clocked_functions(&self, _owner: ModuleBodyPosition, width: u64, bits: usize, gates: usize,
         calls: &ModuleCalls<'p, 'a>, edges: &[Option<usize>], cache: &mut FunctionTemplates<'p, 'a>,
     ) -> (result: Result<(), ClockedModuleError<'p, 'a>>)
         requires

@@ -1,5 +1,8 @@
 //! 呼び出しと公開出力が読む配線を解決し、tick 実行用の VM を初期化する。
 
+mod child_outputs;
+mod hierarchy;
+
 use super::super::ClockedStoragePlacement;
 use super::{ClockedEndpointError, ClockedModuleEndpoints, ModuleBodyPosition, ModuleCalls, UseAliases};
 use crate::netlist::{ClockedNor, ClockedNorError, ClockedStorageInputs, ClockedVm, ClockedVmError,
@@ -50,6 +53,26 @@ struct ClockedModuleNetwork<'p, 'a> {
 /// モジュールを tick 実行用の VM に変換できなかった理由。
 #[derive(Debug)]
 pub enum ClockedModuleVmError<'p, 'a> {
+    /// 呼び出し階層で見つかった再帰または呼び出し先の違反。
+    Hierarchy(super::super::ClockedModuleError<'p, 'a>),
+    /// 階層中のモジュールを展開できなかった。
+    InModule {
+        /// 展開中の宣言の位置。
+        owner: ModuleBodyPosition,
+        /// 宣言の展開時に見つかった診断。
+        reason: alloc::boxed::Box<ClockedModuleVmError<'p, 'a>>,
+    },
+    /// 子の状態出力を加えると、親の増補入力列が上限を超える。
+    ChildStateCapacity {
+        /// 状態出力を配置できなかった呼び出しの範囲。
+        call: LocatedName<'p, 'a>,
+        /// 呼び出しを処理する前に使用済みの増補入力数。
+        used: usize,
+        /// 子の状態出力のビット数。
+        width: usize,
+        /// 増補入力に割り当てられる最大ビット数。
+        capacity: usize,
+    },
     /// ソースの型または呼び出しから、出力配線を配置できなかった。
     Endpoints(ClockedEndpointError<'p, 'a>),
     /// 呼び出しの実引数を配線へ変換できなかった。
@@ -302,7 +325,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
             self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, &plan),
         ensures result matches Ok(network) ==> self.network_wiring_on_checked(limits, checked, &plan, &network),
-            !(result matches Err(ClockedModuleVmError::Endpoints(_))),
+            !(result matches Err(ClockedModuleVmError::Endpoints(_) | ClockedModuleVmError::Hierarchy(_)
+                | ClockedModuleVmError::InModule { .. })),
     {
         let mut gates = Vec::new();
         let mut storage: Vec<ClockedStorageInputs> = Vec::new();
@@ -443,22 +467,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && #[trigger] self.cycle_on_checked(&checked, limits.width, limits.wiring_bits, limits.gates, sites)
     }
 
-    /// 直接の基底 NOR、ラッチ、RAM の呼び出しから tick 実行用の VM を初期化する。
+    /// モジュールのソースから tick 実行用の VM を初期化する。
     ///
     /// 右辺には信号名の直結、信号名を起点とするビット選択、信号名やリテラルの連接も書ける。
     /// 実引数には裸の信号名、ビットリテラル、信号名からのビット選択を使える。
+    /// 子モジュールのゲートと状態素子は呼び出しごとに配置する。
+    /// `func` の呼び出しでは、関数を構成する基底ゲートの遅延を保つ。
     /// 指定位置がモジュール本体を指さない場合は `Ok(None)` を返す。
     ///
     /// # Errors
     ///
     /// 型、定義と出力の配置、直結、選択、連接の配線、直接呼び出しの入力、ネットリスト、状態メモリの順に検査する。
+    /// モジュールや関数を呼ぶ場合は、到達する宣言と再帰を検査し、子から順に配線を組み立てる。
     pub fn lower_clocked_vm(&self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits)
         -> (result: Result<Option<ClockedModuleVm>, ClockedModuleVmError<'p, 'a>>)
         requires self.can_resolve(),
         ensures
             result matches Ok(Some(compiled)) ==> compiled.vm.valid() && compiled.vm.initial()
                 && compiled.vm.external_count() == compiled.inputs.total_bits_model()
-                && self.clocked_module_vm_wiring(owner, limits, &compiled),
+                && (self.clocked_module_vm_wiring(owner, limits, &compiled)
+                    || self.clocked_module_hierarchy_vm(owner, limits, &compiled)),
+            result matches Err(ClockedModuleVmError::Hierarchy(super::super::ClockedModuleError::Recursion(path))) ==>
+                self.clocked_hierarchy_recursion(owner, limits.width, path@),
+            result matches Err(ClockedModuleVmError::InModule { owner: failed, reason }) ==>
+                ((*reason) matches ClockedModuleVmError::Hierarchy(super::super::ClockedModuleError::Function { call, expansion })
+                    ==> self.clocked_hierarchy_function_failure(owner, limits, failed, call, expansion)),
+            result matches Err(ClockedModuleVmError::InModule { reason, .. }) ==>
+                ((*reason) matches ClockedModuleVmError::ChildStateCapacity { used, width, capacity, .. }
+                    ==> capacity == limits.wiring_bits && used <= capacity && used + width > capacity),
             result matches Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::Calls(error))) ==>
                 self.module_calls_result(owner, limits.width, Err(error)),
             result matches Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites))) ==>
@@ -469,6 +505,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(None) => return Ok(None),
             Err(error) => return Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::Calls(error))),
         };
+        if self.has_clocked_routine_call(&checked) {
+            return self.lower_clocked_hierarchy_vm(owner, limits);
+        }
         let plan = match self.prepare_vm_endpoints(owner, limits.width, limits.wiring_bits, limits.gates, &checked) {
             Ok(plan) => plan,
             Err(error) => return Err(ClockedModuleVmError::Endpoints(error)),

@@ -1,7 +1,8 @@
 //! 検査済みの親モジュールから子回路の配置と実引数の配線を求める。
 
-mod function_templates;
+pub(super) mod function_templates;
 mod hierarchy;
+pub(super) use hierarchy::ClockedHierarchy;
 use function_templates::FunctionTemplates;
 #[cfg(verus_only)]
 use function_templates::function_templates_cover;

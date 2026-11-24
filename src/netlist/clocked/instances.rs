@@ -321,6 +321,8 @@ impl ClockedNor {
                 &&& start + width == *final(next_state_input) <= inputs
                 &&& clocked_stateful_instance_result(&netlist, child@, old(caller)@,
                     clocked_stateful_arguments(external@, start, width), inputs, planned, final(caller)@, Ok(instance))
+                &&& instance_outputs_match(netlist.outputs@, clocked_stateful_arguments(external@, start, width),
+                    old(caller)@.len() as usize, instance.outputs@)
             },
             result matches Err(error) ==> {
                 let netlist = self.netlist_model();

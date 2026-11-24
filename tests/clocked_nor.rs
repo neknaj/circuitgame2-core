@@ -210,6 +210,8 @@ fn lowers_a_parent_and_its_child_calls_from_source() {
 
 #[test]
 fn a_module_observes_delayed_function_gates_and_immediate_wires() {
+    use circuitgame2_core::project::{ClockedModuleVmError, ClockedModuleVmLimits};
+
     let project = parse_circuit_project(&[SourceSnapshot {
         path: "root.ncg2", revision: 4,
         text: "(using nor)
@@ -239,10 +241,22 @@ fn a_module_observes_delayed_function_gates_and_immediate_wires() {
     assert_eq!((call.source.revision, &call.source.text[call.span]), (4, "(buffer a)"));
     assert!(matches!(expansion, circuitgame2_core::project::ExpandFunctionsError::Function { position: (0, 3), .. }));
 
+    let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 4, gates: 4, state_bits: 0 };
+    let Err(ClockedModuleVmError::InModule { owner: failed, reason }) =
+        aliases.lower_clocked_vm(owner, ClockedModuleVmLimits { wiring_bits: 3, ..limits })
+    else { panic!("the VM must report the failed function expansion"); };
+    assert_eq!(failed, owner);
+    let ClockedModuleVmError::Hierarchy(ClockedModuleError::Function { call, expansion }) = *reason
+    else { panic!("the VM must preserve the function diagnostic"); };
+    assert_eq!((call.source.revision, &call.source.text[call.span]), (4, "(buffer a)"));
+    assert!(matches!(expansion, circuitgame2_core::project::ExpandFunctionsError::Function { position: (0, 3), .. }));
+
     let circuit = aliases.lower_clocked_module_with_limits(owner, 8, 4, 4).unwrap().unwrap();
     let mut frame = circuit.reset();
     assert_eq!(frame.gates.len(), 4);
     assert_eq!(frame.outputs, [false, false, false]);
+    let mut vm = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap().vm;
+    assert_eq!(vm.reset(), frame.outputs);
     for (input, expected) in [
         (true, [true, true, true]),
         (true, [true, true, false]),
@@ -251,6 +265,7 @@ fn a_module_observes_delayed_function_gates_and_immediate_wires() {
     ] {
         frame = circuit.step(&frame.gates, &[input]).unwrap();
         assert_eq!(frame.outputs, expected);
+        assert_eq!(vm.step(&[input]).unwrap(), expected);
     }
 }
 
@@ -291,8 +306,44 @@ fn identifies_the_source_output_in_a_child_passthrough_cycle() {
     assert_eq!(output.source.revision, 7);
     let start = output.source.text.find("(def (z n)").unwrap() + "(def (".len();
     assert_eq!(output.span, start..start + 1);
+
+    use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits};
+    let owner = ModuleBodyPosition { file: 0, entry: 1 };
+    let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 8, gates: 2, state_bits: 0 };
+    let Err(ClockedModuleVmError::InModule { owner: failed, reason }) = aliases.lower_clocked_vm(owner, limits)
+    else { panic!("the VM must reject the same zero-delay cycle"); };
+    assert_eq!(owner, failed);
+    let ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites)) = *reason
+    else { panic!("the VM must report a wire cycle"); };
+    let [vm_output] = sites.as_slice() else { panic!("the VM cycle must contain one output"); };
+    assert_eq!(vm_output.source.revision, output.source.revision);
+    assert_eq!(vm_output.span, output.span);
 }
 
+#[test]
+fn reports_the_concat_operand_and_child_output_in_a_vm_cycle() {
+    use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits};
+
+    let text = "(using nor)
+                (module root (in) (out (z (bits 2)))
+                  (def z (concat reflected 0))
+                  (def reflected (child (bit z 0))))
+                (module child (in a) (out a))";
+    let project = parse_circuit_project(&[SourceSnapshot { path: "loop.ncg2", revision: 11, text }]).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 8, gates: 0, state_bits: 0 };
+    let Err(ClockedModuleVmError::InModule { reason, .. }) =
+        aliases.lower_clocked_vm(ModuleBodyPosition { file: 0, entry: 1 }, limits)
+    else { panic!("the VM must reject the zero-delay cycle"); };
+    let ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites)) = *reason
+    else { panic!("the VM must preserve the cycle diagnostic"); };
+    let [operand, output] = sites.as_slice() else { panic!("the cycle must contain both wires"); };
+    let first = text.find("(concat reflected").unwrap() + "(concat ".len();
+    let second = text.find("(def reflected").unwrap() + "(def ".len();
+    assert_eq!(operand.span, first..first + "reflected".len());
+    assert_eq!(output.span, second..second + "reflected".len());
+}
 
 #[test]
 fn latch_and_nor_read_the_same_previous_tick() {
