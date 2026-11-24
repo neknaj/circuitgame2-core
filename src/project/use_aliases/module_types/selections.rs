@@ -27,6 +27,8 @@ pub struct ModuleSelection {
     pub driver: OutputDriver,
     /// 元の信号に対する開始位置、選択数、刻み、末尾位置。
     pub projection: CheckedBitSelection,
+    /// 元の構文木で、選択対象の信号名を指す添字。
+    pub operand: usize,
 }
 
 /// 型伝播の結果と、現在検査できたビット選択。
@@ -107,7 +109,7 @@ spec fn checked_range(
             ResolvedPortType::Struct { .. } => result matches Err(ModuleSelectionsError::InputType { input, actual: found })
                 && found == actual && is_form_location(source, forms[leaf as int], input),
             ResolvedPortType::Bits(width) => match result {
-                Ok(Some(checked)) => checked.driver == driver && checked.projection.count <= limit
+                Ok(Some(checked)) => checked.driver == driver && checked.operand == leaf && checked.projection.count <= limit
                     && checked.projection.fits(width)
                     && selection_chain_arguments_match(source, forms, steps, width, actual.origin, Ok(checked.projection)),
                 Err(ModuleSelectionsError::Argument(error)) =>
@@ -146,7 +148,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && {
                         let frame = parsed.entry_ranges@[at.entry as int].signals;
                         let bound = wiring.signals@[member]@[row.signals.start - frame.start];
-                        bound.form == leaf && checked_range(source, forms, root, leaf, steps, bound.driver,
+                        &&& match bound.driver {
+                            OutputDriver::Input(index) => index < wiring.drivers.signature.inputs@.len(),
+                            OutputDriver::Definition(index) => index < wiring.drivers.definitions@.len(),
+                        }
+                        &&& bound.form == leaf && checked_range(source, forms, root, leaf, steps, bound.driver,
                             bound_type(typed, types, bound.driver), limit, result)
                     }
             }
@@ -209,7 +215,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if projection.count > limit {
             return Err(ModuleSelectionsError::Width { expression: form_location(source, forms, root), width: projection.count, limit });
         }
-        Ok(Some(ModuleSelection { driver: bound.driver, projection }))
+        Ok(Some(ModuleSelection { driver: bound.driver, projection, operand: leaf }))
     }
 
     #[verifier::opaque]
@@ -246,12 +252,156 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_wiring_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring))),
             self.module_drivers_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring.drivers))),
             checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
+            checked.selections@.len() == checked.types@.len(),
             type_sites_valid(checked.types@),
     {
         let inferred = ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats };
         self.module_concats_evidence(owner, limit, inferred);
         self.module_alias_types_evidence(owner, limit, checked.typed);
         self.module_wiring_keeps_drivers(owner, limit, checked.typed.sources.roots.wiring);
+    }
+
+    /// 同じ定義を検査した結果から、選択の起点と合成した射影の根拠を取り出す。
+    pub(super) proof fn module_selection_evidence(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections, slot: usize,
+    )
+        requires
+            self.module_selections_result(owner, limit, Ok(Some(checked))),
+            slot < checked.selections@.len(),
+            checked.selections@[slot as int].is_some(),
+        ensures ({
+            let project = self.targets.project_model();
+            let wiring = checked.typed.sources.roots.wiring;
+            let at = wiring.drivers.origins@[slot as int];
+            let parsed = project.circuits_model()[at.file as int];
+            let source = project.sources_model()[at.file as int];
+            let row = parsed.definitions@[wiring.drivers.definitions@[slot as int].definition as int];
+            let picked = checked.selections@[slot as int]->Some_0;
+            &&& picked.operand < parsed.syntax.forms@.len()
+            &&& match picked.driver {
+                OutputDriver::Input(index) => index < wiring.drivers.signature.inputs@.len(),
+                OutputDriver::Definition(index) => index < wiring.drivers.definitions@.len(),
+            }
+            &&& match bound_type(&checked.typed, checked.types@, picked.driver) {
+                Some(base) => base.ty is Bits && picked.projection.fits(base.ty->Bits_0)
+                    && exists|steps: Seq<BitSelectionShape>| #[trigger]
+                        bit_selection_path(source.text, parsed.syntax.forms@, row.expression.start, steps, picked.operand)
+                        && steps.len() > 0
+                        && selection_chain_arguments_match(&source, parsed.syntax.forms@, steps, base.ty->Bits_0,
+                            base.origin, Ok(picked.projection)),
+                None => false,
+            }
+        }),
+    {
+        self.module_selections_evidence(owner, limit, checked);
+        reveal(UseAliases::selection_prefix);
+        let wiring = checked.typed.sources.roots.wiring;
+        let project = self.targets.project_model();
+        let at = wiring.drivers.origins@[slot as int];
+        let parsed = project.circuits_model()[at.file as int];
+        let source = project.sources_model()[at.file as int];
+        let row = parsed.definitions@[wiring.drivers.definitions@[slot as int].definition as int];
+        let forms = parsed.syntax.forms@;
+        let root = row.expression.start;
+        let picked = checked.selections@[slot as int]->Some_0;
+        let result = Ok(Some(picked));
+        assert(self.module_selection_at(&checked.typed, checked.types@, slot as int, limit, result));
+        let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
+            #[trigger] bit_selection_path(source.text, forms, root, steps, leaf)
+            && !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(source.text, forms, leaf as int, shape))
+            && if steps.len() == 0 || !(forms[leaf as int] is Atom && forms[leaf as int]->Atom_kind is Name) {
+                result == Ok(None)
+            } else {
+                exists|member: int| 0 <= member < wiring.drivers.body.members@.len()
+                    && (#[trigger] wiring.drivers.body.members@[member]) == at
+                    && {
+                        let frame = parsed.entry_ranges@[at.entry as int].signals;
+                        let bound = wiring.signals@[member]@[row.signals.start - frame.start];
+                        &&& match bound.driver {
+                            OutputDriver::Input(index) => index < wiring.drivers.signature.inputs@.len(),
+                            OutputDriver::Definition(index) => index < wiring.drivers.definitions@.len(),
+                        }
+                        &&& bound.form == leaf && checked_range(&source, forms, root, leaf, steps, bound.driver,
+                            bound_type(&checked.typed, checked.types@, bound.driver), limit, result)
+                    }
+            };
+        assert(steps.len() > 0);
+        let last = steps.len() - 1;
+        let at = bit_selection_step_root(root, steps, last);
+        assert(bit_selection_shape_matches(source.text, forms, at, steps[last]));
+        bit_selection_shape_positions(source.text, forms, at, steps[last]);
+        assert(leaf == picked.operand);
+    }
+
+    /// 入れ子の選択を合成しても、定義の型にある最外段の選択数を保つ。
+    pub(super) proof fn module_selection_width(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections, slot: usize,
+    )
+        requires
+            self.module_selections_result(owner, limit, Ok(Some(checked))),
+            slot < checked.selections@.len(),
+            checked.selections@[slot as int].is_some(),
+        ensures checked.types@[slot as int] matches Some(ty) && ty.ty ==
+            ResolvedPortType::Bits(checked.selections@[slot as int]->Some_0.projection.count),
+    {
+        self.module_selections_evidence(owner, limit, checked);
+        self.module_selection_evidence(owner, limit, checked, slot);
+        let project = self.targets.project_model();
+        let drivers = checked.typed.sources.roots.wiring.drivers;
+        let file = drivers.origins@[slot as int].file as int;
+        let parsed = project.circuits_model()[file];
+        let source = project.sources_model()[file];
+        let root = parsed.definitions@[drivers.definitions@[slot as int].definition as int].expression.start;
+        let selected = checked.selections@[slot as int]->Some_0;
+        let base = bound_type(&checked.typed, checked.types@, selected.driver)->Some_0;
+        let forms = parsed.syntax.forms@;
+        let steps = choose|steps: Seq<BitSelectionShape>| #[trigger]
+            bit_selection_path(source.text, forms, root, steps, selected.operand)
+            && steps.len() > 0 && selection_chain_arguments_match(&source, forms, steps, base.ty->Bits_0,
+                base.origin, Ok(selected.projection));
+        let outer = bit_selection_step_root(root, steps, 0);
+        assert(bit_selection_shape_matches(source.text, forms, outer, steps[0]));
+        assert(outer == root);
+        let inferred = ModuleConcats { typed: checked.typed, types: checked.types, concats: checked.concats };
+        let numbers = self.module_concat_selection_type(owner, limit, inferred, slot, steps[0]);
+        crate::project::use_aliases::selection_arguments::selection_chain_keeps_outer_count(
+            &source, forms, steps, base.ty->Bits_0, base.origin, selected.projection, numbers);
+    }
+
+    /// 検査済みの選択から、選択対象の信号名の元ソース範囲を返す。
+    pub(super) fn module_selection_operand(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleSelections<'p, 'a>, slot: usize,
+    ) -> (site: LocatedName<'p, 'a>)
+        requires
+            self.can_resolve(), self.module_selections_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.selections@.len(),
+            checked.selections@[slot as int].is_some(),
+        ensures self.module_selection_operand_at(checked, slot as int, site),
+    {
+        let wiring = &checked.typed.sources.roots.wiring;
+        proof {
+            self.module_selections_evidence(owner, limit, *checked);
+            self.module_driver_sites(owner, limit, wiring.drivers, slot as int);
+            self.module_selection_evidence(owner, limit, *checked, slot);
+        }
+        let at = wiring.drivers.origins[slot];
+        let project = self.targets.project();
+        let parsed = &project.circuits()[at.file];
+        let source = &project.sources()[at.file];
+        let Some(picked) = &checked.selections[slot] else { unreachable!() };
+        proof { parsed_index_evidence(*source, *parsed); }
+        form_location(source, parsed.syntax.forms.as_slice(), picked.operand)
+    }
+
+    pub(super) open spec fn module_selection_operand_at(
+        &self, checked: &ModuleSelections, slot: int, site: LocatedName,
+    ) -> bool {
+        let project = self.targets.project_model();
+        let file = checked.typed.sources.roots.wiring.drivers.origins@[slot].file as int;
+        let picked = checked.selections@[slot]->Some_0;
+        &&& checked.selections@[slot].is_some()
+        &&& is_form_location(&project.sources_model()[file],
+            project.circuits_model()[file].syntax.forms@[picked.operand as int], site)
     }
 
     /// 選択検査が保持する型表から、裸名の定義と駆動元の型の一致を取り出す。

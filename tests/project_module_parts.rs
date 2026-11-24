@@ -687,6 +687,52 @@ fn lowers_forward_aliases_across_parts_without_consuming_calls() {
 }
 
 #[test]
+fn lowers_a_nested_selection_on_a_definition_rhs() {
+    use circuitgame2_core::project::ClockedModuleVmLimits;
+
+    let input = [
+        SourceSnapshot { path: "root.ncg2", revision: 3, text:
+            "(using nor) (latch hold (width 1))
+             (module root (in (data (bits 4)) enable) (out q)
+               (def selected (bit (slice data 0 2 2) 1)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9, text:
+            "(module-part root (def q (hold selected enable)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let limits = ClockedModuleVmLimits { width: 4, wiring_bits: 8, gates: 0, state_bits: 1 };
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.reset(), [false]);
+    assert_eq!(compiled.vm.step(&[false, false, true, false, true]).unwrap(), [true]);
+    assert_eq!(compiled.vm.step(&[true, false, false, true, true]).unwrap(), [false]);
+}
+
+#[test]
+fn reports_projection_cycle_at_the_selected_signal_across_parts() {
+    use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits};
+
+    let input = [
+        SourceSnapshot { path: "root.ncg2", revision: 3, text:
+            "(using nor) (module root (in) (out left) (def left (bit right 0)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9, text:
+            "(module-part root (def right (slice left 0 1)))" },
+    ];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let owner = targets.collect_module_parts().unwrap()[0].module_position;
+    let aliases = check_use_aliases(&targets).unwrap();
+    let limits = ClockedModuleVmLimits { width: 1, wiring_bits: 2, gates: 0, state_bits: 0 };
+    let Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites))) =
+        aliases.lower_clocked_vm(owner, limits) else { panic!("expected a wire cycle"); };
+    let mut operands: Vec<_> = sites.iter().map(|site|
+        (site.source.revision, &site.source.text[site.span.clone()])).collect();
+    operands.sort_unstable();
+    assert_eq!(operands, [(3, "right"), (9, "left")]);
+}
+
+#[test]
 fn reports_selection_in_a_call_at_the_argument_and_input_declaration() {
     use circuitgame2_core::project::{ClockedArgumentWiringError, ClockedModuleVmError, ClockedModuleVmLimits};
 

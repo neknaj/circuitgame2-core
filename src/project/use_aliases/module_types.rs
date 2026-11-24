@@ -50,7 +50,8 @@ use crate::project::{CircuitProject, location_in_source, circuits::{is_form_loca
 use crate::syntax::{Form, circuit::{BuildDefinition, bit_selection_shape, definition_root_is_call, definition_target_atoms}};
 #[cfg(verus_only)]
 use crate::syntax::{form_spans_valid, circuit::{BitSelectionShape, bit_selection_shape_matches, build_definition_scope_evidence,
-    build_entry_ranges_evidence, definition_target_range, definition_targets_match, ordinary_call_at}};
+    bit_selection_shapes_agree, build_entry_ranges_evidence, definition_target_range, definition_targets_match,
+    ordinary_call_at, ordinary_call_excludes_special_forms}};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 use alloc::vec::Vec;
@@ -274,6 +275,67 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ((#[trigger] typed.types@[i]) matches Some(ty) ==> location_in_source(ty.origin)),
     {
         reveal(UseAliases::root_types_prefix);
+    }
+
+    /// ビット選択の根に割り当てたビット幅が、元の選択数に等しいことを示す。
+    pub(super) proof fn module_selection_root_numbers(
+        &self, owner: ModuleBodyPosition, limit: u64, typed: ModuleRootTypes, slot: usize, shape: BitSelectionShape,
+    ) -> (numbers: (u64, u64, u64, usize))
+        requires
+            self.module_root_types_result(owner, limit, Ok(Some(typed))),
+            slot < typed.wiring.drivers.definitions@.len(),
+            ({
+                let project = self.targets.project_model();
+                let at = typed.wiring.drivers.origins@[slot as int];
+                let driver = typed.wiring.drivers.definitions@[slot as int];
+                let parsed = &project.circuits_model()[at.file as int];
+                let source = &project.sources_model()[at.file as int];
+                let row = parsed.definitions@[driver.definition as int];
+                bit_selection_shape_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+            }),
+        ensures ({
+            let project = self.targets.project_model();
+            let at = typed.wiring.drivers.origins@[slot as int];
+            let driver = typed.wiring.drivers.definitions@[slot as int];
+            let parsed = &project.circuits_model()[at.file as int];
+            let source = &project.sources_model()[at.file as int];
+            let root = parsed.definitions@[driver.definition as int].expression.start as int;
+            &&& typed.types@[slot as int] matches Some(ty)
+            &&& ty.ty == ResolvedPortType::Bits(numbers.1) && numbers.1 > 0
+            &&& is_form_location(source, parsed.syntax.forms@[root], ty.origin)
+            &&& selection_parameters_match(source, parsed.syntax.forms@, &shape, Ok(numbers))
+        }),
+    {
+        self.module_root_types_evidence(owner, limit, typed);
+        self.module_wiring_keeps_drivers(owner, limit, typed.wiring);
+        self.module_driver_sites(owner, limit, typed.wiring.drivers, slot as int);
+        reveal(UseAliases::root_types_prefix);
+        let project = self.targets.project_model();
+        let at = typed.wiring.drivers.origins@[slot as int];
+        let driver = typed.wiring.drivers.definitions@[slot as int];
+        let parsed = &project.circuits_model()[at.file as int];
+        let source = &project.sources_model()[at.file as int];
+        let forms = parsed.syntax.forms@;
+        let row = parsed.definitions@[driver.definition as int];
+        let root = row.expression.start as int;
+        if ordinary_call_at(source.text, forms, root, row.expression.end as int) {
+            ordinary_call_excludes_special_forms(source.text, forms, root, row.expression.end as int);
+            assert(false);
+        }
+        let found = typed.types@[slot as int];
+        assert(self.root_type(at, driver, limit, Ok(found)));
+        assert(selection_root_type(source, forms, row, Ok(found)));
+        assert(found.is_some());
+        let ty = found->Some_0;
+        let other = choose|other: BitSelectionShape|
+            #[trigger] bit_selection_shape_matches(source.text, forms, root, other)
+            && ty.ty is Bits && 0 < ty.ty->Bits_0 && is_form_location(source, forms[root], ty.origin)
+            && exists|start: u64, stride: u64, last: usize| #[trigger]
+                selection_parameters_match(source, forms, &other, Ok((start, ty.ty->Bits_0, stride, last)));
+        bit_selection_shapes_agree(source.text, forms, root, shape, other);
+        let (start, stride, last) = choose|start: u64, stride: u64, last: usize| #[trigger]
+            selection_parameters_match(source, forms, &shape, Ok((start, ty.ty->Bits_0, stride, last)));
+        (start, ty.ty->Bits_0, stride, last)
     }
 
     /// 右辺の型として得た構造体が、呼び出し先の名前解決済みの宣言を指すことを示す。

@@ -173,6 +173,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::alias_sources_prefix);
     }
 
+    /// リストで書かれた右辺には、裸名参照としての依存先がない。
+    pub(super) proof fn module_list_rhs_has_no_alias(
+        &self, owner: ModuleBodyPosition, limit: u64, sources: ModuleTypeSources, slot: usize,
+    )
+        requires
+            self.module_type_sources_result(owner, limit, Ok(Some(sources))),
+            slot < sources.roots.wiring.drivers.definitions@.len(),
+            ({
+                let project = self.targets.project_model();
+                let at = sources.roots.wiring.drivers.origins@[slot as int];
+                let driver = sources.roots.wiring.drivers.definitions@[slot as int];
+                let parsed = &project.circuits_model()[at.file as int];
+                let row = parsed.definitions@[driver.definition as int];
+                parsed.syntax.forms@[row.expression.start as int] is List
+            }),
+        ensures sources.aliases@[slot as int].is_none(),
+    {
+        reveal(UseAliases::alias_sources_prefix);
+        assert(self.alias_source_at(&sources.roots.wiring, slot as int, sources.aliases@[slot as int]));
+    }
+
     /// 右辺の型を決める通常呼び出しやビット選択と、裸の信号名の依存先を全断片から集める。
     ///
     /// 信号の型を伝播する前に、前方参照を含む依存先を確定する。

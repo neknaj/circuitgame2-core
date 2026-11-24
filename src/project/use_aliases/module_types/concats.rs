@@ -10,10 +10,13 @@ use crate::project::{circuit_literal_width_matches, concat_result_width_matches,
     circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence}};
 #[cfg(verus_only)]
 use super::{propagation::type_sites_valid, selections::bound_type};
+#[cfg(verus_only)]
+use crate::project::use_aliases::selection_arguments::selection_parameters_match;
 use crate::syntax::{AtomKind, Form, circuit::{NamedBuildCircuit, concat_argument_range,
     definition_target_atoms, next_call_argument}};
 #[cfg(verus_only)]
 use crate::syntax::{complete_list_indices, form_span, nested_list_indices, circuit::{build_definition_scope_evidence,
+    bit_selection_shape_matches, bit_selection_shape_positions, BitSelectionShape,
     concat_arguments_evidence, concat_arguments_match, definition_signal_positions_in_order, definition_target_range,
     direct_form_in_range, expression_region, following_concat_argument, indexed_concat_argument_signal}};
 use alloc::vec::Vec;
@@ -686,6 +689,83 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] self.derivation(&checked.typed, limit, trail, checked.types);
         reveal(UseAliases::derivation);
         self.alias_binding_along_inference(owner, limit, &checked.typed, trail, checked.types, trail.len() - 1, slot);
+    }
+
+    proof fn concat_derivation_keeps_initial_type(
+        &self, typed: &ModuleAliasTypes, limit: u64, trail: Seq<(usize, Vec<Option<SignalType>>)>,
+        types: Vec<Option<SignalType>>, step: int, slot: usize,
+    )
+        requires
+            self.derivation(typed, limit, trail, types),
+            0 <= step < trail.len(),
+            slot < typed.types@.len(),
+            typed.types@[slot as int].is_some(),
+        ensures
+            trail[step].1@.len() == typed.types@.len(),
+            trail[step].1@[slot as int] == typed.types@[slot as int],
+        decreases step,
+    {
+        reveal(UseAliases::derivation);
+        if step > 0 {
+            self.concat_derivation_keeps_initial_type(typed, limit, trail, types, step - 1, slot);
+            let before = trail[step - 1].1;
+            let (updated, after) = trail[step];
+            assert(self.inference_step(typed, limit, before, after, updated));
+            assert(updated != slot);
+        }
+    }
+
+    /// 別名と連接の推論を経た後も、ビット選択の型と根拠が元の選択数に対応する。
+    pub(super) proof fn module_concat_selection_type(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleConcats, slot: usize, shape: BitSelectionShape,
+    ) -> (numbers: (u64, u64, u64, usize))
+        requires
+            self.module_concats_result(owner, limit, Ok(Some(checked))),
+            slot < checked.typed.sources.roots.wiring.drivers.definitions@.len(),
+            ({
+                let project = self.targets.project_model();
+                let drivers = checked.typed.sources.roots.wiring.drivers;
+                let at = drivers.origins@[slot as int];
+                let driver = drivers.definitions@[slot as int];
+                let parsed = &project.circuits_model()[at.file as int];
+                let source = &project.sources_model()[at.file as int];
+                let row = parsed.definitions@[driver.definition as int];
+                bit_selection_shape_matches(source.text, parsed.syntax.forms@, row.expression.start as int, shape)
+            }),
+        ensures ({
+            let project = self.targets.project_model();
+            let drivers = checked.typed.sources.roots.wiring.drivers;
+            let at = drivers.origins@[slot as int];
+            let driver = drivers.definitions@[slot as int];
+            let parsed = &project.circuits_model()[at.file as int];
+            let source = &project.sources_model()[at.file as int];
+            let root = parsed.definitions@[driver.definition as int].expression.start as int;
+            &&& checked.types@[slot as int] matches Some(ty)
+            &&& ty.ty == ResolvedPortType::Bits(numbers.1) && numbers.1 > 0
+            &&& is_form_location(source, parsed.syntax.forms@[root], ty.origin)
+            &&& selection_parameters_match(source, parsed.syntax.forms@, &shape, Ok(numbers))
+        }),
+    {
+        self.module_concats_evidence(owner, limit, checked);
+        self.module_alias_types_evidence(owner, limit, checked.typed);
+        let sources = checked.typed.sources;
+        self.module_type_sources_bounds(owner, limit, sources);
+        let numbers = self.module_selection_root_numbers(owner, limit, sources.roots, slot, shape);
+        let project = self.targets.project_model();
+        let drivers = sources.roots.wiring.drivers;
+        let at = drivers.origins@[slot as int];
+        let driver = drivers.definitions@[slot as int];
+        let parsed = &project.circuits_model()[at.file as int];
+        let source = &project.sources_model()[at.file as int];
+        let root = parsed.definitions@[driver.definition as int].expression.start as int;
+        bit_selection_shape_positions(source.text, parsed.syntax.forms@, root, shape);
+        self.module_list_rhs_has_no_alias(owner, limit, sources, slot);
+        self.module_alias_keeps_root_type(owner, limit, checked.typed, slot);
+        let trail = choose|trail: Seq<(usize, Vec<Option<SignalType>>)>|
+            #[trigger] self.derivation(&checked.typed, limit, trail, checked.types);
+        reveal(UseAliases::derivation);
+        self.concat_derivation_keeps_initial_type(&checked.typed, limit, trail, checked.types, trail.len() - 1, slot);
+        numbers
     }
 
     proof fn concat_inference_keeps_declarations(

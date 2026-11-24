@@ -900,6 +900,27 @@ pub(super) proof fn selection_chain_success_excludes_error(
     selection_arguments_agree(source, forms, &steps[i], width, &site, Ok(good[i]), Err(error));
 }
 
+/// 合成後に選ぶビット数は、最外段の式で決まる選択数と一致する。
+pub(super) proof fn selection_chain_keeps_outer_count(
+    source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,
+    base: u64, origin: LocatedName, projection: CheckedBitSelection,
+    numbers: (u64, u64, u64, usize),
+)
+    requires
+        steps.len() > 0,
+        selection_parameters_match(source, forms, &steps[0], Ok(numbers)),
+        selection_chain_arguments_match(source, forms, steps, base, origin, Ok(projection)),
+    ensures projection.count == numbers.1,
+{
+    let checked = choose|checked: Seq<CheckedBitSelection>|
+        #[trigger] checked_selection_suffix(source, forms, steps, base, origin, 0, checked)
+        && projects_selection_chain(checked, base, Some(projection));
+    let width = selection_input_width(checked, 0, base);
+    assert(selection_suffix_stage(source, forms, steps, base, origin, 0, checked, 0));
+    let site = selection_stage_witness(source, forms, steps, 0, origin, width, checked[0]);
+    selection_parameters_keep_count(source, forms, &steps[0], numbers, width, &site, checked[0]);
+}
+
 /// 同じ選択式の列を検査できたとき、最外段の選択数は入力幅や診断位置にかかわらず一致する。
 pub(super) proof fn successful_selection_chain_counts_agree(
     source: &ProjectSource, forms: Seq<Form>, steps: Seq<BitSelectionShape>,

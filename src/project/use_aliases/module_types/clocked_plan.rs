@@ -416,6 +416,14 @@ fn cycle_driver_positions(_drivers: &[ClockedWireDriver], _graph: &[Vec<Option<u
     positions
 }
 
+/// 閉路の位置から、次の駆動元を指す配線を取り出す。
+pub(super) proof fn clocked_cycle_edge(drivers: Seq<ClockedWireDriver>, cycle: Seq<usize>, i: int)
+    requires clocked_wire_cycle(drivers, cycle), 0 <= i < cycle.len(),
+    ensures cycle[i] < drivers.len() && drivers[cycle[i] as int] ==
+        ClockedWireDriver::Alias(if i + 1 == cycle.len() { cycle[0] } else { cycle[i + 1] }),
+{
+}
+
 pub(super) closed spec fn clocked_resolution_result(drivers: Seq<ClockedWireDriver>, inputs: usize, gates: usize,
     result: Result<Vec<Wire>, ClockedPlanError>,
 ) -> bool {

@@ -7,12 +7,12 @@ use super::{ClockedModuleOutputs, ClockedModuleOutputsError, ClockedStorageLayou
     ClockedDriverBitsError, ClockedPlanError, ClockedWireDriver, ModuleCalls, ModuleCallsError, UseAliases,
     clocked_driver_bits, clocked_plan::{TerminalResolution, clocked_resolve, resolve_terminal_wires}};
 #[cfg(verus_only)]
-use super::{clocked_plan::clocked_resolution_result, clocked_driver_bits_result,
-    driver_bits::clocked_whole_port_bits, selections::bound_type};
+use super::{clocked_plan::{clocked_cycle_edge, clocked_resolution_result, clocked_wire_cycle}, clocked_driver_bits_result,
+    driver_bits::{checked_selection_wiring_error, clocked_selected_port_bits, clocked_selected_port_ready, clocked_whole_port_bits}, selections::bound_type};
 #[cfg(verus_only)]
-use crate::project::{OutputDriver, PortDirection, StructureLayouts};
+use crate::project::{PortDirection, StructureLayouts};
 use crate::netlist::Wire;
-use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, ModuleDrivers};
+use crate::project::{CheckedBitSelection, LocatedName, ModuleBodyPosition, ModuleCallTarget, ModuleDrivers, OutputDriver};
 use alloc::vec::Vec;
 #[cfg(verus_only)]
 use core::ops::Range;
@@ -54,7 +54,7 @@ pub enum ClockedEndpointError<'p, 'a> {
     Allocation,
     /// 定義の範囲と平坦な定義列の長さが一致しない。
     Layout,
-    /// 信号名の直結や、基底 NOR、ラッチ、RAM の直接呼び出しとして展開できない定義または呼び出し。
+    /// 直結、ビット選択、基底 NOR・ラッチ・RAM の直接呼び出しのいずれでも展開できない定義。
     Unsupported(LocatedName<'p, 'a>),
     /// 右辺の信号をビット列に展開できなかった。
     AliasBits {
@@ -65,15 +65,15 @@ pub enum ClockedEndpointError<'p, 'a> {
     },
     /// 定義の駆動元が配置の範囲外だった。
     Driver(LocatedName<'p, 'a>),
-    /// 直結が閉路を構成する。各要素は閉路の順に並べた右辺の参照位置。
+    /// 直結やビット選択が閉路を構成する。各要素は閉路順に並べた右辺の信号名の位置。
     AliasCycle(Vec<LocatedName<'p, 'a>>),
     /// ゲート数の上限を超えた最初の定義。
     GateCapacity(LocatedName<'p, 'a>),
-    /// 呼び出しが出力するビット数と、定義に割り当てられたビット数が異なる。
+    /// 右辺が出力するビット数と、定義に割り当てられたビット数が異なる。
     Width {
         /// 定義の左辺の範囲。
         definition: LocatedName<'p, 'a>,
-        /// 呼び出し先の出力に必要なビット数。
+        /// 右辺の出力に必要なビット数。
         produced: usize,
         /// 定義に割り当てられたビット数。
         allocated: usize,
@@ -133,6 +133,60 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && matches!(row.inputs.ports.signature.target, ModuleCallTarget::Nor | ModuleCallTarget::StateElement { .. })
     }
 
+    spec fn endpoint_projection(checked: &ModuleCalls, slot: int) -> Option<(OutputDriver, Option<CheckedBitSelection>)> {
+        let expressions = checked.module.expressions;
+        match expressions.typed.sources.aliases@[slot] {
+            Some(alias) => Some((alias.driver, None)),
+            None => match expressions.selections@[slot] {
+                Some(selected) => Some((selected.driver, Some(selected.projection))),
+                None => None,
+            },
+        }
+    }
+
+    fn endpoint_projection_at(&self, checked: &ModuleCalls<'p, 'a>, slot: usize)
+        -> (projection: Option<(OutputDriver, Option<CheckedBitSelection>)>)
+        requires
+            slot < checked.module.expressions.typed.sources.aliases@.len(),
+            slot < checked.module.expressions.selections@.len(),
+        ensures projection == Self::endpoint_projection(checked, slot as int),
+    {
+        let expressions = &checked.module.expressions;
+        if let Some(alias) = &expressions.typed.sources.aliases[slot] {
+            Some((alias.driver, None))
+        } else if let Some(selected) = &expressions.selections[slot] {
+            Some((selected.driver, Some(selected.projection)))
+        } else {
+            None
+        }
+    }
+
+    fn endpoint_projection_site(&self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>, slot: usize)
+        -> (site: LocatedName<'p, 'a>)
+        requires
+            self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            slot < checked.module.expressions.typed.sources.aliases@.len(),
+            slot < checked.module.expressions.selections@.len(),
+            Self::endpoint_projection(checked, slot as int).is_some(),
+        ensures self.endpoint_projection_site_at(checked, slot as int, site),
+    {
+        let expressions = &checked.module.expressions;
+        if let Some(alias) = &expressions.typed.sources.aliases[slot] {
+            crate::project::use_aliases::function_atoms::copy_location(&alias.reference)
+        } else {
+            proof { self.module_calls_type_evidence(owner, limit, checked); self.module_output_types_evidence(owner, limit, checked.module); }
+            self.module_selection_operand(owner, limit, expressions, slot)
+        }
+    }
+
+    spec fn endpoint_projection_site_at(&self, checked: &ModuleCalls, slot: int, site: LocatedName) -> bool {
+        let expressions = checked.module.expressions;
+        match expressions.typed.sources.aliases@[slot] {
+            Some(alias) => site == alias.reference,
+            None => self.module_selection_operand_at(&expressions, slot, site),
+        }
+    }
+
     #[verifier::opaque]
     spec fn endpoint_row(
         &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, storage: &ClockedStorageLayout,
@@ -143,11 +197,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let aliases = checked.module.expressions.typed.sources.aliases@;
         &&& 0 <= slot < aliases.len()
         &&& bits.len() == range.end - range.start
-        &&& match aliases[slot] {
-            Some(alias) => {
+        &&& match Self::endpoint_projection(checked, slot) {
+            Some((driver, projection)) => {
                 &&& next_call == call && next_gate == gate
                 &&& exists|wires: Vec<ClockedWireDriver>|
-                    #[trigger] clocked_driver_bits_result(&ports.inputs, &ports.definitions, alias.driver, None, Ok(wires))
+                    #[trigger] clocked_driver_bits_result(&ports.inputs, &ports.definitions, driver, projection, Ok(wires))
                     && wires@ == bits
             },
             None => {
@@ -204,7 +258,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures self.endpoint_row(checked, ports, storage, bits, after, slot, call, next_call, gate, next_gate),
     {
         reveal(UseAliases::endpoint_row);
-        if checked.module.expressions.typed.sources.aliases@[slot].is_none() {
+        if Self::endpoint_projection(checked, slot).is_none() {
             assert(after[call as int] == before[call as int]);
         }
     }
@@ -326,6 +380,37 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 選択が収まる基底信号の幅を、その信号に割り当てた範囲の幅と照合する。
+    proof fn selected_endpoint_ready(
+        &self, owner: ModuleBodyPosition, limit: u64, capacity: usize, checked: &ModuleCalls,
+        ports: &ClockedModuleOutputs, slot: usize,
+    )
+        requires
+            self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            self.outputs_on_checked(&checked.module, limit, capacity, Ok(*ports)),
+            slot < checked.module.expressions.selections@.len(),
+            checked.module.expressions.selections@[slot as int].is_some(),
+        ensures ({
+            let selection = checked.module.expressions.selections@[slot as int]->Some_0;
+            clocked_selected_port_ready(&ports.inputs, &ports.definitions, selection.driver, selection.projection)
+        }),
+    {
+        self.module_calls_type_evidence(owner, limit, checked);
+        self.module_output_types_evidence(owner, limit, checked.module);
+        let expressions = checked.module.expressions;
+        self.module_selections_evidence(owner, limit, expressions);
+        self.module_selection_evidence(owner, limit, expressions, slot);
+        self.clocked_output_layouts(&checked.module, limit, capacity, ports);
+        let driver = expressions.selections@[slot as int]->Some_0.driver;
+        let signature = expressions.typed.sources.roots.wiring.drivers.signature;
+        match driver {
+            OutputDriver::Input(port) =>
+                self.routine_bit_layout_port(signature, limit, capacity, &ports.inputs, &ports.outputs, PortDirection::Input, port),
+            OutputDriver::Definition(definition) =>
+                self.clocked_definition_layout_evidence(&expressions, limit, capacity, &ports.definitions, definition),
+        }
+    }
+
     fn bind_endpoint_blocks(
         &self, owner: ModuleBodyPosition, limit: u64, _capacity: usize, gate_limit: usize,
         checked: &ModuleCalls<'p, 'a>, ports: &ClockedModuleOutputs, storage: &ClockedStorageLayout<'p, 'a>,
@@ -342,10 +427,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && cursors@.last() == gate_count
                 && self.endpoint_prefix(checked, ports, storage, bits@, gates@, calls@, cursors@),
             !(result matches Err(ClockedEndpointError::Calls(_))),
+            !(result matches Err(ClockedEndpointError::AliasCycle(_))),
     {
         let expressions = &checked.module.expressions;
         let drivers = &expressions.typed.sources.roots.wiring.drivers;
-        let aliases = &expressions.typed.sources.aliases;
         proof {
             self.module_calls_type_evidence(owner, limit, checked);
             self.module_output_types_evidence(owner, limit, checked.module);
@@ -374,10 +459,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
                 self.module_drivers_result(owner, limit, Ok(Some(*drivers))),
                 *drivers == checked.module.expressions.typed.sources.roots.wiring.drivers,
-                *aliases == checked.module.expressions.typed.sources.aliases,
                 self.storage_on_checked(checked, limit, ports.inputs.total_bits_model(), _capacity, Ok(*storage)),
                 self.outputs_on_checked(&checked.module, limit, _capacity, Ok(*ports)),
-                slot <= drivers.definitions@.len() == aliases@.len() == ports.definitions.ranges_model().len(),
+                slot <= drivers.definitions@.len() == ports.definitions.ranges_model().len(),
+                checked.module.expressions.typed.sources.aliases@.len() == drivers.definitions@.len(),
+                checked.module.expressions.selections@.len() == drivers.definitions@.len(),
                 call == gates@.len() <= checked.calls@.len(), gate_count <= gate_limit,
                 calls.len() == cursors.len() == slot + 1, calls.last() == call, cursors.last() == gate_count,
                 self.endpoint_prefix(checked, ports, storage, definitions@, gates@, calls, cursors),
@@ -389,28 +475,47 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert(slot < checked.module.expressions.typed.sources.aliases@.len());
             if range.start != definitions.len() { return Err(ClockedEndpointError::Layout); }
             let ghost before = (definitions@, gates@, calls, cursors);
-            if let Some(alias) = &aliases[slot] {
-                assert(checked.module.expressions.typed.sources.aliases@[slot as int] == Some(*alias));
-                let wires = match clocked_driver_bits(&ports.inputs, &ports.definitions, alias.driver, None) {
+            if let Some((driver, projection)) = self.endpoint_projection_at(checked, slot) {
+                let wires = match clocked_driver_bits(&ports.inputs, &ports.definitions, driver, projection) {
                     Ok(wires) => wires,
-                    Err(reason) => return Err(ClockedEndpointError::AliasBits {
-                        reference: crate::project::use_aliases::function_atoms::copy_location(&alias.reference), reason,
-                    }),
+                    Err(reason) => {
+                        proof {
+                            if let Some(selected) = projection {
+                                self.selected_endpoint_ready(owner, limit, _capacity, checked, ports, slot);
+                                checked_selection_wiring_error(&ports.inputs, &ports.definitions, driver, selected, reason);
+                            }
+                        }
+                        return Err(ClockedEndpointError::AliasBits {
+                            reference: self.endpoint_projection_site(owner, limit, checked, slot), reason,
+                        });
+                    },
                 };
-                proof { self.alias_endpoint_width(owner, limit, _capacity, checked, ports, slot, wires); }
+                proof {
+                    if let Some(selected) = projection {
+                        let expressions = checked.module.expressions;
+                        self.module_calls_type_evidence(owner, limit, checked);
+                        self.module_output_types_evidence(owner, limit, checked.module);
+                        self.module_selection_width(owner, limit, expressions, slot);
+                        self.clocked_output_layouts(&checked.module, limit, _capacity, ports);
+                        self.clocked_definition_layout_evidence(&expressions, limit, _capacity, &ports.definitions, slot);
+                        clocked_selected_port_bits(&ports.inputs, &ports.definitions, driver, selected, wires);
+                    } else {
+                        self.alias_endpoint_width(owner, limit, _capacity, checked, ports, slot, wires);
+                    }
+                    assert(wires@.len() == width);
+                }
                 self.append_alias_wires(&mut definitions, &wires);
                 assert(definitions@.subrange(range.start as int, range.end as int) =~= wires@);
                 assert(self.endpoint_row(checked, ports, storage, wires@, gates@, slot as int,
                     call, call, gate_count, gate_count)) by {
                     reveal(UseAliases::endpoint_row);
                     assert(exists|row: Vec<ClockedWireDriver>|
-                        #[trigger] clocked_driver_bits_result(&ports.inputs, &ports.definitions, alias.driver, None, Ok(row))
+                        #[trigger] clocked_driver_bits_result(&ports.inputs, &ports.definitions, driver, projection, Ok(row))
                         && row@ == wires@) by {
-                        assert(clocked_driver_bits_result(&ports.inputs, &ports.definitions, alias.driver, None, Ok(wires)));
+                        assert(clocked_driver_bits_result(&ports.inputs, &ports.definitions, driver, projection, Ok(wires)));
                     };
                 };
             } else {
-                assert(checked.module.expressions.typed.sources.aliases@[slot as int].is_none());
                 if !self.direct_slot(owner, limit, checked, drivers, slot, call) {
                     return Err(ClockedEndpointError::Unsupported(self.source_driver_location(owner, limit, drivers, slot)));
                 }
@@ -533,6 +638,104 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& clocked_resolution_result(plan._symbolic@, plan.storage.augmented_inputs, plan.gate_count, Ok(plan.definitions))
     }
 
+    /// 配線の閉路を構成するビットは、終端を持つ呼び出しからは生じない。
+    proof fn cycle_has_projection(
+        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, storage: &ClockedStorageLayout,
+        bits: Seq<ClockedWireDriver>, gates: Seq<Option<usize>>, calls: Seq<usize>, cursors: Seq<usize>,
+        slot: usize, bit: usize,
+    )
+        requires
+            self.endpoint_prefix(checked, ports, storage, bits, gates, calls, cursors),
+            slot < calls.len() - 1,
+            ({
+                let range = ports.definitions.ranges_model()[slot as int];
+                range.start <= bit < range.end
+            }),
+            bits[bit as int] is Alias,
+        ensures Self::endpoint_projection(checked, slot as int).is_some(),
+    {
+        self.endpoint_prefix_row(checked, ports, storage, bits, gates, calls, cursors, slot as int);
+        reveal(UseAliases::endpoint_row);
+        if Self::endpoint_projection(checked, slot as int).is_none() {
+            let range = ports.definitions.ranges_model()[slot as int];
+            let row = bits.subrange(range.start as int, range.end as int);
+            let offset = bit - range.start;
+            assert(row[offset] == bits[bit as int]);
+            if let Some(gate) = gates[calls[slot as int] as int] {
+                assert(offset == 0 && row[offset] == ClockedWireDriver::Terminal(Wire::Gate(gate)));
+            } else {
+                let instance = storage.by_call@[calls[slot as int] as int]->Some_0;
+                let outputs = storage.instances@[instance as int].outputs;
+                assert(row[offset] == ClockedWireDriver::Terminal(Wire::Input((outputs.start + offset) as usize)));
+            }
+        }
+    }
+
+    #[verifier::opaque]
+    spec fn projection_cycle_locations(
+        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, cycle: Seq<usize>, sites: Seq<LocatedName>,
+    ) -> bool {
+        &&& sites.len() <= cycle.len()
+        &&& forall|i: int| 0 <= i < sites.len() ==> {
+            let site = #[trigger] sites[i];
+            exists|slot: int| {
+                let range = #[trigger] ports.definitions.ranges_model()[slot];
+                &&& 0 <= slot < ports.definitions.ranges_model().len()
+                &&& range.start <= cycle[i] < range.end
+                &&& self.endpoint_projection_site_at(checked, slot, site)
+            }
+        }
+    }
+
+    proof fn append_projection_cycle_location(
+        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, cycle: Seq<usize>,
+        sites: Seq<LocatedName>, slot: usize, site: LocatedName,
+    )
+        requires
+            self.projection_cycle_locations(checked, ports, cycle, sites),
+            sites.len() < cycle.len(),
+            slot < ports.definitions.ranges_model().len(),
+            ports.definitions.ranges_model()[slot as int].start <= cycle[sites.len() as int]
+                < ports.definitions.ranges_model()[slot as int].end,
+            self.endpoint_projection_site_at(checked, slot as int, site),
+        ensures self.projection_cycle_locations(checked, ports, cycle, sites.push(site)),
+    {
+        reveal(UseAliases::projection_cycle_locations);
+        let next = sites.push(site);
+        assert forall|i: int| 0 <= i < next.len() implies {
+            let at = #[trigger] next[i];
+            exists|index: int| {
+                let range = #[trigger] ports.definitions.ranges_model()[index];
+                &&& 0 <= index < ports.definitions.ranges_model().len()
+                &&& range.start <= cycle[i] < range.end
+                &&& self.endpoint_projection_site_at(checked, index, at)
+            }
+        } by {
+            if i < sites.len() {
+                assert(next[i] == sites[i]);
+            } else {
+                assert(next[i] == site);
+                assert(ports.definitions.ranges_model()[slot as int].start <= cycle[i]
+                    < ports.definitions.ranges_model()[slot as int].end);
+            }
+        };
+    }
+
+    spec fn cycle_on_checked(
+        &self, checked: &ModuleCalls, limit: u64, capacity: usize, gate_limit: usize, sites: Seq<LocatedName>,
+    ) -> bool {
+        exists|ports: ClockedModuleOutputs, storage: ClockedStorageLayout, bits: Seq<ClockedWireDriver>,
+            gates: Seq<Option<usize>>, calls: Seq<usize>, cursors: Seq<usize>, gate_count: usize, cycle: Vec<usize>|
+            #[trigger] self.endpoint_prefix(checked, &ports, &storage, bits, gates, calls, cursors)
+            && #[trigger] self.projection_cycle_locations(checked, &ports, cycle@, sites)
+            && #[trigger] clocked_resolution_result(bits, storage.augmented_inputs, gate_count, Err(ClockedPlanError::AliasCycle(cycle)))
+            && self.outputs_on_checked(&checked.module, limit, capacity, Ok(ports))
+            && self.storage_on_checked(checked, limit, ports.inputs.total_bits_model(), capacity, Ok(storage))
+            && calls.len() == ports.definitions.ranges_model().len() + 1
+            && cursors.last() == gate_count && gate_count <= gate_limit
+            && clocked_wire_cycle(bits, cycle@) && cycle@.len() == sites.len()
+    }
+
     fn prepare_vm_endpoints(
         &self, owner: ModuleBodyPosition, limit: u64, capacity: usize, gate_limit: usize, checked: &ModuleCalls<'p, 'a>,
     ) -> (result: Result<ClockedModuleEndpoints<'p, 'a>, ClockedEndpointError<'p, 'a>>)
@@ -540,6 +743,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures
             result matches Ok(plan) ==> self.endpoints_on_checked(checked, limit, capacity, gate_limit, &plan),
             !(result matches Err(ClockedEndpointError::Calls(_))),
+            result matches Err(ClockedEndpointError::AliasCycle(sites)) ==>
+                self.cycle_on_checked(checked, limit, capacity, gate_limit, sites@),
     {
         proof { self.module_calls_type_evidence(owner, limit, checked); }
         let ports = match self.wire_clocked_outputs(owner, limit, capacity, &checked.module) {
@@ -579,27 +784,48 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 return Err(ClockedEndpointError::Driver(self.source_driver_location(owner, limit, drivers, slot)));
             },
             Err(ClockedPlanError::AliasCycle(cycle)) => {
-                let aliases = &checked.module.expressions.typed.sources.aliases;
                 let mut sites = Vec::new();
                 if sites.try_reserve_exact(cycle.len()).is_err() { return Err(ClockedEndpointError::Allocation); }
+                assert(self.projection_cycle_locations(checked, &ports, cycle@, sites@)) by {
+                    reveal(UseAliases::projection_cycle_locations);
+                };
                 let mut i = 0usize;
                 while i < cycle.len()
                     invariant
                         i <= cycle@.len(), sites@.len() == i,
-                        aliases@.len() == drivers.definitions@.len() == ports.definitions.ranges_model().len(),
+                        drivers.definitions@.len() == ports.definitions.ranges_model().len(),
+                        checked.module.expressions.typed.sources.aliases@.len() == drivers.definitions@.len(),
+                        checked.module.expressions.selections@.len() == drivers.definitions@.len(),
+                        self.module_calls_result(owner, limit, Ok(Some(*checked))),
+                        self.outputs_on_checked(&checked.module, limit, capacity, Ok(ports)),
+                        self.storage_on_checked(checked, limit, ports.inputs.total_bits_model(), capacity, Ok(storage)),
                         ports.definitions.total_bits_model() == symbolic@.len(),
-                        self.can_resolve(), self.module_drivers_result(owner, limit, Ok(Some(*drivers))),
+                        self.can_resolve(),
+                        call_cursors@.len() == ports.definitions.ranges_model().len() + 1,
+                        self.endpoint_prefix(checked, &ports, &storage, symbolic@, gate_by_call@,
+                            call_cursors@, gate_cursors@),
+                        gate_cursors@.last() == gate_count && gate_count <= gate_limit,
+                        clocked_wire_cycle(symbolic@, cycle@),
+                        clocked_resolution_result(symbolic@, storage.augmented_inputs, gate_count,
+                            Err(ClockedPlanError::AliasCycle(cycle))),
+                        self.projection_cycle_locations(checked, &ports, cycle@, sites@),
                         forall|j: int| 0 <= j < cycle@.len() ==> #[trigger] cycle@[j] < symbolic@.len(),
                     decreases cycle@.len() - i,
                 {
-                    let Some(slot) = ports.definitions.port_at_bit(cycle[i]) else { unreachable!() };
-                    let site = match &aliases[slot] {
-                        Some(alias) => crate::project::use_aliases::function_atoms::copy_location(&alias.reference),
-                        None => self.source_driver_location(owner, limit, drivers, slot),
-                    };
+                    let bit = cycle[i];
+                    let Some(slot) = ports.definitions.port_at_bit(bit) else { unreachable!() };
+                    proof {
+                        clocked_cycle_edge(symbolic@, cycle@, i as int);
+                        self.cycle_has_projection(checked, &ports, &storage, symbolic@, gate_by_call@,
+                            call_cursors@, gate_cursors@, slot, bit);
+                    }
+                    let site = self.endpoint_projection_site(owner, limit, checked, slot);
+                    let ghost prior = sites@;
                     sites.push(site);
+                    proof { self.append_projection_cycle_location(checked, &ports, cycle@, prior, slot, site); }
                     i += 1;
                 }
+                assert(self.cycle_on_checked(checked, limit, capacity, gate_limit, sites@));
                 return Err(ClockedEndpointError::AliasCycle(sites));
             },
         };

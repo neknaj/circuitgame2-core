@@ -394,6 +394,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(checked.types@[i] == inherited_type(inputs, sources.roots.types@, sources.aliases@, checked.types@, i));
     }
 
+    /// 裸名参照としての依存先がない行では、右辺に割り当てた型をそのまま保持する。
+    pub(super) proof fn module_alias_keeps_root_type(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleAliasTypes, slot: usize,
+    )
+        requires
+            self.module_alias_types_result(owner, limit, Ok(Some(checked))),
+            slot < checked.sources.roots.wiring.drivers.definitions@.len(),
+            checked.sources.aliases@[slot as int].is_none(),
+        ensures checked.types@[slot as int] == checked.sources.roots.types@[slot as int],
+    {
+        self.module_alias_types_evidence(owner, limit, checked);
+        let sources = checked.sources;
+        let inputs = sources.roots.wiring.drivers.signature.inputs@;
+        let i = slot as int;
+        assert(checked.types@[i] == inherited_type(inputs, sources.roots.types@, sources.aliases@, checked.types@, i));
+    }
+
     /// 別名が引き継いだ構造体型も、入力または右辺が参照する元の宣言を指す。
     pub(super) proof fn module_alias_type_declarations(&self, owner: ModuleBodyPosition, limit: u64, checked: ModuleAliasTypes)
         requires self.module_alias_types_result(owner, limit, Ok(Some(checked))),
