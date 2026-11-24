@@ -5,7 +5,7 @@ use super::super::super::clocked_source::relocate_child_output;
 use super::super::super::clocked_source::{relocated_child_driver, resolved_driver};
 use crate::netlist::{ClockedNor, PortBitLayout};
 #[cfg(verus_only)]
-use crate::netlist::{Wire, clocked_stateful_arguments, instance_outputs_match, instance_wire};
+use crate::netlist::{NorNetlist, Wire, clocked_stateful_arguments, instance_outputs_match, instance_wire};
 #[cfg(verus_only)]
 use super::resolved_bits;
 use super::{ClockedEndpointError, ClockedModuleVmLimits, ModuleBodyPosition, ModuleCalls, UseAliases};
@@ -34,7 +34,15 @@ pub(super) open spec fn child_port_drivers_match(
     child: &ClockedNor, outputs: &PortBitLayout, port: usize,
     arguments: Seq<ClockedWireDriver>, states: Range<usize>, gates: Range<usize>, drivers: Seq<ClockedWireDriver>,
 ) -> bool {
-    let wires = child.netlist_model().outputs@;
+    child_netlist_port_drivers_match(&child.netlist_model(), outputs, port, arguments, states, gates, drivers)
+}
+
+/// 子のネットリストと配置から、解決前の親の定義配線を定める。
+pub(super) open spec fn child_netlist_port_drivers_match(
+    child: &NorNetlist, outputs: &PortBitLayout, port: usize,
+    arguments: Seq<ClockedWireDriver>, states: Range<usize>, gates: Range<usize>, drivers: Seq<ClockedWireDriver>,
+) -> bool {
+    let wires = child.outputs@;
     &&& port < outputs.ranges_model().len()
     &&& outputs.total_bits_model() == wires.len()
     &&& {

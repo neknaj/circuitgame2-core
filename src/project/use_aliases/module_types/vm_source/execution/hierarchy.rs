@@ -30,7 +30,7 @@ use super::{ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmError, Clocked
 #[cfg(verus_only)]
 use super::row_model;
 #[cfg(verus_only)]
-use super::child_outputs::{child_port_drivers_match, child_port_resolves_to_instance};
+use super::child_outputs::{child_netlist_port_drivers_match, child_port_drivers_match, child_port_resolves_to_instance};
 #[cfg(verus_only)]
 use super::resolved_bits;
 #[cfg(verus_only)]
@@ -40,7 +40,7 @@ use super::super::super::clocked_plan::{clocked_cycle_edge, clocked_wire_at, clo
 use crate::netlist::{ClockedNor, ClockedStatefulInstanceError, ClockedStorageInputs, NorGate, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
 use crate::netlist::{clocked_stateful_arguments, clocked_storage_output_width, clocked_storage_width_concat,
-    instance_outputs_match};
+    instance_outputs_match, output_ports_available};
 use crate::project::{LocatedName, ModuleCallTarget};
 use alloc::{boxed::Box, vec::Vec};
 use core::ops::Range;
@@ -227,6 +227,8 @@ proof fn partition_owner(
 
 /// 親の定義と公開ポートが参照する配線、および各呼び出しの移設済み出力。
 pub(super) struct HierarchyWiring {
+    /// 解決前の終点または直結先。ソース側の定義の解決に使う。
+    symbolic: Seq<ClockedWireDriver>,
     definitions: Seq<Wire>,
     origins: Seq<HierarchyRowOrigin>,
     routines: Seq<Option<RoutineWiring>>,
@@ -340,6 +342,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 == network.circuit.netlist_model().input_count
             && (network._hierarchy_wiring@ matches Some(wiring)
                 && self.hierarchy_public_wiring(checked, limits.width, &ports, &wiring, network.circuit.netlist_model().outputs@)
+                && output_ports_available(wiring.definitions, network.circuit.netlist_model().input_count as nat,
+                    network.circuit.netlist_model().gates@.len(), wiring.definitions.len() as int)
                 && self.hierarchy_primitives_bound(checked, limits.width, &ports, wiring.definitions,
                     wiring.primitives, network.circuit.netlist_model().gates@,
                     network.storage@.take(wiring.direct_devices as int), network.storage_sites@.take(wiring.direct_devices as int))
@@ -436,6 +440,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let definitions = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@;
         &&& wiring.origins.len() == definitions.len() == ports.definitions.ranges_model().len()
         &&& wiring.definitions.len() == ports.definitions.total_bits_model()
+        &&& clocked_wires_match(wiring.symbolic, wiring.definitions)
         &&& resolved_bits(row_model(ports.drivers@), wiring.definitions, outputs)
         &&& wiring.routines.len() == checked.calls@.len()
         &&& forall|call: int| 0 <= call < checked.calls@.len() ==>
@@ -454,9 +459,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         let parent = ports.definitions.ranges_model()[slot];
         let expected = wiring.definitions.subrange(parent.start as int, parent.end as int);
+        let symbolic = wiring.symbolic.subrange(parent.start as int, parent.end as int);
         match wiring.origins[slot] {
             HierarchyRowOrigin::Local(wires) => {
                 self.wire_definition_without_call_matches(checked, ports, slot as usize, Some(wires))
+                    && wires@ == symbolic
                     && resolved_bits(wires@, wiring.definitions, expected)
             },
             HierarchyRowOrigin::Call(call) => {
@@ -464,10 +471,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& call < wiring.routines.len()
                 &&& match wiring.routines[call as int] {
                     None => self.source_vm_direct_slot(checked, slot, call as int)
-                        && (wiring.primitives[call as int] matches Some(primitive) && expected == primitive.outputs),
+                        && (wiring.primitives[call as int] matches Some(primitive)
+                            && expected == primitive.outputs
+                            && symbolic == primitive.outputs.map_values(|wire: Wire| ClockedWireDriver::Terminal(wire))),
                     Some(routine) => {
                         let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index as int;
                         &&& port < routine.layout.ranges_model().len()
+                        &&& child_netlist_port_drivers_match(&routine.callee, &routine.layout, port as usize,
+                            row_model(routine.argument_rows@), routine.state_inputs, routine.gates, symbolic)
                         &&& {
                             let child = routine.layout.ranges_model()[port];
                             expected == routine.outputs.subrange(child.start as int, child.end as int)
@@ -1223,7 +1234,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             forall|i: int| 0 <= i < symbolic._origins@.len() ==> #[trigger]
                 self.hierarchy_row_matches(checked, ports, calls@, symbolic.bits@, i, symbolic._origins@[i]),
         ensures result matches Ok(definitions) ==> definitions@.len() == symbolic.bits@.len()
-                && clocked_wires_match(symbolic.bits@, definitions@),
+                && clocked_wires_match(symbolic.bits@, definitions@)
+                && output_ports_available(definitions@, inputs as nat, gates as nat, definitions@.len() as int),
             !(result matches Err(ClockedModuleVmError::Hierarchy(_) | ClockedModuleVmError::ChildStateCapacity { .. })),
     {
         let expressions = &checked.module.expressions;
@@ -1421,6 +1433,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             }),
             total_inputs <= limits.wiring_bits, total_gates <= limits.gates,
             clocked_wires_match(_rows.bits@, definitions@),
+            output_ports_available(definitions@, total_inputs as nat, total_gates as nat, definitions@.len() as int),
             _rows._origins@.len() == checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len(),
             _rows.bits@.len() == definitions@.len() == ports.definitions.total_bits_model(),
             forall|i: int| 0 <= i < _rows._origins@.len() ==> #[trigger]
@@ -1730,7 +1743,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         let ghost source_ports = ports;
         let ghost wiring = HierarchyWiring {
-            definitions: definitions@, origins: _rows._origins@, routines: captured, primitives,
+            symbolic: _rows.bits@, definitions: definitions@, origins: _rows._origins@, routines: captured, primitives,
             boundaries, direct_devices, first_child_input: first_state,
         };
         proof {
@@ -1778,6 +1791,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                                     assert(_rows.bits@[range.start + bit] == symbols[bit]);
                                 };
                                 assert(expected =~= item.outputs);
+                            } else {
+                                let placed = calls@[index as int]->Some_0;
+                                let routine = captured[index as int]->Some_0;
+                                let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index;
+                                let range = source_ports.definitions.ranges_model()[slot];
+                                let symbolic = _rows.bits@.subrange(range.start as int, range.end as int);
+                                assert(row_model(routine.argument_rows@) == placed.arguments@);
+                                assert(child_port_drivers_match(placed.circuit, placed.outputs, port,
+                                    placed.arguments@, placed.states, placed.gates, symbolic));
+                                assert(child_netlist_port_drivers_match(&routine.callee, &routine.layout, port,
+                                    row_model(routine.argument_rows@), routine.state_inputs, routine.gates, symbolic));
                             }
                         },
                         HierarchyRowOrigin::Local(wires) => {

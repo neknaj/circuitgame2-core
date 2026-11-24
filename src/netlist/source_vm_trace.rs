@@ -6,6 +6,8 @@ use vstd::arithmetic::power2::{lemma_pow2_unfold, pow2};
 use vstd::prelude::*;
 
 mod layout;
+mod stateless;
+pub(crate) use stateless::{source_vm_lift_stateless, source_vm_stateless_model};
 pub(crate) use layout::{
     source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_layout_port_evidence,
     source_vm_row_pair, source_vm_storage_pair,

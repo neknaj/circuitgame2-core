@@ -6,12 +6,14 @@ use super::placement_model::{
 use super::source_ids::{
     HierarchySourceIds, child_source_ids_at, children_follow_calls, source_device_under, source_ids_match_network,
 };
-use super::{ClockedModuleNetwork, ClockedModuleVmLimits, ModuleCalls, UseAliases};
+use super::{
+    ClockedFunctionTemplate, ClockedModuleNetwork, ClockedModuleVmLimits, ModuleCalls, UseAliases, function_target,
+};
 use crate::netlist::{
     ClockedStorageInputs, NorNetlist, SourceStorage, SourceVmCircuit, SourceVmNor, SourceVmWire, Wire,
     clocked_stateful_arguments, clocked_storage_output_width, instance_gates_at, instance_outputs_match, instance_wire,
     source_gate_under, source_vm_layout_for_orders, source_vm_layout_matches, source_vm_layout_port_evidence,
-    source_vm_row_pair, source_vm_storage_pair, source_vm_terminal_pair,
+    source_vm_lift_stateless, source_vm_row_pair, source_vm_stateless_model, source_vm_storage_pair, source_vm_terminal_pair,
 };
 use crate::project::DefinitionPosition;
 use vstd::prelude::*;
@@ -246,6 +248,41 @@ pub(super) proof fn source_vm_child_ports_placed(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 実際に選択した関数展開を、状態素子が空の子回路として照合する。
+    pub(super) proof fn hierarchy_function_source(
+        &self, limits: ClockedModuleVmLimits, checked: &ModuleCalls, network: &ClockedModuleNetwork,
+        edges: Seq<Option<usize>>, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, call: int,
+    ) -> (source: SourceVmCircuit)
+        requires
+            Self::network_uses_selected_templates(checked, edges, networks, functions, network),
+            self.clocked_functions_match(functions, limits.width, limits.wiring_bits, limits.gates),
+            0 <= call < checked.calls@.len(), function_target(checked, edges, call).is_some(),
+            (network._hierarchy_wiring@->Some_0).routines[call].is_some(),
+        ensures ({
+            let key = function_target(checked, edges, call)->Some_0;
+            let template = functions[key];
+            let routine = (network._hierarchy_wiring@->Some_0).routines[call]->Some_0;
+            &&& source == source_vm_stateless_model(&template._source@.0)
+            &&& routine.devices.len() == 0 && routine.callee == template.circuit.netlist_model()
+            &&& source_vm_layout_matches(&source, &routine.callee, routine.devices,
+                &source_vm_layout_for_orders(template._source@.1, Seq::empty()))
+        }),
+    {
+        reveal(UseAliases::network_uses_selected_templates);
+        let wiring = network._hierarchy_wiring@->Some_0;
+        let routine = wiring.routines[call]->Some_0;
+        let key = function_target(checked, edges, call)->Some_0;
+        let template = functions[key];
+        assert(Self::routine_uses_selected_template(checked, edges, networks, functions, call,
+            routine.callee, routine.inputs, routine.layout, routine.devices));
+        self.clocked_function_template_evidence(key, limits.width, limits.wiring_bits, limits.gates, &template);
+        let (model, order, index) = template._source@;
+        let source = source_vm_lift_stateless(&model, &routine.callee, order, index);
+        assert(routine.devices =~= Seq::empty());
+        source
+    }
+
     /// 階層コンパイラが割り当てた区間から、子の配線対応を取り出す。
     pub(super) proof fn hierarchy_child_port_evidence(
         &self, limits: ClockedModuleVmLimits, checked: &ModuleCalls, network: &ClockedModuleNetwork,
