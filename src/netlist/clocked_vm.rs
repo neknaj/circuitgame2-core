@@ -52,6 +52,7 @@ spec fn laid_out(storage: Seq<ClockedStorage>, starts: Seq<usize>, external: usi
         let device = #[trigger] storage[i];
         &&& device.input_count_model() == inputs
         &&& device.gate_count_model() == gates
+        &&& device.wiring_model().pins_available(inputs as nat, gates)
         &&& device.output_model().len() == device.wiring_model().data@.len()
         &&& device.memory_shape()
         &&& starts[i + 1] == starts[i] + device.output_model().len()
@@ -77,6 +78,7 @@ proof fn update_layout(storage: Seq<ClockedStorage>, starts: Seq<usize>, externa
         let device = #[trigger] updated[j];
         &&& device.input_count_model() == inputs
         &&& device.gate_count_model() == gates
+        &&& device.wiring_model().pins_available(inputs as nat, gates)
         &&& device.output_model().len() == device.wiring_model().data@.len()
         &&& device.memory_shape()
         &&& starts[j + 1] == starts[j] + device.output_model().len()
@@ -477,6 +479,7 @@ fn bind_storage(circuit: &ClockedNor, _external: usize, mut pending: Vec<Clocked
                     let device = #[trigger] storage@[j];
                     &&& device.input_count_model() == inputs
                     &&& device.gate_count_model() == gates
+                    &&& device.wiring_model().pins_available(inputs as nat, gates as nat)
                     &&& device.output_model().len() == device.wiring_model().data@.len()
                     &&& device.memory_shape()
                     &&& _starts@.take(i + 2)[j + 1] == _starts@.take(i + 2)[j] + device.output_model().len()
@@ -515,6 +518,16 @@ impl ClockedVm {
 
     /// ゲートと公開出力が参照する回路のネットリスト。
     pub closed spec fn netlist_model(&self) -> NorNetlist { self.circuit.netlist_model() }
+
+    /// VM のすべての端子が、同じ増補入力列とゲート列の範囲内にあることを示す。
+    pub(crate) proof fn network_pin_bounds(&self)
+        requires self.valid(),
+        ensures clocked_wiring_valid(&self.netlist_model()),
+            forall|i: int| 0 <= i < self.storage_model().len() ==>
+                (#[trigger] self.storage_model()[i]).wiring_model().pins_available(
+                    self.netlist_model().input_count as nat, self.netlist_model().gates@.len()),
+    {
+    }
 
     /// 指定した状態素子の登録出力を読む、増補入力上の半開区間。
     pub closed spec fn storage_input_range_model(&self, device: int) -> core::ops::Range<usize>

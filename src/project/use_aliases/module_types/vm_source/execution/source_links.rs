@@ -1,6 +1,7 @@
 //! ソース側の直結を解決し、展開後の配線と照合する。
 
 use super::super::super::clocked_plan::{clocked_alias_ranks, clocked_wire_at, clocked_wires_match};
+use super::resolved_driver;
 use crate::netlist::{
     ClockedStorageInputs, SourceVmLayout, SourceVmWire, Wire, source_vm_row_pair, source_vm_terminal_pair,
 };
@@ -34,6 +35,30 @@ pub(super) open spec fn source_vm_links_resolved(links: Seq<SourceVmLink>, wires
     &&& forall|i: int| 0 <= i < links.len() ==> match #[trigger] links[i] {
         SourceVmLink::Terminal(wire) => wires[i] == wire,
         SourceVmLink::Alias(target) => target < wires.len() && wires[i] == wires[target as int],
+    }
+}
+
+/// 解決済みの定義配線を使い、実引数や公開出力の一つのビットを読む。
+pub(super) open spec fn source_vm_link_value(link: SourceVmLink, definitions: Seq<SourceVmWire>) -> SourceVmWire {
+    match link {
+        SourceVmLink::Terminal(wire) => wire,
+        SourceVmLink::Alias(target) => definitions[target as int],
+    }
+}
+
+/// 定義末端への対応を、その定義を読む実引数と公開出力へ移す。
+pub(super) proof fn source_vm_operand_pair(
+    external: usize, storage: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+    link: SourceVmLink, driver: ClockedWireDriver, definitions: Seq<SourceVmWire>, flat_definitions: Seq<Wire>, flat: Wire,
+)
+    requires
+        source_vm_link_pair(external, storage, layout, link, driver),
+        source_vm_row_pair(external, storage, layout, definitions, flat_definitions),
+        resolved_driver(driver, flat_definitions) == Some(flat),
+    ensures source_vm_terminal_pair(external, storage, layout, source_vm_link_value(link, definitions), flat),
+{
+    if let SourceVmLink::Alias(target) = link {
+        assert(flat_definitions[target as int] == flat);
     }
 }
 

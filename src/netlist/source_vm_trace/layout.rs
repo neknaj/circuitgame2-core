@@ -127,6 +127,44 @@ proof fn index_by_order<K>(order: Seq<K>)
     };
 }
 
+proof fn paired_terminal_valid(
+    source: &SourceVmCircuit, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+    terminal: SourceVmWire, flat: Wire,
+)
+    requires
+        indexed(layout.gates, layout.gate_index, source.gates.dom()),
+        indexed(layout.devices, layout.device_index, source.storage.dom()),
+        layout.devices.len() == wiring.len(),
+        forall|i: int| 0 <= i < wiring.len() ==>
+            source.storage[layout.devices[i]].data.len() == (#[trigger] wiring[i]).data@.len(),
+        source_vm_terminal_pair(source.input_count, wiring, layout, terminal, flat),
+    ensures super::wire_valid(source, terminal),
+{
+    if let SourceVmWire::Registered(id, _) = terminal {
+        let i = layout.device_index[id];
+        assert(layout.devices[i] == id);
+        assert(source.storage[id].data.len() == wiring[i].data@.len());
+    }
+}
+
+proof fn paired_row_valid(
+    source: &SourceVmCircuit, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+    row: Seq<SourceVmWire>, flat: Seq<Wire>,
+)
+    requires
+        indexed(layout.gates, layout.gate_index, source.gates.dom()),
+        indexed(layout.devices, layout.device_index, source.storage.dom()),
+        layout.devices.len() == wiring.len(),
+        forall|i: int| 0 <= i < wiring.len() ==>
+            source.storage[layout.devices[i]].data.len() == (#[trigger] wiring[i]).data@.len(),
+        source_vm_row_pair(source.input_count, wiring, layout, row, flat),
+    ensures super::wire_row_valid(source, row),
+{
+    assert forall|i: int| 0 <= i < row.len() implies super::wire_valid(source, #[trigger] row[i]) by {
+        paired_terminal_valid(source, wiring, layout, row[i], flat[i]);
+    };
+}
+
 /// ソースの端子と VM 配線の照合から、実行全体で使う対応関係を組み立てる。
 ///
 /// ソース回路と素子の順序は呼び出し側が与える。ゲート、状態素子、公開出力の全端子を照合する。
@@ -135,7 +173,6 @@ pub(crate) proof fn source_vm_layout_from_pairs(
     gates: Seq<SourceGateId>, devices: Seq<SourceDeviceId>,
 )
     requires
-        source_vm_wiring_valid(source),
         gates.no_duplicates() && devices.no_duplicates(),
         source.gates.dom() == gates.to_set() && source.storage.dom() == devices.to_set(),
         gates.len() == netlist.gates@.len() && devices.len() == wiring.len(),
@@ -147,15 +184,54 @@ pub(crate) proof fn source_vm_layout_from_pairs(
             &&& source_vm_terminal_pair(source.input_count, wiring, &layout, original.left, lowered.left)
             &&& source_vm_terminal_pair(source.input_count, wiring, &layout, original.right, lowered.right)
         },
-        forall|i: int| 0 <= i < devices.len() ==>
-            source_vm_storage_pair(source.input_count, wiring, &source_vm_layout_for_orders(gates, devices),
-                source.storage[devices[i]], #[trigger] wiring[i]),
+        forall|i: int| 0 <= i < devices.len() ==> {
+            let flat = #[trigger] wiring[i];
+            &&& flat.data@.len() > 0
+            &&& source_vm_storage_pair(source.input_count, wiring, &source_vm_layout_for_orders(gates, devices),
+                source.storage[devices[i]], flat)
+        },
         source_vm_row_pair(source.input_count, wiring, &source_vm_layout_for_orders(gates, devices),
             source.outputs, netlist.outputs@),
     ensures source_vm_layout_matches(source, netlist, wiring, &source_vm_layout_for_orders(gates, devices)),
+        source_vm_wiring_valid(source),
 {
     index_by_order(gates);
     index_by_order(devices);
+    let layout = source_vm_layout_for_orders(gates, devices);
+    let external = source.input_count;
+    assert forall|i: int| 0 <= i < wiring.len() implies
+        source.storage[devices[i]].data.len() == (#[trigger] wiring[i]).data@.len() by {
+        assert(source_vm_storage_pair(external, wiring, &layout, source.storage[devices[i]], wiring[i]));
+    };
+    assert forall|id: SourceGateId| source.gates.contains_key(id) implies {
+        let gate = #[trigger] source.gates[id];
+        super::wire_valid(source, gate.left) && super::wire_valid(source, gate.right)
+    } by {
+        let i = layout.gate_index[id];
+        let flat = netlist.gates@[i];
+        assert(gates[i] == id);
+        paired_terminal_valid(source, wiring, &layout, source.gates[id].left, flat.left);
+        paired_terminal_valid(source, wiring, &layout, source.gates[id].right, flat.right);
+    };
+    assert forall|id: SourceDeviceId| source.storage.contains_key(id) implies {
+        let device = #[trigger] source.storage[id];
+        &&& device.data.len() > 0
+        &&& super::wire_row_valid(source, device.data)
+        &&& super::wire_valid(source, device.enable)
+        &&& (device.address matches Some(address) ==> super::wire_row_valid(source, address))
+    } by {
+        let i = layout.device_index[id];
+        let flat = wiring[i];
+        let device = source.storage[id];
+        assert(devices[i] == id);
+        assert(source_vm_storage_pair(external, wiring, &layout, device, flat));
+        paired_row_valid(source, wiring, &layout, device.data, flat.data@);
+        paired_terminal_valid(source, wiring, &layout, device.enable, flat.enable);
+        if let Some(address) = device.address {
+            paired_row_valid(source, wiring, &layout, address, flat.address->Some_0@);
+        }
+    };
+    paired_row_valid(source, wiring, &layout, source.outputs, netlist.outputs@);
 }
 
 /// VM の状態を、添字に対応するソース ID から引ける形にする。

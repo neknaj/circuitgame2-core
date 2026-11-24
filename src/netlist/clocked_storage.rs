@@ -247,6 +247,7 @@ pub(super) proof fn storage_bound(
     requires clocked_storage_result(wiring, inputs, gates, budget, Ok(device)),
     ensures
         storage_fits(wiring, inputs, gates, budget),
+        wiring.pins_available(inputs as nat, gates as nat),
         device.input_count_model() == inputs, device.gate_count_model() == gates,
         device.wiring_model() == *wiring,
         device.memory_shape(),

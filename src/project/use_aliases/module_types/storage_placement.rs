@@ -128,6 +128,25 @@ impl ClockedStoragePlacement<'_, '_> {
         ensures self.outputs.start + inputs.data@.len() == self.outputs.end,
     {
     }
+
+    /// 型検査済みの幅で、平坦な引数列をアドレス、データ、許可入力に分ける。
+    pub(super) proof fn storage_input_rows_evidence(&self, wires: Seq<Wire>, inputs: ClockedStorageInputs)
+        requires self.storage_inputs_match(wires, Some(inputs)),
+        ensures ({
+            let address = self.address_bits.unwrap_or(0) as int;
+            let width = self.outputs.end - self.outputs.start;
+            let end = address + width;
+            &&& 0 < width && end + 1 == wires.len()
+            &&& inputs.enable == wires[end]
+            &&& inputs.data@ == wires.subrange(address, end)
+            &&& match (self.address_bits, inputs.address) {
+                (Some(_), Some(pins)) => pins@ == wires.take(address),
+                (None, None) => true,
+                _ => false,
+            }
+        }),
+    {
+    }
 }
 
 fn copy_storage_wires(wires: &[Wire], start: usize, end: usize) -> (out: Vec<Wire>)
