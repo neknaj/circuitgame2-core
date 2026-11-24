@@ -1,9 +1,14 @@
 //! ソース上の配線と、展開後の VM の配線を対応付ける。
 
-use super::{SourceDeviceId, SourceDeviceState, SourceStorage, SourceVmCircuit, SourceVmFrame, SourceVmState, SourceVmWire,
-    source_vm_reset_matches, source_vm_state_matches, source_vm_wiring_valid};
-use crate::netlist::{ClockedStorageInputs, ClockedVm, NorNetlist, SourceGateId, Wire, clocked_storage_output_width,
-    clocked_storage_memory_width, output_values_match, wire_value};
+use super::{
+    SourceDeviceId, SourceDeviceState, SourceStorage, SourceVmCircuit, SourceVmFrame, SourceVmState, SourceVmWire,
+    source_vm_reset_matches, source_vm_state_matches, source_vm_step_matches, source_vm_wiring_valid,
+};
+use crate::netlist::{
+    ClockedStorageInputs, ClockedVm, NorNetlist, SourceGateId, Wire, clocked_storage_memory_width,
+    clocked_storage_output_width, clocked_storage_pin_values, clocked_storage_value_transition, clocked_vm_trace,
+    output_values_match, wire_value,
+};
 use vstd::prelude::*;
 
 verus! {
@@ -237,6 +242,174 @@ pub proof fn source_vm_project_reset(
             == match frame.state.storage[id].memory { Some(bits) => Some(bits.len()), None => None });
     };
     frame
+}
+
+proof fn mapped_row_values(
+    source: &SourceVmCircuit, vm: &ClockedVm, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+    input: Seq<bool>, augmented: Seq<bool>, original: Seq<SourceVmWire>, flat: Seq<Wire>,
+)
+    requires source_vm_layout_matches(source, &vm.netlist_model(), wiring, layout),
+        vm.layout_matches(vm.netlist_model(), source.input_count, wiring),
+        vm.augmented_input_matches(input, augmented),
+        row_pair(source.input_count, wiring, layout, original, flat),
+    ensures
+        original.map_values(|pin: SourceVmWire| super::wire_value(pin, input, source_vm_state_projection(vm, layout)))
+            == Seq::new(flat.len(), |i: int| wire_value(flat[i], augmented, vm.gate_values_model())),
+{
+    let state = source_vm_state_projection(vm, layout);
+    let original_bits = original.map_values(|pin: SourceVmWire| super::wire_value(pin, input, state));
+    let flat_bits = Seq::new(flat.len(), |i: int| wire_value(flat[i], augmented, vm.gate_values_model()));
+    assert(original_bits =~= flat_bits) by {
+        assert forall|i: int| 0 <= i < flat.len() implies original_bits[i] == flat_bits[i] by {
+            assert(source_vm_wire_matches(source, wiring, layout, original[i], flat[i]));
+            source_vm_mapped_wire_value(source, vm, wiring, layout, input, augmented, original[i], flat[i]);
+        };
+    };
+}
+
+proof fn mapped_storage_pins(
+    source: &SourceVmCircuit, vm: &ClockedVm, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+    input: Seq<bool>, augmented: Seq<bool>, original: SourceStorage, flat: &ClockedStorageInputs,
+)
+    requires source_vm_layout_matches(source, &vm.netlist_model(), wiring, layout),
+        vm.layout_matches(vm.netlist_model(), source.input_count, wiring),
+        vm.augmented_input_matches(input, augmented),
+        storage_pair(source.input_count, wiring, layout, original, *flat),
+    ensures super::read_pins(original, input, source_vm_state_projection(vm, layout))
+        == clocked_storage_pin_values(flat, augmented, vm.gate_values_model()),
+{
+    if let Some(address) = original.address {
+        let flat_address = flat.address->Some_0;
+        mapped_row_values(source, vm, wiring, layout, input, augmented, address, flat_address@);
+    }
+    mapped_row_values(source, vm, wiring, layout, input, augmented, original.data, flat.data@);
+    assert(source_vm_wire_matches(source, wiring, layout, original.enable, flat.enable));
+    source_vm_mapped_wire_value(source, vm, wiring, layout, input, augmented, original.enable, flat.enable);
+}
+
+/// VM の 1 tick がソースの状態遷移と同じ結果を返すことを示す。
+///
+/// NOR と状態素子は tick 開始時の状態を読み、公開ポートは更新後の状態を読む。
+pub proof fn source_vm_project_step(
+    source: &SourceVmCircuit, previous: &ClockedVm, next: &ClockedVm,
+    wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout, input: Seq<bool>, output: Seq<bool>,
+) -> (frame: SourceVmFrame)
+    requires source_vm_layout_matches(source, &previous.netlist_model(), wiring, layout),
+        previous.layout_matches(previous.netlist_model(), source.input_count, wiring),
+        next.tick_matches(previous, input, output),
+    ensures source_vm_step_matches(source, source_vm_state_projection(previous, layout), input, frame),
+        next.layout_matches(previous.netlist_model(), source.input_count, wiring),
+        frame.state == source_vm_state_projection(next, layout),
+        frame.outputs == output,
+{
+    let netlist = previous.netlist_model();
+    let (old_inputs, new_inputs) = next.tick_snapshots(previous, input, output);
+    next.preserve_layout_evidence(previous, netlist, source.input_count, wiring);
+    assert(next.netlist_model() == netlist);
+    let prior = source_vm_state_projection(previous, layout);
+    let frame = source_vm_project_observation(source, next, wiring, layout, input, new_inputs, output);
+    source_state_has_shape(source, previous, wiring, layout);
+    source_state_has_shape(source, next, wiring, layout);
+    assert forall|id: SourceGateId| source.gates.contains_key(id) implies {
+        let gate = source.gates[id];
+        (#[trigger] frame.state.gates[id]) == !(super::wire_value(gate.left, input, prior)
+            || super::wire_value(gate.right, input, prior))
+    } by {
+        let i = layout.gate_index[id];
+        assert(layout.gates[i] == id && 0 <= i < netlist.gates@.len());
+        let gate = source.gates[id];
+        let flat = netlist.gates@[i];
+        assert(source_vm_wire_matches(source, wiring, layout, gate.left, flat.left));
+        assert(source_vm_wire_matches(source, wiring, layout, gate.right, flat.right));
+        source_vm_mapped_wire_value(source, previous, wiring, layout, input, old_inputs, gate.left, flat.left);
+        source_vm_mapped_wire_value(source, previous, wiring, layout, input, old_inputs, gate.right, flat.right);
+        assert(next.gate_values_model()[i] == !(wire_value(flat.left, old_inputs, previous.gate_values_model())
+            || wire_value(flat.right, old_inputs, previous.gate_values_model())));
+    };
+    assert forall|id: SourceDeviceId| source.storage.contains_key(id) implies {
+        let old = prior.storage[id];
+        let new = #[trigger] frame.state.storage[id];
+        clocked_storage_value_transition(old.registered, old.memory, new.registered, new.memory,
+            super::read_pins(source.storage[id], input, prior))
+    } by {
+        let i = layout.device_index[id];
+        let old = previous.storage_model()[i];
+        let new = next.storage_model()[i];
+        let flat = old.wiring_model();
+        assert(layout.devices[i] == id && 0 <= i < wiring.len());
+        assert(flat == wiring[i]);
+        assert(storage_pair(source.input_count, wiring, layout, source.storage[id], flat));
+        mapped_storage_pins(source, previous, wiring, layout, input, old_inputs, source.storage[id], &flat);
+        new.tick_values(&old, old_inputs, previous.gate_values_model());
+    };
+    frame
+}
+
+proof fn trace_layout(
+    source: &SourceVmCircuit, inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    wiring: Seq<ClockedStorageInputs>, index: int,
+)
+    requires clocked_vm_trace(inputs, states, outputs),
+        states[0].layout_matches(states[0].netlist_model(), source.input_count, wiring),
+        0 <= index < states.len(),
+    ensures states[index].layout_matches(states[0].netlist_model(), source.input_count, wiring),
+    decreases index,
+{
+    if index > 0 {
+        trace_layout(source, inputs, states, outputs, wiring, index - 1);
+        let current = &states[index];
+        let previous = &states[index - 1];
+        current.tick_snapshots(previous, inputs[index - 1], outputs[index]);
+        current.preserve_layout_evidence(previous, states[0].netlist_model(), source.input_count, wiring);
+    }
+}
+
+/// VM の任意の有限実行を、同じ公開出力を持つソースの trace に対応付ける。
+///
+/// 先頭は reset の結果。以後の各フレームは、同じ入力で 1 tick 進めた結果を表す。
+pub proof fn source_vm_project_trace(
+    source: &SourceVmCircuit, inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+) -> (frames: Seq<SourceVmFrame>)
+    requires clocked_vm_trace(inputs, states, outputs),
+        states[0].layout_matches(states[0].netlist_model(), source.input_count, wiring),
+        source_vm_layout_matches(source, &states[0].netlist_model(), wiring, layout),
+    ensures super::source_vm_trace(source, inputs, frames),
+        frames == Seq::new(outputs.len(), |i: int| SourceVmFrame {
+            state: source_vm_state_projection(&states[i], layout), outputs: outputs[i],
+        }),
+        frames.map_values(|frame: SourceVmFrame| frame.outputs) == outputs,
+{
+    let frames = Seq::new(outputs.len(), |i: int| SourceVmFrame {
+        state: source_vm_state_projection(&states[i], layout), outputs: outputs[i],
+    });
+    let reset = source_vm_project_reset(source, &states[0], wiring, layout, outputs[0]);
+    assert(frames[0] == reset);
+    assert forall|i: int| 0 < i < frames.len() implies
+        source_vm_step_matches(source, frames[i - 1].state, inputs[i - 1], #[trigger] frames[i]) by {
+        trace_layout(source, inputs, states, outputs, wiring, i - 1);
+        let prior = &states[i - 1];
+        assert(prior.netlist_model() == states[0].netlist_model());
+        let step = source_vm_project_step(source, prior, &states[i], wiring, layout, inputs[i - 1], outputs[i]);
+        assert(frames[i] == step);
+    };
+    assert(frames.map_values(|frame: SourceVmFrame| frame.outputs) =~= outputs);
+    frames
+}
+
+/// ソースの参照意味論と VM の公開出力が、すべての tick で一致することを示す。
+pub proof fn source_vm_trace_outputs_agree(
+    source: &SourceVmCircuit, inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout, reference: Seq<SourceVmFrame>,
+)
+    requires clocked_vm_trace(inputs, states, outputs),
+        states[0].layout_matches(states[0].netlist_model(), source.input_count, wiring),
+        source_vm_layout_matches(source, &states[0].netlist_model(), wiring, layout),
+        super::source_vm_trace(source, inputs, reference),
+    ensures reference.map_values(|frame: SourceVmFrame| frame.outputs) == outputs,
+{
+    let frames = source_vm_project_trace(source, inputs, states, outputs, wiring, layout);
+    super::source_vm_traces_agree(source, inputs, frames, reference);
 }
 
 } // verus!

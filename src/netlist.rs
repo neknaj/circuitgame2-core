@@ -16,10 +16,11 @@ mod source_vm_trace;
 pub use source_vm_trace::{
     SourceDeviceId, SourceDeviceState, SourceStorage, SourceVmCircuit, SourceVmFrame, SourceVmNor,
     SourceVmLayout, SourceVmState, SourceVmWire, source_vm_layout_matches, source_vm_mapped_wire_value,
-    source_vm_next_frame, source_vm_outputs_match, source_vm_project_observation, source_vm_project_reset, source_vm_read_wire,
+    source_vm_next_frame, source_vm_outputs_match, source_vm_project_observation, source_vm_project_reset,
+    source_vm_project_step, source_vm_project_trace, source_vm_read_wire,
     source_vm_reset_frame, source_vm_reset_matches, source_vm_state_projection,
     source_vm_run_trace, source_vm_state_matches, source_vm_step_matches, source_vm_trace,
-    source_vm_traces_agree, source_vm_wire_matches, source_vm_wiring_valid,
+    source_vm_trace_outputs_agree, source_vm_traces_agree, source_vm_wire_matches, source_vm_wiring_valid,
 };
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
