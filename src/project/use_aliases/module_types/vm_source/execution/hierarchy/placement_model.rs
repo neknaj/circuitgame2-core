@@ -2,9 +2,11 @@
 
 use crate::netlist::{ClockedStorageInputs, NorNetlist, PortBitLayout, Wire};
 #[cfg(verus_only)]
-use crate::netlist::{ClockedVm, NorGate, clocked_instance_inputs, clocked_stateful_arguments, clocked_storage_output_width,
+use crate::netlist::{ClockedVm, NorGate, clocked_gate_updates, clocked_instance_gate_updates_match,
+    clocked_instance_inputs, clocked_instance_outputs_match, clocked_stateful_arguments, clocked_storage_output_width,
+    clocked_storage_pins_valid, output_ports_available, output_values_match,
     clocked_storage_width_concat, clocked_storage_widths_agree, instance_gates_at, wire_value,
-    instance_gates_in_extension, instance_outputs_match};
+    instance_gates_in_extension, instance_outputs_match, clocked_wiring_valid, wire_available};
 use core::ops::Range;
 use alloc::vec::Vec;
 use crate::project::ClockedWireDriver;
@@ -39,6 +41,44 @@ pub(super) open spec fn routine_placed(
     &&& instance_gates_at(routine.callee.gates@, pins, routine.gates.start, gates)
     &&& forall|i: int| 0 <= i < routine.devices.len() ==> routine.devices[i].parent_placement_matches(
         pins, routine.gates.start, &(#[trigger] storage[routine.storage.start + i]))
+}
+
+/// 子の端子と実引数は、親回路全体の配置が終わった時点で有効な配線を参照する。
+pub(super) open spec fn routine_pins_valid(routine: RoutineWiring, inputs: usize, gates: nat) -> bool {
+    let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+        clocked_storage_output_width(routine.devices));
+    &&& clocked_wiring_valid(&routine.callee)
+    &&& clocked_storage_pins_valid(routine.devices, routine.callee.input_count, routine.callee.gates@.len() as usize)
+    &&& output_ports_available(routine.outputs, inputs as nat, gates, routine.outputs.len() as int)
+    &&& forall|i: int| 0 <= i < pins.len() ==> wire_available(#[trigger] pins[i], inputs as nat, gates)
+}
+
+#[verifier::opaque]
+pub(super) closed spec fn routines_pins_valid(routines: Seq<Option<RoutineWiring>>, inputs: usize, gates: nat) -> bool {
+    forall|i: int| 0 <= i < routines.len() ==> ((#[trigger] routines[i]) matches Some(routine)
+        ==> routine_pins_valid(routine, inputs, gates))
+}
+
+pub(super) proof fn empty_routine_pins(inputs: usize, gates: nat)
+    ensures routines_pins_valid(Seq::empty(), inputs, gates),
+{
+    reveal(routines_pins_valid);
+}
+
+pub(super) proof fn extend_routine_pins(
+    routines: Seq<Option<RoutineWiring>>, added: Option<RoutineWiring>, inputs: usize, gates: nat,
+)
+    requires routines_pins_valid(routines, inputs, gates),
+        added matches Some(routine) ==> routine_pins_valid(routine, inputs, gates),
+    ensures routines_pins_valid(routines.push(added), inputs, gates),
+{
+    reveal(routines_pins_valid);
+    let next = routines.push(added);
+    assert forall|i: int| 0 <= i < next.len() implies ((#[trigger] next[i]) matches Some(routine)
+        ==> routine_pins_valid(routine, inputs, gates)) by {
+        if i < routines.len() { assert(next[i] == routines[i]); }
+        else { assert(next[i] == added); }
+    };
 }
 
 pub(super) open spec fn routine_before(first: RoutineWiring, second: RoutineWiring) -> bool {
@@ -341,6 +381,66 @@ pub(super) proof fn routine_augmented_snapshot(
         assert(child.subrange(external.len() + start, external.len() + end) =~= local_storage.subrange(start, end));
     };
     child
+}
+
+/// 親 VM の tick を一つの子への入力、ゲート更新、更新後の出力に対応付ける。
+///
+/// 実引数は親の各時点の配線から読む。更新後の観測には、更新後の実引数を使う。
+pub(super) proof fn routine_tick_observation(
+    vm: &ClockedVm, previous: &ClockedVm, input: Seq<bool>, output: Seq<bool>, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
+) -> (result: (Seq<bool>, Seq<bool>, Seq<bool>))
+    requires
+        previous.layout_matches(previous.netlist_model(), previous.external_count(), wiring),
+        vm.tick_matches(previous, input, output),
+        routines_placed(routines, previous.netlist_model().gates@, wiring.skip(direct as int), first_state,
+            previous.netlist_model().input_count),
+        routine_vm_input_offsets(routines, wiring, direct, previous.external_count()),
+        routines_pins_valid(routines, previous.netlist_model().input_count, previous.netlist_model().gates@.len()),
+        0 <= call < routines.len(),
+        routines[call].is_some(),
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            let start = routine.gates.start as int;
+            let end = routine.gates.end as int;
+            let old_gates = previous.gate_values_model().subrange(start, end);
+            let new_gates = vm.gate_values_model().subrange(start, end);
+            let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+                clocked_storage_output_width(routine.devices));
+            &&& result.0.len() == result.1.len() == routine.callee.input_count
+            &&& clocked_gate_updates(routine.callee.gates@, result.0, old_gates, new_gates)
+            &&& result.2.len() == routine.callee.outputs@.len()
+            &&& output_values_match(result.1, new_gates, routine.callee.outputs@, result.2)
+            &&& exists|before: Seq<bool>, after: Seq<bool>| {
+                &&& #[trigger] previous.augmented_input_matches(input, before)
+                &&& #[trigger] vm.augmented_input_matches(input, after)
+                &&& result.0 == clocked_instance_inputs(pins, before, previous.gate_values_model())
+                &&& result.1 == clocked_instance_inputs(pins, after, vm.gate_values_model())
+                &&& result.2 == clocked_instance_inputs(routine.outputs, after, vm.gate_values_model())
+            }
+        }),
+{
+    reveal(routines_placed);
+    reveal(routines_pins_valid);
+    let routine = routines[call]->Some_0;
+    let netlist = previous.netlist_model();
+    vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
+    let snapshots = vm.tick_snapshots(previous, input, output);
+    vm.preserve_layout_evidence(previous, netlist, previous.external_count(), wiring);
+    assert(vm.netlist_model() == netlist && vm.external_count() == previous.external_count());
+    let old_input = routine_augmented_snapshot(previous, input, snapshots.0, wiring, routines, direct, first_state, call);
+    let new_input = routine_augmented_snapshot(vm, input, snapshots.1, wiring, routines, direct, first_state, call);
+    let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+        clocked_storage_output_width(routine.devices));
+    let base = routine.gates.start;
+    let old_gates = previous.gate_values_model();
+    let new_gates = vm.gate_values_model();
+    clocked_instance_gate_updates_match(&routine.callee, netlist.gates@, pins, base, snapshots.0, old_gates, new_gates);
+    let observed = clocked_instance_inputs(routine.outputs, snapshots.1, new_gates);
+    assert(output_values_match(snapshots.1, new_gates, routine.outputs, observed));
+    clocked_instance_outputs_match(&routine.callee, pins, routine.outputs, base, snapshots.1, new_gates, observed);
+    (old_input, new_input, observed)
 }
 
 } // verus!

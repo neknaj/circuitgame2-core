@@ -14,7 +14,8 @@ mod source_trace;
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 pub use clocked::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatefulInstanceError};
 #[cfg(verus_only)]
-pub use clocked::{clocked_stateful_arguments, clocked_stateful_instance_reads_match, clocked_stateful_instance_result};
+pub use clocked::{clocked_stateful_arguments, clocked_stateful_instance_reads_match, clocked_stateful_instance_result,
+    clocked_storage_pins_valid};
 pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInputs};
 #[cfg(verus_only)]
 pub use clocked_storage::{clocked_storage_pin_values, clocked_storage_result, clocked_storage_steps_agree};

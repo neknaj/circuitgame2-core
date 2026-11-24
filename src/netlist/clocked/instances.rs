@@ -89,6 +89,13 @@ spec fn storage_pins_prefix(storage: Seq<ClockedStorageInputs>, inputs: usize, g
     &&& forall|i: int| 0 <= i < end ==> (#[trigger] storage[i]).pins_available(inputs as nat, gates as nat)
 }
 
+/// 状態素子のすべての入力端子が、子回路内で有効な配線を参照する。
+pub closed spec fn clocked_storage_pins_valid(
+    storage: Seq<ClockedStorageInputs>, inputs: usize, gates: usize,
+) -> bool {
+    storage_pins_prefix(storage, inputs, gates, storage.len() as int)
+}
+
 fn check_instance_storage(storage: &[ClockedStorageInputs], inputs: usize, gates: usize)
     -> (result: Option<usize>)
     ensures match result {
@@ -328,6 +335,12 @@ impl ClockedNor {
                 &&& instance_gates_at(netlist.gates@, arguments, base, final(caller)@)
                 &&& instance_outputs_match(netlist.outputs@, arguments, base, instance.outputs@)
                 &&& instance.storage@.len() == child@.len()
+                &&& clocked_wiring_valid(&netlist)
+                &&& forall|i: int| 0 <= i < arguments.len() ==>
+                    wire_available(#[trigger] arguments[i], inputs as nat, planned as nat)
+                &&& output_ports_available(instance.outputs@, inputs as nat, planned as nat,
+                    instance.outputs@.len() as int)
+                &&& clocked_storage_pins_valid(child@, netlist.input_count, netlist.gates@.len() as usize)
                 &&& forall|i: int| 0 <= i < instance.storage@.len() ==>
                     child@[i].parent_placement_matches(arguments, base, &(#[trigger] instance.storage@[i]))
             },
@@ -351,6 +364,7 @@ impl ClockedNor {
                 external@.len() + clocked_storage_output_width(child@) == self.netlist_model().input_count
                 && *old(next_state_input) + clocked_storage_output_width(child@) <= inputs,
     {
+        proof { use_type_invariant(self); }
         proof { storage_output_width_total(child@); }
         let total = self.netlist.input_count;
         if external.len() > total { return Err(ClockedStatefulInstanceError::InputLayout); }
@@ -362,6 +376,10 @@ impl ClockedNor {
             return Err(ClockedStatefulInstanceError::Allocation);
         };
         let instance = self.append_mapped_stateful_instance(caller, child, arguments.as_slice(), inputs, planned)?;
+        proof {
+            reveal(storage_pins_prefix);
+            reveal(arguments_valid);
+        }
         *next_state_input = start + width;
         Ok(instance)
     }

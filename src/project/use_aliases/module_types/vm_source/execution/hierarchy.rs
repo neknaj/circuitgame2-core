@@ -4,8 +4,9 @@ mod placement_model;
 
 use placement_model::RoutineWiring;
 #[cfg(verus_only)]
-use placement_model::{empty_routines, extend_routines, join_routine_input_offsets, routine_placed,
-    routine_vm_input_offsets, routines_output_width, routines_placed};
+use placement_model::{empty_routine_pins, empty_routines, extend_routine_pins, extend_routines,
+    join_routine_input_offsets, routine_pins_valid, routine_placed, routine_vm_input_offsets,
+    routines_output_width, routines_pins_valid, routines_placed};
 use super::super::super::{ClockedModuleOutputs, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement,
     ClockedWireDriver, copy_location};
 #[cfg(verus_only)]
@@ -336,6 +337,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     network.storage@.take(wiring.direct_devices as int), network.storage_sites@.take(wiring.direct_devices as int))
                 && wiring.primitives.len() == checked.calls@.len()
                 && wiring.direct_devices <= network.storage@.len()
+                && routines_pins_valid(wiring.routines, network.circuit.netlist_model().input_count,
+                    network.circuit.netlist_model().gates@.len())
                 && call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, CallBoundary {
                     gates: network.circuit.netlist_model().gates@.len(),
                     direct: wiring.direct_devices as nat,
@@ -1431,6 +1434,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         proof {
             gate_cursor_zero(checked, calls@);
             empty_routines(first_state);
+            empty_routine_pins(total_inputs, total_gates as nat);
             assert(call_partition_matches(boundaries, captured, primitives,
                 CallBoundary { gates: 0, direct: 0, child: 0 })) by { reveal(call_partition_matches); };
             assert(self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
@@ -1453,6 +1457,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
                     gates@, storage@, direct.instances@),
                 routines_placed(captured, gates@, child_storage@, first_state, next_state),
+                routines_pins_valid(captured, total_inputs, total_gates as nat),
                 forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
                     == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
@@ -1549,6 +1554,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     };
                     extend_routines(before, output, prior_gates, gates@, prior_storage, child_storage@,
                         first_state, prior_state, next_state);
+                    assert(routine_pins_valid(routine, total_inputs, total_gates as nat));
+                    extend_routine_pins(before, output, total_inputs, total_gates as nat);
                     captured = before.push(output);
                 }
                 let external = placement.inputs.total_bits();
@@ -1556,6 +1563,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 while i < placement.storage_sites.len()
                     invariant i <= placement.storage_sites@.len(),
                         routines_placed(captured, gates@, child_storage@, first_state, next_state),
+                        routines_pins_valid(captured, total_inputs, total_gates as nat),
                     decreases placement.storage_sites@.len() - i,
                 {
                     let site = &placement.storage_sites[i];
@@ -1576,6 +1584,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 proof {
                     assert(self.captured_call_output(checked, &ports, calls@, _rows, definitions@, call as int, None));
                     captured = before.push(None);
+                    extend_routine_pins(before, None, total_inputs, total_gates as nat);
                 }
                 let rows = match self.wire_call_arguments(owner, limits.width, limits.wiring_bits, checked, &ports, call) {
                     Ok(rows) => rows,
