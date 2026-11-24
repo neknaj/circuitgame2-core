@@ -100,19 +100,22 @@ pub(crate) proof fn preceding_port_bits_grow(widths: Seq<u64>, first: nat, last:
     }
 }
 
+#[verifier::opaque]
+spec fn consecutive_port_ranges(ranges: Seq<Range<usize>>, total: usize) -> bool {
+    &&& (ranges.len() == 0 <==> total == 0)
+    &&& ranges.len() > 0 ==> ranges[0].start == 0 && ranges[ranges.len() - 1].end == total
+    &&& forall|i: int| 0 <= i < ranges.len() ==> {
+        let range = #[trigger] ranges[i];
+        &&& range.start < range.end <= total
+        &&& i > 0 ==> ranges[i - 1].end == range.start
+    }
+}
+
 impl PortBitLayout {
     #[verifier::type_invariant]
     spec fn valid_port_ranges(&self) -> bool {
-        &&& (self.ranges@.len() == 0 <==> self.total_bits == 0)
-        &&& self.ranges@.len() > 0 ==> self.ranges@[0].start == 0
-            && self.ranges@[self.ranges@.len() - 1].end == self.total_bits
-        &&& forall|i: int| 0 <= i < self.ranges@.len() ==> {
-            let range = #[trigger] self.ranges@[i];
-            &&& range.start < range.end <= self.total_bits
-            &&& i > 0 ==> self.ranges@[i - 1].end == range.start
-        }
+        consecutive_port_ranges(self.ranges@, self.total_bits)
     }
-
     /// 宣言順の幅から、各ポートの半開範囲を求める。
     ///
     /// `capacity` は平坦な配列の総ビット数の上限。幅の列が空なら総ビット数は0になる。
@@ -183,6 +186,7 @@ impl PortBitLayout {
             assert(ranges@[i].start == preceding_port_bits(widths@, i as nat));
             assert(ranges@[i - 1].end == preceding_port_bits(widths@, i as nat));
         };
+        reveal(consecutive_port_ranges);
         Ok(Self { ranges, total_bits: total })
     }
 
@@ -199,7 +203,7 @@ impl PortBitLayout {
             range == if port < self.ranges_model().len() { Some(self.ranges_model()[port as int]) } else { None },
             range matches Some(bits) ==> bits.start < bits.end <= self.total_bits_model(),
     {
-        proof { use_type_invariant(self); }
+        proof { use_type_invariant(self); reveal(consecutive_port_ranges); }
         if port >= self.ranges.len() {
             return None;
         }
@@ -225,7 +229,7 @@ impl PortBitLayout {
         if port >= self.ranges.len() {
             return None;
         }
-        proof { use_type_invariant(self); }
+        proof { use_type_invariant(self); reveal(consecutive_port_ranges); }
         let range = &self.ranges[port];
         if bit >= range.end - range.start {
             None
@@ -247,14 +251,25 @@ impl PortBitLayout {
         proof { use_type_invariant(self); }
         let mut first = 0usize;
         let mut end = self.ranges.len();
+        assert(0 < end && self.ranges@[0].start <= bit < self.ranges@[end - 1].end) by {
+            reveal(consecutive_port_ranges);
+        };
         while first < end
             invariant
                 0 <= first < end <= self.ranges@.len(),
                 self.valid_port_ranges(),
+                bit < self.total_bits,
                 self.ranges@[first as int].start <= bit < self.ranges@[end - 1].end,
             decreases end - first,
         {
-            let middle = first + (end - first) / 2;
+            let distance = end - first;
+            let half = distance / 2;
+            proof {
+                vstd::arithmetic::div_mod::lemma_div_is_strictly_smaller(distance as int, 2);
+                assert(half < distance);
+            }
+            let middle = first + half;
+            proof { self.port_neighbors(middle as int); }
             let range = &self.ranges[middle];
             if bit < range.start {
                 assert(first < middle);
@@ -269,6 +284,19 @@ impl PortBitLayout {
             }
         }
         unreachable!()
+    }
+
+    /// 二分探索で境界を動かすため、隣接するポートと共有する境界を取り出す。
+    proof fn port_neighbors(&self, port: int)
+        requires 0 <= port < self.ranges@.len(), self.valid_port_ranges(),
+        ensures
+            port > 0 ==> self.ranges@[port - 1].end == self.ranges@[port].start,
+            port + 1 < self.ranges@.len() ==> self.ranges@[port + 1].start == self.ranges@[port].end,
+    {
+        reveal(consecutive_port_ranges);
+        if port + 1 < self.ranges@.len() {
+            assert(self.ranges@[port + 1].start == self.ranges@[port].end);
+        }
     }
 
     /// 宣言順に並ぶ半開ビット範囲を表す。
