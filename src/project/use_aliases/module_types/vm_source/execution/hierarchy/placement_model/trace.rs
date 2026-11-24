@@ -138,7 +138,7 @@ pub(in super::super) proof fn project_routine_trace(
         routines[call].is_some(),
     ensures
         states[steps as int].layout_matches(states[0].netlist_model(), states[0].external_count(), wiring),
-        result.1.len() == steps,
+        result.0.len() == steps + 1, result.1.len() == steps,
         ({
             let routine = routines[call]->Some_0;
             &&& routine_trace(&routine.callee, routine.devices, routine.external.len(), result.0, result.1)
@@ -267,7 +267,7 @@ pub(in super::super) closed spec fn nested_trace_projects(
 }
 
 /// 親の軌跡から子を取り出すために必要な配線と配置の条件。
-pub(in super::super) closed spec fn trace_projection_ready(
+pub(in super::super) open spec fn trace_projection_ready(
     netlist: &NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>,
     routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
 ) -> bool {

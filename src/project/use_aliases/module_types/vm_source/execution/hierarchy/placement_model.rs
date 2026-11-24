@@ -119,6 +119,18 @@ pub(super) proof fn routines_output_width(
     reveal(routines_placed);
 }
 
+/// 呼び出し列全体の配置から、指定した子の配線と区間を取り出す。
+pub(super) proof fn placed_routine_evidence(
+    routines: Seq<Option<RoutineWiring>>, gates: Seq<NorGate>, storage: Seq<ClockedStorageInputs>,
+    first_state: usize, next_state: usize, call: int,
+)
+    requires routines_placed(routines, gates, storage, first_state, next_state),
+        0 <= call < routines.len(), routines[call].is_some(),
+    ensures routine_placed(routines[call]->Some_0, gates, storage, next_state),
+{
+    reveal(routines_placed);
+}
+
 /// 空の子回路列には予約済みの区間がない。
 pub(super) proof fn empty_routines(first_state: usize)
     ensures routines_placed(Seq::empty(), Seq::empty(), Seq::empty(), first_state, first_state),

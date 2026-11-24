@@ -746,7 +746,7 @@ impl ClockedVm {
     pub proof fn reset_snapshot(&self, output: Seq<bool>) -> (bits: Seq<bool>)
         requires self.reset_matches(output),
         ensures
-            self.initial(),
+            self.initial() && self.valid(),
             bits == Seq::new(self.netlist_model().input_count as nat, |_: int| false),
             self.augmented_input_matches(Seq::new(self.external_count() as nat, |_: int| false), bits),
             self.gate_values_model() == Seq::new(self.netlist_model().gates@.len(), |_: int| false),

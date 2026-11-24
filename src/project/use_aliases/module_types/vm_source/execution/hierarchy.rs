@@ -1,6 +1,8 @@
 //! 子を先に展開し、各呼び出しに独立したゲートと状態出力の区間を割り当てる。
 
 mod placement_model;
+#[cfg(verus_only)]
+mod path_trace;
 
 use placement_model::RoutineWiring;
 #[cfg(verus_only)]
