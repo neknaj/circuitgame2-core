@@ -29,7 +29,7 @@ pub(super) struct ModuleArgument<'s, 'p, 'a> {
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
-    spec fn module_argument_binding_at(&self, checked: &ModuleCalls, index: int, arg: int,
+    pub(super) open spec fn module_argument_binding_at(&self, checked: &ModuleCalls, index: int, arg: int,
         position: int, driver: OutputDriver,
     ) -> bool {
         let call = checked.calls@[index];
@@ -50,7 +50,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 裸の信号名が、同じ実引数の元の位置で指定された端子または定義を参照する。
-    pub(super) closed spec fn module_argument_binding(
+    pub(super) open spec fn module_argument_binding(
         &self, checked: &ModuleCalls, index: int, arg: int, driver: OutputDriver,
     ) -> bool {
         exists|position: int| #[trigger] self.module_argument_binding_at(checked, index, arg, position, driver)

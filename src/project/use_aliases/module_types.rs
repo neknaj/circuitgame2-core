@@ -1,6 +1,8 @@
 //! 右辺全体を占める呼び出しやビット選択から、左辺の信号に型を割り当てる。
 
 mod aliases;
+mod argument_wiring;
+pub use argument_wiring::ClockedArgumentWiringError;
 pub use aliases::{ModuleAliasSource, ModuleTypeSources};
 mod clocked_plan;
 mod clocked_source;

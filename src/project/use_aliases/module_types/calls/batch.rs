@@ -83,6 +83,38 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.inferred_module_call_plan(&checked.module, row.at, limit, row.inputs);
     }
 
+    /// 全件検査から、指定した実引数の型と要求ポートの照合を取り出す。
+    pub(in crate::project::use_aliases::module_types) proof fn module_call_leaf(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, index: usize, arg: usize,
+        port: crate::project::CallPortType, driver: Option<crate::project::OutputDriver>,
+    )
+        requires
+            self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            index < checked.calls@.len(),
+            ({
+                let row = checked.calls@[index as int];
+                arg < row.inputs.ports.arguments@.len()
+                    && row.inputs.ports.signature.target.port_matches(crate::project::PortDirection::Input, arg, Some(port))
+            }),
+            driver matches Some(driver) ==> self.module_argument_binding(checked, index as int, arg as int, driver),
+        ensures ({
+            let row = checked.calls@[index as int];
+            let forms = self.targets.project_model().circuits_model()[row.at.file as int].syntax.forms@;
+            let form = forms[row.inputs.ports.arguments@[arg as int] as int];
+            let result = row.inputs.types@[arg as int];
+            &&& (exists|known: Option<crate::project::SignalType>| #[trigger]
+                super::leaf_result(row.inputs.ports.signature.source, form, &port, known, limit, Ok(result)))
+            &&& (driver matches Some(driver) ==> {
+                let expressions = checked.module.expressions;
+                result == super::bound_type(&expressions.typed, expressions.types@, driver)
+                    && (result matches Some(signal) ==> crate::project::port_types_equal(signal.ty, port.ty))
+            })
+        }),
+    {
+        reveal(UseAliases::module_calls_before);
+        self.inferred_call_leaf(owner, limit, checked, index, arg, port, driver);
+    }
+
     /// 同じモジュールを組み立てる呼び出しが、互いに異なるソース位置を持つことを示す。
     pub(in crate::project::use_aliases::module_types) proof fn module_call_sites_distinct(
         &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, i: int, j: int,

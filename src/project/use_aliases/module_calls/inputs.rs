@@ -190,6 +190,30 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 検査済みの実引数と、その位置で要求されたポート型の照合を取り出す。
+    pub(in crate::project::use_aliases) proof fn module_input_leaf(
+        &self, at: DefinitionPosition, limit: u64, ports: &ModuleCallPorts, known: Seq<Option<SignalType>>,
+        inputs: &ModuleCallInputs, index: usize,
+    )
+        requires
+            self.module_inputs_from_plan_match(at, limit, ports, known, Ok(Some(*inputs))),
+            index < ports.arguments@.len(),
+        ensures ({
+            let forms = self.targets.project_model().circuits_model()[at.file as int].syntax.forms@;
+            let form = forms[ports.arguments@[index as int] as int];
+            &&& inputs.ports == *ports
+            &&& inputs.types@.len() == ports.arguments@.len()
+            &&& exists|port: CallPortType| #[trigger] ports.signature.target.port_matches(PortDirection::Input, index, Some(port))
+                && leaf_result(ports.signature.source, form, &port, known[index as int], limit, Ok(inputs.types@[index as int]))
+        }),
+    {
+        self.module_inputs_plan_identity(at, limit, ports, known, *inputs);
+        let forms = self.targets.project_model().circuits_model()[at.file as int].syntax.forms@;
+        assert(checked_input_types(forms, ports, limit, known, Ok(inputs.types)));
+        reveal(valid_input_prefix);
+        assert(argument_type(forms, ports, limit, index, known[index as int], Ok(inputs.types@[index as int])));
+    }
+
     /// 検査結果から、NOR に渡した各二進・十六進リテラルの幅の根拠を取り出す。
     pub(in crate::project::use_aliases) proof fn checked_module_nor_literals(
         &self, at: DefinitionPosition, limit: u64, ports: &ModuleCallPorts, known: Seq<Option<SignalType>>, checked: &ModuleCallInputs,

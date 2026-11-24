@@ -135,6 +135,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         match result {
             Ok(plan) => self.routine_bit_layouts_match(drivers.signature, limit, capacity, &plan.inputs, &plan.outputs)
                 && self.clocked_definition_layout_on_checked(&checked.expressions, limit, capacity, Ok(plan.definitions))
+                && plan.inputs.ranges_model().len() == drivers.signature.inputs@.len()
                 && self.output_wiring_prefix(checked, &plan, plan.drivers@)
                 && plan.drivers@.len() == drivers.outputs@.len(),
             Err(ClockedModuleOutputsError::Structure(error)) => self.structure_types_match(limit, Err(error))
@@ -162,6 +163,28 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 },
             Err(ClockedModuleOutputsError::Calls(_)) => false,
         }
+    }
+
+    /// 型検査結果から出力を配置する段階では、型検査の診断は発生しない。
+    pub(super) proof fn clocked_outputs_error_is_not_call_error(
+        &self, checked: &ModuleOutputTypes, limit: u64, capacity: usize, error: ClockedModuleOutputsError,
+    )
+        requires self.outputs_on_checked(checked, limit, capacity, Err(error)),
+        ensures !(error is Calls),
+    {
+    }
+
+    /// 出力計画が使った入出力と定義の配置を、同じ型表から取り出す。
+    pub(super) proof fn clocked_output_layouts(
+        &self, checked: &ModuleOutputTypes, limit: u64, capacity: usize, plan: &ClockedModuleOutputs,
+    )
+        requires self.outputs_on_checked(checked, limit, capacity, Ok(*plan)),
+        ensures
+            self.routine_bit_layouts_match(checked.expressions.typed.sources.roots.wiring.drivers.signature,
+                limit, capacity, &plan.inputs, &plan.outputs),
+            self.clocked_definition_layout_on_checked(&checked.expressions, limit, capacity, Ok(plan.definitions)),
+            plan.inputs.ranges_model().len() == checked.expressions.typed.sources.roots.wiring.drivers.signature.inputs@.len(),
+    {
     }
 
     /// 出力の配線列と宣言順の駆動元との対応を取り出す。
@@ -225,6 +248,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.routine_bit_layouts_match(drivers.signature, limit, capacity, &plan.inputs, &plan.outputs),
                 self.clocked_definition_layout_on_checked(&checked.expressions, limit, capacity, Ok(plan.definitions)),
                 self.output_wiring_prefix(checked, &plan, plan.drivers@),
+                plan.inputs.ranges_model().len() == drivers.signature.inputs@.len(),
             decreases drivers.outputs@.len() - index,
         {
             let driver = drivers.outputs[index];

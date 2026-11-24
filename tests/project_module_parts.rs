@@ -570,7 +570,7 @@ fn places_struct_ram_outputs_in_call_order_across_module_parts() {
                 (memory bank (address 2) (data Word))
                 (module root (in (a (bits 2)) (d Word) we) (out (a (bits 2)) (first Word) (second Word))
                   (def first (bank a d we)))" },
-        SourceSnapshot { path: "part.ncg2", revision: 7, text: "(module-part root (def second (bank a d we)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 7, text: "(module-part root (def second (bank #b1 d we)))" },
     ];
     let project = parse_circuit_project(&input).unwrap();
     let targets = index_use_targets(&project).unwrap();
@@ -602,8 +602,20 @@ fn places_struct_ram_outputs_in_call_order_across_module_parts() {
     assert_eq!((call.source.revision, annotation.source.revision), (7, 5));
     assert_eq!(&annotation.source.text[annotation.span], "Word");
 
-    let wires: Vec<_> = (0..plan.external_inputs).map(Wire::Input).collect();
-    let storage = plan.instances.iter().map(|instance| instance.storage_inputs(&wires).unwrap()).collect();
+    let storage = plan.instances.iter().map(|instance| {
+        let (_, arguments) = aliases.plan_clocked_call_arguments(owner, 16, 18, instance.call_index).unwrap().unwrap();
+        let wires: Vec<_> = arguments.into_iter().flatten().map(|driver| {
+            let ClockedWireDriver::Terminal(wire) = driver else { panic!("expected an input or constant"); };
+            wire
+        }).collect();
+        let expected_address = if instance.call_index == 0 {
+            [Wire::Input(0), Wire::Input(1)]
+        } else {
+            [Wire::Constant(true), Wire::Constant(false)]
+        };
+        assert_eq!(wires[..2], expected_address);
+        instance.storage_inputs(&wires).unwrap()
+    }).collect();
     let circuit = ClockedNor::check(NorNetlist {
         input_count: plan.augmented_inputs, gates: vec![],
         outputs: vec![first.output_wire(0).unwrap(), second.output_wire(0).unwrap()],

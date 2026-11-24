@@ -9,6 +9,10 @@ use crate::project::{DefinitionPosition, ModuleBodyPosition, ModuleCallInputs, M
 #[cfg(verus_only)]
 use super::selections::bound_type;
 #[cfg(verus_only)]
+use crate::project::{CallPortType, OutputDriver, PortDirection, port_types_equal};
+#[cfg(verus_only)]
+use crate::project::use_aliases::call_arity::{checked_name_leaf_type, leaf_result};
+#[cfg(verus_only)]
 use crate::project::circuits::{parsed_circuit_matches, parsed_index_evidence};
 use crate::syntax::{AtomKind, Form, circuit::indexed_call_signal};
 #[cfg(verus_only)]
@@ -199,6 +203,105 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     && known.len() == ports.arguments@.len()
                     && self.module_inputs_from_plan_match(at, limit, &ports, known, result),
             }
+        }
+    }
+
+    /// 実引数の元のフォーム、型推論、入力ポートとの照合を同じ呼び出しに結び付ける。
+    proof fn inferred_call_leaf(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls, index: usize, arg: usize,
+        port: CallPortType, _driver: Option<OutputDriver>,
+    )
+        requires
+            self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            index < checked.calls@.len(),
+            ({
+                let row = checked.calls@[index as int];
+                &&& self.inferred_call(&checked.module, row.at, limit, Ok(Some(row.inputs)))
+                &&& arg < row.inputs.ports.arguments@.len()
+                &&& row.inputs.ports.signature.target.port_matches(PortDirection::Input, arg, Some(port))
+            }),
+            _driver matches Some(driver) ==> self.module_argument_binding(checked, index as int, arg as int, driver),
+        ensures ({
+            let row = checked.calls@[index as int];
+            let forms = self.targets.project_model().circuits_model()[row.at.file as int].syntax.forms@;
+            let form = forms[row.inputs.ports.arguments@[arg as int] as int];
+            let result = row.inputs.types@[arg as int];
+            &&& (exists|known: Option<SignalType>|
+                #[trigger] leaf_result(row.inputs.ports.signature.source, form, &port, known, limit, Ok(result)))
+            &&& (_driver matches Some(driver) ==> {
+                let expressions = checked.module.expressions;
+                result == bound_type(&expressions.typed, expressions.types@, driver)
+                    && (result matches Some(signal) ==> port_types_equal(signal.ty, port.ty))
+            })
+        }),
+    {
+        let row = checked.calls@[index as int];
+        let at = row.at;
+        let module = &checked.module;
+        let (ports, known, member) = choose|ports: ModuleCallPorts, known: Seq<Option<SignalType>>, member: usize|
+            #[trigger] self.module_call_ports_result(at, limit, Ok(Some(ports)))
+            && member < module.expressions.typed.sources.roots.wiring.drivers.body.members@.len()
+            && module.expressions.typed.sources.roots.wiring.drivers.body.members@[member as int]
+                == (ModuleBodyPosition { file: at.file, entry: at.entry })
+            && #[trigger] self.inferred_arguments_prefix(module, at, limit, member, &ports, known)
+            && known.len() == ports.arguments@.len()
+            && self.module_inputs_from_plan_match(at, limit, &ports, known, Ok(Some(row.inputs)));
+        self.module_inputs_plan_identity(at, limit, &ports, known, row.inputs);
+        self.module_input_leaf(at, limit, &ports, known, &row.inputs, arg);
+        self.module_call_ports_evidence(at, limit, ports);
+        self.module_call_site_evidence(at, limit, ports.signature);
+        let project = self.targets.project_model();
+        let parsed = project.circuits_model()[at.file as int];
+        let root = ports.arguments@[arg as int];
+        let form = parsed.syntax.forms@[root as int];
+        let actual = row.inputs.types@[arg as int];
+        let expected = choose|expected: CallPortType|
+            #[trigger] ports.signature.target.port_matches(PortDirection::Input, arg, Some(expected))
+            && leaf_result(ports.signature.source, form, &expected, known[arg as int], limit, Ok(actual));
+        ports.signature.target.port_results_agree(PortDirection::Input, arg, Some(port), Some(expected));
+        assert(expected == port);
+        if let Some(driver) = _driver {
+            self.module_calls_item_evidence(owner, limit, checked, index as int);
+            self.module_calls_type_evidence(owner, limit, checked);
+            self.module_output_types_evidence(owner, limit, *module);
+            self.module_selections_evidence(owner, limit, module.expressions);
+            let drivers = module.expressions.typed.sources.roots.wiring.drivers;
+            self.checked_module_driver_body(owner, limit, drivers);
+            if member < row.member {
+                self.targets.module_body_members_distinct(&drivers.body, member as int, row.member as int);
+            } else if row.member < member {
+                self.targets.module_body_members_distinct(&drivers.body, row.member as int, member as int);
+            }
+            assert(member == row.member);
+            reveal(UseAliases::inferred_arguments_prefix);
+            let value = known[arg as int];
+            let frame = parsed.entry_ranges@[at.entry as int];
+            let definition = frame.definitions.start + at.definition;
+            let sites = parsed.definitions@[definition].signals;
+            let bound = choose|position: int| #[trigger] self.module_argument_binding_at(checked, index as int, arg as int, position, driver);
+            let resolved = choose|position: int| sites.start <= position < sites.end
+                && (#[trigger] parsed.signals@[position]) == root && {
+                    let slot = position - frame.signals.start;
+                    let wiring = module.expressions.typed.sources.roots.wiring;
+                    let binding = wiring.signals@[member as int]@[slot];
+                    &&& 0 <= slot < wiring.signals@[member as int]@.len()
+                    &&& binding.form == root
+                    &&& value == bound_type(&module.expressions.typed, module.expressions.types@, binding.driver)
+                };
+            let source = ports.signature.source;
+            self.targets.parsed_project_model();
+            parsed_index_evidence(*source, parsed);
+            let model = parsed.build_model();
+            build_entry_ranges_evidence(source.text, &model, at.entry as int);
+            build_definition_scope_evidence(source.text, &model, at.entry as int, definition);
+            crate::syntax::circuit::definition_signal_positions_in_order(source.text, &model, at.entry as int, definition);
+            if bound < resolved {
+                assert(parsed.signals@[bound] < parsed.signals@[resolved]);
+            } else if resolved < bound {
+                assert(parsed.signals@[resolved] < parsed.signals@[bound]);
+            }
+            assert(bound == resolved);
+            checked_name_leaf_type(source, form, &port, value, limit, actual);
         }
     }
 

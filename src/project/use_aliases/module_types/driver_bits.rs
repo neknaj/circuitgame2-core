@@ -62,9 +62,31 @@ spec fn driver_range(inputs: &PortBitLayout, definitions: &PortBitLayout, driver
     if slot < ranges.len() { Some(ranges[slot as int]) } else { None }
 }
 
-spec fn driver_bits_capacity() -> usize {
+pub(super) open spec fn driver_bits_capacity() -> usize {
     let element_size = vstd::layout::size_of::<ClockedWireDriver>();
     if element_size == 0 { usize::MAX } else { (isize::MAX as nat / element_size) as usize }
+}
+
+pub(super) fn reserve_clocked_bits(count: u64) -> (result: Result<Vec<ClockedWireDriver>, ClockedDriverBitsError>)
+    ensures match result {
+        Ok(wires) => wires@.len() == 0 && count <= driver_bits_capacity(),
+        Err(ClockedDriverBitsError::Capacity { count: needed, limit }) =>
+            needed == count && limit == driver_bits_capacity() && count > limit,
+        Err(ClockedDriverBitsError::Allocation) => count <= driver_bits_capacity(),
+        _ => false,
+    },
+{
+    let element_size = core::mem::size_of::<ClockedWireDriver>();
+    let limit = if element_size == 0 { usize::MAX } else { isize::MAX as usize / element_size };
+    assert(limit == driver_bits_capacity());
+    if count > limit as u64 {
+        return Err(ClockedDriverBitsError::Capacity { count, limit });
+    }
+    let mut wires = Vec::new();
+    if wires.try_reserve_exact(count as usize).is_err() {
+        return Err(ClockedDriverBitsError::Allocation);
+    }
+    Ok(wires)
 }
 
 /// 配線が開始位置と刻みに従うこと、または最初に検出した違反を表す。
@@ -190,16 +212,7 @@ pub fn clocked_driver_bits(
         },
         None => (0, width, 1, width - 1),
     };
-    let element_size = core::mem::size_of::<ClockedWireDriver>();
-    let limit = if element_size == 0 { usize::MAX } else { isize::MAX as usize / element_size };
-    assert(limit == driver_bits_capacity());
-    if count > limit as u64 {
-        return Err(ClockedDriverBitsError::Capacity { count, limit });
-    }
-    let mut wires = Vec::new();
-    if wires.try_reserve_exact(count as usize).is_err() {
-        return Err(ClockedDriverBitsError::Allocation);
-    }
+    let mut wires = reserve_clocked_bits(count)?;
     let mut i = 0u64;
     while i < count
         invariant

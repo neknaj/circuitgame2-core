@@ -161,6 +161,15 @@ impl<'p, 'a> ModuleCallTarget<'p, 'a> {
         }
     }
 
+    /// 同じ方向、添字、署名から取り出したポートは一致する。
+    pub(in crate::project::use_aliases) proof fn port_results_agree(
+        &self, direction: PortDirection, index: usize, left: Option<CallPortType>, right: Option<CallPortType>,
+    )
+        requires self.port_matches(direction, index, left), self.port_matches(direction, index, right),
+        ensures left == right,
+    {
+    }
+
     /// 基底 NOR の入力ポートは1ビット幅である。
     pub(super) proof fn nor_input_width(&self, index: usize, port: CallPortType)
         requires *self is Nor, self.port_matches(PortDirection::Input, index, Some(port)),
