@@ -9,6 +9,7 @@ mod clocked_source;
 mod source_arguments;
 mod vm_source;
 pub use vm_source::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+pub use vm_source::{VramOutputError, VramTarget};
 #[cfg(verus_only)]
 pub use vm_source::ClockedModuleObservation;
 mod storage_placement;

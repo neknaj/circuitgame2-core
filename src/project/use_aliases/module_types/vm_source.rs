@@ -2,7 +2,9 @@
 
 mod concat;
 mod execution;
+mod vram;
 pub use execution::{ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+pub use vram::{VramOutputError, VramTarget};
 #[cfg(verus_only)]
 pub use execution::ClockedModuleObservation;
 
