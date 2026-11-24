@@ -51,13 +51,13 @@ pub(super) closed spec fn children_follow_calls(wiring: &HierarchyWiring, childr
     }
 }
 
-spec fn owning_call(wiring: &HierarchyWiring, area: PartitionArea, index: nat) -> int {
+pub(super) open spec fn owning_call(wiring: &HierarchyWiring, area: PartitionArea, index: nat) -> int {
     choose|i: int| 0 <= i < wiring.routines.len()
         && boundary_position(wiring.boundaries[i], area) <= index
         && index < #[trigger] boundary_position(wiring.boundaries[i + 1], area)
 }
 
-proof fn owner_is_partition_call(wiring: &HierarchyWiring, area: PartitionArea, index: nat)
+pub(super) proof fn owner_is_partition_call(wiring: &HierarchyWiring, area: PartitionArea, index: nat)
     requires
         call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, wiring.boundaries.last()),
         index < boundary_position(wiring.boundaries.last(), area),
@@ -89,7 +89,7 @@ spec fn parent_gate_id(
     }
 }
 
-spec fn device_owner(wiring: &HierarchyWiring, index: nat) -> int {
+pub(super) open spec fn device_owner(wiring: &HierarchyWiring, index: nat) -> int {
     if index < wiring.direct_devices {
         owning_call(wiring, PartitionArea::DirectStorage, index)
     } else {

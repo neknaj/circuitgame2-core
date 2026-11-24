@@ -211,11 +211,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.selected_argument_wires(checked, limit, plan, index, arg, port, Ok(wires)),
         ensures port.ty == ResolvedPortType::Bits(wires@.len() as u64), wires@.len() <= u64::MAX,
     {
+        let (driver, projection) = self.selected_argument_projection(checked, limit, plan, index, arg, port, wires);
+        clocked_selected_port_bits(&plan.inputs, &plan.definitions, driver, projection, wires);
+    }
+
+    /// 選択の配線に使った型検査済みの駆動元と射影を取り出す。
+    pub(super) proof fn selected_argument_projection(
+        &self, checked: &ModuleCalls, limit: u64, plan: &ClockedModuleOutputs, index: usize, arg: usize,
+        port: CallPortType, wires: Vec<ClockedWireDriver>,
+    ) -> (result: (OutputDriver, CheckedBitSelection))
+        requires self.selected_argument_wires(checked, limit, plan, index, arg, port, Ok(wires)),
+        ensures port.ty == ResolvedPortType::Bits(result.1.count),
+            clocked_driver_bits_result(&plan.inputs, &plan.definitions, result.0, Some(result.1), Ok(wires)),
+    {
         let selection = choose|selection: SelectedPort|
             #[trigger] self.selection_at_argument(checked, limit, index, arg, Ok(Some(selection)))
             && port.ty == ResolvedPortType::Bits(selection.projection.count)
             && clocked_driver_bits_result(&plan.inputs, &plan.definitions, selection.driver, Some(selection.projection), Ok(wires));
-        clocked_selected_port_bits(&plan.inputs, &plan.definitions, selection.driver, selection.projection, wires);
+        (selection.driver, selection.projection)
     }
 
     /// 型検査が保留した選択式を検査して、要求した幅の配線に変換する。

@@ -11,7 +11,7 @@ use crate::syntax::{AtomKind, Form, read_bit_literal};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use super::{clocked_driver_bits_result, driver_bits::{clocked_whole_port_bits, driver_bits_capacity}, selections::bound_type};
+use super::{clocked_driver_bits_result, driver_bits::{clocked_driver_terminal_bound, clocked_whole_port_bits, driver_bits_capacity}, selections::bound_type};
 #[cfg(verus_only)]
 use crate::project::{CallPortType, OutputDriver, SignalType, StructureLayouts, circuit_literal_width_matches, port_types_equal,
     circuits::is_form_location, use_aliases::call_arity::{checked_literal_leaf_width, leaf_result}};
@@ -21,6 +21,31 @@ use crate::syntax::{bit_literal_value_at, form_span};
 use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
+
+proof fn flatten_argument_terminal_bounds(rows: Seq<Seq<ClockedWireDriver>>, external: usize, bit: int)
+    requires
+        0 <= bit < rows.flatten().len(),
+        forall|i: int, j: int| 0 <= i < rows.len() && 0 <= j < rows[i].len() ==>
+            ((#[trigger] rows[i][j]) matches ClockedWireDriver::Terminal(wire) ==>
+                crate::netlist::wire_available(wire, external as nat, 0)),
+    ensures rows.flatten()[bit] matches ClockedWireDriver::Terminal(wire) ==>
+        crate::netlist::wire_available(wire, external as nat, 0),
+    decreases rows.len(),
+{
+    assert(rows.len() > 0);
+    if bit < rows[0].len() {
+        assert(rows.flatten()[bit] == rows[0][bit]);
+    } else {
+        let rest = rows.drop_first();
+        assert forall|i: int, j: int| 0 <= i < rest.len() && 0 <= j < rest[i].len() implies
+            ((#[trigger] rest[i][j]) matches ClockedWireDriver::Terminal(wire) ==>
+                crate::netlist::wire_available(wire, external as nat, 0)) by {
+            assert(rest[i][j] == rows[i + 1][j]);
+        };
+        flatten_argument_terminal_bounds(rest, external, bit - rows[0].len());
+        assert(rows.flatten()[bit] == rest.flatten()[bit - rows[0].len()]);
+    }
+}
 
 /// 呼び出しの実引数をビット配線へ変換できなかった理由。
 #[derive(Debug)]
@@ -240,6 +265,81 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.call_wires_result(checked, limit, plan, index, Ok(wires)),
         ensures wires@.len() == checked.calls@[index as int].inputs.ports.arguments@.len(),
     {
+    }
+
+    /// 全実引数の直接端子は外部入力か定数を指す。定義参照は直結のまま残る。
+    pub(super) proof fn call_wires_terminal_bounds(
+        &self, checked: &ModuleCalls, limit: u64, capacity: usize, plan: &ClockedModuleOutputs,
+        call: usize, wires: Vec<Vec<ClockedWireDriver>>,
+    )
+        requires
+            self.outputs_on_checked(&checked.module, limit, capacity, Ok(*plan)),
+            call < checked.calls@.len(),
+            self.call_wires_result(checked, limit, plan, call, Ok(wires)),
+        ensures ({
+            let flattened = wires@.map_values(|row: Vec<ClockedWireDriver>| row@).flatten();
+            forall|i: int| 0 <= i < flattened.len() ==> ((#[trigger] flattened[i])
+                matches ClockedWireDriver::Terminal(wire) ==>
+                    crate::netlist::wire_available(wire, plan.inputs.total_bits_model() as nat, 0))
+        }),
+    {
+        self.clocked_output_layouts(&checked.module, limit, capacity, plan);
+        let signature = checked.module.expressions.typed.sources.roots.wiring.drivers.signature;
+        vstd::std_specs::vec::axiom_spec_len(&signature.inputs);
+        vstd::std_specs::vec::axiom_spec_len(&wires);
+        assert forall|i: int| 0 <= i < plan.inputs.ranges_model().len() implies
+            (#[trigger] plan.inputs.ranges_model()[i]).end <= plan.inputs.total_bits_model() by {
+            self.routine_bit_layout_port(signature, limit, capacity, &plan.inputs, &plan.outputs, PortDirection::Input, i as usize);
+        };
+        reveal(UseAliases::call_wires_prefix);
+        let rows = wires@.map_values(|row: Vec<ClockedWireDriver>| row@);
+        let external = plan.inputs.total_bits_model();
+        let row = checked.calls@[call as int];
+        let parsed = self.targets.project_model().circuits_model()[row.at.file as int];
+        assert forall|i: int, j: int| 0 <= i < rows.len() && 0 <= j < rows[i].len() implies
+            ((#[trigger] rows[i][j]) matches ClockedWireDriver::Terminal(wire) ==>
+                crate::netlist::wire_available(wire, external as nat, 0)) by {
+            let bits = wires@[i];
+            let arg = i as usize;
+            assert(arg == i);
+            assert(self.argument_wires(checked, limit, plan, call, arg, Ok(bits)));
+            let port_data = row.inputs.ports;
+            let form = parsed.syntax.forms@[port_data.arguments@[arg as int] as int];
+            if form is Atom && form->Atom_kind is Name {
+                let expressions = &checked.module.expressions;
+                let (driver, _port) = choose|driver: OutputDriver, port: CallPortType|
+                    #[trigger] self.module_argument_binding(checked, call as int, arg as int, driver)
+                    && #[trigger] port_data.signature.target.port_matches(PortDirection::Input, arg, Some(port))
+                    && row.inputs.types@[arg as int] == bound_type(&expressions.typed, expressions.types@, driver)
+                    && (row.inputs.types@[arg as int] matches Some(ty) ==> port_types_equal(ty.ty, port.ty))
+                    && clocked_driver_bits_result(&plan.inputs, &plan.definitions, driver, None, Ok(bits));
+                clocked_driver_terminal_bound(&plan.inputs, &plan.definitions, driver, None, bits, j);
+            } else if literal_atom(form) {
+                let span = form_span(form);
+                let bytes = port_data.signature.source.text.spec_bytes()[span.start as int..span.end as int];
+                let ty = choose|port: CallPortType|
+                    #[trigger] port_data.signature.target.port_matches(PortDirection::Input, arg, Some(port))
+                        && port.ty is Bits
+                        && circuit_literal_width_matches(bytes, Some(port.ty->Bits_0), limit, Ok(port.ty->Bits_0))
+                        && literal_wires(bytes, port.ty->Bits_0, Ok(bits));
+                assert(literal_wires(bytes, ty.ty->Bits_0, Ok(bits)));
+                assert(bits@[j] is Terminal);
+                assert(bits@[j]->Terminal_0 is Constant);
+            } else {
+                assert(form is List);
+                let port = choose|port: CallPortType|
+                    #[trigger] port_data.signature.target.port_matches(PortDirection::Input, arg, Some(port))
+                        && self.selected_argument_wires(checked, limit, plan, call, arg, port, Ok(bits));
+                let (driver, projection) = self.selected_argument_projection(checked, limit, plan, call, arg, port, bits);
+                clocked_driver_terminal_bound(&plan.inputs, &plan.definitions, driver, Some(projection), bits, j);
+            }
+        };
+        let flattened = rows.flatten();
+        assert forall|i: int| 0 <= i < flattened.len() implies
+            ((#[trigger] flattened[i]) matches ClockedWireDriver::Terminal(wire) ==>
+                crate::netlist::wire_available(wire, external as nat, 0)) by {
+            flatten_argument_terminal_bounds(rows, external, i);
+        };
     }
 
     /// 実引数の配線数が呼び出し先の入力ポートの表現幅に一致することを示す。

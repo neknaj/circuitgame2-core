@@ -126,6 +126,29 @@ pub closed spec fn clocked_driver_bits_result(
     }
 }
 
+/// 引数の直接端子は、型検査で配置した外部入力の範囲内を指す。
+pub(super) proof fn clocked_driver_terminal_bound(
+    inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver,
+    selection: Option<CheckedBitSelection>, wires: Vec<ClockedWireDriver>, bit: int,
+)
+    requires
+        clocked_driver_bits_result(inputs, definitions, driver, selection, Ok(wires)),
+        0 <= bit < wires@.len(),
+        forall|i: int| 0 <= i < inputs.ranges_model().len() ==>
+            (#[trigger] inputs.ranges_model()[i]).end <= inputs.total_bits_model(),
+    ensures wires@[bit] matches ClockedWireDriver::Terminal(wire) ==>
+        crate::netlist::wire_available(wire, inputs.total_bits_model() as nat, 0),
+{
+    let range = driver_range(inputs, definitions, driver)->Some_0;
+    let width = (range.end - range.start) as u64;
+    let (start, count, stride, last) = match selection {
+        Some(selection) => (selection.start, selection.count, selection.stride, selection.last),
+        None => (0u64, width, 1u64, (width - 1) as u64),
+    };
+    selected_bit_in_range(width, start, count, stride, last, bit);
+    assert(range.start + start + bit * stride < range.end);
+}
+
 /// 信号全体を展開すると、配線数はそのポートまたは定義の範囲の長さになる。
 pub(super) proof fn clocked_whole_port_bits(
     inputs: &PortBitLayout, definitions: &PortBitLayout, driver: OutputDriver, wires: Vec<ClockedWireDriver>,

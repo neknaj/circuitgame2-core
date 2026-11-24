@@ -8,6 +8,8 @@ mod source_ids;
 #[cfg(verus_only)]
 mod source_links;
 #[cfg(verus_only)]
+mod source_widths;
+#[cfg(verus_only)]
 mod source_placement;
 #[cfg(verus_only)]
 pub use path_trace::ClockedModuleObservation;
@@ -352,6 +354,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     network.storage@.take(wiring.direct_devices as int), network.storage_sites@.take(wiring.direct_devices as int))
                 && wiring.primitives.len() == checked.calls@.len()
                 && wiring.direct_devices <= network.storage@.len()
+                && wiring.direct_devices <= network.storage_sites@.len()
                 && routines_pins_valid(wiring.routines, network.circuit.netlist_model().input_count,
                     network.circuit.netlist_model().gates@.len())
                 && call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, CallBoundary {

@@ -170,7 +170,8 @@ pub(crate) proof fn source_vm_layout_port_evidence(
             &&& source_vm_terminal_pair(source.input_count, wiring, layout, original.right, flat.right)
         },
         forall|i: int| 0 <= i < wiring.len() ==>
-            source_vm_storage_pair(source.input_count, wiring, layout, source.storage[layout.devices[i]], #[trigger] wiring[i]),
+            source.storage.contains_key(layout.devices[i])
+                && source_vm_storage_pair(source.input_count, wiring, layout, source.storage[layout.devices[i]], #[trigger] wiring[i]),
         source_vm_row_pair(source.input_count, wiring, layout, source.outputs, netlist.outputs@),
 {
 }
