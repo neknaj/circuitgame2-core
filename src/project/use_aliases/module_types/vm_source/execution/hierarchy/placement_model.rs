@@ -268,7 +268,7 @@ pub(super) proof fn join_routine_input_offsets(
 }
 
 /// 子の素子の配線と登録出力が、親側のどの添字とビット位置に対応するかを示す。
-proof fn routine_storage_mapping(
+pub(super) proof fn routine_storage_mapping(
     netlist: &NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>,
     routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int, device: int,
 )

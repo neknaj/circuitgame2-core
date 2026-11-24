@@ -7,7 +7,8 @@ use vstd::prelude::*;
 
 mod layout;
 pub(crate) use layout::{
-    source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_row_pair, source_vm_storage_pair,
+    source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_layout_port_evidence,
+    source_vm_row_pair, source_vm_storage_pair,
     source_vm_terminal_pair,
 };
 pub use layout::{

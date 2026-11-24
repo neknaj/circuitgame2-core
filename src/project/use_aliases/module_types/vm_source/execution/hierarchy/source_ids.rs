@@ -2,7 +2,7 @@
 
 use super::{
     ClockedFunctionTemplate, ClockedHierarchy, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits,
-    HierarchyWiring, ModuleBodyPosition, ModuleCalls, PartitionArea, UseAliases, boundary_position,
+    HierarchyWiring, ModuleBodyPosition, ModuleCalls, PartitionArea, RoutineWiring, UseAliases, boundary_position,
     call_interval_matches, call_partition_matches, function_target, partition_owner,
 };
 use crate::netlist::{
@@ -38,7 +38,7 @@ proof fn source_device_under_distinct(site: DefinitionPosition, a: SourceDeviceI
     assert(right.instance.skip(1) =~= b.instance);
 }
 
-spec fn children_follow_calls(wiring: &HierarchyWiring, children: Seq<Option<HierarchySourceIds>>) -> bool {
+pub(super) closed spec fn children_follow_calls(wiring: &HierarchyWiring, children: Seq<Option<HierarchySourceIds>>) -> bool {
     &&& children.len() == wiring.routines.len()
     &&& forall|call: int| 0 <= call < children.len() ==> match ((#[trigger] wiring.routines[call]), children[call]) {
         (Some(routine), Some(ids)) => ids.gates.len() == routine.callee.gates@.len()
@@ -124,7 +124,7 @@ spec fn selected_source_children(hierarchy: &ClockedHierarchy, node: int, orders
         })
 }
 
-spec fn source_ids_match_network(ids: HierarchySourceIds, checked: &ModuleCalls, network: &ClockedModuleNetwork,
+pub(super) closed spec fn source_ids_match_network(ids: HierarchySourceIds, checked: &ModuleCalls, network: &ClockedModuleNetwork,
     children: Seq<Option<HierarchySourceIds>>,
 ) -> bool {
     let wiring = &network._hierarchy_wiring@->Some_0;
@@ -133,6 +133,33 @@ spec fn source_ids_match_network(ids: HierarchySourceIds, checked: &ModuleCalls,
     &&& ids.gates.no_duplicates() && ids.devices.no_duplicates()
     &&& ids.gates == Seq::new(ids.gates.len(), |i: int| parent_gate_id(checked, wiring, children, i as nat))
     &&& ids.devices == Seq::new(ids.devices.len(), |i: int| parent_device_id(checked, wiring, children, i as nat))
+}
+
+/// 子の素子 ID を、呼び出し経路を付けて親の割り当て区間に置く。
+pub(super) open spec fn child_source_ids_at(
+    site: DefinitionPosition, routine: RoutineWiring, direct: usize, child: HierarchySourceIds, parent: HierarchySourceIds,
+) -> bool {
+    &&& routine.gates.start + child.gates.len() == routine.gates.end <= parent.gates.len()
+    &&& direct + routine.storage.start + child.devices.len() == direct + routine.storage.end <= parent.devices.len()
+    &&& forall|i: int| 0 <= i < child.gates.len() ==>
+        (#[trigger] parent.gates[routine.gates.start + i]) == source_gate_under(seq![site], child.gates[i])
+    &&& forall|i: int| 0 <= i < child.devices.len() ==>
+        (#[trigger] parent.devices[direct + routine.storage.start + i]) == source_device_under(site, child.devices[i])
+}
+
+proof fn interval_given_owns_index(wiring: &HierarchyWiring, area: PartitionArea, call: int, index: nat)
+    requires
+        call_partition_matches(wiring.boundaries, wiring.routines, wiring.primitives, wiring.boundaries.last()),
+        0 <= call < wiring.routines.len(),
+        boundary_position(wiring.boundaries[call], area) <= index < boundary_position(wiring.boundaries[call + 1], area),
+        index < boundary_position(wiring.boundaries.last(), area),
+    ensures owning_call(wiring, area, index) == call,
+{
+    reveal(call_partition_matches);
+    let found = partition_owner(wiring.boundaries, wiring.routines, wiring.primitives, area, index, wiring.routines.len() as int);
+    owner_is_partition_call(wiring, area, index);
+    assert(found == call);
+    assert(found == owning_call(wiring, area, index));
 }
 
 #[verifier::opaque]
@@ -206,6 +233,53 @@ proof fn device_owner_evidence(checked: &ModuleCalls, wiring: &HierarchyWiring,
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 親の実配列上で、この呼び出しに割り当てた子の ID を取り出す。
+    pub(super) proof fn child_source_ids_evidence(
+        &self, limits: ClockedModuleVmLimits, checked: &ModuleCalls, network: &ClockedModuleNetwork,
+        children: Seq<Option<HierarchySourceIds>>, parent: HierarchySourceIds, call: int,
+    )
+        requires
+            self.hierarchy_network_wiring(checked, limits, network),
+            children_follow_calls(&network._hierarchy_wiring@->Some_0, children),
+            source_ids_match_network(parent, checked, network, children),
+            0 <= call < checked.calls@.len(),
+            (network._hierarchy_wiring@->Some_0).routines[call].is_some(),
+        ensures
+            children[call].is_some(),
+            parent.devices.no_duplicates(),
+            ({
+                let wiring = network._hierarchy_wiring@->Some_0;
+                child_source_ids_at(checked.calls@[call].at, wiring.routines[call]->Some_0, wiring.direct_devices,
+                    children[call]->Some_0, parent)
+            }),
+    {
+        reveal(call_partition_matches);
+        reveal(UseAliases::hierarchy_public_wiring);
+        let wiring = &network._hierarchy_wiring@->Some_0;
+        let routine = wiring.routines[call]->Some_0;
+        let child = children[call]->Some_0;
+        let site = checked.calls@[call].at;
+        let last = wiring.boundaries.last();
+        super::placement_model::placed_routine_evidence(wiring.routines, network.circuit.netlist_model().gates@,
+            network.storage@.skip(wiring.direct_devices as int), wiring.first_child_input,
+            network.circuit.netlist_model().input_count, call);
+        assert(call_interval_matches(wiring.boundaries[call], wiring.boundaries[call + 1],
+            wiring.routines[call], wiring.primitives[call]));
+        assert forall|i: int| 0 <= i < child.gates.len() implies
+            (#[trigger] parent.gates[routine.gates.start + i]) == source_gate_under(seq![site], child.gates[i]) by {
+            let index = (routine.gates.start + i) as nat;
+            assert(index < last.gates);
+            interval_given_owns_index(wiring, PartitionArea::Gate, call, index);
+        };
+        assert forall|i: int| 0 <= i < child.devices.len() implies
+            (#[trigger] parent.devices[wiring.direct_devices + routine.storage.start + i]) ==
+                source_device_under(site, child.devices[i]) by {
+            let relative = (routine.storage.start + i) as nat;
+            assert(relative < last.child);
+            interval_given_owns_index(wiring, PartitionArea::ChildStorage, call, relative);
+        };
+    }
+
     /// 子の素子に呼び出し位置を付け、実際のゲート・状態素子順に並べる。
     ///
     /// 状態素子は直接呼び出した素子が先で、その後に子の素子が並ぶ。

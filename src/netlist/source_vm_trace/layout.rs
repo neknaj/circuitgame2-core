@@ -97,6 +97,26 @@ pub closed spec fn source_vm_layout_matches(
     &&& source_vm_row_pair(source.input_count, wiring, layout, source.outputs, netlist.outputs@)
 }
 
+/// 検証済みの対応表から、子を親に移すときに使う端子と素子列の事実を取り出す。
+pub(crate) proof fn source_vm_layout_port_evidence(
+    source: &SourceVmCircuit, netlist: &NorNetlist, wiring: Seq<ClockedStorageInputs>, layout: &SourceVmLayout,
+)
+    requires source_vm_layout_matches(source, netlist, wiring, layout),
+    ensures
+        layout.gates.len() == netlist.gates@.len() && layout.devices.len() == wiring.len(),
+        source.input_count + clocked_storage_output_width(wiring) == netlist.input_count,
+        forall|i: int| 0 <= i < netlist.gates@.len() ==> {
+            let flat = #[trigger] netlist.gates@[i];
+            let original = source.gates[layout.gates[i]];
+            &&& source_vm_terminal_pair(source.input_count, wiring, layout, original.left, flat.left)
+            &&& source_vm_terminal_pair(source.input_count, wiring, layout, original.right, flat.right)
+        },
+        forall|i: int| 0 <= i < wiring.len() ==>
+            source_vm_storage_pair(source.input_count, wiring, layout, source.storage[layout.devices[i]], #[trigger] wiring[i]),
+        source_vm_row_pair(source.input_count, wiring, layout, source.outputs, netlist.outputs@),
+{
+}
+
 /// 素子 ID を VM の配列順に並べた列から、位置の逆引きを定める。
 pub(crate) open spec fn source_vm_layout_for_orders(
     gates: Seq<SourceGateId>, devices: Seq<SourceDeviceId>,

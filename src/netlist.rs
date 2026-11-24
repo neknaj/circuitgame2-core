@@ -14,7 +14,8 @@ mod source_trace;
 mod source_vm_trace;
 #[cfg(verus_only)]
 pub(crate) use source_vm_trace::{
-    source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_row_pair, source_vm_storage_pair,
+    source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_layout_port_evidence,
+    source_vm_row_pair, source_vm_storage_pair,
     source_vm_terminal_pair,
 };
 #[cfg(verus_only)]
