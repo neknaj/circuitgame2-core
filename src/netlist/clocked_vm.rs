@@ -637,6 +637,27 @@ impl ClockedVm {
         assert(first[a].same_layout(self) && second[b].same_layout(self));
     }
 
+    /// 定常化の上界が `within` 以下なら、固定入力の履歴で `period` tick 離れた状態が一致する。
+    ///
+    /// `period` には正の間隔を指定する。`within` 以降の `tick` と、そこから `period` tick 後の
+    /// 両方を履歴に含める。
+    pub proof fn settling_states_repeat(
+        &self, bound: usize, within: nat, period: nat, input: Seq<bool>, states: Seq<ClockedVm>, tick: nat,
+    )
+        requires
+            self.valid(), self.settling_bound_matches(Some(bound)),
+            self.fixed_input_states(input, states),
+            bound as nat <= within <= tick, 0 < period,
+            tick + period < states.len(),
+        ensures
+            states[tick as int].same_layout(&states[(tick + period) as int]),
+            states[tick as int].storage_model().len() == 0
+                && states[(tick + period) as int].storage_model().len() == 0,
+            states[tick as int].gate_values_model() == states[(tick + period) as int].gate_values_model(),
+    {
+        self.settling_states_agree(bound, input, states, states, tick as int, (tick + period) as int);
+    }
+
     /// 指定した状態素子の RAM 記憶部を読み取る。
     ///
     /// 直近の tick が確定した時点の記憶部を返す。語はアドレス順で、各語の中は最下位ビットから並ぶ。
