@@ -3,14 +3,39 @@
 use super::{ClockedHierarchy, ClockedFunctionTemplate, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits,
     ModuleBodyPosition, UseAliases, routine_placed};
 use super::placement_model::{RoutineWiring, placed_routine_evidence, sibling_routines_order};
-use super::placement_model::trace::{RoutineFrame, frame_observed_from, frame_state_slice, join_frame_state_slices,
+use super::placement_model::trace::{RoutineFrame, frame_observed_from, frame_output_count, frame_outputs, frame_state_slice, join_frame_state_slices,
     join_vm_state_slices, nested_state_slice, nested_trace_projects, project_nested_trace, project_routine_trace,
-    routine_trace, trace_frame_lengths, trace_projection_ready, update_input_read_from, vm_state_slice};
+    routine_trace, trace_frame_lengths, trace_projection_ready, update_input_read_from, vm_state_slice, vm_state_slice_bounds};
 use crate::netlist::{ClockedVm, clocked_vm_trace};
 use alloc::vec::Vec;
+use core::ops::Range;
 use vstd::prelude::*;
 
 verus! {
+
+/// 名前解決済みの呼び出し一件の観測を表す。
+pub struct ClockedModuleObservation {
+    /// 呼び出し先モジュールの宣言位置。
+    pub declaration: ModuleBodyPosition,
+    /// ルート VM におけるゲートの半開区間。
+    pub gates: Range<usize>,
+    /// ルート VM におけるラッチと RAM の半開区間。
+    pub storage: Range<usize>,
+    /// reset 直後と各 tick 後の公開出力。先頭は reset の観測。
+    pub outputs: Seq<Seq<bool>>,
+}
+
+impl ClockedModuleObservation {
+    /// 観測件数が状態列と一致し、すべての状態で各区間が範囲内にある。
+    pub open spec fn fits_trace(&self, states: Seq<ClockedVm>) -> bool {
+        &&& self.outputs.len() == states.len()
+        &&& forall|i: int| 0 <= i < states.len() ==> {
+            let state = #[trigger] states[i];
+            &&& self.gates.start <= self.gates.end <= state.gate_values_model().len()
+            &&& self.storage.start <= self.storage.end <= state.storage_model().len()
+        }
+    }
+}
 
 /// 呼び出し番号を順にたどった先のモジュール。番号は各親のソース順である。
 spec fn path_target(graph: Seq<Vec<Option<usize>>>, node: usize, path: Seq<usize>) -> Option<usize>
@@ -49,16 +74,6 @@ spec fn path_offsets(
             _ => (0, 0),
         }
     }
-}
-
-/// 経路が分岐する最初の位置で、先の呼び出しを選ぶ。
-/// 一方が他方の接頭列である場合は、同じインスタンスの内外を指す。
-spec fn paths_diverge_in_order(first: Seq<usize>, second: Seq<usize>) -> bool
-    decreases first.len(),
-{
-    &&& first.len() > 0 && second.len() > 0
-    &&& (first[0] < second[0]
-        || (first[0] == second[0] && paths_diverge_in_order(first.skip(1), second.skip(1))))
 }
 
 /// 選ばれたインスタンスの状態は、開始モジュールのゲート列と状態素子列の部分列にある。
@@ -126,7 +141,172 @@ spec fn trace_starts_in_vm(
         inputs[i], #[trigger] updates[i])
 }
 
+spec fn vm_path_projection(
+    graph: Seq<Vec<Option<usize>>>, networks: Seq<Option<ClockedModuleNetwork>>, path: Seq<usize>, target: usize,
+    inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, result: PathTrace,
+) -> bool {
+    let parent = networks[0]->Some_0;
+    let leaf = networks[target as int]->Some_0;
+    let first = graph[0]@[path[0] as int]->Some_0;
+    let wiring = parent._hierarchy_wiring@->Some_0;
+    let routine = wiring.routines[path[0] as int]->Some_0;
+    &&& result.frames.len() == states.len() && result.updates.len() == inputs.len()
+    &&& (result.gates, result.storage) == path_offsets(graph, networks, 0, path)
+    &&& routine_trace(&leaf.circuit.netlist_model(), leaf.storage@, leaf.inputs.total_bits_model() as nat,
+        result.frames, result.updates)
+    &&& result.gates + leaf.circuit.netlist_model().gates@.len() <= parent.circuit.netlist_model().gates@.len()
+    &&& result.storage + leaf.storage@.len() <= parent.storage@.len()
+    &&& forall|i: int| 0 <= i < states.len() ==> vm_state_slice(&states[i], #[trigger] result.frames[i],
+        result.gates, leaf.circuit.netlist_model().gates@.len(), result.storage, leaf.storage@.len())
+    &&& exists|frames: Seq<RoutineFrame>, updates: Seq<Seq<bool>>, suffix: PathTrace| {
+        &&& #[trigger] trace_starts_in_vm(inputs, states, routine, wiring.direct_devices, frames, updates)
+        &&& #[trigger] trace_follows_path(graph, networks, path.skip(1), TraceHop { node: first, frames, updates },
+            target, suffix)
+        &&& result.frames == suffix.frames && result.updates == suffix.updates && result.hops == suffix.hops
+        &&& result.gates == routine.gates.start + suffix.gates
+        &&& result.storage == wiring.direct_devices + routine.storage.start + suffix.storage
+    }
+}
+
+spec fn public_observation_matches(
+    hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>, path: Seq<usize>,
+    inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, result: Option<ClockedModuleObservation>,
+) -> bool {
+    match result {
+        None => path.len() == 0 || path_target(hierarchy.graph@, 0, path).is_none(),
+        Some(observed) => {
+            &&& path.len() > 0
+            &&& path_target(hierarchy.graph@, 0, path) matches Some(target)
+            &&& target < hierarchy.positions@.len() && target < networks.len()
+            &&& networks[target as int] matches Some(network)
+            &&& observed.declaration == hierarchy.positions@[target as int]
+            &&& observed.gates.start + network.circuit.netlist_model().gates@.len() == observed.gates.end
+            &&& observed.storage.start + network.storage@.len() == observed.storage.end
+            &&& observed.outputs.len() == states.len()
+            &&& exists|trace: PathTrace| #[trigger]
+                vm_path_projection(hierarchy.graph@, networks, path, target, inputs, states, trace)
+                && observed.gates.start == trace.gates && observed.storage.start == trace.storage
+                && observed.outputs == frame_outputs(trace.frames)
+        },
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 二つの経路が分岐し、最初に異なる呼び出しでは `first` がソース順で先にある。
+    ///
+    /// 一方が他方の接頭列である場合は、同じインスタンスの内外を指すため成立しない。
+    pub open spec fn clocked_module_paths_in_order(first: Seq<usize>, second: Seq<usize>) -> bool
+        decreases first.len(),
+    {
+        &&& first.len() > 0 && second.len() > 0
+        &&& (first[0] < second[0]
+            || (first[0] == second[0] && Self::clocked_module_paths_in_order(first.skip(1), second.skip(1))))
+    }
+
+    /// 同じコンパイル結果と VM 実行に対する二つの呼び出しの観測を表す。
+    pub closed spec fn clocked_module_observations_match(
+        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        first: Seq<usize>, second: Seq<usize>, inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>,
+        result: (Option<ClockedModuleObservation>, Option<ClockedModuleObservation>),
+    ) -> bool {
+        exists|hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+            functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int|
+            #[trigger] self.hierarchy_compilation_snapshot(root, limits, compiled, hierarchy, networks, functions, end)
+            && public_observation_matches(hierarchy, networks, first, inputs, states, result.0)
+            && public_observation_matches(hierarchy, networks, second, inputs, states, result.1)
+    }
+
+    /// reset と有限個の入力から、二つのモジュール呼び出しの公開出力と状態区間を得る。
+    ///
+    /// 経路の各番号は、その親にある検査済みの呼び出し一覧の添字。空の経路や、途中でモジュールの
+    /// 呼び出しをたどれない経路には `None` を返す。結果が二つあり、経路が分岐順なら区間は重ならない。
+    pub proof fn observe_clocked_module_paths(
+        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        first: Seq<usize>, second: Seq<usize>, inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    ) -> (result: (Option<ClockedModuleObservation>, Option<ClockedModuleObservation>))
+        requires self.clocked_module_hierarchy_vm(root, limits, compiled),
+            clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
+        ensures self.clocked_module_observations_match(root, limits, compiled, first, second, inputs, states, result),
+            first.len() == 0 ==> result.0.is_none(),
+            second.len() == 0 ==> result.1.is_none(),
+            result.0 matches Some(left) ==> left.fits_trace(states),
+            result.1 matches Some(right) ==> right.fits_trace(states),
+            result matches (Some(left), Some(right)) ==> Self::clocked_module_paths_in_order(first, second) ==>
+                left.gates.end <= right.gates.start && left.storage.end <= right.storage.start,
+    {
+        let (hierarchy, networks, functions, end) = choose|hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+            functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int|
+                #[trigger] self.hierarchy_compilation_snapshot(root, limits, compiled, hierarchy, networks, functions, end);
+        let left = self.observe_compiled_path(root, limits, compiled, hierarchy, networks, functions, end,
+            first, inputs, states, outputs);
+        let right = self.observe_compiled_path(root, limits, compiled, hierarchy, networks, functions, end,
+            second, inputs, states, outputs);
+        if Self::clocked_module_paths_in_order(first, second) && left.is_some() && right.is_some() {
+            self.clocked_hierarchy_evidence(root, limits.width, &hierarchy);
+            let earlier = path_target(hierarchy.graph@, 0, first)->Some_0;
+            let later = path_target(hierarchy.graph@, 0, second)->Some_0;
+            self.resolved_paths_separate(root, limits, &hierarchy, end, networks, functions, 0, first, second, earlier, later);
+        }
+        (left, right)
+    }
+
+    proof fn observe_compiled_path(
+        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, compiled: &ClockedModuleVm,
+        hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int,
+        path: Seq<usize>, inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    ) -> (result: Option<ClockedModuleObservation>)
+        requires self.hierarchy_compilation_snapshot(root, limits, compiled, hierarchy, networks, functions, end),
+            clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
+        ensures public_observation_matches(hierarchy, networks, path, inputs, states, result),
+            path.len() == 0 ==> result.is_none(),
+            result matches Some(observed) ==> {
+                &&& observed.fits_trace(states)
+                &&& path_target(hierarchy.graph@, 0, path) matches Some(target)
+                &&& networks[target as int] matches Some(network)
+                &&& observed.gates.start + network.circuit.netlist_model().gates@.len() == observed.gates.end
+                &&& observed.storage.start + network.storage@.len() == observed.storage.end
+                &&& observed.gates.start == path_offsets(hierarchy.graph@, networks, 0, path).0
+                &&& observed.storage.start == path_offsets(hierarchy.graph@, networks, 0, path).1
+            },
+    {
+        if path.len() == 0 { return None; }
+        let resolved = path_target(hierarchy.graph@, 0, path);
+        if resolved.is_none() { return None; }
+        let target = resolved->Some_0;
+        let trace = self.project_resolved_vm_path(root, limits, &hierarchy, end, networks, functions, compiled,
+            path, target, inputs, states, outputs);
+        self.clocked_hierarchy_evidence(root, limits.width, &hierarchy);
+        reveal(UseAliases::hierarchy_templates_through);
+        assert(target < hierarchy.positions@.len());
+        frame_output_count(trace.frames);
+        let parent = networks[0]->Some_0;
+        let leaf = networks[target as int]->Some_0;
+        let parent_netlist = parent.circuit.netlist_model();
+        vstd::std_specs::vec::axiom_spec_len(&parent_netlist.gates);
+        vstd::std_specs::vec::axiom_spec_len(&parent.storage);
+        let observed = ClockedModuleObservation {
+            declaration: hierarchy.positions@[target as int],
+            gates: Range { start: trace.gates as usize, end: (trace.gates + leaf.circuit.netlist_model().gates@.len()) as usize },
+            storage: Range { start: trace.storage as usize, end: (trace.storage + leaf.storage@.len()) as usize },
+            outputs: frame_outputs(trace.frames),
+        };
+        assert(observed.fits_trace(states)) by {
+            assert forall|i: int| 0 <= i < states.len() implies {
+                let state = #[trigger] states[i];
+                &&& observed.gates.start <= observed.gates.end <= state.gate_values_model().len()
+                &&& observed.storage.start <= observed.storage.end <= state.storage_model().len()
+            } by {
+                vm_state_slice_bounds(&states[i], trace.frames[i], trace.gates, leaf.circuit.netlist_model().gates@.len(),
+                    trace.storage, leaf.storage@.len());
+            };
+        };
+        assert(public_observation_matches(hierarchy, networks, path, inputs, states, Some(observed))) by {
+            assert(vm_path_projection(hierarchy.graph@, networks, path, target, inputs, states, trace));
+        };
+        Some(observed)
+    }
+
     proof fn selected_trace_edge(
         &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
         end: int, networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
@@ -293,32 +473,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             target < networks.len(), networks[target as int].is_some(),
             result.frames.len() == states.len(), result.updates.len() == inputs.len(),
             (result.gates, result.storage) == path_offsets(hierarchy.graph@, networks, 0, path),
-            ({
-                let parent = networks[0]->Some_0;
-                let leaf = networks[target as int]->Some_0;
-                let first = hierarchy.graph@[0]@[path[0] as int]->Some_0;
-                let wiring = parent._hierarchy_wiring@->Some_0;
-                let routine = wiring.routines[path[0] as int]->Some_0;
-                &&& routine_trace(&leaf.circuit.netlist_model(), leaf.storage@, leaf.inputs.total_bits_model() as nat,
-                    result.frames, result.updates)
-                &&& result.gates + leaf.circuit.netlist_model().gates@.len() <= parent.circuit.netlist_model().gates@.len()
-                &&& result.storage + leaf.storage@.len() <= parent.storage@.len()
-                &&& forall|i: int| 0 <= i < states.len() ==> vm_state_slice(&states[i], #[trigger] result.frames[i],
-                    result.gates, leaf.circuit.netlist_model().gates@.len(), result.storage, leaf.storage@.len())
-                &&& routine.gates.start <= result.gates
-                &&& result.gates + leaf.circuit.netlist_model().gates@.len() <= routine.gates.end
-                &&& wiring.direct_devices + routine.storage.start <= result.storage
-                &&& result.storage + leaf.storage@.len() <= wiring.direct_devices + routine.storage.end
-                &&& exists|first_frames: Seq<RoutineFrame>, first_updates: Seq<Seq<bool>>, suffix: PathTrace| {
-                    &&& #[trigger] trace_starts_in_vm(inputs, states, routine, wiring.direct_devices, first_frames, first_updates)
-                    &&& #[trigger] trace_follows_path(hierarchy.graph@, networks, path.skip(1),
-                        TraceHop { node: first, frames: first_frames, updates: first_updates }, target, suffix)
-                    &&& result.frames == suffix.frames && result.updates == suffix.updates
-                    &&& result.gates == routine.gates.start + suffix.gates
-                    &&& result.storage == wiring.direct_devices + routine.storage.start + suffix.storage
-                    &&& result.hops == suffix.hops
-                }
-            }),
+            vm_path_projection(hierarchy.graph@, networks, path, target, inputs, states, result),
     {
         self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
         let call = path[0];
@@ -411,7 +566,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             node < networks.len(), node < hierarchy.rank@.len(), node < hierarchy.modules@.len(),
             hierarchy.rank@[node as int] < end,
             hierarchy.modules@[node as int].is_some(), networks[node as int].is_some(),
-            paths_diverge_in_order(first, second),
+            Self::clocked_module_paths_in_order(first, second),
             path_target(hierarchy.graph@, node, first) == Some(first_target),
             path_target(hierarchy.graph@, node, second) == Some(second_target),
         ensures
@@ -446,52 +601,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    /// 二つの経路の末尾は、同じ宣言を指す場合も分岐先ごとに別の状態区間を使う。
-    proof fn project_separate_vm_paths(
-        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
-        end: int, networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
-        compiled: &ClockedModuleVm, first: Seq<usize>, second: Seq<usize>, first_target: usize, second_target: usize,
-        inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
-    ) -> (result: (PathTrace, PathTrace))
-        requires
-            self.clocked_hierarchy_matches(root, limits.width, hierarchy),
-            self.hierarchy_templates_through(hierarchy, limits, end, networks, functions),
-            0 < end, hierarchy.order@[end - 1] == 0,
-            networks.len() > 0, networks[0].is_some(),
-            hierarchy.modules@.len() > 0, hierarchy.modules@[0].is_some(),
-            self.network_vm_on_reset(&networks[0]->Some_0, limits.state_bits, compiled),
-            paths_diverge_in_order(first, second),
-            path_target(hierarchy.graph@, 0, first) == Some(first_target),
-            path_target(hierarchy.graph@, 0, second) == Some(second_target),
-            clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
-        ensures
-            ({
-                let first_leaf = networks[first_target as int]->Some_0;
-                let second_leaf = networks[second_target as int]->Some_0;
-                &&& first_target < networks.len() && networks[first_target as int].is_some()
-                &&& second_target < networks.len() && networks[second_target as int].is_some()
-                &&& (result.0.gates, result.0.storage) == path_offsets(hierarchy.graph@, networks, 0, first)
-                &&& (result.1.gates, result.1.storage) == path_offsets(hierarchy.graph@, networks, 0, second)
-                &&& result.0.gates + first_leaf.circuit.netlist_model().gates@.len() <= result.1.gates
-                &&& result.0.storage + first_leaf.storage@.len() <= result.1.storage
-                &&& result.0.frames.len() == result.1.frames.len() == states.len()
-                &&& forall|i: int| 0 <= i < states.len() ==> {
-                    &&& vm_state_slice(&states[i], #[trigger] result.0.frames[i], result.0.gates,
-                        first_leaf.circuit.netlist_model().gates@.len(), result.0.storage, first_leaf.storage@.len())
-                    &&& vm_state_slice(&states[i], #[trigger] result.1.frames[i], result.1.gates,
-                        second_leaf.circuit.netlist_model().gates@.len(), result.1.storage, second_leaf.storage@.len())
-                }
-            }),
-    {
-        let earlier = self.project_resolved_vm_path(root, limits, hierarchy, end, networks, functions, compiled,
-            first, first_target, inputs, states, outputs);
-        let later = self.project_resolved_vm_path(root, limits, hierarchy, end, networks, functions, compiled,
-            second, second_target, inputs, states, outputs);
-        self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
-        self.resolved_paths_separate(root, limits, hierarchy, end, networks, functions, 0, first, second,
-            first_target, second_target);
-        (earlier, later)
-    }
+
 }
 
 } // verus!

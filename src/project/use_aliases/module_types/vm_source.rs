@@ -3,6 +3,8 @@
 mod concat;
 mod execution;
 pub use execution::{ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+#[cfg(verus_only)]
+pub use execution::ClockedModuleObservation;
 
 use super::{ClockedModuleOutputs, ClockedModuleOutputsError, ClockedStorageLayout, ClockedStorageLayoutError,
     ClockedDriverBitsError, ClockedPlanError, ClockedWireDriver, ModuleCalls, ModuleCallsError, UseAliases,

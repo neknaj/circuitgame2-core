@@ -83,6 +83,8 @@ pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes,
     ModuleOutputTypes, ModuleOutputTypesError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 pub use use_aliases::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+#[cfg(verus_only)]
+pub use use_aliases::ClockedModuleObservation;
 pub use use_aliases::{ClockedArgumentWiringError, ClockedModuleOutputs, ClockedModuleOutputsError};
 pub use use_aliases::{ClockedDriverBitsError, clocked_driver_bits};
 #[cfg(verus_only)]

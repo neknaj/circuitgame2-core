@@ -3,6 +3,8 @@
 mod placement_model;
 #[cfg(verus_only)]
 mod path_trace;
+#[cfg(verus_only)]
+pub use path_trace::ClockedModuleObservation;
 
 use placement_model::RoutineWiring;
 #[cfg(verus_only)]
@@ -613,22 +615,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    spec fn hierarchy_compilation_snapshot(
+        &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, vm: &ClockedModuleVm,
+        hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
+        functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int,
+    ) -> bool {
+        &&& self.clocked_hierarchy_matches(owner, limits.width, &hierarchy)
+        &&& self.hierarchy_templates_through(&hierarchy, limits, end, networks, functions)
+        &&& self.clocked_functions_match(functions, limits.width, limits.wiring_bits, limits.gates)
+        &&& 0 < end <= hierarchy.order@.len() && hierarchy.order@[end - 1] == 0
+        &&& networks.len() > 0
+        &&& networks[0] matches Some(network)
+        &&& hierarchy.modules@.len() > 0 && hierarchy.modules@[0].is_some()
+        &&& self.network_vm_on_reset(&network, limits.state_bits, vm)
+        &&& self.hierarchy_network_wiring(&hierarchy.modules@[0]->Some_0, limits, &network)
+        &&& network.circuit.netlist_model().gates@.len() <= limits.gates
+        &&& network.circuit.netlist_model().input_count <= limits.wiring_bits
+    }
+
     /// ルートの定義と公開ポートの配線に対応するネットワークから、VM が初期化されることを表す。
     pub closed spec fn clocked_module_hierarchy_vm(
         &self, owner: ModuleBodyPosition, limits: ClockedModuleVmLimits, vm: &ClockedModuleVm,
     ) -> bool {
-        exists|hierarchy: ClockedHierarchy, network: ClockedModuleNetwork, networks: Seq<Option<ClockedModuleNetwork>>,
+        exists|hierarchy: ClockedHierarchy, networks: Seq<Option<ClockedModuleNetwork>>,
             functions: Map<(usize, usize), ClockedFunctionTemplate>, end: int|
-            #[trigger] self.clocked_hierarchy_matches(owner, limits.width, &hierarchy)
-            && #[trigger] self.network_vm_on_reset(&network, limits.state_bits, vm)
-            && #[trigger] self.hierarchy_templates_through(&hierarchy, limits, end, networks, functions)
-            && self.clocked_functions_match(functions, limits.width, limits.wiring_bits, limits.gates)
-            && 0 < end && hierarchy.order@[end - 1] == 0
-            && networks[0] == Some(network)
-            && hierarchy.modules@[0].is_some()
-            && self.hierarchy_network_wiring(&hierarchy.modules@[0]->Some_0, limits, &network)
-            && network.circuit.netlist_model().gates@.len() <= limits.gates
-            && network.circuit.netlist_model().input_count <= limits.wiring_bits
+            #[trigger] self.hierarchy_compilation_snapshot(owner, limits, vm, hierarchy, networks, functions, end)
     }
 
     /// 失敗した関数の展開を、階層中の宣言と、そこで最初に失敗した呼び出しに対応付ける。
@@ -748,6 +759,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                             assert(self.clocked_module_hierarchy_vm(owner, limits, &vm)) by {
                                 assert(self.network_vm_on_reset(&source, limits.state_bits, &vm));
                                 assert(self.hierarchy_templates_through(&hierarchy, limits, index + 1, completed, functions@));
+                                assert(self.hierarchy_compilation_snapshot(owner, limits, &vm, hierarchy,
+                                    completed, functions@, index + 1));
                             };
                             Ok(Some(vm))
                         },

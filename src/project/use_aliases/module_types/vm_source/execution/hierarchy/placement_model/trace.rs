@@ -25,6 +25,17 @@ pub(in super::super) struct RoutineFrame {
     output: Seq<bool>,
 }
 
+/// 各フレームの出力を、reset から観測した順に並べる。
+pub(in super::super) closed spec fn frame_outputs(frames: Seq<RoutineFrame>) -> Seq<Seq<bool>> {
+    frames.map_values(|frame: RoutineFrame| frame.output)
+}
+
+/// どのフレームにも一つの出力が対応する。
+pub(in super::super) proof fn frame_output_count(frames: Seq<RoutineFrame>)
+    ensures frame_outputs(frames).len() == frames.len(),
+{
+}
+
 /// フレームに含まれるゲートと状態素子の数。
 pub(in super::super) closed spec fn frame_state_lengths(frame: RoutineFrame) -> (nat, nat) {
     (frame.gates.len(), frame.devices.len())
@@ -63,6 +74,15 @@ pub(in super::super) closed spec fn vm_state_slice(
     &&& device + devices <= vm.storage_model().len()
     &&& child.gates == vm.gate_values_model().subrange(gate as int, gate as int + gates)
     &&& child.devices == vm_storage_values(vm).subrange(device as int, device as int + devices)
+}
+
+/// 射影に使うゲートと状態素子の区間は、VM の状態列に収まる。
+pub(in super::super) proof fn vm_state_slice_bounds(
+    vm: &ClockedVm, child: RoutineFrame, gate: nat, gates: nat, device: nat, devices: nat,
+)
+    requires vm_state_slice(vm, child, gate, gates, device, devices),
+    ensures gate + gates <= vm.gate_values_model().len(), device + devices <= vm.storage_model().len(),
+{
 }
 
 /// 二段の配置を合成しても、各値の並びは親の元の部分列と一致する。

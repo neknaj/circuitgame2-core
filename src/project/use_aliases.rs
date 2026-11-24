@@ -39,6 +39,8 @@ pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes
     ModuleOutputTypes, ModuleOutputTypesError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 pub use module_types::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+#[cfg(verus_only)]
+pub use module_types::ClockedModuleObservation;
 pub use module_types::{ClockedArgumentWiringError, ClockedModuleOutputs, ClockedModuleOutputsError};
 pub use module_types::{ClockedDriverBitsError, clocked_driver_bits};
 #[cfg(verus_only)]

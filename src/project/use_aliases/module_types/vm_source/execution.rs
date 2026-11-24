@@ -2,6 +2,8 @@
 
 mod child_outputs;
 mod hierarchy;
+#[cfg(verus_only)]
+pub use hierarchy::ClockedModuleObservation;
 
 use super::super::ClockedStoragePlacement;
 use super::{ClockedEndpointError, ClockedModuleEndpoints, ModuleBodyPosition, ModuleCalls, UseAliases};
