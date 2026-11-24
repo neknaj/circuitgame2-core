@@ -77,6 +77,7 @@ struct PrimitiveWiring {
     placement: PrimitivePlacement,
     rows: Vec<Vec<ClockedWireDriver>>,
     arguments: Seq<Wire>,
+    outputs: Seq<Wire>,
 }
 
 /// 親の定義と公開ポートが参照する配線、および各呼び出しの移設済み出力。
@@ -96,6 +97,72 @@ fn call_site<'p, 'a>(checked: &ModuleCalls<'p, 'a>, call: usize) -> (site: Locat
 {
     let signature = &checked.calls[call].inputs.ports.signature;
     LocatedName { source: signature.source, span: signature.call.span.start..signature.call.span.end }
+}
+
+/// 呼び出しの手前までに配置するゲートの数。
+#[verifier::opaque]
+spec fn gate_cursor(checked: &ModuleCalls, calls: Seq<Option<CallPlacement>>, count: nat) -> nat
+    decreases count,
+{
+    if count == 0 || count > calls.len() { 0 } else {
+        let i = (count - 1) as int;
+        if let Some(child) = calls[i] { child.gates.end as nat }
+        else if checked.calls@[i].inputs.ports.signature.target is Nor { gate_cursor(checked, calls, i as nat) + 1 }
+        else { gate_cursor(checked, calls, i as nat) }
+    }
+}
+
+spec fn storage_outputs(range: Range<usize>) -> Seq<Wire> {
+    Seq::new((range.end - range.start) as nat, |i: int| Wire::Input((range.start + i) as usize))
+}
+
+proof fn gate_cursor_zero(checked: &ModuleCalls, calls: Seq<Option<CallPlacement>>)
+    ensures gate_cursor(checked, calls, 0) == 0,
+{
+    reveal(gate_cursor);
+}
+
+proof fn gate_cursor_next(checked: &ModuleCalls, calls: Seq<Option<CallPlacement>>, call: nat)
+    requires call < calls.len() == checked.calls@.len(),
+    ensures gate_cursor(checked, calls, call + 1) == if let Some(child) = calls[call as int] { child.gates.end as nat }
+        else if checked.calls@[call as int].inputs.ports.signature.target is Nor { gate_cursor(checked, calls, call) + 1 }
+        else { gate_cursor(checked, calls, call) },
+{
+    reveal(gate_cursor);
+}
+
+spec fn primitive_symbolic_row(
+    checked: &ModuleCalls, ports: &ClockedModuleOutputs, calls: Seq<Option<CallPlacement>>,
+    direct: &ClockedStorageLayout, bits: Seq<ClockedWireDriver>, slot: int, origin: HierarchyRowOrigin,
+) -> bool {
+    match origin {
+        HierarchyRowOrigin::Call(call) if calls[call as int].is_none() => {
+            let range = ports.definitions.ranges_model()[slot];
+            let row = bits.subrange(range.start as int, range.end as int);
+            if checked.calls@[call as int].inputs.ports.signature.target is Nor {
+                row == seq![ClockedWireDriver::Terminal(Wire::Gate(gate_cursor(checked, calls, call as nat) as usize))]
+            } else {
+                &&& direct.by_call@[call as int] matches Some(index)
+                &&& index < direct.instances@.len()
+                &&& row == storage_outputs(direct.instances@[index as int].outputs)
+                    .map_values(|wire: Wire| ClockedWireDriver::Terminal(wire))
+            }
+        },
+        _ => true,
+    }
+}
+
+spec fn primitive_follows_plan(
+    checked: &ModuleCalls, calls: Seq<Option<CallPlacement>>, direct: &ClockedStorageLayout,
+    call: int, primitive: Option<PrimitiveWiring>,
+) -> bool {
+    match primitive {
+        None => calls[call].is_some(),
+        Some(item) => calls[call].is_none() && match item.placement {
+            PrimitivePlacement::Nor(gate) => gate == gate_cursor(checked, calls, call as nat),
+            PrimitivePlacement::Storage(index) => direct.by_call@[call] == Some(index),
+        },
+    }
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -152,12 +219,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& resolved_bits(row_model(item.rows@), definitions, item.arguments)
                 &&& match item.placement {
                     PrimitivePlacement::Nor(gate) => target is Nor && gate < gates.len()
+                        && item.outputs == seq![Wire::Gate(gate)]
                         && item.arguments.len() == 2
                         && gates[gate as int] == (NorGate { left: item.arguments[0], right: item.arguments[1] }),
                     PrimitivePlacement::Storage(index) => target is StateElement && index < storage.len()
                         && index < sites.len() && sites[index as int].call_index == call
                         && sites[index as int].at == checked.calls@[call].at
                         && self.placement_matches(checked, width, sites[index as int])
+                        && item.outputs == storage_outputs(sites[index as int].outputs)
                         && sites[index as int].storage_inputs_match(item.arguments, Some(storage[index as int])),
                 }
             },
@@ -241,7 +310,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& self.source_vm_root_slot(checked, slot, call as int)
                 &&& call < wiring.routines.len()
                 &&& match wiring.routines[call as int] {
-                    None => self.source_vm_direct_slot(checked, slot, call as int),
+                    None => self.source_vm_direct_slot(checked, slot, call as int)
+                        && (wiring.primitives[call as int] matches Some(primitive) && expected == primitive.outputs),
                     Some(routine) => {
                         let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index as int;
                         &&& port < routine.layout.ranges_model().len()
@@ -793,6 +863,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& symbolic._origins@.len() == checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len()
             &&& forall|i: int| 0 <= i < symbolic._origins@.len() ==> #[trigger]
                 self.hierarchy_row_matches(checked, ports, calls@, symbolic.bits@, i, symbolic._origins@[i])
+            &&& forall|i: int| 0 <= i < symbolic._origins@.len() ==> #[trigger]
+                primitive_symbolic_row(checked, ports, calls@, direct, symbolic.bits@, i, symbolic._origins@[i])
         },
     {
         let expressions = &checked.module.expressions;
@@ -810,6 +882,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut slot = 0;
         let mut call = 0;
         let mut gates = 0usize;
+        proof { gate_cursor_zero(checked, calls@); }
         let ghost mut origins = Seq::<HierarchyRowOrigin>::empty();
         while slot < drivers.definitions.len()
             invariant
@@ -819,8 +892,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(*ports)),
                 slot <= drivers.definitions@.len(), call <= calls@.len() == checked.calls@.len(),
                 slot == origins.len(),
+                gates == gate_cursor(checked, calls@, call as nat),
                 forall|i: int| 0 <= i < slot ==> #[trigger]
                     self.hierarchy_row_matches(checked, ports, calls@, symbolic@, i, origins[i]),
+                forall|i: int| 0 <= i < slot ==> #[trigger]
+                    primitive_symbolic_row(checked, ports, calls@, direct, symbolic@, i, origins[i]),
             decreases drivers.definitions@.len() - slot,
         {
             let Some(range) = ports.definitions.range(slot) else { return Err(ClockedModuleVmError::InstanceCount); };
@@ -846,6 +922,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(self.hierarchy_row_matches(checked, ports, calls@, symbolic@, slot as int, origin)) by {
                         reveal(UseAliases::hierarchy_row_matches);
                     };
+                    assert(primitive_symbolic_row(checked, ports, calls@, direct, symbolic@, slot as int, origins[slot as int]));
                 }
             } else if call < calls.len() && calls[call].is_some() {
                 let Some(placement) = &calls[call] else { return Err(ClockedModuleVmError::InstanceCount); };
@@ -863,11 +940,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(self.hierarchy_row_matches(checked, ports, calls@, symbolic@, slot as int, origin)) by {
                         reveal(UseAliases::hierarchy_row_matches);
                     };
+                    assert(primitive_symbolic_row(checked, ports, calls@, direct, symbolic@, slot as int, origins[slot as int]));
                 }
                 let port = drivers.definitions[slot].result_index;
                 let port_count = placement.outputs.ranges().len();
                 if port >= port_count { return Err(ClockedModuleVmError::InstanceCount); }
                 if port + 1 == port_count {
+                    proof { gate_cursor_next(checked, calls@, call as nat); }
                     gates = placement.gates.end;
                     call += 1;
                 }
@@ -876,10 +955,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     return Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::Unsupported(
                         self.source_driver_location(owner, limits.width, drivers, slot))));
                 }
+                let ghost cursor = gates;
                 if matches!(checked.calls[call].inputs.ports.signature.target, ModuleCallTarget::Nor) {
                     if width != 1 || gates >= limits.gates { return Err(ClockedModuleVmError::InstanceCount); }
                     symbolic.push(ClockedWireDriver::Terminal(Wire::Gate(gates)));
                     gates += 1;
+                    assert(symbolic@.subrange(range.start as int, range.end as int)
+                        =~= seq![ClockedWireDriver::Terminal(Wire::Gate(cursor))]);
                 } else {
                     if call >= direct.by_call.len() { return Err(ClockedModuleVmError::InstanceCount); }
                     let Some(instance) = direct.by_call[call] else { return Err(ClockedModuleVmError::InstanceCount); };
@@ -892,12 +974,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     while bit < width
                         invariant bit <= width, symbolic@.len() == before.len() + bit,
                             symbolic@.take(before.len() as int) == before,
+                            placement.outputs.start + width == placement.outputs.end,
+                            forall|j: int| 0 <= j < bit ==> (#[trigger] symbolic@[before.len() + j])
+                                == ClockedWireDriver::Terminal(Wire::Input((placement.outputs.start + j) as usize)),
                         decreases width - bit,
                     {
                         let Some(wire) = placement.output_wire(bit) else { return Err(ClockedModuleVmError::InstanceCount); };
+                        let ghost prior = symbolic@;
                         symbolic.push(ClockedWireDriver::Terminal(wire));
                         assert(symbolic@.take(before.len() as int) =~= before);
+                        assert forall|j: int| 0 <= j <= bit implies (#[trigger] symbolic@[before.len() + j])
+                            == ClockedWireDriver::Terminal(Wire::Input((placement.outputs.start + j) as usize)) by {
+                            if j < bit { assert(symbolic@[before.len() + j] == prior[before.len() + j]); }
+                        };
                         bit += 1;
+                    }
+                    proof {
+                        let row = symbolic@.subrange(range.start as int, range.end as int);
+                        let terminals = storage_outputs(placement.outputs)
+                            .map_values(|wire: Wire| ClockedWireDriver::Terminal(wire));
+                        assert(range.start == before.len() && range.end == symbolic@.len());
+                        assert(row.len() == terminals.len());
+                        assert forall|j: int| 0 <= j < row.len() implies (#[trigger] row[j]) == terminals[j] by {
+                            assert(row[j] == symbolic@[before.len() + j]);
+                        };
+                        assert(row =~= terminals);
                     }
                 }
                 proof {
@@ -906,6 +1007,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(self.hierarchy_row_matches(checked, ports, calls@, symbolic@, slot as int, origin)) by {
                         reveal(UseAliases::hierarchy_row_matches);
                     };
+                    assert(primitive_symbolic_row(checked, ports, calls@, direct, symbolic@, slot as int, origins[slot as int]));
+                    gate_cursor_next(checked, calls@, call as nat);
                 }
                 call += 1;
             }
@@ -915,6 +1018,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 if i < slot {
                     assert(origins[i] == previous[i]);
                     assert(self.hierarchy_row_matches(checked, ports, calls@, before, i, previous[i]));
+                    reveal(UseAliases::hierarchy_row_matches);
+                    let old = ports.definitions.ranges_model()[i];
+                    assert(symbolic@.subrange(old.start as int, old.end as int)
+                        =~= before.subrange(old.start as int, old.end as int));
+                } else {
+                    assert(origins[i] == origins.last());
+                }
+            };
+            assert forall|i: int| 0 <= i < slot + 1 implies #[trigger]
+                primitive_symbolic_row(checked, ports, calls@, direct, symbolic@, i, origins[i]) by {
+                if i < slot {
+                    assert(origins[i] == previous[i]);
+                    assert(self.hierarchy_row_matches(checked, ports, calls@, before, i, previous[i]));
+                    assert(primitive_symbolic_row(checked, ports, calls@, direct, before, i, previous[i]));
                     reveal(UseAliases::hierarchy_row_matches);
                     let old = ports.definitions.ranges_model()[i];
                     assert(symbolic@.subrange(old.start as int, old.end as int)
@@ -1144,6 +1261,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             _rows.bits@.len() == definitions@.len() == ports.definitions.total_bits_model(),
             forall|i: int| 0 <= i < _rows._origins@.len() ==> #[trigger]
                 self.hierarchy_row_matches(checked, &ports, calls@, _rows.bits@, i, _rows._origins@[i]),
+            forall|i: int| 0 <= i < _rows._origins@.len() ==> #[trigger]
+                primitive_symbolic_row(checked, &ports, calls@, &direct, _rows.bits@, i, _rows._origins@[i]),
         ensures result matches Ok(network) ==> network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits,
             result matches Ok(network) ==> self.hierarchy_network_wiring(checked, limits, &network),
@@ -1167,6 +1286,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let first_state = direct.augmented_inputs;
         let mut next_state = first_state;
         proof {
+            gate_cursor_zero(checked, calls@);
             empty_routines(first_state);
             assert(self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
                 gates@, storage@, direct.instances@)) by { reveal(UseAliases::hierarchy_primitives_bound); };
@@ -1180,6 +1300,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 call <= calls@.len() == checked.calls@.len(),
                 call == captured.len(),
                 call == primitives.len(),
+                gates@.len() == gate_cursor(checked, calls@, call as nat),
+                forall|i: int| 0 <= i < call ==> primitive_follows_plan(
+                    checked, calls@, &direct, i, #[trigger] primitives[i]),
                 self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
                     gates@, storage@, direct.instances@),
                 routines_placed(captured, gates@, child_storage@, first_state, next_state),
@@ -1322,7 +1445,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let ghost gate = gates@.len() as usize;
                     gates.push(NorGate { left: arguments[0], right: arguments[1] });
                     proof {
-                        primitive = Some(PrimitiveWiring { placement: PrimitivePlacement::Nor(gate), rows, arguments: arguments@ });
+                        primitive = Some(PrimitiveWiring {
+                            placement: PrimitivePlacement::Nor(gate), rows, arguments: arguments@,
+                            outputs: seq![Wire::Gate(gate)],
+                        });
                     }
                 } else {
                     if call >= direct.by_call.len() { return Err(ClockedModuleVmError::InstanceCount); }
@@ -1339,6 +1465,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         direct.instances@[instance as int].storage_inputs_width(arguments@, inputs);
                         primitive = Some(PrimitiveWiring {
                             placement: PrimitivePlacement::Storage(instance), rows, arguments: arguments@,
+                            outputs: storage_outputs(direct.instances@[instance as int].outputs),
                         });
                     }
                     storage.push(inputs);
@@ -1360,11 +1487,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             proof {
                 assert(gates@.take(prior_gates.len() as int) =~= prior_gates);
                 assert(storage@.take(prior_direct.len() as int) =~= prior_direct);
+                gate_cursor_next(checked, calls@, call as nat);
                 assert(self.hierarchy_primitive_bound(checked, limits.width, &ports, definitions@, call as int,
                     primitive, gates@, storage@, direct.instances@));
                 self.extend_hierarchy_primitives(checked, limits.width, &ports, definitions@, primitives, primitive,
                     prior_gates, gates@, prior_direct, storage@, direct.instances@);
-                primitives = primitives.push(primitive);
+                let next = primitives.push(primitive);
+                assert forall|i: int| 0 <= i < next.len() implies primitive_follows_plan(
+                    checked, calls@, &direct, i, #[trigger] next[i]) by {
+                    if i < call { assert(next[i] == primitives[i]); }
+                    else { assert(next[i] == primitive); }
+                };
+                primitives = next;
             }
             assert forall|i: int| 0 <= i <= call implies #[trigger]
                 self.captured_call_output(checked, &ports, calls@, _rows, definitions@, i, captured[i]) by {
@@ -1377,6 +1511,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let ghost direct_wiring = storage@;
         let ghost direct_sites = direct.instances@;
+        let ghost source_direct = direct;
         let ghost routine_storage = child_storage@;
         proof {
             self.placed_storage_width_evidence(checked, limits.width, ports.inputs.total_bits_model(),
@@ -1443,6 +1578,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     match _rows._origins@[slot] {
                         HierarchyRowOrigin::Call(index) => {
                             assert(self.captured_call_output(checked, &source_ports, calls@, _rows, definitions@, index as int, captured[index as int]));
+                            if calls@[index as int].is_none() {
+                                reveal(UseAliases::hierarchy_primitives_bound);
+                                assert(self.hierarchy_primitive_bound(checked, limits.width, &source_ports, definitions@,
+                                    index as int, primitives[index as int], circuit.netlist_model().gates@,
+                                    direct_wiring, direct_sites));
+                                let item = primitives[index as int]->Some_0;
+                                assert(primitive_follows_plan(checked, calls@, &source_direct, index as int, Some(item)));
+                                assert(primitive_symbolic_row(checked, &source_ports, calls@, &source_direct,
+                                    _rows.bits@, slot, _rows._origins@[slot]));
+                                let range = source_ports.definitions.ranges_model()[slot];
+                                let expected = definitions@.subrange(range.start as int, range.end as int);
+                                let symbols = _rows.bits@.subrange(range.start as int, range.end as int);
+                                assert(symbols =~= item.outputs.map_values(|wire: Wire| ClockedWireDriver::Terminal(wire)));
+                                assert forall|bit: int| 0 <= bit < expected.len() implies
+                                    (#[trigger] expected[bit]) == (#[trigger] item.outputs[bit]) by {
+                                    clocked_wire_at(_rows.bits@, definitions@, range.start + bit);
+                                    assert(_rows.bits@[range.start + bit] == symbols[bit]);
+                                };
+                                assert(expected =~= item.outputs);
+                            }
                         },
                         HierarchyRowOrigin::Local(wires) => {
                             let range = source_ports.definitions.ranges_model()[slot];
