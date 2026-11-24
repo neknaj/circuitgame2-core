@@ -5,6 +5,8 @@ mod child_outputs;
 mod direct_source;
 mod hierarchy;
 #[cfg(verus_only)]
+mod source_links;
+#[cfg(verus_only)]
 pub use hierarchy::ClockedModuleObservation;
 
 use super::super::ClockedStoragePlacement;

@@ -2,10 +2,13 @@
 
 use super::{ClockedModuleEndpoints, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits, ModuleBodyPosition,
     ModuleCalls, UseAliases};
+use super::source_links::{SourceVmLink, source_vm_link_pair, source_vm_links_resolved, source_vm_resolve_links};
+use super::super::super::clocked_plan::{clocked_resolution_success, clocked_wire_at};
 use crate::netlist::{
     ClockedStorage, ClockedStorageInputs, SourceDeviceId, SourceGateId, SourceVmWire, Wire,
-    source_vm_layout_for_orders, source_vm_terminal_pair,
+    source_vm_layout_for_orders, source_vm_row_pair, source_vm_terminal_pair, wire_available,
 };
+use crate::project::ClockedWireDriver;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -21,6 +24,34 @@ spec fn gate_call_order(
     }
     &&& forall|call: int| 0 <= call < consumed ==> ((#[trigger] calls[call]) matches Some(gate) ==>
         gate < order.len() && order[gate as int] == call)
+}
+
+spec fn direct_device_ids(plan: &ClockedModuleEndpoints) -> Seq<SourceDeviceId> {
+    plan.storage.instances@.map_values(|item: super::ClockedStoragePlacement| SourceDeviceId {
+        instance: Seq::empty(), call: item.at,
+    })
+}
+
+spec fn direct_source_link(
+    plan: &ClockedModuleEndpoints, gates: Seq<SourceGateId>, driver: ClockedWireDriver,
+) -> SourceVmLink {
+    match driver {
+        ClockedWireDriver::Alias(target) => SourceVmLink::Alias(target),
+        ClockedWireDriver::Terminal(Wire::Constant(bit)) => SourceVmLink::Terminal(SourceVmWire::Constant(bit)),
+        ClockedWireDriver::Terminal(Wire::Gate(index)) => SourceVmLink::Terminal(SourceVmWire::Gate(gates[index as int])),
+        ClockedWireDriver::Terminal(Wire::Input(port)) => {
+            let external = plan.ports.inputs.total_bits_model();
+            if port < external {
+                SourceVmLink::Terminal(SourceVmWire::Input(port))
+            } else {
+                let instances = plan.storage.instances@;
+                let index = choose|i: int| 0 <= i < instances.len()
+                    && (#[trigger] instances[i]).outputs.start <= port < instances[i].outputs.end;
+                SourceVmLink::Terminal(SourceVmWire::Registered(direct_device_ids(plan)[index],
+                    (port - instances[index].outputs.start) as usize))
+            }
+        },
+    }
 }
 
 proof fn extend_gate_call_order(
@@ -121,9 +152,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& gates == order.map_values(|call: int| SourceGateId {
                 instance: Seq::empty(), gate: checked.calls@[call].at,
             })
-            &&& devices == plan.storage.instances@.map_values(|item: super::ClockedStoragePlacement| SourceDeviceId {
-                instance: Seq::empty(), call: item.at,
-            })
+            &&& devices == direct_device_ids(&plan)
         }
     }
 
@@ -148,9 +177,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let gate_calls = self.direct_gate_call_order(&checked, &plan, limits.width, limits.wiring_bits, limits.gates);
         let gates = gate_calls.map_values(|call: int| SourceGateId { instance: Seq::empty(), gate: checked.calls@[call].at });
         let placed = plan.storage.instances@;
-        let devices = placed.map_values(|item: super::ClockedStoragePlacement| SourceDeviceId {
-            instance: Seq::empty(), call: item.at,
-        });
+        let devices = direct_device_ids(&plan);
         assert forall|i: int, j: int| 0 <= i < j < gates.len() implies (#[trigger] gates[i]) != (#[trigger] gates[j]) by {
             let a = gate_calls[i];
             let b = gate_calls[j];
@@ -206,9 +233,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& #[trigger] gate_call_order(plan.gate_by_call@, checked.calls@.len() as int, order)
                 &&& order.len() == plan.gate_count
                 &&& gates == order.map_values(|call: int| SourceGateId { instance: Seq::empty(), gate: checked.calls@[call].at })
-                &&& devices == plan.storage.instances@.map_values(|item: super::ClockedStoragePlacement| SourceDeviceId {
-                    instance: Seq::empty(), call: item.at,
-                })
+                &&& devices == direct_device_ids(&plan)
             };
         let wiring = network.storage@;
         let netlist = network.circuit.netlist_model();
@@ -243,6 +268,77 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(start + wiring[index].data@.len() == placed[index].outputs.end);
         assert(start + bit < placed[index].outputs.end);
         Wire::Input((start + bit) as usize)
+    }
+
+    proof fn direct_source_link_matches(
+        &self, checked: &ModuleCalls, limits: ClockedModuleVmLimits, plan: &ClockedModuleEndpoints,
+        storage: Seq<ClockedStorageInputs>, gates: Seq<SourceGateId>, driver: ClockedWireDriver,
+    )
+        requires
+            self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, plan),
+            gates.len() == plan.gate_count,
+            direct_device_ids(plan).no_duplicates(),
+            storage.len() == plan.storage.instances@.len(),
+            forall|i: int| 0 <= i < storage.len() ==>
+                (#[trigger] plan.storage.instances@[i]).outputs.start + (#[trigger] storage[i]).data@.len()
+                    == plan.storage.instances@[i].outputs.end,
+            driver matches ClockedWireDriver::Terminal(wire) ==>
+                wire_available(wire, plan.storage.augmented_inputs as nat, plan.gate_count as nat),
+        ensures source_vm_link_pair(plan.ports.inputs.total_bits_model(), storage,
+            &source_vm_layout_for_orders(gates, direct_device_ids(plan)), direct_source_link(plan, gates, driver), driver),
+    {
+        let external = plan.ports.inputs.total_bits_model();
+        let devices = direct_device_ids(plan);
+        let layout = source_vm_layout_for_orders(gates, devices);
+        gates.to_set_ensures();
+        devices.to_set_ensures();
+        if let ClockedWireDriver::Terminal(Wire::Input(port)) = driver {
+            if port >= external {
+                self.storage_covers_augmented_input(checked, limits.width, external, limits.wiring_bits, &plan.storage, port);
+                let instances = plan.storage.instances@;
+                let index = choose|i: int| 0 <= i < instances.len()
+                    && (#[trigger] instances[i]).outputs.start <= port < instances[i].outputs.end;
+                self.placed_storage_range_evidence(checked, limits.width, external, limits.wiring_bits, &plan.storage, storage, index);
+                let id = devices[index];
+                assert(layout.device_index.contains_key(id));
+                assert(devices[layout.device_index[id]] == id);
+                assert(layout.device_index[id] == index);
+                assert(instances[index].outputs.start + storage[index].data@.len() == instances[index].outputs.end);
+            }
+        }
+    }
+
+    /// 型検査済みの記号配線からソースの終点を求め、実際に使う解決済み配線と照合する。
+    proof fn direct_source_definition_wires(
+        &self, checked: &ModuleCalls, limits: ClockedModuleVmLimits, plan: &ClockedModuleEndpoints,
+        storage: Seq<ClockedStorageInputs>, gates: Seq<SourceGateId>,
+    ) -> (wires: Seq<SourceVmWire>)
+        requires
+            self.endpoints_on_checked(checked, limits.width, limits.wiring_bits, limits.gates, plan),
+            gates.len() == plan.gate_count,
+            direct_device_ids(plan).no_duplicates(),
+            storage.len() == plan.storage.instances@.len(),
+            forall|i: int| 0 <= i < storage.len() ==>
+                (#[trigger] plan.storage.instances@[i]).outputs.start + (#[trigger] storage[i]).data@.len()
+                    == plan.storage.instances@[i].outputs.end,
+        ensures
+            source_vm_links_resolved(plan._symbolic@.map_values(|driver: ClockedWireDriver|
+                direct_source_link(plan, gates, driver)), wires),
+            source_vm_row_pair(plan.ports.inputs.total_bits_model(), storage,
+                &source_vm_layout_for_orders(gates, direct_device_ids(plan)), wires, plan.definitions@),
+    {
+        let drivers = plan._symbolic@;
+        let flat = plan.definitions@;
+        let links = drivers.map_values(|driver: ClockedWireDriver| direct_source_link(plan, gates, driver));
+        let external = plan.ports.inputs.total_bits_model();
+        let layout = source_vm_layout_for_orders(gates, direct_device_ids(plan));
+        clocked_resolution_success(drivers, plan.storage.augmented_inputs, plan.gate_count, plan.definitions);
+        assert forall|i: int| 0 <= i < links.len() implies
+            source_vm_link_pair(external, storage, &layout, #[trigger] links[i], drivers[i]) by {
+            clocked_wire_at(drivers, flat, i);
+            self.direct_source_link_matches(checked, limits, plan, storage, gates, drivers[i]);
+        };
+        source_vm_resolve_links(external, storage, &layout, links, drivers, flat)
     }
 }
 

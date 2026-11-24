@@ -438,6 +438,16 @@ pub(super) closed spec fn clocked_resolution_result(drivers: Seq<ClockedWireDriv
     }
 }
 
+/// 正常に解決した配線は、すべての直接端子と直結の指定を満たす。
+pub(super) proof fn clocked_resolution_success(
+    drivers: Seq<ClockedWireDriver>, inputs: usize, gates: usize, wires: Vec<Wire>,
+)
+    requires clocked_resolution_result(drivers, inputs, gates, Ok(wires)),
+    ensures clocked_wires_match(drivers, wires@), wires@.len() == drivers.len(),
+        forall|i: int| 0 <= i < wires@.len() ==> wire_available(#[trigger] wires@[i], inputs as nat, gates as nat),
+{
+}
+
 pub(super) enum TerminalResolution {
     Wires(Vec<Wire>),
     FirstInvalid(usize),

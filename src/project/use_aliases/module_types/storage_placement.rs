@@ -270,6 +270,25 @@ proof fn ordered_storage_ranges(instances: Seq<ClockedStoragePlacement>, externa
     }
 }
 
+proof fn covering_storage_range(
+    instances: Seq<ClockedStoragePlacement>, external: usize, port: usize, last: int,
+) -> (index: int)
+    requires ranges_follow(instances, external), 0 <= last < instances.len(),
+        external <= port < instances[last].outputs.end,
+    ensures 0 <= index <= last,
+        instances[index].outputs.start <= port < instances[index].outputs.end,
+    decreases last,
+{
+    reveal(ranges_follow);
+    if instances[last].outputs.start <= port {
+        last
+    } else {
+        assert(last > 0);
+        storage_neighbor(instances, external, last - 1);
+        covering_storage_range(instances, external, port, last - 1)
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     spec fn placement_width_matches(&self, storage: StorageSignature, limit: u64, address: Option<u64>, width: nat) -> bool {
         &&& width > 0
@@ -461,6 +480,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let instances = plan.instances@;
         storage_index_within_call_order(instances, external, index);
         instances[index].call_index as int
+    }
+
+    /// 増補入力のビットがどの状態素子の登録出力に属するかを、配置計画から定める。
+    pub(super) proof fn storage_covers_augmented_input(
+        &self, checked: &ModuleCalls, limit: u64, external: usize, capacity: usize,
+        plan: &ClockedStorageLayout, port: usize,
+    )
+        requires self.storage_on_checked(checked, limit, external, capacity, Ok(*plan)),
+            external <= port < plan.augmented_inputs,
+        ensures exists|i: int| 0 <= i < plan.instances@.len()
+            && (#[trigger] plan.instances@[i]).outputs.start <= port < plan.instances@[i].outputs.end,
+    {
+        reveal(UseAliases::storage_on_checked);
+        reveal(UseAliases::placed_prefix);
+        let instances = plan.instances@;
+        assert(instances.len() > 0);
+        let index = covering_storage_range(instances, external, port, instances.len() - 1);
+        assert(instances[index].outputs.start <= port < instances[index].outputs.end);
     }
 
     /// 状態素子の区間が、外部入力と先行する素子の登録出力の直後から始まることを示す。
