@@ -10,6 +10,15 @@ mod port_layout;
 mod state_elements;
 #[cfg(verus_only)]
 mod source_trace;
+#[cfg(verus_only)]
+mod source_vm_trace;
+#[cfg(verus_only)]
+pub use source_vm_trace::{
+    SourceDeviceId, SourceDeviceState, SourceStorage, SourceVmCircuit, SourceVmFrame, SourceVmNor,
+    SourceVmState, SourceVmWire, source_vm_next_frame, source_vm_reset_frame, source_vm_reset_matches,
+    source_vm_run_trace, source_vm_state_matches, source_vm_step_matches, source_vm_trace,
+    source_vm_traces_agree, source_vm_wiring_valid,
+};
 
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 pub use clocked::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatefulInstanceError};
