@@ -308,6 +308,18 @@ impl ClockedStorage {
         self.state.memory_bits()
     }
 
+    pub(super) fn ram_memory(&self) -> (bits: Option<&[bool]>)
+        ensures self.memory_model() == match bits {
+            Some(memory) => Some(memory@),
+            None => None,
+        },
+    {
+        match &self.state {
+            StorageState::Ram(ram) => Some(ram.memory()),
+            StorageState::Latch(_) => None,
+        }
+    }
+
     /// ラッチと RAM の区別および RAM の記憶容量が、宣言された端子幅に従う。
     pub open spec fn memory_shape(&self) -> bool {
         (match self.memory_model() { Some(bits) => Some(bits.len()), None => None })

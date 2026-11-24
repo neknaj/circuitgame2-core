@@ -513,6 +513,26 @@ impl ClockedVm {
     /// 状態素子を、増補入力に登録出力を並べる順に表す。
     pub closed spec fn storage_model(&self) -> Seq<ClockedStorage> { self.storage@ }
 
+    /// 指定した状態素子の RAM 記憶部を読み取る。
+    ///
+    /// 直近の tick が確定した時点の記憶部を返す。語はアドレス順で、各語の中は最下位ビットから並ぶ。
+    /// 初期化とリセットの直後は、記憶部の全ビットが0になる。
+    /// 添字が範囲外か、指定した素子がラッチの場合は `None` を返す。
+    pub fn ram_memory(&self, index: usize) -> (bits: Option<&[bool]>)
+        ensures
+            index >= self.storage_model().len() ==> bits.is_none(),
+            index < self.storage_model().len() ==> self.storage_model()[index as int].memory_model() == match bits {
+                Some(memory) => Some(memory@),
+                None => None,
+            },
+    {
+        if index < self.storage.len() {
+            self.storage[index].ram_memory()
+        } else {
+            None
+        }
+    }
+
     /// ゲートの登録値をネットリスト順に並べた列。
     pub closed spec fn gate_values_model(&self) -> Seq<bool> { self.gates@ }
 

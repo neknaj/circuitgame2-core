@@ -390,6 +390,13 @@ impl RamState {
         self.memory.len() + self.output.len()
     }
 
+    /// 記憶部の全ビットをアドレス順に参照する。各語は最下位ビットから並ぶ。
+    pub(super) fn memory(&self) -> (bits: &[bool])
+        ensures bits@ == self.memory_model(),
+    {
+        self.memory.as_slice()
+    }
+
     /// 最新の tick で読み出した値を返す。初期化と reset の直後は0を返す。
     pub fn output(&self) -> (bits: &[bool])
         ensures bits@ == self.output_model(), bits@.len() == self.word_bits_model(),
