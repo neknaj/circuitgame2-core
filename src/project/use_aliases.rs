@@ -38,6 +38,9 @@ pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes
     CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError, PrimitiveModuleError,
     ModuleOutputTypes, ModuleOutputTypesError,
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
+pub use module_types::{ClockedDriverBitsError, clocked_driver_bits};
+#[cfg(verus_only)]
+pub use module_types::{clocked_driver_bit, clocked_driver_bits_result, clocked_driver_port_model, clocked_driver_selection_matches};
 pub use module_types::{ClockedDefinitionLayoutError, ClockedLinkPlan, ClockedModuleError, ClockedPlanError, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement, ClockedWireDriver, plan_clocked_links};
 #[cfg(verus_only)]
 pub use module_types::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,

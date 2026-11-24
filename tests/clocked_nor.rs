@@ -338,3 +338,32 @@ fn mixed_vm_observes_read_first_and_keeps_two_ram_instances_separate() {
     assert_eq!(vm.reset(), [false, false]);
     assert_eq!(vm.step(&[true, false, false, false]).unwrap(), [false, false]);
 }
+
+#[test]
+fn selects_clocked_driver_bits_in_the_signal_port() {
+    use circuitgame2_core::netlist::PortBitLayout;
+    use circuitgame2_core::project::{CheckedBitSelection, ClockedDriverBitsError, OutputDriver, clocked_driver_bits};
+
+    let inputs = PortBitLayout::from_widths(&[2, 4], 6).unwrap();
+    let definitions = PortBitLayout::from_widths(&[5, 4], 9).unwrap();
+    let selection = CheckedBitSelection { start: 1, count: 2, stride: 2, last: 3 };
+    assert_eq!(clocked_driver_bits(&inputs, &definitions, OutputDriver::Input(1), None).unwrap(),
+        [2, 3, 4, 5].map(|bit| ClockedWireDriver::Terminal(Wire::Input(bit))));
+    assert_eq!(clocked_driver_bits(&inputs, &definitions, OutputDriver::Input(1), Some(selection)).unwrap(),
+        [ClockedWireDriver::Terminal(Wire::Input(3)), ClockedWireDriver::Terminal(Wire::Input(5))]);
+    assert_eq!(clocked_driver_bits(&inputs, &definitions, OutputDriver::Definition(1), Some(selection)).unwrap(),
+        [ClockedWireDriver::Alias(6), ClockedWireDriver::Alias(8)]);
+
+    let incorrect_last = CheckedBitSelection { last: 2, ..selection };
+    assert_eq!(clocked_driver_bits(&inputs, &definitions, OutputDriver::Definition(1), Some(incorrect_last)),
+        Err(ClockedDriverBitsError::Last { expected: 3, actual: 2 }));
+
+    let oversized = PortBitLayout::from_widths(&[usize::MAX as u64 - 2, 2], usize::MAX).unwrap();
+    let result = clocked_driver_bits(&oversized, &definitions, OutputDriver::Input(0), None);
+    assert_eq!(result, Err(ClockedDriverBitsError::Capacity {
+        count: usize::MAX as u64 - 2,
+        limit: isize::MAX as usize / core::mem::size_of::<ClockedWireDriver>(),
+    }));
+    assert_eq!(clocked_driver_bits(&oversized, &definitions, OutputDriver::Input(1), None).unwrap(),
+        [usize::MAX - 2, usize::MAX - 1].map(|bit| ClockedWireDriver::Terminal(Wire::Input(bit))));
+}

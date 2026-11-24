@@ -14,6 +14,10 @@ pub use clocked_plan::{clocked_link_plan_result, clocked_regions_cover, clocked_
     clocked_wire_solutions_agree, clocked_wires_match};
 mod calls;
 pub use calls::{CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError};
+mod driver_bits;
+pub use driver_bits::{ClockedDriverBitsError, clocked_driver_bits};
+#[cfg(verus_only)]
+pub use driver_bits::{clocked_driver_bit, clocked_driver_bits_result, clocked_driver_port_model, clocked_driver_selection_matches};
 mod definition_layout;
 pub use definition_layout::ClockedDefinitionLayoutError;
 mod concats;

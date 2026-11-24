@@ -14,6 +14,7 @@ use crate::project::use_aliases::bit_func::{ExpandFunctionsError, RoutineBitLayo
 mod semantics;
 
 use super::{ModuleCalls, ModuleCallsError, PrimitiveModuleError, UseAliases, copy_location};
+use super::driver_bits::mapped_driver_bit;
 use super::clocked_plan::{ClockedPlanError, ClockedWireDriver, clocked_reserve, clocked_resolve};
 use super::primitive_nor::{read_literal_bit, unsupported_port};
 #[cfg(verus_only)]
@@ -132,8 +133,7 @@ fn symbolic_driver(driver: OutputDriver) -> (wire: ClockedWireDriver)
     ensures wire == symbolic_output(driver),
 {
     match driver {
-        OutputDriver::Input(port) => ClockedWireDriver::Terminal(Wire::Input(port)),
-        OutputDriver::Definition(definition) => ClockedWireDriver::Alias(definition),
+        OutputDriver::Input(port) | OutputDriver::Definition(port) => mapped_driver_bit(driver, port),
     }
 }
 

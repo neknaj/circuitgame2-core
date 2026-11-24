@@ -179,6 +179,20 @@ impl PortBitLayout {
         self.ranges.as_slice()
     }
 
+    /// 指定したポートの半開ビット範囲を返す。ポートが存在しなければ `None` を返す。
+    pub fn range(&self, port: usize) -> (range: Option<Range<usize>>)
+        ensures
+            range == if port < self.ranges_model().len() { Some(self.ranges_model()[port as int]) } else { None },
+            range matches Some(bits) ==> bits.start < bits.end <= self.total_bits_model(),
+    {
+        proof { use_type_invariant(self); }
+        if port >= self.ranges.len() {
+            return None;
+        }
+        let bits = &self.ranges[port];
+        Some(bits.start..bits.end)
+    }
+
     /// 全ポートを合わせたビット数を返す。
     pub fn total_bits(&self) -> (total: usize)
         ensures total == self.total_bits_model(),
