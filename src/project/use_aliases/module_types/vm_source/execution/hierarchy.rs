@@ -66,11 +66,25 @@ struct HierarchyRows {
     _origins: Ghost<Seq<HierarchyRowOrigin>>,
 }
 
+/// 直接呼び出した素子が占めるゲート番号または状態素子の添字。
+enum PrimitivePlacement {
+    Nor(usize),
+    Storage(usize),
+}
+
+/// 型検査済みの実引数と、親回路でその値を受け取る配線。
+struct PrimitiveWiring {
+    placement: PrimitivePlacement,
+    rows: Vec<Vec<ClockedWireDriver>>,
+    arguments: Seq<Wire>,
+}
+
 /// 親の定義と公開ポートが参照する配線、および各呼び出しの移設済み出力。
 pub(super) struct HierarchyWiring {
     definitions: Seq<Wire>,
     origins: Seq<HierarchyRowOrigin>,
     routines: Seq<Option<RoutineWiring>>,
+    primitives: Seq<Option<PrimitiveWiring>>,
     direct_devices: usize,
     first_child_input: usize,
 }
@@ -113,12 +127,84 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 == network.circuit.netlist_model().input_count
             && (network._hierarchy_wiring@ matches Some(wiring)
                 && self.hierarchy_public_wiring(checked, limits.width, &ports, &wiring, network.circuit.netlist_model().outputs@)
+                && self.hierarchy_primitives_bound(checked, limits.width, &ports, wiring.definitions,
+                    wiring.primitives, network.circuit.netlist_model().gates@,
+                    network.storage@.take(wiring.direct_devices as int), network.storage_sites@.take(wiring.direct_devices as int))
+                && wiring.primitives.len() == checked.calls@.len()
                 && wiring.direct_devices <= network.storage@.len()
                 && routine_vm_input_offsets(wiring.routines, network.storage@, wiring.direct_devices,
                     network.inputs.total_bits_model())
                 && routines_placed(wiring.routines, network.circuit.netlist_model().gates@,
                     network.storage@.skip(wiring.direct_devices as int), wiring.first_child_input,
                     network.circuit.netlist_model().input_count))
+    }
+
+    spec fn hierarchy_primitive_bound(
+        &self, checked: &ModuleCalls, width: u64, ports: &ClockedModuleOutputs, definitions: Seq<Wire>,
+        call: int, primitive: Option<PrimitiveWiring>, gates: Seq<NorGate>,
+        storage: Seq<ClockedStorageInputs>, sites: Seq<ClockedStoragePlacement>,
+    ) -> bool {
+        let target = checked.calls@[call].inputs.ports.signature.target;
+        match primitive {
+            None => target is Routine,
+            Some(item) => {
+                &&& self.call_wires_result(checked, width, ports, call as usize, Ok(item.rows))
+                &&& resolved_bits(row_model(item.rows@), definitions, item.arguments)
+                &&& match item.placement {
+                    PrimitivePlacement::Nor(gate) => target is Nor && gate < gates.len()
+                        && item.arguments.len() == 2
+                        && gates[gate as int] == (NorGate { left: item.arguments[0], right: item.arguments[1] }),
+                    PrimitivePlacement::Storage(index) => target is StateElement && index < storage.len()
+                        && index < sites.len() && sites[index as int].call_index == call
+                        && sites[index as int].at == checked.calls@[call].at
+                        && self.placement_matches(checked, width, sites[index as int])
+                        && sites[index as int].storage_inputs_match(item.arguments, Some(storage[index as int])),
+                }
+            },
+        }
+    }
+
+    #[verifier::opaque]
+    spec fn hierarchy_primitives_bound(
+        &self, checked: &ModuleCalls, width: u64, ports: &ClockedModuleOutputs, definitions: Seq<Wire>,
+        primitives: Seq<Option<PrimitiveWiring>>, gates: Seq<NorGate>,
+        storage: Seq<ClockedStorageInputs>, sites: Seq<ClockedStoragePlacement>,
+    ) -> bool {
+        &&& primitives.len() <= checked.calls@.len()
+        &&& forall|i: int| 0 <= i < primitives.len() ==> self.hierarchy_primitive_bound(
+            checked, width, ports, definitions, i, #[trigger] primitives[i], gates, storage, sites)
+    }
+
+    proof fn extend_hierarchy_primitives(
+        &self, checked: &ModuleCalls, width: u64, ports: &ClockedModuleOutputs, definitions: Seq<Wire>,
+        before: Seq<Option<PrimitiveWiring>>, added: Option<PrimitiveWiring>,
+        prior_gates: Seq<NorGate>, gates: Seq<NorGate>, prior_storage: Seq<ClockedStorageInputs>,
+        storage: Seq<ClockedStorageInputs>, sites: Seq<ClockedStoragePlacement>,
+    )
+        requires
+            before.len() < checked.calls@.len(),
+            prior_gates.len() <= gates.len(), gates.take(prior_gates.len() as int) == prior_gates,
+            prior_storage.len() <= storage.len(), storage.take(prior_storage.len() as int) == prior_storage,
+            self.hierarchy_primitives_bound(checked, width, ports, definitions, before, prior_gates, prior_storage, sites),
+            self.hierarchy_primitive_bound(checked, width, ports, definitions, before.len() as int, added, gates, storage, sites),
+        ensures self.hierarchy_primitives_bound(checked, width, ports, definitions, before.push(added), gates, storage, sites),
+    {
+        reveal(UseAliases::hierarchy_primitives_bound);
+        let next = before.push(added);
+        assert forall|i: int| 0 <= i < next.len() implies self.hierarchy_primitive_bound(
+            checked, width, ports, definitions, i, #[trigger] next[i], gates, storage, sites) by {
+            if i < before.len() {
+                assert(next[i] == before[i]);
+                if let Some(item) = before[i] {
+                    match item.placement {
+                        PrimitivePlacement::Nor(gate) => { assert(gates[gate as int] == prior_gates[gate as int]); },
+                        PrimitivePlacement::Storage(index) => { assert(storage[index as int] == prior_storage[index as int]); },
+                    }
+                }
+            } else {
+                assert(next[i] == added);
+            }
+        };
     }
 
     #[verifier::opaque]
@@ -1077,9 +1163,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut child_storage: Vec<ClockedStorageInputs> = Vec::new();
         let mut child_sites = Vec::new();
         let ghost mut captured = Seq::<Option<RoutineWiring>>::empty();
+        let ghost mut primitives = Seq::<Option<PrimitiveWiring>>::empty();
         let first_state = direct.augmented_inputs;
         let mut next_state = first_state;
-        proof { empty_routines(first_state); }
+        proof {
+            empty_routines(first_state);
+            assert(self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
+                gates@, storage@, direct.instances@)) by { reveal(UseAliases::hierarchy_primitives_bound); };
+        }
         if gates.try_reserve_exact(total_gates).is_err() || storage.try_reserve_exact(direct.instances.len()).is_err() {
             return Err(ClockedModuleVmError::Allocation);
         }
@@ -1088,11 +1179,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 call <= calls@.len() == checked.calls@.len(),
                 call == captured.len(),
+                call == primitives.len(),
+                self.hierarchy_primitives_bound(checked, limits.width, &ports, definitions@, primitives,
+                    gates@, storage@, direct.instances@),
                 routines_placed(captured, gates@, child_storage@, first_state, next_state),
                 forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
                     == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
                 self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports)),
+                self.storage_on_checked(checked, limits.width, ports.inputs.total_bits_model(), limits.wiring_bits, Ok(direct)),
                 storage@.len() <= direct.instances@.len(),
                 forall|i: int| 0 <= i < storage@.len() ==>
                     (#[trigger] direct.instances@[i]).outputs.start + (#[trigger] storage@[i]).data@.len()
@@ -1108,6 +1203,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let ghost prior_gates = gates@;
             let ghost prior_storage = child_storage@;
             let ghost prior_state = next_state;
+            let ghost prior_direct = storage@;
+            let ghost mut primitive = None::<PrimitiveWiring>;
             proof { vstd::std_specs::vec::axiom_spec_len(&child_storage); }
             if let Some(placement) = &calls[call] {
                 let mut arguments = Vec::new();
@@ -1222,7 +1319,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     if arguments.len() != 2 || gates.len() >= total_gates {
                         return Err(ClockedModuleVmError::CallWiring(call_site(checked, call)));
                     }
+                    let ghost gate = gates@.len() as usize;
                     gates.push(NorGate { left: arguments[0], right: arguments[1] });
+                    proof {
+                        primitive = Some(PrimitiveWiring { placement: PrimitivePlacement::Nor(gate), rows, arguments: arguments@ });
+                    }
                 } else {
                     if call >= direct.by_call.len() { return Err(ClockedModuleVmError::InstanceCount); }
                     let Some(instance) = direct.by_call[call] else { return Err(ClockedModuleVmError::InstanceCount); };
@@ -1232,8 +1333,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let Some(inputs) = direct.instances[instance].storage_inputs(&arguments) else {
                         return Err(ClockedModuleVmError::CallWiring(call_site(checked, call)));
                     };
-                    let ghost prior_direct = storage@;
-                    proof { direct.instances@[instance as int].storage_inputs_width(arguments@, inputs); }
+                    proof {
+                        self.storage_layout_call(checked, limits.width, ports.inputs.total_bits_model(),
+                            limits.wiring_bits, &direct, call);
+                        direct.instances@[instance as int].storage_inputs_width(arguments@, inputs);
+                        primitive = Some(PrimitiveWiring {
+                            placement: PrimitivePlacement::Storage(instance), rows, arguments: arguments@,
+                        });
+                    }
                     storage.push(inputs);
                     assert forall|i: int| 0 <= i < storage@.len() implies
                         (#[trigger] direct.instances@[i]).outputs.start + (#[trigger] storage@[i]).data@.len()
@@ -1250,6 +1357,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         first_state, prior_state, next_state);
                 }
             }
+            proof {
+                assert(gates@.take(prior_gates.len() as int) =~= prior_gates);
+                assert(storage@.take(prior_direct.len() as int) =~= prior_direct);
+                assert(self.hierarchy_primitive_bound(checked, limits.width, &ports, definitions@, call as int,
+                    primitive, gates@, storage@, direct.instances@));
+                self.extend_hierarchy_primitives(checked, limits.width, &ports, definitions@, primitives, primitive,
+                    prior_gates, gates@, prior_direct, storage@, direct.instances@);
+                primitives = primitives.push(primitive);
+            }
             assert forall|i: int| 0 <= i <= call implies #[trigger]
                 self.captured_call_output(checked, &ports, calls@, _rows, definitions@, i, captured[i]) by {
                 if i < call { assert(captured[i] == before[i]); }
@@ -1260,6 +1376,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             return Err(ClockedModuleVmError::InstanceCount);
         }
         let ghost direct_wiring = storage@;
+        let ghost direct_sites = direct.instances@;
         let ghost routine_storage = child_storage@;
         proof {
             self.placed_storage_width_evidence(checked, limits.width, ports.inputs.total_bits_model(),
@@ -1274,12 +1391,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let direct_devices = storage.len();
         storage.append(&mut child_storage);
         assert(storage@.skip(direct_devices as int) =~= routine_storage);
+        assert(storage@.take(direct_devices as int) =~= direct_wiring);
         proof {
             assert(storage@ =~= direct_wiring + routine_storage);
             join_routine_input_offsets(captured, gates@, storage@, direct_devices, ports.inputs.total_bits_model(),
                 first_state, next_state);
         }
         storage_sites.append(&mut child_sites);
+        assert(storage_sites@.take(direct_devices as int) =~= direct_sites);
         let outputs = match resolve_rows(&ports.drivers, definitions) {
             Ok(outputs) => outputs,
             Err(ResolveRowsError::Allocation) => return Err(ClockedModuleVmError::Allocation),
@@ -1295,7 +1414,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
         let ghost source_ports = ports;
         let ghost wiring = HierarchyWiring {
-            definitions: definitions@, origins: _rows._origins@, routines: captured, direct_devices, first_child_input: first_state,
+            definitions: definitions@, origins: _rows._origins@, routines: captured, primitives,
+            direct_devices, first_child_input: first_state,
         };
         proof {
             self.module_calls_type_evidence(owner, limits.width, checked);

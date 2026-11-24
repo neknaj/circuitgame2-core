@@ -274,7 +274,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     #[verifier::opaque]
-    spec fn placement_matches(&self, checked: &ModuleCalls, limit: u64, instance: ClockedStoragePlacement) -> bool {
+    pub(super) closed spec fn placement_matches(&self, checked: &ModuleCalls, limit: u64, instance: ClockedStoragePlacement) -> bool {
         let index = instance.call_index as int;
         let row = checked.calls@[index];
         &&& 0 <= index < checked.calls@.len()
@@ -450,6 +450,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& index < layout.instances@.len()
                 &&& layout.instances@[index as int].call_index == call
                 &&& layout.instances@[index as int].at == checked.calls@[call as int].at
+                &&& self.placement_matches(checked, limit, layout.instances@[index as int])
                 &&& external <= layout.instances@[index as int].outputs.start < layout.instances@[index as int].outputs.end
                     <= layout.augmented_inputs
             },
