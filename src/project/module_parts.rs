@@ -90,7 +90,74 @@ spec fn before(file: int, name: int, limit_file: int, limit_name: int) -> bool {
     file < limit_file || file == limit_file && name < limit_name
 }
 
+spec fn part_name_contains(name: NamedForm, offset: usize) -> bool {
+    name.head == Head::ModulePart && name.name.span.start <= offset < name.name.span.end
+}
+
 impl<'p, 'a> UseTargets<'p, 'a> {
+    /// バイト位置を含む最初の断片名に、コンパイル時と同じ対象解決を適用した結果を表す。
+    pub closed spec fn module_part_at_offset_matches(
+        &self, file: usize, offset: usize,
+        result: Option<Result<ModulePartBinding<'p, 'a>, ModulePartError<'p, 'a>>>,
+    ) -> bool {
+        let circuits = self.project_model().circuits_model();
+        if file >= circuits.len() {
+            result.is_none()
+        } else {
+            let names = circuits[file as int].names@;
+            match result {
+                Some(binding) => exists|i: usize| {
+                    &&& i < names.len()
+                    &&& part_name_contains(names[i as int], offset)
+                    &&& forall|j: int| 0 <= j < i ==> !part_name_contains(#[trigger] names[j], offset)
+                    &&& #[trigger] self.module_part_resolution(file, i, binding)
+                },
+                None => forall|i: int| 0 <= i < names.len() ==> !part_name_contains(#[trigger] names[i], offset),
+            }
+        }
+    }
+
+    /// `module-part` の名前を指す位置から、結線を受け取るモジュールを探す。
+    ///
+    /// [`crate::project::index_use_targets`] が返した一覧を使う。ファイル番号が範囲外か、
+    /// 指定した UTF-8 バイト位置を名前の半開範囲に含む断片がなければ `None` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 断片の対象が未定義、または別の種別の場合は、その指定に対する診断を返す。
+    pub fn resolve_module_part_at_offset(
+        &self, file: usize, offset: usize,
+    ) -> (result: Option<Result<ModulePartBinding<'p, 'a>, ModulePartError<'p, 'a>>>)
+        requires self.covers_project(),
+        ensures self.module_part_at_offset_matches(file, offset, result),
+    {
+        let project = self.project();
+        let circuits = project.circuits();
+        if file >= circuits.len() {
+            return None;
+        }
+        let names = &circuits[file].names;
+        let mut i = 0usize;
+        while i < names.len()
+            invariant
+                self.covers_project(),
+                i <= names@.len(),
+                circuits@ == self.project_model().circuits_model(),
+                file < circuits@.len(),
+                names@ == circuits@[file as int].names@,
+                forall|j: int| 0 <= j < i ==> !part_name_contains(#[trigger] names@[j], offset),
+            decreases names@.len() - i,
+        {
+            let part = &names[i];
+            let span = &part.name.span;
+            if matches!(part.head, Head::ModulePart) && span.start <= offset && offset < span.end {
+                return Some(self.resolve_module_part(file, i));
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// 指定した索引位置から、断片と同じ名前空間にある対象を直接検索した結果を表す。
     pub closed spec fn module_part_resolution(
         &self, file: usize, index: usize, result: Result<ModulePartBinding<'p, 'a>, ModulePartError<'p, 'a>>,
