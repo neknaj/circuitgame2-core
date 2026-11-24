@@ -539,14 +539,55 @@ impl ClockedVm {
         }
     }
 
+    /// 固定入力を与えた1 tick で、この状態に遷移できることを表す。
+    #[verifier::opaque]
+    pub closed spec fn fixed_input_tick_matches(&self, previous: &Self, input: Seq<bool>) -> bool {
+        exists|observed: Seq<bool>| #[trigger] self.tick_matches(previous, input, observed)
+    }
+
     /// 任意の初期状態から、各 tick に同じ入力を与えて進めた VM の状態列。
     pub open spec fn fixed_input_states(&self, input: Seq<bool>, states: Seq<ClockedVm>) -> bool {
         &&& input.len() == self.external_count()
         &&& forall|i: int| 0 <= i < states.len() ==> (#[trigger] states[i]).valid() && states[i].same_layout(self)
-        &&& forall|i: int| 0 < i < states.len() ==> {
-            let current = #[trigger] states[i];
-            exists|output: Seq<bool>| #[trigger] current.tick_matches(&states[i - 1], input, output)
-        }
+        &&& forall|i: int| 0 < i < states.len() ==>
+            (#[trigger] states[i]).fixed_input_tick_matches(&states[i - 1], input)
+    }
+
+    /// 現在の VM 状態を、固定入力で進める履歴の先頭に置く。
+    pub proof fn fixed_input_states_start(&self, input: Seq<bool>)
+        requires self.valid(), input.len() == self.external_count(),
+        ensures self.fixed_input_states(input, seq![*self]),
+    {
+    }
+
+    /// 同じ入力で進めた `step` の成功結果を、固定入力の履歴に追加する。
+    pub proof fn fixed_input_states_push_tick(&self, input: Seq<bool>, states: Seq<ClockedVm>, next: ClockedVm, output: Seq<bool>)
+        requires
+            states.len() > 0, self.fixed_input_states(input, states),
+            next.tick_matches(&states.last(), input, output),
+        ensures self.fixed_input_states(input, states.push(next)),
+    {
+        let extended = states.push(next);
+        reveal(ClockedVm::fixed_input_states);
+        next.tick_snapshots(&states.last(), input, output);
+        assert(states.last().same_layout(self));
+        assert(next.same_layout(self));
+        assert forall|i: int| 0 <= i < extended.len() implies
+            (#[trigger] extended[i]).valid() && extended[i].same_layout(self) by {
+            if i < states.len() { assert(extended[i] == states[i]); }
+        };
+        assert forall|i: int| 0 < i < extended.len() implies
+            (#[trigger] extended[i]).fixed_input_tick_matches(&extended[i - 1], input) by {
+            assert(extended[i - 1] == states[i - 1]);
+            if i < states.len() {
+                assert(extended[i] == states[i]);
+            } else {
+                assert(extended[i] == next);
+                assert(extended[i].tick_matches(&extended[i - 1], input, output));
+                reveal(ClockedVm::fixed_input_tick_matches);
+            }
+        };
+        assert(self.fixed_input_states(input, extended));
     }
 
     proof fn gate_only_history(&self, input: Seq<bool>, states: Seq<ClockedVm>)
@@ -565,6 +606,8 @@ impl ClockedVm {
             #[trigger] clocked_gate_updates(netlist.gates@, input, gates[i - 1], gates[i]) by {
             let current = &states[i];
             let previous = &states[i - 1];
+            assert(current.fixed_input_tick_matches(previous, input));
+            reveal(ClockedVm::fixed_input_tick_matches);
             let output = choose|output: Seq<bool>| #[trigger] current.tick_matches(previous, input, output);
             let (old_inputs, _) = current.tick_snapshots(previous, input, output);
             assert(current.netlist_model() == netlist);
@@ -1017,6 +1060,16 @@ pub proof fn clocked_vm_trace_push_tick(
             inputs.push(input)[i - 1], outputs.push(output)[i]) by {
         if i < states.len() { assert(states.push(state)[i] == states[i]); }
     };
+}
+
+/// 任意の有効な状態を取り、`step` の事後条件から固定入力の履歴を組み立てる例。
+proof fn fixed_input_states_example(start: ClockedVm, input: Seq<bool>, next: ClockedVm, output: Seq<bool>)
+    requires start.valid(), input.len() == start.external_count(), next.tick_matches(&start, input, output),
+    ensures start.fixed_input_states(input, seq![start, next]),
+{
+    start.fixed_input_states_start(input);
+    start.fixed_input_states_push_tick(input, seq![start], next, output);
+    assert(seq![start].push(next) =~= seq![start, next]);
 }
 
 } // verus!
