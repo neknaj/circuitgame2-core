@@ -2,9 +2,10 @@
 
 use super::{ClockedHierarchy, ClockedFunctionTemplate, ClockedModuleNetwork, ClockedModuleVm, ClockedModuleVmLimits,
     ModuleBodyPosition, UseAliases, routine_placed};
-use super::placement_model::{RoutineWiring, placed_routine_evidence};
-use super::placement_model::trace::{RoutineFrame, frame_observed_from, nested_trace_projects, project_nested_trace,
-    project_routine_trace, routine_trace, trace_projection_ready, update_input_read_from};
+use super::placement_model::{RoutineWiring, placed_routine_evidence, sibling_routines_order};
+use super::placement_model::trace::{RoutineFrame, frame_observed_from, frame_state_slice, join_frame_state_slices,
+    join_vm_state_slices, nested_state_slice, nested_trace_projects, project_nested_trace, project_routine_trace,
+    routine_trace, trace_frame_lengths, trace_projection_ready, update_input_read_from, vm_state_slice};
 use crate::netlist::{ClockedVm, clocked_vm_trace};
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -191,7 +192,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             target < networks.len(), networks[target as int].is_some(),
             trace_follows_path(hierarchy.graph@, networks, path, TraceHop { node, frames, updates }, target, result),
             (result.gates, result.storage) == path_offsets(hierarchy.graph@, networks, node, path),
-            result.updates.len() == updates.len(),
+            result.frames.len() == frames.len(), result.updates.len() == updates.len(),
             ({
                 let parent = networks[node as int]->Some_0;
                 let leaf = networks[target as int]->Some_0;
@@ -199,18 +200,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     result.frames, result.updates)
                 &&& result.gates + leaf.circuit.netlist_model().gates@.len() <= parent.circuit.netlist_model().gates@.len()
                 &&& result.storage + leaf.storage@.len() <= parent.storage@.len()
+                &&& forall|i: int| 0 <= i < frames.len() ==> frame_state_slice(frames[i], #[trigger] result.frames[i],
+                    result.gates, leaf.circuit.netlist_model().gates@.len(), result.storage, leaf.storage@.len())
             }),
         decreases path.len(),
     {
         self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
         let first = TraceHop { node, frames, updates };
+        let parent = networks[node as int]->Some_0;
         if path.len() == 0 {
+            assert forall|i: int| 0 <= i < frames.len() implies frame_state_slice(
+                #[trigger] frames[i], frames[i], 0, parent.circuit.netlist_model().gates@.len(), 0, parent.storage@.len()) by {
+                trace_frame_lengths(&parent.circuit.netlist_model(), parent.storage@, parent.inputs.total_bits_model() as nat,
+                    frames, updates, i);
+                super::placement_model::trace::frame_identity_slice(frames[i]);
+            };
             PathTrace { frames, updates, gates: 0, storage: 0, hops: seq![first] }
         } else {
             let call = path[0];
             let child = hierarchy.graph@[node as int]@[call as int]->Some_0;
             let routine = self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, node, call, child);
-            let parent = networks[node as int]->Some_0;
             let wiring = parent._hierarchy_wiring@->Some_0;
             let (local, local_updates) = project_nested_trace(&parent.circuit.netlist_model(), parent.inputs.total_bits_model(),
                 parent.storage@, wiring.routines, wiring.direct_devices, wiring.first_child_input, call as int, frames, updates);
@@ -226,6 +235,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             assert((result.gates, result.storage) == path_offsets(hierarchy.graph@, networks, node, path));
             assert(routine.gates.start + child_network.circuit.netlist_model().gates@.len() <= parent.circuit.netlist_model().gates@.len());
             assert(wiring.direct_devices + routine.storage.start + child_network.storage@.len() <= parent.storage@.len());
+            let leaf = networks[target as int]->Some_0;
+            assert forall|i: int| 0 <= i < frames.len() implies frame_state_slice(frames[i], #[trigger] result.frames[i],
+                result.gates, leaf.circuit.netlist_model().gates@.len(), result.storage, leaf.storage@.len()) by {
+                let netlist = parent.circuit.netlist_model();
+                trace_frame_lengths(&netlist, parent.storage@, parent.inputs.total_bits_model() as nat, frames, updates, i);
+                nested_state_slice(routine, wiring.direct_devices, frames, updates, local, local_updates, i,
+                    netlist.gates@.len(), parent.storage@.len());
+                join_frame_state_slices(frames[i], local[i], result.frames[i],
+                    (routine.gates.start as nat, routine.callee.gates@.len(),
+                        (wiring.direct_devices + routine.storage.start) as nat, routine.devices.len()),
+                    (suffix.gates, leaf.circuit.netlist_model().gates@.len(), suffix.storage, leaf.storage@.len()));
+            };
             assert forall|i: int| 0 <= i < path.len() implies hop_projects(hierarchy.graph@, networks,
                 #[trigger] hops[i], hops[i + 1], path[i]) by {
                 if i == 0 {
@@ -260,7 +281,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
         ensures
             target < networks.len(), networks[target as int].is_some(),
-            result.updates.len() == inputs.len(),
+            result.frames.len() == states.len(), result.updates.len() == inputs.len(),
             (result.gates, result.storage) == path_offsets(hierarchy.graph@, networks, 0, path),
             ({
                 let parent = networks[0]->Some_0;
@@ -272,6 +293,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     result.frames, result.updates)
                 &&& result.gates + leaf.circuit.netlist_model().gates@.len() <= parent.circuit.netlist_model().gates@.len()
                 &&& result.storage + leaf.storage@.len() <= parent.storage@.len()
+                &&& forall|i: int| 0 <= i < states.len() ==> vm_state_slice(&states[i], #[trigger] result.frames[i],
+                    result.gates, leaf.circuit.netlist_model().gates@.len(), result.storage, leaf.storage@.len())
+                &&& routine.gates.start <= result.gates
+                &&& result.gates + leaf.circuit.netlist_model().gates@.len() <= routine.gates.end
+                &&& wiring.direct_devices + routine.storage.start <= result.storage
+                &&& result.storage + leaf.storage@.len() <= wiring.direct_devices + routine.storage.end
                 &&& exists|first_frames: Seq<RoutineFrame>, first_updates: Seq<Seq<bool>>, suffix: PathTrace| {
                     &&& #[trigger] trace_starts_in_vm(inputs, states, routine, wiring.direct_devices, first_frames, first_updates)
                     &&& #[trigger] trace_follows_path(hierarchy.graph@, networks, path.skip(1),
@@ -307,7 +334,68 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(wiring.direct_devices + routine.storage.start + child_network.storage@.len() <= parent.storage@.len());
         assert(trace_follows_path(hierarchy.graph@, networks, path.skip(1),
             TraceHop { node: child, frames, updates }, target, suffix));
+        let leaf = networks[target as int]->Some_0;
+        assert forall|i: int| 0 <= i < states.len() implies vm_state_slice(&states[i], #[trigger] result.frames[i],
+            result.gates, leaf.circuit.netlist_model().gates@.len(), result.storage, leaf.storage@.len()) by {
+            join_vm_state_slices(&states[i], frames[i], result.frames[i],
+                (routine.gates.start as nat, routine.callee.gates@.len(),
+                    (wiring.direct_devices + routine.storage.start) as nat, routine.devices.len()),
+                (suffix.gates, leaf.circuit.netlist_model().gates@.len(), suffix.storage, leaf.storage@.len()));
+        };
         result
+    }
+
+    /// 別々の子から始まる経路は、同じ宣言を指す場合もルート VM の状態区間が重ならない。
+    proof fn project_separate_vm_paths(
+        &self, root: ModuleBodyPosition, limits: ClockedModuleVmLimits, hierarchy: &ClockedHierarchy,
+        end: int, networks: Seq<Option<ClockedModuleNetwork>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        compiled: &ClockedModuleVm, first: Seq<usize>, second: Seq<usize>, first_target: usize, second_target: usize,
+        inputs: Seq<Seq<bool>>, states: Seq<ClockedVm>, outputs: Seq<Seq<bool>>,
+    ) -> (result: (PathTrace, PathTrace))
+        requires
+            self.clocked_hierarchy_matches(root, limits.width, hierarchy),
+            self.hierarchy_templates_through(hierarchy, limits, end, networks, functions),
+            0 < end, hierarchy.order@[end - 1] == 0,
+            networks.len() > 0, networks[0].is_some(),
+            hierarchy.modules@.len() > 0, hierarchy.modules@[0].is_some(),
+            self.network_vm_on_reset(&networks[0]->Some_0, limits.state_bits, compiled),
+            0 < first.len(), 0 < second.len(), first[0] < second[0],
+            path_target(hierarchy.graph@, 0, first) == Some(first_target),
+            path_target(hierarchy.graph@, 0, second) == Some(second_target),
+            clocked_vm_trace(inputs, states, outputs), states[0].same_layout(&compiled.vm),
+        ensures
+            ({
+                let first_leaf = networks[first_target as int]->Some_0;
+                let second_leaf = networks[second_target as int]->Some_0;
+                &&& first_target < networks.len() && networks[first_target as int].is_some()
+                &&& second_target < networks.len() && networks[second_target as int].is_some()
+                &&& (result.0.gates, result.0.storage) == path_offsets(hierarchy.graph@, networks, 0, first)
+                &&& (result.1.gates, result.1.storage) == path_offsets(hierarchy.graph@, networks, 0, second)
+                &&& result.0.gates + first_leaf.circuit.netlist_model().gates@.len() <= result.1.gates
+                &&& result.0.storage + first_leaf.storage@.len() <= result.1.storage
+                &&& result.0.frames.len() == result.1.frames.len() == states.len()
+                &&& forall|i: int| 0 <= i < states.len() ==> {
+                    &&& vm_state_slice(&states[i], #[trigger] result.0.frames[i], result.0.gates,
+                        first_leaf.circuit.netlist_model().gates@.len(), result.0.storage, first_leaf.storage@.len())
+                    &&& vm_state_slice(&states[i], #[trigger] result.1.frames[i], result.1.gates,
+                        second_leaf.circuit.netlist_model().gates@.len(), result.1.storage, second_leaf.storage@.len())
+                }
+            }),
+    {
+        let earlier = self.project_resolved_vm_path(root, limits, hierarchy, end, networks, functions, compiled,
+            first, first_target, inputs, states, outputs);
+        let later = self.project_resolved_vm_path(root, limits, hierarchy, end, networks, functions, compiled,
+            second, second_target, inputs, states, outputs);
+        self.clocked_hierarchy_evidence(root, limits.width, hierarchy);
+        let parent = networks[0]->Some_0;
+        let wiring = parent._hierarchy_wiring@->Some_0;
+        let edges = hierarchy.graph@[0]@;
+        self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, 0, first[0], edges[first[0] as int]->Some_0);
+        self.selected_trace_edge(root, limits, hierarchy, end, networks, functions, 0, second[0], edges[second[0] as int]->Some_0);
+        let netlist = parent.circuit.netlist_model();
+        sibling_routines_order(wiring.routines, netlist.gates@, parent.storage@.skip(wiring.direct_devices as int),
+            wiring.first_child_input, netlist.input_count, first[0] as int, second[0] as int);
+        (earlier, later)
     }
 }
 

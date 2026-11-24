@@ -25,6 +25,75 @@ pub(in super::super) struct RoutineFrame {
     output: Seq<bool>,
 }
 
+/// フレームに含まれるゲートと状態素子の数。
+pub(in super::super) closed spec fn frame_state_lengths(frame: RoutineFrame) -> (nat, nat) {
+    (frame.gates.len(), frame.devices.len())
+}
+
+/// 指定区間のゲート値と状態素子の値を、同じ順序で子の状態に対応付ける。
+pub(in super::super) closed spec fn frame_state_slice(
+    parent: RoutineFrame, child: RoutineFrame, gate: nat, gates: nat, device: nat, devices: nat,
+) -> bool {
+    &&& gate + gates <= parent.gates.len()
+    &&& device + devices <= parent.devices.len()
+    &&& child.gates == parent.gates.subrange(gate as int, gate as int + gates)
+    &&& child.devices == parent.devices.subrange(device as int, device as int + devices)
+}
+
+/// 空の呼び出し経路は、開始モジュールの状態全体を指す。
+pub(in super::super) proof fn frame_identity_slice(frame: RoutineFrame)
+    ensures frame_state_slice(frame, frame, 0, frame_state_lengths(frame).0, 0, frame_state_lengths(frame).1),
+{
+    assert(frame.gates.subrange(0, frame.gates.len() as int) =~= frame.gates);
+    assert(frame.devices.subrange(0, frame.devices.len() as int) =~= frame.devices);
+}
+
+spec fn vm_storage_values(vm: &ClockedVm) -> Seq<RoutineDeviceValues> {
+    Seq::new(vm.storage_model().len(), |i: int| {
+        let device = vm.storage_model()[i];
+        RoutineDeviceValues { registered: device.output_model(), memory: device.memory_model() }
+    })
+}
+
+/// 子の状態を、ルート VM が保持するゲート値、登録出力、RAM の記憶の区間に対応付ける。
+pub(in super::super) closed spec fn vm_state_slice(
+    vm: &ClockedVm, child: RoutineFrame, gate: nat, gates: nat, device: nat, devices: nat,
+) -> bool {
+    &&& gate + gates <= vm.gate_values_model().len()
+    &&& device + devices <= vm.storage_model().len()
+    &&& child.gates == vm.gate_values_model().subrange(gate as int, gate as int + gates)
+    &&& child.devices == vm_storage_values(vm).subrange(device as int, device as int + devices)
+}
+
+/// 二段の配置を合成しても、各値の並びは親の元の部分列と一致する。
+pub(in super::super) proof fn join_frame_state_slices(
+    parent: RoutineFrame, child: RoutineFrame, leaf: RoutineFrame,
+    first: (nat, nat, nat, nat), rest: (nat, nat, nat, nat),
+)
+    requires frame_state_slice(parent, child, first.0, first.1, first.2, first.3),
+        frame_state_slice(child, leaf, rest.0, rest.1, rest.2, rest.3),
+    ensures frame_state_slice(parent, leaf, first.0 + rest.0, rest.1, first.2 + rest.2, rest.3),
+{
+    let gate = first.0 as int + rest.0;
+    let device = first.2 as int + rest.2;
+    assert(leaf.gates =~= parent.gates.subrange(gate, gate + rest.1));
+    assert(leaf.devices =~= parent.devices.subrange(device, device + rest.3));
+}
+
+/// 子の部分列から、ルート VM の元の部分列を直接参照できる。
+pub(in super::super) proof fn join_vm_state_slices(
+    parent: &ClockedVm, child: RoutineFrame, leaf: RoutineFrame,
+    first: (nat, nat, nat, nat), rest: (nat, nat, nat, nat),
+)
+    requires vm_state_slice(parent, child, first.0, first.1, first.2, first.3),
+        frame_state_slice(child, leaf, rest.0, rest.1, rest.2, rest.3),
+    ensures vm_state_slice(parent, leaf, first.0 + rest.0, rest.1, first.2 + rest.2, rest.3),
+{
+    let whole = RoutineFrame { input: Seq::empty(), output: Seq::empty(),
+        gates: parent.gate_values_model(), devices: vm_storage_values(parent) };
+    join_frame_state_slices(whole, child, leaf, first, rest);
+}
+
 spec fn registered_inputs(
     devices: Seq<ClockedStorageInputs>, external: nat, input: Seq<bool>, values: Seq<RoutineDeviceValues>,
 ) -> bool {
@@ -89,6 +158,19 @@ pub(in super::super) closed spec fn routine_trace(
         frames[i - 1], #[trigger] frames[i], update_inputs[i - 1])
 }
 
+/// 即時の観測を含む各フレームの状態列は、回路と素子列の長さに従う。
+pub(in super::super) proof fn trace_frame_lengths(
+    callee: &NorNetlist, devices: Seq<ClockedStorageInputs>, external: nat,
+    frames: Seq<RoutineFrame>, updates: Seq<Seq<bool>>, tick: int,
+)
+    requires routine_trace(callee, devices, external, frames, updates), 0 <= tick < frames.len(),
+    ensures frame_state_lengths(frames[tick]) == (callee.gates@.len(), devices.len()),
+{
+    if tick > 0 {
+        assert(frame_steps(callee, devices, external, frames[tick - 1], frames[tick], updates[tick - 1]));
+    }
+}
+
 spec fn state_at(vm: &ClockedVm, routine: RoutineWiring, direct: usize, input: Seq<bool>, output: Seq<bool>) -> RoutineFrame {
     RoutineFrame {
         input,
@@ -148,11 +230,16 @@ pub(in super::super) proof fn project_routine_trace(
                 #[trigger] result.0[i])
             &&& forall|i: int| 0 <= i < steps ==> update_input_read_from(&states[i], routine, inputs[i],
                 #[trigger] result.1[i])
+            &&& forall|i: int| 0 <= i <= steps ==> vm_state_slice(&states[i], #[trigger] result.0[i],
+                routine.gates.start as nat, routine.callee.gates@.len(),
+                (direct + routine.storage.start) as nat, routine.devices.len())
         }),
     decreases steps,
 {
     let root = states[0];
     let routine = routines[call]->Some_0;
+    reveal(routines_placed);
+    assert(routine_placed(routine, root.netlist_model().gates@, wiring.skip(direct as int), root.netlist_model().input_count));
     let external = routine.external.len();
     if steps == 0 {
         let (input, output) = routine_reset_observation(&root, outputs[0], wiring, routines, direct, first_state, call);
@@ -160,6 +247,7 @@ pub(in super::super) proof fn project_routine_trace(
         let zero = Seq::new(root.external_count() as nat, |_: int| false);
         let bits = root.reset_snapshot(outputs[0]);
         assert(frame_observed_from(&root, routine, direct, zero, frame));
+        observed_vm_state_slice(&root, routine, direct, zero, frame);
         assert(frame_is_reset(&routine.callee, routine.devices, external, frame)) by {
             assert forall|i: int| 0 <= i < routine.devices.len() implies {
                 let stored = #[trigger] frame.devices[i];
@@ -214,6 +302,7 @@ pub(in super::super) proof fn project_routine_trace(
             assert(frame_matches(&routine.callee, routine.devices, external, next));
         };
         assert(frame_observed_from(&current, routine, direct, root_input, next));
+        observed_vm_state_slice(&current, routine, direct, root_input, next);
         assert(update_input_read_from(&previous, routine, root_input, old_input));
         let extended = frames.push(next);
         let extended_updates = updates.push(old_input);
@@ -233,6 +322,11 @@ pub(in super::super) proof fn project_routine_trace(
         assert forall|j: int| 0 <= j < steps implies update_input_read_from(&states[j], routine, inputs[j],
             #[trigger] extended_updates[j]) by {
             if j < i - 1 { assert(extended_updates[j] == updates[j]); }
+        };
+        assert forall|j: int| 0 <= j <= steps implies vm_state_slice(&states[j], #[trigger] extended[j],
+            routine.gates.start as nat, routine.callee.gates@.len(),
+            (direct + routine.storage.start) as nat, routine.devices.len()) by {
+            if j < i { assert(extended[j] == frames[j]); }
         };
         (extended, extended_updates)
     }
@@ -264,6 +358,41 @@ pub(in super::super) closed spec fn nested_trace_projects(
     &&& child_frames == Seq::new(frames.len(), |i: int| local_frame(routine, direct, frames[i]))
     &&& child_updates == Seq::new(updates.len(), |i: int|
         clocked_instance_inputs(routine_arguments(routine), updates[i], frames[i].gates))
+}
+
+/// 一段のトレース射影から、その時点の状態の区間を取り出す。
+pub(in super::super) proof fn nested_state_slice(
+    routine: RoutineWiring, direct: usize, frames: Seq<RoutineFrame>, updates: Seq<Seq<bool>>,
+    child_frames: Seq<RoutineFrame>, child_updates: Seq<Seq<bool>>, tick: int,
+    gates: nat, devices: nat,
+)
+    requires
+        nested_trace_projects(routine, direct, frames, updates, child_frames, child_updates),
+        0 <= tick < frames.len(),
+        routine.gates.start + routine.callee.gates@.len() == routine.gates.end <= gates,
+        routine.storage.start + routine.devices.len() == routine.storage.end,
+        direct + routine.storage.end <= devices,
+        frame_state_lengths(frames[tick]) == (gates, devices),
+    ensures frame_state_slice(frames[tick], child_frames[tick], routine.gates.start as nat, routine.callee.gates@.len(),
+        (direct + routine.storage.start) as nat, routine.devices.len()),
+{
+}
+
+/// 実 VM の観測から、同じ時点の状態が占める区間を取り出す。
+pub(in super::super) proof fn observed_vm_state_slice(
+    vm: &ClockedVm, routine: RoutineWiring, direct: usize, input: Seq<bool>, frame: RoutineFrame,
+)
+    requires
+        frame_observed_from(vm, routine, direct, input, frame),
+        routine.gates.start + routine.callee.gates@.len() == routine.gates.end <= vm.gate_values_model().len(),
+        routine.storage.start + routine.devices.len() == routine.storage.end,
+        direct + routine.storage.end <= vm.storage_model().len(),
+    ensures vm_state_slice(vm, frame, routine.gates.start as nat, routine.callee.gates@.len(),
+        (direct + routine.storage.start) as nat, routine.devices.len()),
+{
+    let storage = vm_storage_values(vm);
+    let selected = storage.subrange(direct + routine.storage.start, direct + routine.storage.end);
+    assert(selected =~= frame.devices);
 }
 
 /// 親の軌跡から子を取り出すために必要な配線と配置の条件。
@@ -366,6 +495,7 @@ pub(in super::super) proof fn project_nested_trace(
         ({
             let routine = routines[call]->Some_0;
             &&& result.1.len() == updates.len()
+            &&& result.0.len() == frames.len()
             &&& routine_trace(&routine.callee, routine.devices, routine.external.len(), result.0, result.1)
             &&& nested_trace_projects(routine, direct, frames, updates, result.0, result.1)
         }),

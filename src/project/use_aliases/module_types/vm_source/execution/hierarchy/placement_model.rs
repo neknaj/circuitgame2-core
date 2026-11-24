@@ -131,6 +131,18 @@ pub(super) proof fn placed_routine_evidence(
     reveal(routines_placed);
 }
 
+/// 同じ親が順に呼ぶ二つの子は、ゲートと状態素子の配置を共有しない。
+pub(super) proof fn sibling_routines_order(
+    routines: Seq<Option<RoutineWiring>>, gates: Seq<NorGate>, storage: Seq<ClockedStorageInputs>,
+    first_state: usize, next_state: usize, first: int, second: int,
+)
+    requires routines_placed(routines, gates, storage, first_state, next_state),
+        0 <= first < second < routines.len(), routines[first].is_some(), routines[second].is_some(),
+    ensures routine_before(routines[first]->Some_0, routines[second]->Some_0),
+{
+    reveal(routines_placed);
+}
+
 /// 空の子回路列には予約済みの区間がない。
 pub(super) proof fn empty_routines(first_state: usize)
     ensures routines_placed(Seq::empty(), Seq::empty(), Seq::empty(), first_state, first_state),
