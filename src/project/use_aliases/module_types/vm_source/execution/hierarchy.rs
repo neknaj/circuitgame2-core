@@ -4,6 +4,8 @@ mod placement_model;
 #[cfg(verus_only)]
 mod path_trace;
 #[cfg(verus_only)]
+mod source_ids;
+#[cfg(verus_only)]
 pub use path_trace::ClockedModuleObservation;
 
 use placement_model::RoutineWiring;
