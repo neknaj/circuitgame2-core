@@ -12,7 +12,7 @@ use crate::project::use_aliases::module_types::clocked_source::resolve_driver;
 #[cfg(verus_only)]
 use crate::project::use_aliases::module_types::clocked_source::resolved_driver;
 #[cfg(verus_only)]
-use crate::netlist::clocked_vm_result;
+use crate::netlist::{clocked_storage_output_width, clocked_vm_result};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -433,6 +433,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result matches Ok(compiled) ==> compiled.vm.valid() && compiled.vm.initial()
                 && compiled.vm.external_count() == compiled.inputs.total_bits_model()
                 && self.network_vm_on_reset(&network, state_limit, &compiled),
+            result.is_ok() ==> network.inputs.total_bits_model() + clocked_storage_output_width(network.storage@)
+                == network.circuit.netlist_model().input_count,
             result matches Err(error) ==> error is Vm,
     {
         let external = network.inputs.total_bits();

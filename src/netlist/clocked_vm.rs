@@ -123,6 +123,63 @@ pub(super) proof fn wiring_width_step(wiring: Seq<ClockedStorageInputs>, i: nat)
     reveal(wiring_width);
 }
 
+proof fn equal_wiring_prefix_width(first: Seq<ClockedStorageInputs>, second: Seq<ClockedStorageInputs>, count: nat)
+    requires count <= first.len() && count <= second.len(),
+        forall|i: int| 0 <= i < count ==> (#[trigger] first[i]).data@.len() == (#[trigger] second[i]).data@.len(),
+    ensures wiring_width(first, count) == wiring_width(second, count),
+    decreases count,
+{
+    if count == 0 {
+        wiring_width_zero(first);
+        wiring_width_zero(second);
+    } else {
+        let last = (count - 1) as nat;
+        equal_wiring_prefix_width(first, second, last);
+        assert(first[last as int].data@.len() == second[last as int].data@.len());
+        wiring_width_step(first, last);
+        wiring_width_step(second, last);
+    }
+}
+
+/// 各状態素子の出力幅が一致すれば、増補入力で占める総幅も一致する。
+pub proof fn clocked_storage_widths_agree(first: Seq<ClockedStorageInputs>, second: Seq<ClockedStorageInputs>)
+    requires first.len() == second.len(),
+        forall|i: int| 0 <= i < first.len() ==> (#[trigger] first[i]).data@.len() == (#[trigger] second[i]).data@.len(),
+    ensures clocked_storage_output_width(first) == clocked_storage_output_width(second),
+{
+    equal_wiring_prefix_width(first, second, first.len());
+}
+
+proof fn concatenated_wiring_prefix_width(
+    first: Seq<ClockedStorageInputs>, second: Seq<ClockedStorageInputs>, count: nat,
+)
+    requires count <= second.len(),
+    ensures wiring_width(first + second, first.len() + count) == wiring_width(first, first.len()) + wiring_width(second, count),
+    decreases count,
+{
+    let joined = first + second;
+    if count == 0 {
+        assert forall|i: int| 0 <= i < first.len() implies (#[trigger] joined[i]).data@.len() == (#[trigger] first[i]).data@.len() by {
+            assert(joined[i] == first[i]);
+        };
+        equal_wiring_prefix_width(joined, first, first.len());
+        wiring_width_zero(second);
+    } else {
+        let last = (count - 1) as nat;
+        concatenated_wiring_prefix_width(first, second, last);
+        assert(joined[(first.len() + last) as int] == second[last as int]);
+        wiring_width_step(joined, first.len() + last);
+        wiring_width_step(second, last);
+    }
+}
+
+/// 状態素子列を連結すると、それぞれが使う増補入力の幅が加算される。
+pub proof fn clocked_storage_width_concat(first: Seq<ClockedStorageInputs>, second: Seq<ClockedStorageInputs>)
+    ensures clocked_storage_output_width(first + second) == clocked_storage_output_width(first) + clocked_storage_output_width(second),
+{
+    concatenated_wiring_prefix_width(first, second, second.len());
+}
+
 pub(super) proof fn wiring_width_grows(wiring: Seq<ClockedStorageInputs>, before: nat, end: nat)
     requires before <= end <= wiring.len(),
     ensures wiring_width(wiring, before) <= wiring_width(wiring, end),
@@ -469,6 +526,7 @@ impl ClockedVm {
         ensures
             clocked_vm_result(&circuit, external, wiring@, state_bit_limit, result),
             result matches Ok(vm) ==> vm.valid() && vm.initial() && vm.external_count() == external,
+            result.is_ok() ==> external + clocked_storage_output_width(wiring@) == circuit.netlist_model().input_count,
     {
         let netlist = circuit.checked_netlist();
         let inputs = netlist.input_count;

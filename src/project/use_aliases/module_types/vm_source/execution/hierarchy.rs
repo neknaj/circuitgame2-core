@@ -1,5 +1,11 @@
 //! 子を先に展開し、各呼び出しに独立したゲートと状態出力の区間を割り当てる。
 
+mod placement_model;
+
+use placement_model::RoutineWiring;
+#[cfg(verus_only)]
+use placement_model::{empty_routines, extend_routines, join_routine_input_offsets, routine_placed,
+    routine_vm_input_offsets, routines_placed};
 use super::super::super::{ClockedModuleOutputs, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement,
     ClockedWireDriver, clocked_source::ClockedHierarchy, copy_location};
 use super::super::super::clocked_source::function_templates::FunctionTemplates;
@@ -40,6 +46,7 @@ struct CallPlacement<'s, 'p, 'a> {
     gates: Range<usize>,
     states: Range<usize>,
     arguments: Vec<ClockedWireDriver>,
+    _argument_rows: Ghost<Vec<Vec<ClockedWireDriver>>>,
 }
 
 /// 記号配線を作った局所式か呼び出しを示す、証明用の根拠。
@@ -58,7 +65,9 @@ struct HierarchyRows {
 pub(super) struct HierarchyWiring {
     definitions: Seq<Wire>,
     origins: Seq<HierarchyRowOrigin>,
-    routine_outputs: Seq<Option<(PortBitLayout, Seq<Wire>)>>,
+    routines: Seq<Option<RoutineWiring>>,
+    direct_devices: usize,
+    first_child_input: usize,
 }
 
 fn call_site<'p, 'a>(checked: &ModuleCalls<'p, 'a>, call: usize) -> (site: LocatedName<'p, 'a>)
@@ -96,21 +105,29 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             #[trigger] self.outputs_on_checked(&checked.module, limits.width, limits.wiring_bits, Ok(ports))
             && network.inputs == ports.inputs && network.outputs == ports.outputs
             && (network._hierarchy_wiring@ matches Some(wiring)
-                && self.hierarchy_public_wiring(checked, &ports, &wiring, network.circuit.netlist_model().outputs@))
+                && self.hierarchy_public_wiring(checked, limits.width, &ports, &wiring, network.circuit.netlist_model().outputs@)
+                && wiring.direct_devices <= network.storage@.len()
+                && routines_placed(wiring.routines, network.circuit.netlist_model().gates@,
+                    network.storage@.skip(wiring.direct_devices as int), wiring.first_child_input,
+                    network.circuit.netlist_model().input_count))
     }
 
     #[verifier::opaque]
     spec fn hierarchy_public_wiring(
-        &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, wiring: &HierarchyWiring, outputs: Seq<Wire>,
+        &self, checked: &ModuleCalls, width: u64, ports: &ClockedModuleOutputs, wiring: &HierarchyWiring, outputs: Seq<Wire>,
     ) -> bool {
         let definitions = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@;
         &&& wiring.origins.len() == definitions.len() == ports.definitions.ranges_model().len()
         &&& wiring.definitions.len() == ports.definitions.total_bits_model()
         &&& resolved_bits(row_model(ports.drivers@), wiring.definitions, outputs)
-        &&& wiring.routine_outputs.len() == checked.calls@.len()
+        &&& wiring.routines.len() == checked.calls@.len()
         &&& forall|call: int| 0 <= call < checked.calls@.len() ==>
-            ((#[trigger] wiring.routine_outputs[call]).is_some()
+            ((#[trigger] wiring.routines[call]).is_some()
                 == (checked.calls@[call].inputs.ports.signature.target is Routine))
+        &&& forall|i: int| 0 <= i < wiring.routines.len() ==> ((#[trigger] wiring.routines[i]) matches Some(routine) ==> {
+            &&& self.call_wires_result(checked, width, ports, i as usize, Ok(routine.argument_rows))
+            &&& resolved_bits(row_model(routine.argument_rows@), wiring.definitions, routine.external)
+        })
         &&& forall|slot: int| 0 <= slot < definitions.len() ==> #[trigger]
             self.hierarchy_definition_wiring(checked, ports, wiring, slot)
     }
@@ -127,15 +144,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             },
             HierarchyRowOrigin::Call(call) => {
                 &&& self.source_vm_root_slot(checked, slot, call as int)
-                &&& call < wiring.routine_outputs.len()
-                &&& match wiring.routine_outputs[call as int] {
+                &&& call < wiring.routines.len()
+                &&& match wiring.routines[call as int] {
                     None => self.source_vm_direct_slot(checked, slot, call as int),
-                    Some((layout, mapped)) => {
+                    Some(routine) => {
                         let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index as int;
-                        &&& port < layout.ranges_model().len()
+                        &&& port < routine.layout.ranges_model().len()
                         &&& {
-                            let child = layout.ranges_model()[port];
-                            expected == mapped.subrange(child.start as int, child.end as int)
+                            let child = routine.layout.ranges_model()[port];
+                            expected == routine.outputs.subrange(child.start as int, child.end as int)
                         }
                     },
                 }
@@ -152,6 +169,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && #[trigger] self.network_vm_on_reset(&network, limits.state_bits, vm)
             && hierarchy.modules@[0].is_some()
             && self.hierarchy_network_wiring(&hierarchy.modules@[0]->Some_0, limits, &network)
+            && (network._hierarchy_wiring@ matches Some(wiring)
+                && routine_vm_input_offsets(wiring.routines, network.storage@, wiring.direct_devices,
+                    network.inputs.total_bits_model()))
             && network.circuit.netlist_model().gates@.len() <= limits.gates
             && network.circuit.netlist_model().input_count <= limits.wiring_bits
     }
@@ -262,6 +282,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let ghost source = network;
                     return match self.initialize_clocked_network(network, limits.state_bits) {
                         Ok(vm) => {
+                            proof {
+                                assert(self.hierarchy_network_wiring(checked, limits, &source));
+                                let wiring = source._hierarchy_wiring@->Some_0;
+                                join_routine_input_offsets(wiring.routines, source.circuit.netlist_model().gates@,
+                                    source.storage@, wiring.direct_devices, source.inputs.total_bits_model(),
+                                    wiring.first_child_input, source.circuit.netlist_model().input_count);
+                            }
                             assert(self.clocked_module_hierarchy_vm(owner, limits, &vm)) by {
                                 assert(self.network_vm_on_reset(&source, limits.state_bits, &vm));
                             };
@@ -355,6 +382,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 self.clocked_functions_match(functions@, limits.width, limits.wiring_bits, limits.gates),
                 forall|i: int| 0 <= i < call ==> (#[trigger] placements@[i]).is_some()
                     == (checked.calls@[i].inputs.ports.signature.target is Routine),
+                forall|i: int| 0 <= i < call ==> ((#[trigger] placements@[i]) matches Some(placed) ==> {
+                    &&& self.call_wires_result(checked, limits.width, &ports, i as usize, Ok(placed._argument_rows@))
+                    &&& row_model(placed._argument_rows@@) == placed.arguments@
+                }),
                 forall|i: int| 0 <= i < edges@.len() ==> ((#[trigger] edges@[i]) matches Some(child)
                     ==> child < networks@.len() && networks@[child as int].is_some()
                         && (checked.calls@[i].inputs.ports.signature.target is Routine)),
@@ -393,7 +424,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 let arguments = self.flatten_clocked_arguments(&rows)?;
                 if arguments.len() != child_external { return Err(ClockedModuleVmError::CallWiring(call_site(checked, call))); }
                 placement = Some(CallPlacement { circuit, inputs, outputs, storage, storage_sites, gates: total_gates..total_gates + gates,
-                    states: total_inputs..total_inputs + width, arguments });
+                    states: total_inputs..total_inputs + width, arguments, _argument_rows: Ghost(rows) });
                 total_inputs += width;
                 total_gates += gates;
             } else if matches!(checked.calls[call].inputs.ports.signature.target, ModuleCallTarget::Nor) {
@@ -406,6 +437,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             placements.push(placement);
             assert forall|i: int| 0 <= i <= call implies (#[trigger] placements@[i]).is_some()
                 == (checked.calls@[i].inputs.ports.signature.target is Routine) by {
+                if i < call { assert(placements@[i] == previous[i]); }
+            };
+            assert forall|i: int| 0 <= i <= call implies ((#[trigger] placements@[i]) matches Some(placed) ==> {
+                &&& self.call_wires_result(checked, limits.width, &ports, i as usize, Ok(placed._argument_rows@))
+                &&& row_model(placed._argument_rows@@) == placed.arguments@
+            }) by {
                 if i < call { assert(placements@[i] == previous[i]); }
             };
             call += 1;
@@ -789,19 +826,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
 
     spec fn captured_call_output(
         &self, checked: &ModuleCalls, ports: &ClockedModuleOutputs, calls: Seq<Option<CallPlacement>>,
-        rows: &HierarchyRows, definitions: Seq<Wire>, call: int, output: Option<(PortBitLayout, Seq<Wire>)>,
+        rows: &HierarchyRows, definitions: Seq<Wire>, call: int, output: Option<RoutineWiring>,
     ) -> bool {
         match (calls[call], output) {
             (None, None) => true,
-            (Some(placed), Some((layout, mapped))) => {
-                &&& layout == *placed.outputs
+            (Some(placed), Some(routine)) => {
+                &&& routine.layout == *placed.outputs
+                &&& routine.callee == placed.circuit.netlist_model()
+                &&& routine.devices == placed.storage@
+                &&& routine.gates == placed.gates && routine.state_inputs == placed.states
+                &&& routine.argument_rows == placed._argument_rows@
+                &&& resolved_bits(placed.arguments@, definitions, routine.external)
                 &&& forall|slot: int| 0 <= slot < rows._origins@.len()
                     && #[trigger] rows._origins@[slot] == HierarchyRowOrigin::Call(call as usize) ==> {
                     let port = checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@[slot].result_index as int;
-                    let child = layout.ranges_model()[port];
+                    let child = routine.layout.ranges_model()[port];
                     let parent = ports.definitions.ranges_model()[slot];
                     definitions.subrange(parent.start as int, parent.end as int)
-                        == mapped.subrange(child.start as int, child.end as int)
+                        == routine.outputs.subrange(child.start as int, child.end as int)
                 }
             },
             _ => false,
@@ -818,6 +860,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             calls@.len() == checked.calls@.len(),
             forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
                 == (checked.calls@[i].inputs.ports.signature.target is Routine),
+            forall|i: int| 0 <= i < calls@.len() ==> ((#[trigger] calls@[i]) matches Some(placed) ==> {
+                &&& self.call_wires_result(checked, limits.width, &ports, i as usize, Ok(placed._argument_rows@))
+                &&& row_model(placed._argument_rows@@) == placed.arguments@
+            }),
             total_inputs <= limits.wiring_bits, total_gates <= limits.gates,
             clocked_wires_match(_rows.bits@, definitions@),
             _rows._origins@.len() == checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len(),
@@ -833,8 +879,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut storage = Vec::new();
         let mut child_storage: Vec<ClockedStorageInputs> = Vec::new();
         let mut child_sites = Vec::new();
-        let ghost mut captured = Seq::<Option<(PortBitLayout, Seq<Wire>)>>::empty();
-        let mut next_state = direct.augmented_inputs;
+        let ghost mut captured = Seq::<Option<RoutineWiring>>::empty();
+        let first_state = direct.augmented_inputs;
+        let mut next_state = first_state;
+        proof { empty_routines(first_state); }
         if gates.try_reserve_exact(total_gates).is_err() || storage.try_reserve_exact(direct.instances.len()).is_err() {
             return Err(ClockedModuleVmError::Allocation);
         }
@@ -843,6 +891,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 call <= calls@.len() == checked.calls@.len(),
                 call == captured.len(),
+                routines_placed(captured, gates@, child_storage@, first_state, next_state),
                 forall|i: int| 0 <= i < calls@.len() ==> (#[trigger] calls@[i]).is_some()
                     == (checked.calls@[i].inputs.ports.signature.target is Routine),
                 self.can_resolve(), self.module_calls_result(owner, limits.width, Ok(Some(*checked))),
@@ -855,6 +904,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             decreases calls@.len() - call,
         {
             let ghost before = captured;
+            let ghost prior_gates = gates@;
+            let ghost prior_storage = child_storage@;
+            let ghost prior_state = next_state;
+            proof { vstd::std_specs::vec::axiom_spec_len(&child_storage); }
             if let Some(placement) = &calls[call] {
                 let mut arguments = Vec::new();
                 match append_row(&mut arguments, &placement.arguments, definitions) {
@@ -888,19 +941,52 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         placement.gates.start, instance.outputs@));
                     self.placed_outputs_match_definitions(checked, &ports, calls@, _rows, definitions@,
                         call, arguments@, instance.outputs@);
-                    let output = Some((*placement.outputs, instance.outputs@));
-                    assert(self.captured_call_output(checked, &ports, calls@, _rows, definitions@, call as int, output));
-                    captured = before.push(output);
                 }
                 if child_storage.try_reserve(instance.storage.len()).is_err()
                     || child_sites.try_reserve(instance.storage.len()).is_err() {
                     return Err(ClockedModuleVmError::Allocation);
                 }
+                let ghost placed_devices = instance.storage@;
+                proof {
+                    let pins = clocked_stateful_arguments(arguments@, placement.states.start,
+                        clocked_storage_output_width(placement.storage@));
+                    assert(placed_devices.len() == placement.storage@.len());
+                    assert forall|i: int| 0 <= i < placed_devices.len() implies placement.storage@[i].parent_placement_matches(
+                        pins, placement.gates.start, &(#[trigger] placed_devices[i])) by {
+                        assert(placed_devices[i] == instance.storage@[i]);
+                    };
+                }
                 child_storage.append(&mut instance.storage);
+                proof {
+                    vstd::std_specs::vec::axiom_spec_len(&child_storage);
+                    let routine = RoutineWiring {
+                        layout: *placement.outputs, outputs: instance.outputs@,
+                        callee: placement.circuit.netlist_model(), devices: placement.storage@, external: arguments@,
+                        gates: placement.gates, state_inputs: placement.states,
+                        argument_rows: placement._argument_rows@,
+                        storage: Range { start: prior_storage.len() as usize, end: child_storage@.len() as usize },
+                    };
+                    let output = Some(routine);
+                    assert(self.captured_call_output(checked, &ports, calls@, _rows, definitions@, call as int, output));
+                    assert(child_storage@ == prior_storage + placed_devices);
+                    assert(child_storage@.take(prior_storage.len() as int) =~= prior_storage);
+                    assert(routine_placed(routine, gates@, child_storage@, next_state)) by {
+                        let pins = clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+                            clocked_storage_output_width(routine.devices));
+                        assert forall|i: int| 0 <= i < routine.devices.len() implies routine.devices[i].parent_placement_matches(
+                            pins, routine.gates.start, &(#[trigger] child_storage@[routine.storage.start + i])) by {
+                            assert(child_storage@[routine.storage.start + i] == placed_devices[i]);
+                        };
+                    };
+                    extend_routines(before, output, prior_gates, gates@, prior_storage, child_storage@,
+                        first_state, prior_state, next_state);
+                    captured = before.push(output);
+                }
                 let external = placement.inputs.total_bits();
                 let mut i = 0;
                 while i < placement.storage_sites.len()
                     invariant i <= placement.storage_sites@.len(),
+                        routines_placed(captured, gates@, child_storage@, first_state, next_state),
                     decreases placement.storage_sites@.len() - i,
                 {
                     let site = &placement.storage_sites[i];
@@ -947,6 +1033,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     };
                     storage.push(inputs);
                 }
+                proof {
+                    assert(gates@.take(prior_gates.len() as int) =~= prior_gates);
+                    assert(child_storage@.take(prior_storage.len() as int) =~= prior_storage);
+                    extend_routines(before, None, prior_gates, gates@, prior_storage, child_storage@,
+                        first_state, prior_state, next_state);
+                }
             }
             assert forall|i: int| 0 <= i <= call implies #[trigger]
                 self.captured_call_output(checked, &ports, calls@, _rows, definitions@, i, captured[i]) by {
@@ -961,7 +1053,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if storage.try_reserve(child_storage.len()).is_err() || storage_sites.try_reserve(child_sites.len()).is_err() {
             return Err(ClockedModuleVmError::Allocation);
         }
+        let ghost routine_storage = child_storage@;
+        let direct_devices = storage.len();
         storage.append(&mut child_storage);
+        assert(storage@.skip(direct_devices as int) =~= routine_storage);
         storage_sites.append(&mut child_sites);
         let outputs = match resolve_rows(&ports.drivers, definitions) {
             Ok(outputs) => outputs,
@@ -977,7 +1072,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(ClockedModuleVmError::Netlist(error)),
         };
         let ghost source_ports = ports;
-        let ghost wiring = HierarchyWiring { definitions: definitions@, origins: _rows._origins@, routine_outputs: captured };
+        let ghost wiring = HierarchyWiring {
+            definitions: definitions@, origins: _rows._origins@, routines: captured, direct_devices, first_child_input: first_state,
+        };
         proof {
             self.module_calls_type_evidence(owner, limits.width, checked);
             self.module_output_types_evidence(owner, limits.width, checked.module);
@@ -985,10 +1082,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.module_selections_evidence(owner, limits.width, checked.module.expressions);
             self.clocked_definition_layout_evidence(&checked.module.expressions, limits.width, limits.wiring_bits,
                 &source_ports.definitions, 0);
-            assert(self.hierarchy_public_wiring(checked, &source_ports, &wiring, circuit.netlist_model().outputs@)) by {
+            assert(self.hierarchy_public_wiring(checked, limits.width, &source_ports, &wiring, circuit.netlist_model().outputs@)) by {
                 reveal(UseAliases::hierarchy_public_wiring);
                 assert forall|i: int| 0 <= i < captured.len() implies
                     (#[trigger] captured[i]).is_some() == (checked.calls@[i].inputs.ports.signature.target is Routine) by {
+                    assert(self.captured_call_output(checked, &source_ports, calls@, _rows, definitions@, i, captured[i]));
+                };
+                assert forall|i: int| 0 <= i < captured.len() implies ((#[trigger] captured[i]) matches Some(routine) ==> {
+                    &&& self.call_wires_result(checked, limits.width, &source_ports, i as usize, Ok(routine.argument_rows))
+                    &&& resolved_bits(row_model(routine.argument_rows@), definitions@, routine.external)
+                }) by {
                     assert(self.captured_call_output(checked, &source_ports, calls@, _rows, definitions@, i, captured[i]));
                 };
                 assert forall|slot: int| 0 <= slot < wiring.origins.len() implies #[trigger]
