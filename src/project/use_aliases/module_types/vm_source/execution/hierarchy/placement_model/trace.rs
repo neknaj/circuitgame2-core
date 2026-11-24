@@ -1,11 +1,12 @@
 //! 子回路の状態と観測を、親 VM の有限実行から取り出す。
 
 use super::{RoutineWiring, routine_reset_observation, routine_tick_observation, routine_vm_input_offsets,
-    routines_pins_valid, routines_placed};
+    routine_storage_mapping, routine_placed, routines_pins_valid, routines_placed};
 use crate::netlist::{ClockedStorageInputs, ClockedVm, NorNetlist, clocked_gate_updates, clocked_instance_inputs,
+    clocked_instance_gate_updates_match, clocked_instance_outputs_match, clocked_mapped_storage_reads_match,
     clocked_stateful_arguments,
     clocked_storage_memory_width, clocked_storage_output_width, clocked_storage_pin_values,
-    clocked_storage_value_transition, clocked_vm_trace, output_values_match};
+    clocked_storage_value_transition, clocked_vm_trace, output_values_match, wire_value};
 use vstd::prelude::*;
 
 verus! {
@@ -235,6 +236,201 @@ pub(in super::super) proof fn project_routine_trace(
         };
         (extended, extended_updates)
     }
+}
+
+spec fn routine_arguments(routine: RoutineWiring) -> Seq<crate::netlist::Wire> {
+    clocked_stateful_arguments(routine.external, routine.state_inputs.start,
+        clocked_storage_output_width(routine.devices))
+}
+
+spec fn local_devices(routine: RoutineWiring, direct: usize, parent: Seq<RoutineDeviceValues>) -> Seq<RoutineDeviceValues> {
+    parent.subrange(direct + routine.storage.start, direct + routine.storage.end)
+}
+
+spec fn local_frame(routine: RoutineWiring, direct: usize, parent: RoutineFrame) -> RoutineFrame {
+    RoutineFrame {
+        input: clocked_instance_inputs(routine_arguments(routine), parent.input, parent.gates),
+        output: clocked_instance_inputs(routine.outputs, parent.input, parent.gates),
+        gates: parent.gates.subrange(routine.gates.start as int, routine.gates.end as int),
+        devices: local_devices(routine, direct, parent.devices),
+    }
+}
+
+/// 子の各値が、同じ時点の親の状態と配線から得られることを表す。
+pub(in super::super) closed spec fn nested_trace_projects(
+    routine: RoutineWiring, direct: usize, frames: Seq<RoutineFrame>, updates: Seq<Seq<bool>>,
+    child_frames: Seq<RoutineFrame>, child_updates: Seq<Seq<bool>>,
+) -> bool {
+    &&& child_frames == Seq::new(frames.len(), |i: int| local_frame(routine, direct, frames[i]))
+    &&& child_updates == Seq::new(updates.len(), |i: int|
+        clocked_instance_inputs(routine_arguments(routine), updates[i], frames[i].gates))
+}
+
+/// 親の軌跡から子を取り出すために必要な配線と配置の条件。
+pub(in super::super) closed spec fn trace_projection_ready(
+    netlist: &NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
+) -> bool {
+    &&& routines_placed(routines, netlist.gates@, wiring.skip(direct as int), first_state, netlist.input_count)
+    &&& routine_vm_input_offsets(routines, wiring, direct, external)
+    &&& routines_pins_valid(routines, netlist.input_count, netlist.gates@.len())
+    &&& 0 <= call < routines.len()
+    &&& routines[call].is_some()
+}
+
+proof fn local_input_has_registered_outputs(
+    netlist: &NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
+    input: Seq<bool>, gates: Seq<bool>, values: Seq<RoutineDeviceValues>,
+)
+    requires
+        trace_projection_ready(netlist, external, wiring, routines, direct, first_state, call),
+        registered_inputs(wiring, external as nat, input, values),
+        input.len() == netlist.input_count,
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            registered_inputs(routine.devices, routine.external.len(),
+                clocked_instance_inputs(routine_arguments(routine), input, gates), local_devices(routine, direct, values))
+        }),
+{
+    reveal(routines_placed);
+    let routine = routines[call]->Some_0;
+    let pins = routine_arguments(routine);
+    let child = clocked_instance_inputs(pins, input, gates);
+    let ext = routine.external.len() as int;
+    let devices = local_devices(routine, direct, values);
+    assert(routine_placed(routine, netlist.gates@, wiring.skip(direct as int), netlist.input_count));
+    assert forall|i: int| 0 <= i < routine.devices.len() implies {
+        let value = #[trigger] devices[i];
+        let relative = clocked_storage_output_width(routine.devices.take(i)) as int;
+        let start = ext + relative;
+        let end = start + routine.devices[i].data@.len();
+        &&& end <= child.len()
+        &&& child.subrange(start, end) == value.registered
+    } by {
+        routine_storage_mapping(netlist, external, wiring, routines, direct, first_state, call, i);
+        let parent = direct + routine.storage.start + i;
+        let relative = clocked_storage_output_width(routine.devices.take(i)) as int;
+        let width = routine.devices[i].data@.len();
+        let start = ext + relative;
+        let end = start + width;
+        let parent_start = routine.state_inputs.start + relative;
+        let row = child.subrange(start, end);
+        let parent_row = input.subrange(parent_start, parent_start + width);
+        assert(devices[i] == values[parent]);
+        assert(parent_row == values[parent].registered);
+        assert(row.len() == parent_row.len());
+        assert forall|j: int| 0 <= j < row.len() implies (#[trigger] row[j]) == parent_row[j] by {
+            assert(pins[start + j] == crate::netlist::Wire::Input((parent_start + j) as usize));
+            assert(wire_value(pins[start + j], input, gates) == input[parent_start + j]);
+        };
+        assert(row =~= parent_row);
+    };
+}
+
+proof fn local_frame_matches(
+    netlist: &NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int, frame: RoutineFrame,
+)
+    requires trace_projection_ready(netlist, external, wiring, routines, direct, first_state, call),
+        frame_matches(netlist, wiring, external as nat, frame),
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            frame_matches(&routine.callee, routine.devices, routine.external.len(), local_frame(routine, direct, frame))
+        }),
+{
+    reveal(routines_placed);
+    reveal(routines_pins_valid);
+    let routine = routines[call]->Some_0;
+    let child = local_frame(routine, direct, frame);
+    vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
+    local_input_has_registered_outputs(netlist, external, wiring, routines, direct, first_state, call,
+        frame.input, frame.gates, frame.devices);
+    assert(output_values_match(frame.input, frame.gates, routine.outputs, child.output));
+    clocked_instance_outputs_match(&routine.callee, routine_arguments(routine), routine.outputs, routine.gates.start,
+        frame.input, frame.gates, child.output);
+}
+
+/// 親の有限トレースから子のトレースを導く。得られた列を次の子の親として使える。
+pub(in super::super) proof fn project_nested_trace(
+    netlist: &NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>,
+    routines: Seq<Option<RoutineWiring>>, direct: usize, first_state: usize, call: int,
+    frames: Seq<RoutineFrame>, updates: Seq<Seq<bool>>,
+) -> (result: (Seq<RoutineFrame>, Seq<Seq<bool>>))
+    requires
+        trace_projection_ready(netlist, external, wiring, routines, direct, first_state, call),
+        routine_trace(netlist, wiring, external as nat, frames, updates),
+    ensures
+        ({
+            let routine = routines[call]->Some_0;
+            &&& result.1.len() == updates.len()
+            &&& routine_trace(&routine.callee, routine.devices, routine.external.len(), result.0, result.1)
+            &&& nested_trace_projects(routine, direct, frames, updates, result.0, result.1)
+        }),
+{
+    reveal(routines_placed);
+    reveal(routines_pins_valid);
+    let routine = routines[call]->Some_0;
+    let pins = routine_arguments(routine);
+    let child_frames = Seq::new(frames.len(), |i: int| local_frame(routine, direct, frames[i]));
+    let child_updates = Seq::new(updates.len(), |i: int| clocked_instance_inputs(pins, updates[i], frames[i].gates));
+    vstd::std_specs::vec::axiom_spec_len(&netlist.gates);
+    let initial = frames[0];
+    let child_initial = child_frames[0];
+    local_frame_matches(netlist, external, wiring, routines, direct, first_state, call, initial);
+    assert(child_initial.gates =~= Seq::new(routine.callee.gates@.len(), |_: int| false));
+    assert forall|j: int| 0 <= j < routine.devices.len() implies {
+        let value = #[trigger] child_initial.devices[j];
+        &&& value.registered == Seq::new(routine.devices[j].data@.len(), |_: int| false)
+        &&& value.memory == match clocked_storage_memory_width(&routine.devices[j]) {
+            Some(width) => Some(Seq::new(width, |_: int| false)),
+            None => None,
+        }
+    } by {
+        routine_storage_mapping(netlist, external, wiring, routines, direct, first_state, call, j);
+        let parent = direct + routine.storage.start + j;
+        assert(child_initial.devices[j] == initial.devices[parent]);
+        assert(clocked_storage_memory_width(&routine.devices[j]) == clocked_storage_memory_width(&wiring[parent]));
+    };
+    assert(frame_is_reset(&routine.callee, routine.devices, routine.external.len(), child_initial));
+    assert forall|i: int| 0 < i < child_frames.len() implies frame_steps(
+        &routine.callee, routine.devices, routine.external.len(), child_frames[i - 1], #[trigger] child_frames[i],
+        child_updates[i - 1],
+    ) by {
+        let previous = frames[i - 1];
+        let next = frames[i];
+        let update = updates[i - 1];
+        let child_before = child_frames[i - 1];
+        let child_after = child_frames[i];
+        let child_update = child_updates[i - 1];
+        assert(frame_steps(netlist, wiring, external as nat, previous, next, update));
+        if i == 1 {
+            assert(frame_matches(netlist, wiring, external as nat, previous));
+        } else {
+            assert(frame_steps(netlist, wiring, external as nat, frames[i - 2], previous, updates[i - 2]));
+        }
+        local_frame_matches(netlist, external, wiring, routines, direct, first_state, call, next);
+        local_input_has_registered_outputs(netlist, external, wiring, routines, direct, first_state, call,
+            update, previous.gates, previous.devices);
+        clocked_instance_gate_updates_match(&routine.callee, netlist.gates@, pins, routine.gates.start,
+            update, previous.gates, next.gates);
+        assert forall|j: int| 0 <= j < routine.devices.len() implies {
+            let before = child_before.devices[j];
+            let after = #[trigger] child_after.devices[j];
+            clocked_storage_value_transition(before.registered, before.memory, after.registered, after.memory,
+                clocked_storage_pin_values(&routine.devices[j], child_update, child_before.gates))
+        } by {
+            routine_storage_mapping(netlist, external, wiring, routines, direct, first_state, call, j);
+            let parent = direct + routine.storage.start + j;
+            assert(child_before.devices[j] == previous.devices[parent]);
+            assert(child_after.devices[j] == next.devices[parent]);
+            clocked_mapped_storage_reads_match(routine.devices, j, &wiring[parent], pins, routine.gates.start,
+                routine.callee.gates@.len() as usize, update, previous.gates);
+        };
+    };
+    (child_frames, child_updates)
 }
 
 } // verus!
