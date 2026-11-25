@@ -47,8 +47,10 @@ static COMPLETIONS: Channel<Mutex, Completion<CAPACITY>, 1> = Channel::new();
 async fn worker(mut controller: Controller<'static, SPI0>) {
     loop {
         let (id, request) = REQUESTS.receive().await;
-        COMPLETIONS
-            .send(controller.execute(id, &request).await)
+        controller
+            .execute(id, &request, async |completion| {
+                COMPLETIONS.send(completion).await
+            })
             .await;
     }
 }

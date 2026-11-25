@@ -24,7 +24,7 @@ path = "src/spi_demo.rs"
 required-features = ["spi"]
 
 [features]
-spi = ["dep:embassy-sync", "embassy-rp/unstable-pac"]
+spi = ["dep:embassy-futures", "dep:embassy-sync", "embassy-rp/unstable-pac"]
 i2c = ["dep:embassy-futures", "dep:embassy-sync", "embassy-rp/unstable-pac"]
 uart = [
     "dep:embassy-futures",

@@ -1,11 +1,14 @@
 //! RP の SPI を、取引全体の GPIO チップ選択と DMA で進める。
 
+use core::pin::pin;
+
 use circuitgame2_device_timing::{HostRequestId, SpiBitOrder, SpiTransfer};
+use embassy_futures::select::{Either, select};
 use embassy_rp::{
     gpio::Output,
     spi::{Async, Instance, Spi},
 };
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer};
 
 /// SPI の応答を取得できなかった理由。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,44 +78,67 @@ impl<'d, T: Instance> Controller<'d, T> {
 
     /// 台帳が確定した要求を、送信と同じバイト数の受信とともに実行する。
     ///
-    /// 要求 ID は変更しない。結果を tick に渡す前に、呼び出し側で ID と世代を照合する。
+    /// 要求 ID は変更しない。呼び出し元の常駐タスクが実行を所有し、
+    /// 期限超過後も開始済みの DMA の終了を待つ。
     pub(super) async fn execute<const N: usize>(
         &mut self,
         id: HostRequestId,
         transfer: &SpiTransfer<N>,
-    ) -> Completion<N> {
-        Completion {
-            id,
-            result: self.transfer(transfer).await,
-        }
-    }
-
-    async fn transfer<const N: usize>(
-        &mut self,
-        transfer: &SpiTransfer<N>,
-    ) -> Result<[u8; N], TransferFailure> {
+        publish: impl AsyncFnOnce(Completion<N>),
+    ) {
+        let complete = async move |result| publish(Completion { id, result }).await;
         if !self.available {
-            return Err(TransferFailure::Unavailable);
+            complete(Err(TransferFailure::Unavailable)).await;
+            return;
         }
+        // 完了を期限内に確認できた取引の後だけ、コントローラーを再利用する。
+        self.available = false;
+        let Some(deadline) = Instant::now().checked_add(self.timeout) else {
+            complete(Err(TransferFailure::Timeout)).await;
+            return;
+        };
         let (write, len) = transfer.wire_parts(self.order);
         let mut read = [0; N];
-        // DMA の中断は SPI の FIFO を初期化しない。完了を確認した取引の後だけ次を受け付ける。
-        self.available = false;
-        {
-            let _selected = Selection::new(&mut self.select);
-            with_timeout(self.timeout, async {
-                self.spi.transfer(&mut read[..len], &write[..len]).await?;
+        if Instant::now() >= deadline {
+            complete(Err(TransferFailure::Timeout)).await;
+            return;
+        }
+        let result = {
+            let selected = Selection::new(&mut self.select);
+            let mut io = pin!(async {
+                // 期限切れの要求で DMA を開始しない。期限到達後に最初の poll が来る場合もある。
+                if Instant::now() >= deadline {
+                    return Err(TransferFailure::Timeout);
+                }
+                self.spi
+                    .transfer(&mut read[..len], &write[..len])
+                    .await
+                    .map_err(|_| TransferFailure::Driver)?;
                 // 最後のクロックが終わるまで CS を保持し、tick タスクに実行機会を渡す。
                 while (self.busy)() {
                     Timer::after_micros(1).await;
                 }
-                Ok::<(), embassy_rp::spi::Error>(())
-            })
-            .await
-            .map_err(|_| TransferFailure::Timeout)?
-            .map_err(|_| TransferFailure::Driver)?;
-        }
-        self.available = true;
-        Ok(transfer.readback(self.order, &read))
+                Ok(())
+            });
+            // select に借用だけを渡す。RP2350-E5 により、動作中の DMA を
+            // Embassy 0.10 の Drop で中断する方法には依存できない。
+            let completed = select(Timer::at(deadline), io.as_mut()).await;
+            drop(selected);
+            match completed {
+                Either::First(()) => {
+                    complete(Err(TransferFailure::Timeout)).await;
+                    // CS は解放済み。DMA とバッファーを保持し、終了まで新規取引を受け付けない。
+                    let _ = io.await;
+                    return;
+                }
+                Either::Second(result) if Instant::now() < deadline => result,
+                Either::Second(_) => Err(TransferFailure::Timeout),
+            }
+        };
+        let result = result.map(|()| {
+            self.available = true;
+            transfer.readback(self.order, &read)
+        });
+        complete(result).await;
     }
 }
