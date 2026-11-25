@@ -505,6 +505,22 @@ pub closed spec fn recovery_three_parts_projection(
     &&& placed.original == whole.original_lists@
 }
 
+pub(super) proof fn observe_tail_repairs(
+    whole: &crate::Recovered, head: &crate::Recovered, changed: &crate::Recovered, tail: &crate::Recovered,
+    start: usize, join: usize,
+)
+    requires
+        recovery_three_parts_projection(whole, head, changed, tail, start, join),
+        head.repairs@.len() == 0,
+        changed.repairs@.len() == 0,
+    ensures whole.repairs@ == tail.repairs@.map_values(|repair: Repair|
+        place_repair(repair, head.forms@.len() as int + changed.forms@.len(), join as int)),
+{
+    let placed = project_parts_state(head, changed, tail, start, join);
+    let forms_before = head.forms@.len() as int + changed.forms@.len();
+    assert(placed.repairs =~= tail.repairs@.map_values(|repair: Repair| place_repair(repair, forms_before, join as int)));
+}
+
 pub(super) proof fn observe_recovery_projection(
     whole: &crate::Recovered, head: &crate::Recovered, changed: &crate::Recovered, tail: &crate::Recovered,
     start: usize, join: usize, section: int, local: &crate::Recovered,

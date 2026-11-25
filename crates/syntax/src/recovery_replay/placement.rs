@@ -43,7 +43,7 @@ pub(super) open spec fn place_form(form: Form, base: int, byte: int) -> Form {
     }
 }
 
-pub(super) open spec fn place_repair(repair: Repair, base: int, byte: int) -> Repair {
+pub(crate) open spec fn place_repair(repair: Repair, base: int, byte: int) -> Repair {
     match repair {
         Repair::InsertedClose { offset, opening, list } =>
             Repair::InsertedClose {

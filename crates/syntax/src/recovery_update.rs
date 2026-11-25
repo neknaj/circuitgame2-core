@@ -14,6 +14,7 @@ use vstd::{
 };
 
 mod observe;
+mod repair;
 mod owned;
 pub use owned::{OwnedRecoveryCache, RecoverySnapshot, SnapshotRecovery, recover_snapshot};
 pub use observe::RecoveryFormLocation;
