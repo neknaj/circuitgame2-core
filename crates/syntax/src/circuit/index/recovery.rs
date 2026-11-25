@@ -9,6 +9,9 @@ use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::valid_utf8;
 
+mod names;
+pub use names::{RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_names};
+
 verus! {
 
 /// エディタ向けの回路フォーム検査結果。

@@ -1,8 +1,31 @@
 use circuitgame2_syntax::circuit::{
-    CircuitFormError, CircuitRecovery, Head, HeaderError, RecoveredFormOutcome, index_headers,
-    recover_circuit_forms,
+    CircuitFormError, CircuitRecovery, Head, HeaderError, RecoveredFormOutcome,
+    RecoveredNamePosition, index_headers, recover_circuit_forms, recover_circuit_names,
 };
 use circuitgame2_syntax::{Form, Repair};
+
+#[test]
+fn recovered_names_use_original_file_ranges_and_skip_repaired_scopes() {
+    let source = concat!(
+        "; 日本語と絵文字 🐈\n",
+        "(using nor) ) ",
+        "(namespace app (bad) (func good (in) (out y) (def y 0))) ",
+        "(namespace unfinished (func tentative (in) (out y) (def y 0))",
+    );
+    let recovered = recover_circuit_names(source);
+    let position = |fragment, item| RecoveredNamePosition::Original { fragment, item };
+    let name = recovered.name_at(position(1, 2)).unwrap();
+    assert_eq!(name.head, Head::Func);
+    assert_eq!(name.name.word, "good");
+    assert_eq!(&source[name.name.span], "good");
+    let namespace = name.namespace.unwrap();
+    assert_eq!(namespace.word, "app");
+    assert_eq!(&source[namespace.span], "app");
+    assert_eq!(recovered.name_at(position(0, 0)), None);
+    assert_eq!(recovered.name_at(position(1, 1)), None);
+    assert_eq!(recovered.name_at(position(2, 1)), None);
+    assert_eq!(recovered.name_at(RecoveredNamePosition::File(2)), None);
+}
 
 #[test]
 fn continues_within_a_namespace_and_after_its_closing_delimiter() {
