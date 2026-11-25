@@ -4,5 +4,6 @@ pub mod data_types;
 pub mod defn;
 pub mod file;
 mod forms;
+pub mod expression_types;
 pub mod integer_expression;
 pub mod integers;

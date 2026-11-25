@@ -121,7 +121,7 @@ pub open spec fn data_type_matches(source: &str, syntax: DataTypeSyntax, value: 
     }
 }
 
-fn read_type_value<'a>(source: &'a str, syntax: &DataTypeSyntax) -> (value: LocatedDataType<'a>)
+pub(super) fn read_type_value<'a>(source: &'a str, syntax: &DataTypeSyntax) -> (value: LocatedDataType<'a>)
     requires type_spans_valid(source, *syntax),
     ensures data_type_matches(source, *syntax, value),
 {

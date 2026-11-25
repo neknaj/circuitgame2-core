@@ -166,7 +166,7 @@ fn expected(forms: &[Form], at: usize, part: DefnPart) -> (error: DefnHeaderErro
     DefnHeaderError::Expected { span: span_of(&forms[at]), part }
 }
 
-spec fn tagged_arguments(
+pub(super) open spec fn tagged_arguments(
     source: &str, forms: Seq<Form>, at: usize, tag: &str, has_second: bool,
 ) -> Option<(usize, usize)> {
     let end = subtree_limit(forms, at);
@@ -183,7 +183,7 @@ spec fn tagged_arguments(
     }
 }
 
-fn tagged(
+pub(super) fn tagged(
     source: &str, forms: &[Form], at: usize, tag: &str, has_second: bool,
 ) -> (result: Option<(usize, usize)>)
     requires usable_forms(source, forms@), at < forms@.len(),
@@ -243,7 +243,7 @@ pub(crate) open spec fn signature_spans_valid(source: &str, header: DefnHeader) 
 }
 
 // リスト型の引数は1個なので、型名とリスト型の入れ子の深さで型の形を表せる。
-spec fn type_at(
+pub(super) closed spec fn type_at(
     source: &str, forms: Seq<Form>, root: usize, at: usize, depth: usize,
 ) -> Result<DataTypeSyntax, DefnHeaderError>
     decreases forms.len() - at,
@@ -270,7 +270,7 @@ spec fn type_at(
     }
 }
 
-fn read_type(source: &str, forms: &[Form], root: usize) -> (result: Result<DataTypeSyntax, DefnHeaderError>)
+pub(super) fn read_type(source: &str, forms: &[Form], root: usize) -> (result: Result<DataTypeSyntax, DefnHeaderError>)
     requires usable_forms(source, forms@), root < forms@.len(),
     ensures result == type_at(source, forms@, root, root, 0),
         result matches Ok(ty) ==> type_spans_valid(source, ty),
@@ -697,6 +697,28 @@ pub(super) fn parse_defn_header_with_spans(source: &str) -> (result: Result<Defn
     ensures result.is_ok() == valid_defn_header(source), defn_header_matches(source, result),
         result matches Ok(header) ==> signature_spans_valid(source, header),
 {
+    match parse_defn_input(source) {
+        Ok((_, header, _)) => Ok(header),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) closed spec fn defn_body_site(source: &str, forms: Seq<Form>, root: usize, body: usize) -> bool {
+    sites_model(source, forms, root) matches Ok((_, _, _, _, at)) && at == body
+}
+
+pub(super) fn parse_defn_input(source: &str)
+    -> (result: Result<(Vec<Form>, DefnHeader, usize), DefnHeaderError>)
+    ensures
+        result.is_ok() == valid_defn_header(source),
+        match result {
+            Ok((forms, header, body)) => defn_header_matches(source, Ok(header))
+                && sexpr_form_model(source) == Some(forms@)
+                && usable_forms(source, forms@) && signature_spans_valid(source, header)
+                && defn_body_site(source, forms@, 0, body) && body < forms@.len(),
+            Err(error) => defn_header_matches(source, Err(error)),
+        },
+{
     let forms = match syntax::parse(source) {
         Ok(forms) => forms,
         Err(error) => return Err(DefnHeaderError::Syntax(error)),
@@ -711,7 +733,8 @@ pub(super) fn parse_defn_header_with_spans(source: &str) -> (result: Result<Defn
         return Err(DefnHeaderError::ExpectedOneDeclaration(span_of(&forms[limit])));
     }
 
-    read_defn_at(source, &forms, 0)
+    let (header, body) = read_defn_with_body(source, &forms, 0)?;
+    Ok((forms, header, body))
 }
 
 pub(super) fn read_defn_at(source: &str, forms: &[Form], root: usize)
@@ -721,17 +744,34 @@ pub(super) fn read_defn_at(source: &str, forms: &[Form], root: usize)
         result matches Ok(header) ==> readable_span(source, header.name_span)
             && signature_spans_valid(source, header),
 {
+    match read_defn_with_body(source, forms, root) {
+        Ok((header, _)) => Ok(header),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_defn_with_body(source: &str, forms: &[Form], root: usize)
+    -> (result: Result<(DefnHeader, usize), DefnHeaderError>)
+    requires usable_forms(source, forms@), root < forms@.len(),
+    ensures match result {
+        Ok((header, body)) => defn_at_matches(source, forms@, root, Ok(header))
+            && readable_span(source, header.name_span)
+            && signature_spans_valid(source, header)
+            && defn_body_site(source, forms@, root, body) && body < forms@.len(),
+        Err(error) => defn_at_matches(source, forms@, root, Err(error)),
+    },
+{
     let (name, types, output, names, body) = header_sites(source, forms, root)?;
     proof { form_span_readable(source, forms@, name); }
     let parameters = read_parameters(source, forms, (types, names))?;
     let result_type = read_type(source, forms, output)?;
-    Ok(DefnHeader {
+    Ok((DefnHeader {
         span: span_of(&forms[root]),
         name_span: span_of(&forms[name]),
         parameters,
         result_type,
         body_span: span_of(&forms[body]),
-    })
+    }, body))
 }
 
 }
