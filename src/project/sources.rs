@@ -92,6 +92,21 @@ spec fn source_prefix_matches(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectS
     }
 }
 
+
+impl ProjectSource<'_> {
+    /// 同じファイルに統合した入力のうち、最初の入力スナップショットの添字を返す。
+    pub fn input_index(&self) -> (index: usize)
+        ensures index == self.input_index_model(),
+    {
+        self.first_input
+    }
+
+    /// このソースを代表する入力スナップショットの添字を表す。
+    pub closed spec fn input_index_model(&self) -> usize {
+        self.first_input
+    }
+}
+
 /// 各仮想ファイル識別子がちょうど一件あり、バージョン、本文、言語が入力に対応することを表す。
 pub closed spec fn project_sources_match(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>) -> bool {
     source_prefix_matches(inputs, sources, inputs.len() as int)
@@ -195,6 +210,75 @@ pub open spec fn source_set_error(inputs: Seq<SourceSnapshot>, error: SourceSetE
                 || inputs[first as int].text@ != inputs[input as int].text@)
             && (forall|previous: int| 0 <= previous < first ==>
                 normalized_path((#[trigger] inputs[previous]).path) != normalized_path(inputs[first as int].path)),
+    }
+}
+
+spec fn rejected_input(error: SourceSetError) -> usize {
+    match error {
+        SourceSetError::Path { input, .. } | SourceSetError::UnsupportedExtension { input }
+            | SourceSetError::ConflictingSnapshot { input, .. } => input,
+    }
+}
+
+/// ソース集合の違反があり、その入力より前までの収集は妥当であることを表す。
+pub closed spec fn first_source_set_error(inputs: Seq<SourceSnapshot>, error: SourceSetError) -> bool {
+    source_set_error(inputs, error) && valid_source_snapshots(inputs.take(rejected_input(error) as int))
+}
+
+proof fn conflict_has_supported_path(inputs: Seq<SourceSnapshot>, error: SourceSetError)
+    requires first_source_set_error(inputs, error), error is ConflictingSnapshot,
+    ensures normalized_path(inputs[rejected_input(error) as int].path) matches Ok(id)
+        && source_kind_of(id) is Some,
+{
+    let first = error->ConflictingSnapshot_first;
+    let stop = rejected_input(error);
+    let prefix = inputs.take(stop as int);
+    assert(prefix[first as int] == inputs[first as int]);
+    assert(normalized_path(prefix[first as int].path) matches Ok(id) && source_kind_of(id) is Some);
+}
+
+/// 同じ入力列に対する最初の収集エラーが一致することを示す。
+pub proof fn source_set_errors_agree(inputs: Seq<SourceSnapshot>, left: SourceSetError, right: SourceSetError)
+    requires first_source_set_error(inputs, left), first_source_set_error(inputs, right),
+    ensures left == right,
+{
+    let i = rejected_input(left);
+    let j = rejected_input(right);
+    if i < j {
+        prior_collection_rejects(inputs, left, j);
+    } else if j < i {
+        prior_collection_rejects(inputs, right, i);
+    } else {
+        if left is ConflictingSnapshot {
+            conflict_has_supported_path(inputs, left);
+        }
+        if right is ConflictingSnapshot {
+            conflict_has_supported_path(inputs, right);
+        }
+        match (left, right) {
+            (SourceSetError::ConflictingSnapshot { first: a, .. },
+                SourceSetError::ConflictingSnapshot { first: b, .. }) => {
+                if a < b {
+                    assert(normalized_path(inputs[a as int].path) != normalized_path(inputs[b as int].path));
+                }
+                if b < a {
+                    assert(normalized_path(inputs[b as int].path) != normalized_path(inputs[a as int].path));
+                }
+            }
+            _ => {},
+        }
+    }
+}
+
+proof fn prior_collection_rejects(inputs: Seq<SourceSnapshot>, error: SourceSetError, stop: usize)
+    requires source_set_error(inputs, error), rejected_input(error) < stop <= inputs.len(),
+    ensures !valid_source_snapshots(inputs.take(stop as int)),
+{
+    let prefix = inputs.take(stop as int);
+    let index = rejected_input(error);
+    assert(prefix[index as int] == inputs[index as int]);
+    if let SourceSetError::ConflictingSnapshot { first, .. } = error {
+        assert(prefix[first as int] == inputs[first as int]);
     }
 }
 
@@ -302,23 +386,26 @@ proof fn append_source(
     };
 }
 
-proof fn source_set_is_consistent(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>)
-    requires project_sources_match(inputs, sources),
-    ensures valid_source_snapshots(inputs),
+proof fn collected_prefix_is_consistent(inputs: Seq<SourceSnapshot>, sources: Seq<ProjectSource>, count: int)
+    requires source_prefix_matches(inputs, sources, count),
+    ensures valid_source_snapshots(inputs.take(count)),
 {
     reveal(source_prefix_matches);
-    assert forall|i: int| 0 <= i < inputs.len() implies {
-        let input = #[trigger] inputs[i];
+    let prefix = inputs.take(count);
+    assert forall|i: int| 0 <= i < prefix.len() implies {
+        let input = #[trigger] prefix[i];
         normalized_path(input.path) matches Ok(id) && source_kind_of(id) is Some
     } by {
+        assert(prefix[i] == inputs[i]);
         assert(input_is_represented(inputs[i], sources));
         let at = choose|at: int| 0 <= at < sources.len() && #[trigger] snapshot_matches(inputs[i], sources[at]);
         assert(source_kind_of(sources[at].id.components_model()) == Some(sources[at].kind));
     };
-    assert forall|i: int, j: int| 0 <= i < j < inputs.len()
-        && normalized_path((#[trigger] inputs[i]).path).is_ok()
-        && normalized_path(inputs[i].path) == normalized_path((#[trigger] inputs[j]).path) implies
-            inputs[i].revision == inputs[j].revision && inputs[i].text@ == inputs[j].text@ by {
+    assert forall|i: int, j: int| 0 <= i < j < prefix.len()
+        && normalized_path((#[trigger] prefix[i]).path).is_ok()
+        && normalized_path(prefix[i].path) == normalized_path((#[trigger] prefix[j]).path) implies
+            prefix[i].revision == prefix[j].revision && prefix[i].text@ == prefix[j].text@ by {
+        assert(prefix[i] == inputs[i] && prefix[j] == inputs[j]);
         assert(input_is_represented(inputs[i], sources));
         assert(input_is_represented(inputs[j], sources));
         let left = choose|at: int| 0 <= at < sources.len() && #[trigger] snapshot_matches(inputs[i], sources[at]);
@@ -340,7 +427,7 @@ pub fn collect_sources<'a>(inputs: &[SourceSnapshot<'a>]) -> (result: Result<Vec
         result.is_ok() <==> valid_source_snapshots(inputs@),
         match result {
             Ok(sources) => project_sources_match(inputs@, sources@),
-            Err(error) => source_set_error(inputs@, error),
+            Err(error) => source_set_error(inputs@, error) && first_source_set_error(inputs@, error),
         },
 {
     let mut sources: Vec<ProjectSource> = Vec::new();
@@ -352,6 +439,7 @@ pub fn collect_sources<'a>(inputs: &[SourceSnapshot<'a>]) -> (result: Result<Vec
             source_prefix_matches(inputs@, sources@, index as int),
         decreases inputs@.len() - index,
     {
+        proof { collected_prefix_is_consistent(inputs@, sources@, index as int); }
         let input = &inputs[index];
         let id = match normalize_path(input.path) {
             Ok(id) => id,
@@ -391,7 +479,10 @@ pub fn collect_sources<'a>(inputs: &[SourceSnapshot<'a>]) -> (result: Result<Vec
         }
         index += 1;
     }
-    proof { source_set_is_consistent(inputs@, sources@); }
+    proof {
+        collected_prefix_is_consistent(inputs@, sources@, inputs@.len() as int);
+        assert(inputs@.take(inputs@.len() as int) =~= inputs@);
+    }
     Ok(sources)
 }
 
