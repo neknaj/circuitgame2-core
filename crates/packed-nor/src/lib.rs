@@ -2,6 +2,13 @@
 
 //! NOR の1ワードを32個の独立した回路実行として扱う。
 
+mod clocked;
+
+pub use clocked::{ClockedPlanError, ClockedTickError, PackedClockedNorPlan32};
+#[cfg(verus_only)]
+pub use clocked::{clocked_ports_fit, clocked_tick_error, packed_clocked_tick_matches};
+
+
 #[cfg(not(verus_only))]
 use verus_builtin_macros::verus;
 #[cfg(verus_only)]

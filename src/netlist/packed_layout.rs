@@ -82,6 +82,22 @@ impl PackedNorLayout32 {
         }
     }
 
+    pub(crate) proof fn port_slots(&self, netlist: &NorNetlist)
+        requires self.matches(netlist),
+        ensures
+            self.input_model() == netlist.input_count,
+            self.source_model() == netlist.input_count + netlist.gates@.len() + 2,
+            self.gates_model().len() == netlist.gates@.len(),
+            self.outputs_model().len() == netlist.outputs@.len(),
+            forall|i: int| 0 <= i < self.outputs_model().len() ==> {
+                let slot = #[trigger] self.outputs_model()[i];
+                slot < self.source_model()
+                    && slot == packed_wire_slot(netlist.outputs@[i], self.input_model(), netlist.gates@.len())
+            },
+    {
+        reveal(PackedNorLayout32::matches);
+    }
+
     /// 元のネットリストにある外部入力の数。
     pub closed spec fn input_model(&self) -> nat { self.input_count as nat }
     /// ワードを並べる配列の長さ。
@@ -188,6 +204,74 @@ pub proof fn packed_tick32_agrees(
         assert(lanes_after[slot as int] == nor_lane_bit32(flat_after[slot as int], lane));
         assert(lanes_after[slot as int] == wire_value(port, input, after));
     };
+}
+
+// 共有バッファーの範囲を読み出してから射影しても、レーンの配線順は変わらない。
+proof fn packed_frame_lane32(words: Seq<u32>, inputs: nat, gates: nat, lane: u32)
+    requires lane < 32, words.len() == inputs + gates + 2,
+        words[(inputs + gates) as int] == 0, words[(inputs + gates + 1) as int] == u32::MAX,
+    ensures packed_lane32(words, lane) ==
+        packed_lane32(words.take(inputs as int), lane)
+        + packed_lane32(words.subrange(inputs as int, (inputs + gates) as int), lane)
+        + seq![false, true],
+{
+    let left = packed_lane32(words, lane);
+    let input = packed_lane32(words.take(inputs as int), lane);
+    let state = packed_lane32(words.subrange(inputs as int, (inputs + gates) as int), lane);
+    let right = input + state + seq![false, true];
+    assert(nor_lane_bit32(0, lane) == false) by (bit_vector);
+    assert(lane < 32 ==> (((u32::MAX >> lane) & 1u32) == 1u32)) by (bit_vector);
+    assert forall|i: int| 0 <= i < left.len() implies #[trigger] left[i] == right[i] by {
+        if i < inputs {
+            assert(words.take(inputs as int)[i] == words[i]);
+        } else if i < inputs + gates {
+            assert(words.subrange(inputs as int, (inputs + gates) as int)[i - inputs] == words[i]);
+        } else {
+            assert(i == inputs + gates || i == inputs + gates + 1);
+        }
+    };
+    assert(left =~= right);
+}
+
+/// バッファーを再利用する実行の1レーンが、元の順序回路の同じ tick と一致することを示す。
+///
+/// 入力と前後の状態は、共有バッファーの外部入力・ゲート範囲から取り出す。
+/// 公開出力は確定後の状態から得られる。
+pub proof fn packed_clocked_step32_agrees(
+    netlist: &NorNetlist, layout: &PackedNorLayout32, lane: u32,
+    before: Seq<u32>, after: Seq<u32>, outputs: Seq<u32>,
+)
+    requires lane < 32, clocked_wiring_valid(netlist), layout.matches(netlist),
+        circuitgame2_packed_nor::packed_clocked_tick_matches(
+            layout.gates_model(), layout.input_model(), layout.outputs_model(), before, after, outputs),
+        before[layout.source_model() - 2] == 0,
+        before[layout.source_model() - 1] == u32::MAX,
+    ensures ({
+        let low = layout.input_model() as int;
+        let high = low + layout.gates_model().len();
+        let input = packed_lane32(before.take(low), lane);
+        let previous = packed_lane32(before.subrange(low, high), lane);
+        let updated = packed_lane32(after.subrange(low, high), lane);
+        &&& clocked_gate_updates(netlist.gates@, input, previous, updated)
+        &&& output_values_match(input, updated, netlist.outputs@, packed_lane32(outputs, lane))
+    }),
+{
+    reveal(PackedNorLayout32::matches);
+    let n = layout.input_model();
+    let g = layout.gates_model().len();
+    let updated = after.subrange(n as int, (n + g) as int);
+    assert(before.len() == after.len() == n + g + 2);
+    assert(before.take(n as int) =~= after.take(n as int));
+    assert(after[(n + g) as int] == before[(n + g) as int] && after[(n + g + 1) as int] == before[(n + g + 1) as int]);
+    packed_frame_lane32(before, n, g, lane);
+    packed_frame_lane32(after, n, g, lane);
+    assert forall|i: int| 0 <= i < updated.len() implies
+        #[trigger] gate_value_matches(layout.gates_model()[i], before, updated[i]) by {
+        assert(updated[i] == after[n + i]);
+    };
+    packed_tick32_agrees(
+        netlist, layout, lane, packed_lane32(before.take(n as int), lane),
+        packed_lane32(before.subrange(n as int, (n + g) as int), lane), before, updated, after, outputs);
 }
 
 impl ClockedNor {

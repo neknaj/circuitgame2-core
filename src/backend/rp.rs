@@ -1,5 +1,11 @@
 //! Pico と Pico 2 の外部 GPIO とハードウェア周辺機能の割り当てを検査する。
 
+mod image;
+
+pub use image::{GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin};
+#[cfg(verus_only)]
+pub use image::{gpio_assignment, gpio_binding_indices_match, gpio_image_ports_match, gpio_request};
+
 use vstd::prelude::*;
 
 verus! {
@@ -315,6 +321,47 @@ fn same_controller(left: Controller, right: Controller) -> (same: bool)
     }
 }
 
+
+#[verifier::opaque]
+spec fn no_controller_before(input: Seq<Assignment>, stop: int, value: (Controller, u8)) -> bool {
+    forall|i: int| 0 <= i < stop ==> #[trigger] assignment_controller(input[i]) != Some(value)
+}
+
+proof fn extend_controller_scan(input: Seq<Assignment>, row: int, value: (Controller, u8))
+    requires 0 <= row < input.len(), no_controller_before(input, row, value),
+        assignment_controller(input[row]) != Some(value),
+    ensures no_controller_before(input, row + 1, value),
+{
+    reveal(no_controller_before);
+    assert forall|i: int| 0 <= i < row + 1 implies
+        #[trigger] assignment_controller(input[i]) != Some(value) by {
+        if i != row { assert(i < row); }
+    };
+}
+
+proof fn controller_scan_result(input: Seq<Assignment>, stop: int, row: usize, value: (Controller, u8))
+    requires row <= stop <= input.len(), no_controller_before(input, row as int, value),
+        row < stop ==> assignment_controller(input[row as int]) == Some(value),
+    ensures first_controller(input, stop, value) == if row < stop { Some(row) } else { None },
+{
+    reveal(no_controller_before);
+    if row < stop {
+        assert(exists|i: int| 0 <= i < stop && #[trigger] assignment_controller(input[i]) == Some(value)) by {
+            assert(assignment_controller(input[row as int]) == Some(value));
+        };
+        let first = first_controller(input, stop, value)->Some_0;
+        assert(first == row) by {
+            if first < row {
+                assert(assignment_controller(input[first as int]) != Some(value));
+            } else if row < first {
+                assert(assignment_controller(input[row as int]) != Some(value));
+            }
+        };
+    } else {
+        assert(!(exists|i: int| 0 <= i < stop && #[trigger] assignment_controller(input[i]) == Some(value)));
+    }
+}
+
 fn check_controller(input: &[Assignment], i: usize) -> (error: Option<AssignmentError>)
     requires i < input@.len(),
     ensures error == controller_error(input@, i as int),
@@ -323,33 +370,27 @@ fn check_controller(input: &[Assignment], i: usize) -> (error: Option<Assignment
     if instance > 1 {
         return Some(AssignmentError::UnknownInstance { assignment: i, controller: kind, instance });
     }
+    let ghost key = (kind, instance);
+    assert(no_controller_before(input@, 0, key)) by { reveal(no_controller_before); };
     let mut k = 0;
     while k < i
         invariant k <= i < input@.len(),
             assignment_controller(input@[i as int]) == Some((kind, instance)),
             instance <= 1,
-            forall|j: int| 0 <= j < k ==> #[trigger] assignment_controller(input@[j]) != Some((kind, instance)),
+            key == (kind, instance), no_controller_before(input@, k as int, key),
         decreases i - k,
     {
         if let Some((earlier, number)) = controller(input[k]) {
             if number == instance && same_controller(earlier, kind) {
-                proof {
-                    let model = first_controller(input@, i as int, (kind, instance));
-                    let first = model->Some_0;
-                    assert(first == k) by {
-                        if first < k {
-                            assert(assignment_controller(input@[first as int]) != Some((kind, instance)));
-                        } else if k < first {
-                            assert(assignment_controller(input@[k as int]) != Some((kind, instance)));
-                        }
-                    };
-                }
+                proof { controller_scan_result(input@, i as int, k, key); }
                 return Some(AssignmentError::DuplicateInstance { first_assignment: k, assignment: i, controller: kind, instance });
             }
         }
         assert(assignment_controller(input@[k as int]) != Some((kind, instance)));
+        proof { extend_controller_scan(input@, k as int, key); }
         k += 1;
     }
+    proof { controller_scan_result(input@, i as int, k, key); }
     None
 }
 
