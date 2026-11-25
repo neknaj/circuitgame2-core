@@ -58,13 +58,17 @@ pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod reference_cursor;
 mod call_site;
-pub use call_site::{DefnCallError, DefnCallSite, PreparedDefnCall};
+pub use call_site::{DefnCallEdge, DefnCallError, DefnCallSite, DefnPosition, PreparedDefnCall};
 #[cfg(verus_only)]
 pub(crate) use call_site::call_arity_matches;
 #[cfg(verus_only)]
 pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin};
 mod defn_name;
+mod defn_call_graph;
 pub use defn_name::{DefnNameError, ResolvedDefnName};
+pub use defn_call_graph::{DefnCallGraphError, DefnCallPlan};
+#[cfg(verus_only)]
+pub use defn_call_graph::{defn_call_cycle, defn_call_plan_matches, defn_call_plan_contains, defn_call_plan_edge_order};
 #[cfg(verus_only)]
 pub use defn_name::{defn_name_resolution, resolved_defn_name_origin, stage_name_has_no_binding};
 mod mixed;
