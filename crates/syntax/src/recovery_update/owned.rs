@@ -108,6 +108,27 @@ impl OwnedRecoveryCache {
         self.text.as_str()
     }
 
+    /// 現在の本文の変更区間だけを回復解析し、問い合わせの文書バージョンを添える。
+    ///
+    /// 変更区間を切り出せない場合や、指定されたバージョンと本文がキャッシュの条件を満たさない場合は、
+    /// `None` を返す。呼び出し側はそのとき用途に合う全文解析を実行できる。
+    pub fn try_snapshot<'p, 's>(&'p self, source: &'s str, revision: u64)
+        -> (result: Option<RecoverySnapshot<'p, 's>>)
+        ensures result matches Some(snapshot) ==> {
+            &&& snapshot.revision_model() == revision
+            &&& snapshot.source_model() == source
+            &&& snapshot.matches_source()
+            &&& snapshot.recovery_model() matches SnapshotRecovery::Local(update)
+            &&& self.revision_model() <= revision
+            &&& (revision == self.revision_model() ==> source@ == self.text_model())
+            &&& *update.section_model(0).recovered == self.head_model()
+            &&& *update.section_model(2).recovered == self.tail_model()
+        },
+    {
+        let recovery = SnapshotRecovery::Local(self.try_reparse(source, revision)?);
+        Some(RecoverySnapshot { revision, source, recovery })
+    }
+
     fn try_reparse<'p, 's>(&'p self, source: &'s str, revision: u64)
         -> (result: Option<ReparsedRecovery<'p, 's>>)
         ensures result matches Some(update) ==> {
@@ -190,15 +211,12 @@ pub fn recover_snapshot<'p, 's>(
             &&& *update.section_model(2).recovered == saved.tail_model()
         },
 {
-    let recovery = if let Some(cache) = cache {
-        cache.try_reparse(source, revision)
-    } else {
-        None
-    };
-    let recovery = match recovery {
-        Some(local) => SnapshotRecovery::Local(local),
-        None => SnapshotRecovery::Full(parse_recovering(source)),
-    };
+    if let Some(cache) = cache {
+        if let Some(snapshot) = cache.try_snapshot(source, revision) {
+            return snapshot;
+        }
+    }
+    let recovery = SnapshotRecovery::Full(parse_recovering(source));
     RecoverySnapshot { revision, source, recovery }
 }
 

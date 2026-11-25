@@ -58,10 +58,13 @@ fn local_recovery_keeps_only_the_changed_middle_owned_by_the_update() {
         *changed.recovered,
         relative_to_tail(parse_recovering(&current[..join]), start)
     );
-    assert_eq!(
-        *tail.recovered,
-        relative_to_tail(parse_recovering(&current), join)
-    );
+    let whole = parse_recovering(&current);
+    assert_eq!(*tail.recovered, relative_to_tail(whole.clone(), join));
+    assert_eq!(update.repair_count(), whole.repairs.len());
+    for (index, repair) in whole.repairs.iter().enumerate() {
+        assert_eq!(update.repair_at(index).as_ref(), Some(repair));
+    }
+    assert!(update.repair_at(whole.repairs.len()).is_none());
 
     let removal = retained
         .reparse(&format!("{prefix}{suffix}"))
@@ -156,6 +159,7 @@ fn owned_cache_borrows_local_views_and_reparses_the_current_text_on_fallback() {
         start..start + "(original)".len()
     });
     let malformed = format!("{prefix}(new {suffix}");
+    assert!(cache.try_snapshot(&malformed, u64::MAX).is_none());
     for (saved, source, revision) in [
         (Some(&cache), current.as_str(), u64::MAX - 2),
         (Some(&cache), current.as_str(), u64::MAX - 1),
