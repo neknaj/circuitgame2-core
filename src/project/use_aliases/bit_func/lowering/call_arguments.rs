@@ -1,6 +1,10 @@
 //! 展開に渡す実引数を、呼び出し先の入力ポート順で配線に変換する。
 
 pub(super) mod child_calls;
+#[cfg(verus_only)]
+pub(super) mod source_wires;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_wires::SourceChildModel;
 
 use super::{append_bit_literal_wires, lower_driver_bit};
 use super::super::instances::{append_instance, append_instance_to};

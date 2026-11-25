@@ -379,6 +379,7 @@ impl<'p, 'a> UseTargets<'p, 'a> {
         requires self.covers_project(),
         ensures declaration_table_matches(&self.project_model(), self.exports_model().declarations_model()),
             !project_names_conflict(&self.project_model()),
+            self.exports_model().declarations_model().well_formed(),
     {
         super::exports::exports_use_project_declarations(self.project, self.exports);
     }

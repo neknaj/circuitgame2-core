@@ -29,7 +29,7 @@ pub enum FuncCallSignature<'p, 'a> {
 pub struct CallPortType<'s, 'p, 'a> {
     /// ポートが受け取る、または返す型。
     pub ty: ResolvedPortType<'p, 'a>,
-    /// 関数の元の型注釈。基底 NOR では `None`。
+    /// 元の型注釈。基底 NOR や状態素子の許可入力では `None`。
     pub annotation: Option<&'s LocatedName<'p, 'a>>,
 }
 
@@ -66,7 +66,7 @@ pub open spec fn signature_port_matches(
 }
 
 /// 解決済みの署名からポートを借用する。`None` は基底 NOR の署名を表す。
-pub(super) fn signature_port<'s, 'p, 'a>(
+pub(in crate::project::use_aliases) fn signature_port<'s, 'p, 'a>(
     signature: Option<&'s TypedRoutineSignature<'p, 'a>>, direction: PortDirection, index: usize,
 ) -> (port: Option<CallPortType<'s, 'p, 'a>>)
     ensures signature_port_matches(match signature {

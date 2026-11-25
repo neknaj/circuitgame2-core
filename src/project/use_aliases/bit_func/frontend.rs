@@ -2,8 +2,12 @@
 
 #[cfg(verus_only)]
 mod source_evaluation;
+#[cfg(verus_only)]
+mod source_tick;
 mod body;
 pub(super) use body::{ExpandedBody, ExpandedBodyError};
+#[cfg(verus_only)]
+pub(super) use body::function_source_model_matches;
 #[cfg(verus_only)]
 pub(super) use body::{
     argument_matches_width, call_covers, expression_argument_matches_width, expression_input_width, expression_output_bits,
@@ -13,6 +17,10 @@ pub(super) use body::{
 };
 
 use alloc::vec::Vec;
+use crate::netlist::{PortBitLayout, PortBitLayoutError};
+use crate::project::PortDirection;
+#[cfg(verus_only)]
+use crate::netlist::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, preceding_port_bits};
 use vstd::prelude::*;
 
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc};
@@ -93,6 +101,14 @@ pub enum UnsupportedBitFunc {
     Expression,
 }
 
+/// 入出力のビット範囲を決める際の診断。
+pub(in crate::project::use_aliases) enum RoutineBitLayoutError<'p, 'a> {
+    /// 宣言された構造体の配置を検査できなかった。
+    Structure(StructureTypeError<'p, 'a>),
+    /// ポートのビット範囲を割り当てられなかった。
+    Port(PortDirection, LocatedName<'p, 'a>, PortBitLayoutError),
+}
+
 /// 幅付きの組み合わせ回路を取り出すときの診断。
 #[derive(Debug)]
 pub enum BitFuncError<'p, 'a> {
@@ -153,7 +169,7 @@ struct FuncProjection<'w, 'p, 'a> {
     structures: &'w Vec<StructureProjection>,
 }
 
-pub(super) open spec fn has_structure_port(ports: Seq<TypedPort>) -> bool {
+pub(in crate::project::use_aliases) open spec fn has_structure_port(ports: Seq<TypedPort>) -> bool {
     exists|i: int| 0 <= i < ports.len() && (#[trigger] ports[i]).ty is Struct
 }
 
@@ -176,7 +192,7 @@ pub(super) fn contains_structure_port(ports: &[TypedPort]) -> (has_structure: bo
     false
 }
 
-spec fn supported_ports(ports: Seq<TypedPort>) -> bool {
+pub(in crate::project::use_aliases) open spec fn supported_ports(ports: Seq<TypedPort>) -> bool {
     forall|i: int| 0 <= i < ports.len() ==>
         (#[trigger] ports[i]).ty != ResolvedPortType::Bits(0)
 }
@@ -845,6 +861,246 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures inputs.len() == signature.inputs@.len(), outputs.len() == signature.outputs@.len(),
     {
         reveal(UseAliases::template_port_widths_match);
+    }
+
+    /// 入出力の各ポートと、宣言順のビット範囲の対応を表す。
+    pub(in crate::project::use_aliases) closed spec fn routine_bit_layouts_match(
+        &self, signature: TypedRoutineSignature, width_limit: u64, bit_limit: usize,
+        inputs: &crate::netlist::PortBitLayout, outputs: &crate::netlist::PortBitLayout,
+    ) -> bool {
+        exists|incoming: Seq<u64>, outgoing: Seq<u64>, structures: Option<StructureLayouts>| {
+            &&& #[trigger] self.template_port_widths_match(signature, width_limit, incoming, outgoing, structures)
+            &&& port_bit_layout_result(incoming, bit_limit, Ok(*inputs))
+            &&& port_bit_layout_result(outgoing, bit_limit, Ok(*outputs))
+        }
+    }
+
+    pub(in crate::project::use_aliases) open spec fn routine_port_range_width(
+        &self, ports: Seq<TypedPort>, layout: &PortBitLayout, width: u64, capacity: usize, index: usize,
+    ) -> bool {
+        let range = layout.ranges_model()[index as int];
+        let bits = range.end - range.start;
+        &&& layout.ranges_model().len() == ports.len()
+        &&& range.start < range.end <= layout.total_bits_model() <= capacity
+        &&& match ports[index as int].ty {
+            ResolvedPortType::Bits(count) => bits == count,
+            ty @ ResolvedPortType::Struct { .. } =>
+                exists|table: StructureLayouts| self.structure_types_match(width, Ok(table))
+                    && #[trigger] self.layout_port_width_matches(&table, ty, bits),
+        }
+    }
+
+    /// 宣言ポートの幅と、配置した範囲の長さとの対応を取り出す。
+    pub(in crate::project::use_aliases) proof fn routine_bit_layout_port(
+        &self, signature: TypedRoutineSignature, width: u64, capacity: usize,
+        inputs: &PortBitLayout, outputs: &PortBitLayout, direction: PortDirection, index: usize,
+    )
+        requires
+            self.routine_bit_layouts_match(signature, width, capacity, inputs, outputs),
+            index < if direction is Input { signature.inputs@.len() } else { signature.outputs@.len() },
+        ensures
+            direction is Input ==> self.routine_port_range_width(signature.inputs@, inputs, width, capacity, index),
+            direction is Output ==> self.routine_port_range_width(signature.outputs@, outputs, width, capacity, index),
+    {
+        let (incoming, outgoing, structures) = choose|incoming: Seq<u64>, outgoing: Seq<u64>, structures: Option<StructureLayouts>|
+            #[trigger] self.template_port_widths_match(signature, width, incoming, outgoing, structures)
+                && port_bit_layout_result(incoming, capacity, Ok(*inputs))
+                && port_bit_layout_result(outgoing, capacity, Ok(*outputs));
+        reveal(UseAliases::template_port_widths_match);
+        let table = match &structures { Some(table) => Some(table), None => None };
+        if direction is Input {
+            self.routine_port_layout_width(signature.inputs@, incoming, table, width, capacity, inputs, index);
+        } else {
+            self.routine_port_layout_width(signature.outputs@, outgoing, table, width, capacity, outputs, index);
+        }
+    }
+
+    proof fn routine_port_layout_width(
+        &self, ports: Seq<TypedPort>, widths: Seq<u64>, structures: Option<&StructureLayouts>,
+        width: u64, capacity: usize, layout: &PortBitLayout, index: usize,
+    )
+        requires
+            self.structure_layout_for_ports(width, structures),
+            self.port_widths_match(ports, widths, structures),
+            port_bit_layout_result(widths, capacity, Ok(*layout)),
+            index < ports.len(),
+        ensures self.routine_port_range_width(ports, layout, width, capacity, index),
+    {
+        let i = index as int;
+        let ty = ports[i].ty;
+        let range = layout.ranges_model()[i];
+        port_bit_layout_size(widths, capacity, layout);
+        port_bit_layout_port(widths, capacity, *layout, index);
+        assert(range.end - range.start == widths[i]);
+        assert(self.port_width_matches(ty, widths[i], structures));
+        if ty is Struct {
+            let witness = *structures->Some_0;
+            assert(self.structure_types_match(width, Ok(witness)));
+            assert(self.layout_port_width_matches(&witness, ty, range.end - range.start));
+            assert(exists|table: StructureLayouts| self.structure_types_match(width, Ok(table))
+                && #[trigger] self.layout_port_width_matches(&table, ty, range.end - range.start));
+        }
+    }
+
+    /// 署名の幅を使ってから平坦化した配列は、元の各ポートに対応する。
+    pub(super) proof fn routine_bit_layouts_intro(
+        &self, signature: TypedRoutineSignature, width_limit: u64, bit_limit: usize,
+        input_widths: Seq<u64>, output_widths: Seq<u64>, structures: Option<StructureLayouts>,
+        inputs: &crate::netlist::PortBitLayout, outputs: &crate::netlist::PortBitLayout,
+    )
+        requires
+            self.template_port_widths_match(signature, width_limit, input_widths, output_widths, structures),
+            port_bit_layout_result(input_widths, bit_limit, Ok(*inputs)),
+            port_bit_layout_result(output_widths, bit_limit, Ok(*outputs)),
+        ensures self.routine_bit_layouts_match(signature, width_limit, bit_limit, inputs, outputs),
+    {
+    }
+
+    /// 最初に容量を超えたポートを、宣言幅と元の型注釈に結び付ける。
+    pub(in crate::project::use_aliases) closed spec fn routine_bit_layout_failure(
+        &self, signature: TypedRoutineSignature, width: u64, bits: usize,
+        direction: PortDirection, site: LocatedName, error: PortBitLayoutError,
+    ) -> bool {
+        let port = match error {
+            PortBitLayoutError::ZeroWidth { port } | PortBitLayoutError::CapacityExceeded { port, .. } => port as int,
+        };
+        exists|incoming: Seq<u64>, outgoing: Seq<u64>, structures: Option<StructureLayouts>| {
+            &&& #[trigger] self.template_port_widths_match(signature, width, incoming, outgoing, structures)
+            &&& match direction {
+                PortDirection::Input => 0 <= port < signature.inputs@.len()
+                    && site == signature.inputs@[port].annotation
+                    && port_bit_layout_result(incoming, bits, Err(error)),
+                PortDirection::Output => 0 <= port < signature.outputs@.len()
+                    && site == signature.outputs@[port].annotation
+                    && port_bit_layout_result(outgoing, bits, Err(error))
+                    && (exists|layout: PortBitLayout| #[trigger] port_bit_layout_result(incoming, bits, Ok(layout))),
+            }
+        }
+    }
+
+    /// 入力と出力をそれぞれ宣言順に平坦化する。
+    ///
+    /// # Errors
+    ///
+    /// 構造体の配置、入力範囲、出力範囲の順に検査する。
+    pub(in crate::project::use_aliases) fn prepare_routine_bit_layouts(
+        &self, _position: (usize, usize), signature: &TypedRoutineSignature<'p, 'a>, width: u64, bits: usize,
+    ) -> (result: Result<(PortBitLayout, PortBitLayout), RoutineBitLayoutError<'p, 'a>>)
+        requires
+            self.can_resolve(),
+            self.typed_signature_evidence(_position.0, _position.1, width, Ok(Some(*signature))),
+            supported_ports(signature.inputs@), supported_ports(signature.outputs@),
+        ensures match result {
+            Ok((inputs, outputs)) => self.routine_bit_layouts_match(*signature, width, bits, &inputs, &outputs)
+                && inputs.ranges_model().len() == signature.inputs@.len()
+                && outputs.ranges_model().len() == signature.outputs@.len(),
+            Err(RoutineBitLayoutError::Port(direction, site, error)) =>
+                self.routine_bit_layout_failure(*signature, width, bits, direction, site, error),
+            Err(RoutineBitLayoutError::Structure(error)) => self.structure_types_match(width, Err(error))
+                && (has_structure_port(signature.inputs@) || has_structure_port(signature.outputs@)),
+        },
+    {
+        proof { self.typed_signature_types_declared(_position.0, _position.1, width, *signature); }
+        let structures = if contains_structure_port(signature.inputs.as_slice()) || contains_structure_port(signature.outputs.as_slice()) {
+            match self.check_structure_types(width) {
+                Ok(layout) => Some(layout),
+                Err(error) => return Err(RoutineBitLayoutError::Structure(error)),
+            }
+        } else {
+            None
+        };
+        let layouts = structures.as_ref();
+        let incoming = self.collect_port_widths(signature.inputs.as_slice(), layouts, width);
+        let outgoing = self.collect_port_widths(signature.outputs.as_slice(), layouts, width);
+        proof {
+            reveal(UseAliases::template_port_widths_match);
+            assert(self.template_port_widths_match(*signature, width, incoming@, outgoing@, structures));
+        }
+        let inputs = match PortBitLayout::from_widths(incoming.as_slice(), bits) {
+            Ok(layout) => layout,
+            Err(error @ (PortBitLayoutError::ZeroWidth { port } | PortBitLayoutError::CapacityExceeded { port, .. })) => {
+                let site = copy_location(&signature.inputs[port].annotation);
+                assert(self.routine_bit_layout_failure(*signature, width, bits, PortDirection::Input, site, error));
+                return Err(RoutineBitLayoutError::Port(PortDirection::Input, site, error));
+            },
+        };
+        let outputs = match PortBitLayout::from_widths(outgoing.as_slice(), bits) {
+            Ok(layout) => layout,
+            Err(error @ (PortBitLayoutError::ZeroWidth { port } | PortBitLayoutError::CapacityExceeded { port, .. })) => {
+                let site = copy_location(&signature.outputs[port].annotation);
+                assert(self.routine_bit_layout_failure(*signature, width, bits, PortDirection::Output, site, error));
+                return Err(RoutineBitLayoutError::Port(PortDirection::Output, site, error));
+            },
+        };
+        proof {
+            self.routine_bit_layouts_intro(*signature, width, bits, incoming@, outgoing@, structures, &inputs, &outputs);
+        }
+        Ok((inputs, outputs))
+    }
+
+    /// 型検査の結果が同じポート列なら、同じビット配置を使える。
+    pub(super) proof fn routine_bit_layouts_transfer(
+        &self, original: TypedRoutineSignature, checked: TypedRoutineSignature, width: u64, bits: usize,
+        inputs: &crate::netlist::PortBitLayout, outputs: &crate::netlist::PortBitLayout,
+    )
+        requires
+            self.routine_bit_layouts_match(original, width, bits, inputs, outputs),
+            original.inputs@ == checked.inputs@, original.outputs@ == checked.outputs@,
+        ensures self.routine_bit_layouts_match(checked, width, bits, inputs, outputs),
+    {
+        let (incoming, outgoing, structures) = choose|incoming: Seq<u64>, outgoing: Seq<u64>, structures: Option<StructureLayouts>| {
+            &&& #[trigger] self.template_port_widths_match(original, width, incoming, outgoing, structures)
+            &&& port_bit_layout_result(incoming, bits, Ok(*inputs))
+            &&& port_bit_layout_result(outgoing, bits, Ok(*outputs))
+        };
+        reveal(UseAliases::template_port_widths_match);
+        self.routine_bit_layouts_intro(checked, width, bits, incoming, outgoing, structures, inputs, outputs);
+    }
+
+    /// すべての幅が1であれば、先頭から数えたポート数とビット数が一致する。
+    proof fn single_bit_prefix_count(widths: Seq<u64>, count: nat)
+        requires
+            count <= widths.len(),
+            forall|i: int| 0 <= i < count ==> (#[trigger] widths[i]) == 1,
+        ensures preceding_port_bits(widths, count) == count,
+        decreases count,
+    {
+        reveal(preceding_port_bits);
+        if count > 0 {
+            Self::single_bit_prefix_count(widths, (count - 1) as nat);
+        }
+    }
+
+    /// 単一ビットポートの署名では、共通の配置から得た総ビット数がポート数と一致する。
+    pub(in crate::project::use_aliases) proof fn routine_single_bit_layout_counts(
+        &self, signature: TypedRoutineSignature, width_limit: u64, bit_limit: usize,
+        inputs: &crate::netlist::PortBitLayout, outputs: &crate::netlist::PortBitLayout,
+    )
+        requires
+            self.routine_bit_layouts_match(signature, width_limit, bit_limit, inputs, outputs),
+            forall|i: int| 0 <= i < signature.inputs@.len() ==> (#[trigger] signature.inputs@[i]).ty == ResolvedPortType::Bits(1),
+            forall|i: int| 0 <= i < signature.outputs@.len() ==> (#[trigger] signature.outputs@[i]).ty == ResolvedPortType::Bits(1),
+        ensures
+            inputs.total_bits_model() == signature.inputs@.len(),
+            outputs.total_bits_model() == signature.outputs@.len(),
+            inputs.total_bits_model() <= bit_limit, outputs.total_bits_model() <= bit_limit,
+    {
+        let (incoming, outgoing, structures) = choose|incoming: Seq<u64>, outgoing: Seq<u64>, structures: Option<StructureLayouts>| {
+            &&& #[trigger] self.template_port_widths_match(signature, width_limit, incoming, outgoing, structures)
+            &&& port_bit_layout_result(incoming, bit_limit, Ok(*inputs))
+            &&& port_bit_layout_result(outgoing, bit_limit, Ok(*outputs))
+        };
+        reveal(UseAliases::template_port_widths_match);
+        assert forall|i: int| 0 <= i < incoming.len() implies (#[trigger] incoming[i]) == 1 by {
+            assert(signature.inputs@[i].ty == ResolvedPortType::Bits(1));
+        };
+        assert forall|i: int| 0 <= i < outgoing.len() implies (#[trigger] outgoing[i]) == 1 by {
+            assert(signature.outputs@[i].ty == ResolvedPortType::Bits(1));
+        };
+        Self::single_bit_prefix_count(incoming, incoming.len());
+        Self::single_bit_prefix_count(outgoing, outgoing.len());
+        crate::netlist::port_bit_layout_size(incoming, bit_limit, inputs);
+        crate::netlist::port_bit_layout_size(outgoing, bit_limit, outputs);
     }
 
     /// 呼び出し先のポート幅を、呼び出し元で使う検査済みの配置表へ引き継ぐ。

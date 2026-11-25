@@ -14,16 +14,18 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
-use super::call_arguments::{argument_prefix_wires, argument_wires_ready, builtin_nor_evaluation, layout_argument_ready};
+use super::call_arguments::{argument_prefix_wires, argument_wires_ready, builtin_nor_call_matches, builtin_nor_evaluation, layout_argument_ready};
 #[cfg(verus_only)]
 use super::call_arguments::child_calls::{
     ChildCall, NestedRootEvaluation, bound_template_arguments_ready, child_call_abi, child_call_binding, child_call_ready, child_value_flows_to_root,
     child_ranges_match, child_sizes, child_wiring_trace_matches, nested_root_values, nested_root_wiring_result,
-    nor_root_children_bound, nor_root_wiring_result,
+    nested_gate_instance, nested_gate_instance_at, nested_root_wiring_matches, nor_root_children_bound, nor_root_wiring_result,
     root_arguments_fit_children, root_port_reads_child,
 };
 #[cfg(verus_only)]
 use super::super::frontend::nor_root_arguments_match_widths;
+#[cfg(verus_only)]
+use super::super::templates::{FunctionTemplate, ResolvedExpressionCall};
 #[cfg(verus_only)]
 use super::evaluation::port_values;
 #[cfg(verus_only)]
@@ -149,6 +151,29 @@ pub(super) open spec fn call_group_result(
     }
 }
 
+/// 入れ子を含まない呼び出しの成功結果から、実引数と左辺に追加した出力の配線を取り出す。
+pub(super) proof fn flat_call_group_wiring<'s, 'p, 'a>(
+    group: &CheckedExpansionCall, forms: Seq<Form>, arguments: Seq<ProjectedCallArgument>,
+    caller: &Layouts, callee: &LoweredBitFunc, before: WiringView, after: WiringView,
+    gate_limit: usize, destination_widths: Seq<u64>, output_widths: Seq<u64>,
+) -> (wiring: (CallerArguments<'s, 'p, 'a>, Seq<Wire>, Seq<Wire>))
+    requires
+        call_group_result(group, forms, arguments, caller, callee, before, after,
+            gate_limit, destination_widths, output_widths, Ok(())),
+    ensures ({
+        let (invocation, mapped, outputs) = wiring;
+        &&& call_group_wires_match(group, forms, arguments, caller, callee, before, after,
+            output_widths, invocation, mapped, outputs)
+        &&& outputs == after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int)
+    }),
+{
+    let (invocation, mapped, outputs) = choose|invocation: CallerArguments<'s, 'p, 'a>, mapped: Seq<Wire>, outputs: Seq<Wire>|
+        #[trigger] call_group_wires_match(group, forms, arguments, caller, callee, before, after, output_widths,
+            invocation, mapped, outputs);
+    assert(outputs =~= after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int));
+    (invocation, mapped, outputs)
+}
+
 pub(super) open spec fn call_output_bit_has_value(
     caller: &Layouts, callee: &LoweredBitFunc, definitions: Seq<Wire>, first: usize, port: int, bit: int,
     inputs: Seq<bool>, values: Seq<bool>, outputs: Seq<bool>,
@@ -194,9 +219,9 @@ pub(super) proof fn call_group_values(
             #[trigger] call_output_bit_has_value(caller, callee, after.definitions, group.outputs.start, port, bit,
                 inputs, values, result.1),
 {
-    let (invocation, mapped, outputs) = choose|invocation: CallerArguments, mapped: Seq<Wire>, outputs: Seq<Wire>|
-        #[trigger] call_group_wires_match(group, forms, arguments, caller, callee, before, after, output_widths,
-            invocation, mapped, outputs);
+    let (invocation, mapped, outputs) =
+        flat_call_group_wiring(group, forms, arguments, caller, callee, before, after, gate_limit,
+            destination_widths, output_widths);
     reveal(wires_available);
     instance_evaluates_from_caller(before.gates, callee.netlist_model(), combined, mapped, outputs, inputs, values);
     let input_values = instance_wire_values(mapped, inputs, values);
@@ -390,6 +415,205 @@ pub(super) closed spec fn nested_call_group_result(
     }
 }
 
+/// 一つの呼び出しを展開した区間と、その実引数から得た配線。
+#[cfg(verus_only)]
+pub(super) struct CallGateWiring<'s, 'p, 'a> {
+    /// 同じ定義内での呼び出し先参照の添字。右辺の根は 0。
+    pub(super) reference: usize,
+    /// 通常関数の展開結果。基底 NOR では `None`。
+    pub(super) template: Option<&'s FunctionTemplate<'p, 'a>>,
+    pub(super) target: NorNetlist,
+    pub(super) prior: Seq<NorGate>,
+    pub(super) inputs: Seq<Wire>,
+    /// 子の出力を登録する前に、呼び出し元から受け取った配線。
+    pub(super) invocation: CallerArguments<'s, 'p, 'a>,
+    /// 子の列と、ゲートを追加した呼び出しの添字。子の個数と等しければ根を指す。
+    pub(super) nested: Option<(Seq<ChildCall<'s, 'p, 'a>>, int)>,
+    /// 式全体の根が定義へ渡した出力配線。
+    pub(super) outputs: Seq<Wire>,
+}
+
+pub(super) open spec fn call_gate_wiring_matches(
+    row: CallGateWiring, before: Seq<NorGate>, after: Seq<NorGate>, gate: int,
+) -> bool {
+    let begin = row.prior.len();
+    let end = begin + row.target.gates@.len();
+    &&& before.len() <= begin <= gate < end <= after.len()
+    &&& instance_gates_match(row.prior, row.target.gates@, row.inputs, after.take(end as int))
+    &&& match row.template {
+        Some(template) => row.target == *template.circuit_model().netlist_model(),
+        None => true,
+    }
+}
+
+#[verifier::opaque]
+pub(super) open spec fn bound_call_gate_matches(
+    row: CallGateWiring, children: Seq<ResolvedExpressionCall>, references: Range<usize>,
+    builtin: &(NorNetlist, PortBitLayout), root_template: Option<&FunctionTemplate>,
+    root: &NorNetlist, layout: &PortBitLayout, args: Seq<ProjectedCallArgument>,
+    before: Seq<NorGate>, after: Seq<NorGate>, input_bits: usize, gate: int,
+) -> bool {
+    &&& row.nested matches Some((calls, index))
+    &&& references.start <= references.end
+    &&& calls.len() == children.len() && 0 <= index <= calls.len()
+    &&& forall|i: int| 0 <= i < calls.len() ==> child_call_binding(children[i], references, builtin, #[trigger] calls[i])
+    &&& nested_gate_instance(&row.invocation, calls, (references.end - references.start) as usize,
+        args, layout, root, before, after, input_bits, row.outputs, gate, index, row.prior, row.inputs)
+    &&& if index == calls.len() {
+        row.reference == 0 && row.template == root_template && row.target == *root
+    } else {
+        &&& row.reference == calls[index].reference
+        &&& children[index].child.reference == references.start + row.reference
+        &&& row.template == children[index].template && row.target == *calls[index].circuit
+        &&& row.template.is_none() ==> row.target == builtin.0
+    }
+}
+
+proof fn bound_call_gate<'s, 'p, 'a>(
+    children: Seq<ResolvedExpressionCall<'s, 'p, 'a>>, references: Range<usize>,
+    builtin: &(NorNetlist, PortBitLayout),
+    root_template: Option<&'s FunctionTemplate<'p, 'a>>, root: &NorNetlist, layout: &PortBitLayout,
+    caller: CallerArguments<'s, 'p, 'a>, calls: Seq<ChildCall<'s, 'p, 'a>>, args: Seq<ProjectedCallArgument>,
+    before: Seq<NorGate>, after: Seq<NorGate>, outputs: Seq<Wire>, input_bits: usize, gate: int,
+) -> (row: CallGateWiring<'s, 'p, 'a>)
+    requires
+        references.start <= references.end,
+        calls.len() == children.len(),
+        forall|i: int| 0 <= i < calls.len() ==> child_call_binding(children[i], references, builtin, #[trigger] calls[i]),
+        root_template matches Some(template) ==> root == template.circuit_model().netlist_model(),
+        nested_root_wiring_matches(&caller, calls, (references.end - references.start) as usize,
+            args, layout, root, before, after, input_bits, outputs),
+        before.len() <= gate < after.len() <= usize::MAX,
+    ensures
+        call_gate_wiring_matches(row, before, after, gate),
+        row.invocation == caller, row.outputs == outputs,
+        row.nested matches Some((saved, _)) && saved == calls,
+        bound_call_gate_matches(row, children, references, builtin, root_template, root, layout, args,
+            before, after, input_bits, gate),
+{
+    reveal(bound_call_gate_matches);
+    let (index, prior, inputs) = nested_gate_instance_at(&caller, calls, (references.end - references.start) as usize,
+        args, layout, root, before, after, input_bits, outputs, gate);
+    if index == calls.len() {
+        CallGateWiring { reference: 0, template: root_template, target: *root, prior, inputs,
+            invocation: caller, nested: Some((calls, index)), outputs }
+    } else {
+        let call = calls[index];
+        let child = children[index];
+        assert(child_call_binding(child, references, builtin, call));
+        CallGateWiring { reference: call.reference, template: child.template, target: *call.circuit, prior, inputs,
+            invocation: caller, nested: Some((calls, index)), outputs }
+    }
+}
+
+#[verifier::opaque]
+pub(super) open spec fn nested_call_group_gate_matches(
+    row: CallGateWiring, selected: &ResolvedTemplateCall, forms: Seq<Form>, caller: &Layouts,
+    builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView, gate: int,
+) -> bool {
+    let callee = selected.template.circuit_model();
+    &&& call_gate_wiring_matches(row, before.gates, after.gates, gate)
+    &&& row.nested matches Some((calls, _))
+    &&& nested_group_invocation_matches(selected, forms, caller, builtin, before, row.invocation, calls)
+    &&& row.outputs == after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int)
+    &&& bound_call_gate_matches(row, selected.children@, selected.group.references, builtin, Some(selected.template),
+        callee.netlist_model(), callee.input_layout_model(), selected.arguments@, before.gates, after.gates,
+        caller.inputs.total_bits_model(), gate)
+}
+
+/// 入れ子の呼び出しに渡した呼び出し元の配線、後順の子、左辺に追加した出力配線を取り出す。
+pub(super) proof fn nested_call_group_wiring<'s, 'p, 'a>(
+    selected: &ResolvedTemplateCall<'s, 'p, 'a>, forms: Seq<Form>, caller: &Layouts, builtin: &(NorNetlist, PortBitLayout),
+    before: WiringView, after: WiringView, gate_limit: usize, child_limit: usize, widths: Seq<u64>,
+) -> (wiring: (CallerArguments<'s, 'p, 'a>, Seq<ChildCall<'s, 'p, 'a>>, Seq<Wire>))
+    requires
+        nested_call_group_result(selected, forms, caller, builtin, before, after, gate_limit, child_limit, widths, Ok(())),
+    ensures ({
+        let (invocation, calls, outputs) = wiring;
+        let references = selected.group.references;
+        let count = (references.end - references.start) as usize;
+        let callee = selected.template.circuit_model();
+        let input_bits = caller.inputs.total_bits_model();
+        &&& references.start <= references.end
+        &&& outputs == after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int)
+        &&& nested_group_invocation_matches(selected, forms, caller, builtin, before, invocation, calls)
+        &&& nested_root_wiring_result(&invocation, calls, count, selected.arguments@, callee.input_layout_model(),
+            callee.netlist_model(), before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(outputs))
+        &&& nested_root_wiring_matches(&invocation, calls, count, selected.arguments@, callee.input_layout_model(),
+            callee.netlist_model(), before.gates, after.gates, input_bits, outputs)
+    }),
+{
+    reveal(nested_call_group_result);
+    reveal(nested_root_wiring_result);
+    let references = selected.group.references;
+    let count = (references.end - references.start) as usize;
+    let callee = selected.template.circuit_model();
+    let input_bits = caller.inputs.total_bits_model();
+    let outputs = after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int);
+    let (calls, invocation) = choose|calls: Seq<ChildCall<'s, 'p, 'a>>, invocation: CallerArguments<'s, 'p, 'a>|
+        #[trigger] nested_group_invocation_matches(selected, forms, caller, builtin, before, invocation, calls)
+        && nested_root_wiring_result(&invocation, calls, count, selected.arguments@, callee.input_layout_model(),
+            callee.netlist_model(), before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(outputs));
+    (invocation, calls, outputs)
+}
+
+/// 通常の呼び出しを展開した区間から、ゲートを追加した根または子を取り出す。
+pub(super) proof fn nested_call_group_gate<'s, 'p, 'a>(
+    selected: &ResolvedTemplateCall<'s, 'p, 'a>, forms: Seq<Form>, caller: &Layouts, builtin: &(NorNetlist, PortBitLayout),
+    before: WiringView, after: WiringView, gate_limit: usize, child_limit: usize, widths: Seq<u64>, gate: int,
+) -> (row: CallGateWiring<'s, 'p, 'a>)
+    requires
+        nested_call_group_result(selected, forms, caller, builtin, before, after, gate_limit, child_limit, widths, Ok(())),
+        before.gates.len() <= gate < after.gates.len(),
+    ensures
+        call_gate_wiring_matches(row, before.gates, after.gates, gate),
+        nested_call_group_gate_matches(row, selected, forms, caller, builtin, before, after, gate),
+{
+    reveal(nested_call_group_gate_matches);
+    reveal(nested_call_group_result);
+    reveal(nested_root_wiring_result);
+    reveal(nested_group_invocation_matches);
+    let group = selected.group;
+    let callee = selected.template.circuit_model();
+    let input_bits = caller.inputs.total_bits_model();
+    let (invocation, calls, produced) =
+        nested_call_group_wiring(selected, forms, caller, builtin, before, after, gate_limit, child_limit, widths);
+    bound_call_gate(selected.children@, group.references, builtin, Some(selected.template), callee.netlist_model(),
+        callee.input_layout_model(), invocation, calls, selected.arguments@, before.gates, after.gates, produced, input_bits, gate)
+}
+
+pub(super) open spec fn flat_call_group_gate_matches(
+    row: CallGateWiring, group: &CheckedExpansionCall, forms: Seq<Form>, arguments: Seq<ProjectedCallArgument>,
+    layouts: &Layouts, template: &FunctionTemplate, before: WiringView, after: WiringView, output_widths: Seq<u64>, gate: int,
+) -> bool {
+    &&& call_gate_wiring_matches(row, before.gates, after.gates, gate)
+    &&& row.reference == 0 && row.template == Some(template) && row.prior == before.gates && row.nested.is_none()
+    &&& call_group_wires_match(group, forms, arguments, layouts, template.circuit_model(), before, after, output_widths,
+        row.invocation, row.inputs, row.outputs)
+}
+
+/// 入れ子を含まない呼び出しで、ゲートの変換に使った実引数の配線を取り出す。
+pub(super) proof fn flat_call_group_gate<'s, 'p, 'a>(
+    group: &CheckedExpansionCall<'p, 'a>, forms: Seq<Form>, arguments: Seq<ProjectedCallArgument>,
+    layouts: &Layouts, template: &'s FunctionTemplate<'p, 'a>, before: WiringView, after: WiringView,
+    limit: usize, widths: Seq<u64>, output_widths: Seq<u64>, gate: int,
+) -> (row: CallGateWiring<'s, 'p, 'a>)
+    requires
+        call_group_result(group, forms, arguments, layouts, template.circuit_model(), before, after, limit,
+            widths, output_widths, Ok(())),
+        before.gates.len() <= gate < after.gates.len(),
+    ensures
+        call_gate_wiring_matches(row, before.gates, after.gates, gate),
+        flat_call_group_gate_matches(row, group, forms, arguments, layouts, template, before, after, output_widths, gate),
+{
+    let callee = template.circuit_model();
+    let (invocation, mapped, outputs) =
+        flat_call_group_wiring(group, forms, arguments, layouts, callee, before, after, limit, widths, output_widths);
+    assert(after.gates.take(after.gates.len() as int) =~= after.gates);
+    CallGateWiring { reference: 0, template: Some(template), target: *callee.netlist_model(), prior: before.gates,
+        inputs: mapped, invocation, nested: None, outputs }
+}
+
 /// 入れ子呼び出しの成否から、本体の配線履歴を進める条件を取り出す。
 pub(super) proof fn nested_call_group_frame(
     selected: &ResolvedTemplateCall, forms: Seq<Form>, caller: &Layouts, builtin: &(NorNetlist, PortBitLayout),
@@ -488,13 +712,10 @@ pub(super) proof fn nested_call_group_values<'s, 'p, 'a>(
     let callee = template.circuit_model();
     let count = (group.references.end - group.references.start) as usize;
     let input_bits = caller.inputs.total_bits_model();
-    let produced = after.definitions.subrange(before.definitions.len() as int, after.definitions.len() as int);
     nested_call_group_frame(selected, forms, caller, builtin, before, after, gate_limit, child_limit,
         destination_widths, Ok(()));
-    let (calls, invocation) = choose|calls: Seq<ChildCall>, invocation: CallerArguments|
-        #[trigger] nested_group_invocation_matches(selected, forms, caller, builtin, before, invocation, calls)
-        && nested_root_wiring_result(&invocation, calls, count, selected.arguments@, callee.input_layout_model(),
-            callee.netlist_model(), before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(produced));
+    let (invocation, calls, produced) =
+        nested_call_group_wiring(selected, forms, caller, builtin, before, after, gate_limit, child_limit, destination_widths);
     let root = nested_root_values(&invocation, calls, count, selected.arguments@, callee.input_layout_model(),
         callee.netlist_model(), before.gates, after.gates, produced, combined, inputs, values, input_bits);
     vstd::std_specs::vec::axiom_spec_len(&root.end.table.wires);
@@ -669,6 +890,88 @@ pub(super) closed spec fn nor_call_group_result(
             &&& error matches NestedCallWiringError::Child(index, _) ==> index < selected.children@.len()
         },
     }
+}
+
+#[verifier::opaque]
+pub(super) open spec fn nor_call_group_gate_matches(
+    row: CallGateWiring, selected: &ResolvedNorRoot, references: Range<usize>, forms: Seq<Form>,
+    caller: &Layouts, builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView, gate: int,
+) -> bool {
+    &&& builtin_nor_call_matches(builtin)
+    &&& call_gate_wiring_matches(row, before.gates, after.gates, gate)
+    &&& row.nested matches Some((calls, _))
+    &&& nor_group_invocation_matches(selected, forms, caller, before, row.invocation)
+    &&& nor_root_children_bound(selected, references, &row.invocation, builtin, calls)
+    &&& row.outputs == seq![after.definitions[before.definitions.len() as int]]
+    &&& bound_call_gate_matches(row, selected.children@, references, builtin, None, &builtin.0, &builtin.1,
+        selected.arguments@, before.gates, after.gates, caller.inputs.total_bits_model(), gate)
+}
+
+/// 根 NOR の呼び出しに渡した配線と後順の子を取り出し、出力を最後に追加したゲートに結び付ける。
+pub(super) proof fn nor_call_group_wiring<'s, 'p, 'a>(
+    selected: &ResolvedNorRoot<'s, 'p, 'a>, references: Range<usize>, forms: Seq<Form>,
+    caller: &Layouts, builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView,
+    gate_limit: usize, child_limit: usize, widths: Seq<u64>,
+) -> (wiring: (CallerArguments<'s, 'p, 'a>, Seq<ChildCall<'s, 'p, 'a>>, Seq<Wire>))
+    requires
+        nor_call_group_result(selected, references, forms, caller, builtin, before, after, gate_limit, child_limit, widths, Ok(())),
+    ensures ({
+        let (invocation, calls, outputs) = wiring;
+        let count = (references.end - references.start) as usize;
+        let input_bits = caller.inputs.total_bits_model();
+        &&& builtin_nor_call_matches(builtin)
+        &&& references.start <= references.end
+        &&& outputs == seq![after.definitions[before.definitions.len() as int]]
+        &&& after.gates.len() > 0
+        &&& outputs[0] == Wire::Gate((after.gates.len() - 1) as usize)
+        &&& nor_group_invocation_matches(selected, forms, caller, before, invocation)
+        &&& nor_root_children_bound(selected, references, &invocation, builtin, calls)
+        &&& nested_root_wiring_result(&invocation, calls, count, selected.arguments@, &builtin.1, &builtin.0,
+            before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(outputs))
+        &&& nested_root_wiring_matches(&invocation, calls, count, selected.arguments@, &builtin.1, &builtin.0,
+            before.gates, after.gates, input_bits, outputs)
+    }),
+{
+    reveal(nor_call_group_result);
+    reveal(nor_root_wiring_result);
+    reveal(nested_root_wiring_result);
+    let input_bits = caller.inputs.total_bits_model();
+    let wire = after.definitions[before.definitions.len() as int];
+    let invocation = choose|invocation: CallerArguments<'s, 'p, 'a>|
+        #[trigger] nor_group_invocation_matches(selected, forms, caller, before, invocation)
+        && nor_root_wiring_result(selected, references, &invocation, builtin, before.gates, after.gates,
+            gate_limit, child_limit, input_bits, Ok(wire));
+    let count = (references.end - references.start) as usize;
+    let outputs = seq![wire];
+    let calls = choose|calls: Seq<ChildCall<'s, 'p, 'a>>|
+        #[trigger] nor_root_children_bound(selected, references, &invocation, builtin, calls)
+        && nested_root_wiring_result(&invocation, calls, count, selected.arguments@, &builtin.1, &builtin.0,
+            before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(outputs));
+    (invocation, calls, outputs)
+}
+
+/// 根 NOR を含む展開から、ゲートを追加した呼び出しと実引数の配線を取り出す。
+pub(super) proof fn nor_call_group_gate<'s, 'p, 'a>(
+    selected: &ResolvedNorRoot<'s, 'p, 'a>, references: Range<usize>, forms: Seq<Form>,
+    caller: &Layouts, builtin: &(NorNetlist, PortBitLayout), before: WiringView, after: WiringView,
+    gate_limit: usize, child_limit: usize, widths: Seq<u64>, gate: int,
+) -> (row: CallGateWiring<'s, 'p, 'a>)
+    requires
+        nor_call_group_result(selected, references, forms, caller, builtin, before, after, gate_limit, child_limit, widths, Ok(())),
+        before.gates.len() <= gate < after.gates.len(),
+    ensures
+        call_gate_wiring_matches(row, before.gates, after.gates, gate),
+        nor_call_group_gate_matches(row, selected, references, forms, caller, builtin, before, after, gate),
+{
+    reveal(nor_call_group_gate_matches);
+    reveal(nor_call_group_result);
+    reveal(nor_root_children_bound);
+    reveal(nested_root_wiring_result);
+    let input_bits = caller.inputs.total_bits_model();
+    let (invocation, calls, produced) =
+        nor_call_group_wiring(selected, references, forms, caller, builtin, before, after, gate_limit, child_limit, widths);
+    bound_call_gate(selected.children@, references, builtin, None, &builtin.0, &builtin.1, invocation, calls,
+        selected.arguments@, before.gates, after.gates, produced, input_bits, gate)
 }
 
 /// 根 NOR の配線結果から、本体の走査に必要な状態の条件を取り出す。
@@ -879,17 +1182,9 @@ pub(super) proof fn nor_call_group_values<'s, 'p, 'a>(
     let input_bits = caller.inputs.total_bits_model();
     let bit = before.definitions.len() as int;
     let wire = after.definitions[bit];
-    let invocation = choose|invocation: CallerArguments|
-        #[trigger] nor_group_invocation_matches(selected, forms, caller, before, invocation)
-        && nor_root_wiring_result(selected, references, &invocation, builtin, before.gates, after.gates,
-            gate_limit, child_limit, input_bits, Ok(wire));
-    reveal(nor_root_wiring_result);
     let count = (references.end - references.start) as usize;
-    let produced = seq![wire];
-    let calls = choose|calls: Seq<ChildCall>|
-        #[trigger] nor_root_children_bound(selected, references, &invocation, builtin, calls)
-        && nested_root_wiring_result(&invocation, calls, count, selected.arguments@, &builtin.1, &builtin.0,
-            before.gates, after.gates, gate_limit, child_limit, input_bits, Ok(produced));
+    let (invocation, calls, produced) =
+        nor_call_group_wiring(selected, references, forms, caller, builtin, before, after, gate_limit, child_limit, widths);
     reveal(nested_root_wiring_result);
     let root = nested_root_values(&invocation, calls, count, selected.arguments@, &builtin.1, &builtin.0,
         before.gates, after.gates, produced, combined, inputs, values, input_bits);

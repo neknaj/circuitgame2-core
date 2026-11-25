@@ -3,6 +3,7 @@
 mod compile;
 mod frontend;
 pub use compile::{ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic};
+pub(super) use compile::ClockedFunctionTemplate;
 mod expansion;
 mod templates;
 mod instances;
@@ -10,6 +11,9 @@ mod lowering;
 mod semantics;
 
 pub use frontend::{BitFuncError, UnsupportedBitFunc};
+pub(super) use frontend::RoutineBitLayoutError;
+#[cfg(verus_only)]
+pub(super) use frontend::has_structure_port;
 pub use lowering::{BitFuncLowerError, LoweredBitFunc};
 #[cfg(verus_only)]
 pub use lowering::{bit_func_lowering_preserves_evaluation, lowered_bit_func_result, port_values};

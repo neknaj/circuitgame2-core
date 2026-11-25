@@ -432,8 +432,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let project = self.targets.project_model();
             let parsed = &project.circuits_model()[file as int];
             let row = parsed.definitions@[definition as int];
+            let (first, end) = crate::syntax::circuit::definition_target_range(parsed.syntax.forms@, row);
             let local = (definition - parsed.entry_ranges@[entry as int].definitions.start) as usize;
             &&& self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring)))
+            &&& outputs.end <= wiring.drivers.definitions@.len()
+            &&& outputs.end - outputs.start == end - first
             &&& slot < wiring.drivers.definitions@.len()
             &&& wiring.drivers.definitions@[slot].definition == definition
             &&& wiring.drivers.definitions@[slot].result_index == slot - outputs.start
@@ -443,7 +446,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& crate::syntax::circuit::ordinary_call_at(project.sources_model()[file as int].text,
                 parsed.syntax.forms@, row.expression.start as int, row.expression.end as int)
             &&& self.func_call_signature_evidence(file, entry, local, 0, limit, Ok(Some(signature)))
-            &&& signature.call.target is Function
+            &&& signature.call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, .. }
+            &&& (target_file, target_entry) == target
         }),
     {
         reveal(UseAliases::source_function_call_site);
@@ -647,7 +651,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let expression = row.expression;
         let signature = group._signature@;
         let (callee_at, caller_at) = group._order@;
-        &&& self.function_expansion_evidence(Ok(plan))
+        &&& self.function_template_plan(plan)
         &&& definitions.start <= root.definition < definitions.end <= parsed.definitions@.len()
         &&& crate::syntax::circuit::ordinary_call_at(source.text, parsed.syntax.forms@, expression.start as int, expression.end as int)
         &&& group.outputs.start == root.first_output
@@ -880,9 +884,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             if let FuncCallTarget::Function { file: target_file, entry: target_entry, .. } = child.call.target {
                 let source = DefinitionPosition { file, entry, definition: local, reference };
                 let site = self.expansion_site_for_call(source, child.call);
-                let (callee, caller_rank) = self.function_expansion_callee_precedes(plan, site);
-                self.template_rank_from_position(plan, (file, entry), caller_rank, group._order@.1);
-                assert(callee < group._order@.1);
+                let callee = self.template_callee_precedes(plan, group._order@.1, site);
                 assert(plan.position_model(callee) == Some((target_file, target_entry)));
             }
         }
@@ -1170,6 +1172,78 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let child = self.prepared_nested_argument(plan, caller, local, arguments, prepared.typed.types@,
             &wiring, group._order@.1, children, parent, reference, typed, projected, port);
         (port, child)
+    }
+
+    /// 根の引数がすべて信号またはリテラルなら、先に展開する子は存在しない。
+    #[verifier::spinoff_prover]
+    pub(super) proof fn direct_expansion_has_no_children(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+        group_index: int,
+    )
+        requires
+            self.can_resolve(),
+            self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+            0 <= group_index < prepared.calls@.len(),
+            ({
+                let range = prepared.calls@[group_index].arguments;
+                forall|i: int| range.start <= i < range.end ==>
+                    (#[trigger] prepared.projections.call_arguments.arguments@[i]).source.has_direct_wires()
+            }),
+        ensures
+            prepared.calls@[group_index].postorder matches Some(children) ==> children@.len() == 0,
+    {
+        let group = prepared.calls@[group_index];
+        if let Some(children) = group.postorder {
+            if children@.len() > 0 {
+                reveal(UseAliases::checked_expansion_call_matches);
+                reveal(UseAliases::prepared_expression_children_match);
+                let (file, entry, limit) = caller;
+                let project = self.targets.project_model();
+                let parsed = &project.circuits_model()[file as int];
+                let source = &project.sources_model()[file as int];
+                let absolute = prepared.projections.calls@[group_index].definition;
+                let local = (absolute - parsed.entry_ranges@[entry as int].definitions.start) as usize;
+                let row = parsed.definitions@[absolute as int];
+                let forms = parsed.syntax.forms@;
+                let refs = parsed.references@;
+                let child = children@[0];
+                let relative = (child.reference - group.references.start) as usize;
+                self.expansion_child_template_evidence(plan, caller, prepared, group_index, 0);
+                self.typed_call_arguments_ready(file, entry, local, relative, limit, child._signature@);
+                self.typed_call_arguments_ready(file, entry, local, 0, limit, group._signature@);
+                self.resolved_call_reference_form(file, entry, local, 0, group._signature@.call);
+                self.targets.parsed_project_model();
+                parsed_index_evidence(*source, *parsed);
+                build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+                vstd::std_specs::vec::axiom_spec_len(&parsed.syntax.forms);
+                root_call_reference(source.text, forms, refs, row);
+                crate::syntax::circuit::call_form_bounds(forms, child._signature@.call.call);
+                crate::syntax::circuit::call_form_bounds(forms, group._signature@.call.call);
+
+                let last = children@.len() as int;
+                let order = Seq::new(children@.len(), |i: int| children@[i].reference).push(group.references.start);
+                assert(order[0] == child.reference && order[last] == group.references.start);
+                let (parent, position) = call_postorder_positions(source.text, forms, refs, row,
+                    order, group.references.start, child.reference);
+                if parent < last {
+                    call_postorder_references_distinct(forms, refs, row.references, order, parent, last);
+                }
+                if position > 0 {
+                    call_postorder_references_distinct(forms, refs, row.references, order, 0, position);
+                }
+                assert(position == 0 && parent == last);
+
+                let range = group.arguments;
+                let arguments = prepared.projections.call_arguments.arguments@;
+                assert forall|i: int| range.start <= i < range.end implies
+                    !((#[trigger] arguments[i]).source is Deferred) by {
+                    assert(arguments[i].source.has_direct_wires());
+                };
+                let (port, _) = self.expansion_child_containing_form(plan, caller, prepared, group_index, last,
+                    child._signature@.call.call.form as int);
+                assert(arguments[range.start + port].source.has_direct_wires());
+            }
+        }
     }
 
     /// 一つの定義で、対象の子と同じフォームを指す後順項目を同定する。
@@ -1667,7 +1741,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ghost(context): Ghost<(u64, Seq<Option<SignalType<'p, 'a>>>, &FuncWiring<'p, 'a>, int)>,
     ) -> (item: PreparedExpressionCall<'p, 'a>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
             self.projected_references_match((file, entry, context.0), context.1, context.2,
                 &projections.call_arguments, projections.calls@),
@@ -1748,15 +1822,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             RetainedCallTarget::Function(target_file, target_entry) => {
                 let ghost at = DefinitionPosition { file, entry, definition, reference: local };
                 let ghost site = self.expansion_site_for_call(at, signature.call);
-                let ghost order = self.function_expansion_callee_precedes(*plan, site);
+                let ghost rank = self.template_callee_precedes(*plan, context.3, site);
                 let target = (target_file, target_entry);
                 let vertex = plan.template_vertex(target);
-                proof {
-                    self.template_rank_from_position(*plan, (file, entry), order.1, context.3);
-                    plan.template_vertex_at_position(target, order.0, vertex);
-                }
+                proof { plan.template_vertex_at_position(target, rank, vertex); }
                 PreparedExpressionCall {
-                    reference, expression, arguments, vertex, _signature: Ghost(signature), _rank: Ghost(Some(order.0)),
+                    reference, expression, arguments, vertex, _signature: Ghost(signature), _rank: Ghost(Some(rank)),
                 }
             },
         };
@@ -1886,7 +1957,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ghost(context): Ghost<(u64, Seq<Option<SignalType<'p, 'a>>>, &FuncWiring<'p, 'a>, int)>,
     ) -> (children: Vec<PreparedExpressionCall<'p, 'a>>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
             self.projected_references_match((file, entry, context.0), context.1, context.2,
                 &projections.call_arguments, projections.calls@),
@@ -1921,7 +1992,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let mut index = 0;
         while index < stop
             invariant
-                self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.can_resolve(), self.function_template_plan(*plan),
                 caller == (file, entry, context.0),
                 self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
                 self.projected_references_match(caller, context.1, context.2, &projections.call_arguments, projections.calls@),
@@ -1979,7 +2050,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ghost(context): Ghost<(u64, Seq<Option<SignalType<'p, 'a>>>, &FuncWiring<'p, 'a>, int)>,
     ) -> (calls: (PreparedExpressionCall<'p, 'a>, Option<Vec<PreparedExpressionCall<'p, 'a>>>))
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.func_wiring_evidence(file, entry, context.0, Ok(FuncWiringResult::Checked(*context.2))),
             self.projected_references_match((file, entry, context.0), context.1, context.2,
                 &projections.call_arguments, projections.calls@),
@@ -2064,9 +2135,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn check_expansion_call_groups(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
         typed: &FuncSignalTypes<'p, 'a>, wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
+        Ghost(caller_rank): Ghost<int>,
     ) -> (groups: Vec<CheckedExpansionCall<'p, 'a>>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
+            plan.position_model(caller_rank) == Some((file, entry)),
             self.func_signal_types_evidence(file, entry, limit, Ok(*typed)),
             typed.literals.wiring == FuncWiringResult::Checked(*wiring),
             typed.types@.len() == wiring.drivers.definitions@.len(),
@@ -2100,7 +2173,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while index < projections.calls.len()
             invariant
                 caller == (file, entry, limit),
-                self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.can_resolve(), self.function_template_plan(*plan),
+                plan.position_model(caller_rank) == Some((file, entry)),
                 self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(*wiring))),
                 self.func_signal_types_evidence(file, entry, limit, Ok(*typed)),
                 typed.literals.wiring == FuncWiringResult::Checked(*wiring),
@@ -2126,7 +2200,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         {
             let root = &projections.calls[index];
             let ghost group_model = self.checked_root_call_for_expansion(*plan, caller, *typed, *wiring,
-                projections.calls@, index as int);
+                projections.calls@, index as int, caller_rank);
             let start = parsed.entry_ranges[entry].definitions.start;
             let definition = root.definition - start;
             let row = &parsed.definitions[root.definition];
@@ -2146,7 +2220,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 vstd::std_specs::vec::axiom_spec_len(&typed.types);
                 self.successful_call_signatures_agree(file, entry, definition, 0, limit, group_model.0, root_call._signature@);
                 let rank = root_call._rank@->Some_0;
-                self.template_rank_from_position(*plan, (root.target_file, root.target_entry), rank, group_model.1.0);
+                self.function_template_rank_at(*plan, (root.target_file, root.target_entry), rank, group_model.1.0);
                 assert(root_call.vertex == Some(plan.order_model()[group_model.1.0]));
                 assert(arguments == projections.call_arguments.ranges@[index as int]);
             }
@@ -2237,11 +2311,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& root.root.expression.source == source
             &&& references.start == root.root.reference
             &&& self.expression_children_in_reference_range(references, root.root.expression.source, Some(root.postorder))
+            &&& forall|i: int| 0 <= i < root.postorder@.len() ==>
+                references.start < (#[trigger] root.postorder@[i]).reference
         }),
     {
         reveal(UseAliases::prepared_nor_root_matches);
         reveal(UseAliases::prepared_expression_children_match);
         reveal(UseAliases::prepared_expression_call_matches);
+        let root = prepared.nor_roots@[index];
+        let parsed = &self.targets.project_model().circuits_model()[caller.0 as int];
+        let references = parsed.definitions@[root.definition as int].references;
+        let children = root.postorder@;
+        let last = children.len() as int;
+        let order = Seq::new(children.len(), |i: int| children[i].reference).push(references.start);
+        assert forall|i: int| 0 <= i < children.len() implies
+            references.start < (#[trigger] children[i]).reference by {
+            assert(order[i] == children[i].reference && order[last] == references.start);
+            call_postorder_references_distinct(parsed.syntax.forms@, parsed.references@, references, order, i, last);
+        };
     }
 
     /// 根 NOR の出力スロットと式全体のソース範囲を、定義の投影に渡す。
@@ -2785,9 +2872,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn prepare_nested_nor_roots(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, _limit: u64,
         _typed: &FuncSignalTypes<'p, 'a>, _wiring: &FuncWiring<'p, 'a>, projections: &FuncProjections<'p, 'a>,
+        Ghost(rank): Ghost<int>,
     ) -> (roots: Vec<PreparedNorRoot<'p, 'a>>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
+            0 <= rank < plan.order_model().len(), plan.position_model(rank) == Some((file, entry)),
             self.func_signal_types_evidence(file, entry, _limit, Ok(*_typed)),
             _typed.literals.wiring == FuncWiringResult::Checked(*_wiring),
             _typed.types@.len() == _wiring.drivers.definitions@.len(),
@@ -2803,7 +2892,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 #[trigger] roots@[i]),
     {
         let ghost caller = (file, entry, _limit);
-        let ghost rank = self.checked_function_rank(*plan, caller, *_wiring);
         proof { self.checked_wiring_is_func(file, entry, _limit, *_wiring); }
         let project = self.targets.project();
         let parsed = &project.circuits()[file];
@@ -2820,7 +2908,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let drivers = _wiring.drivers.definitions.as_slice();
         while index < indices.len()
             invariant
-                self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+                self.can_resolve(), self.function_template_plan(*plan),
                 self.func_signal_types_evidence(file, entry, _limit, Ok(*_typed)),
                 _typed.literals.wiring == FuncWiringResult::Checked(*_wiring),
                 _typed.types@.len() == _wiring.drivers.definitions@.len() == drivers@.len(),
@@ -2945,6 +3033,27 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             !((#[trigger] calls[i]).outputs.start <= (#[trigger] roots[j]).output_slot < calls[i].outputs.end)
     }
 
+    /// 通常呼び出しは一つ以上の左辺を持ち、先行する呼び出しの左辺と重ならない。
+    pub(super) proof fn prepared_expansion_ordered_call_ranges(
+        &self, plan: FunctionExpansionOrder, caller: (usize, usize, u64), prepared: &PreparedExpansionBody,
+    )
+        requires self.prepared_expansion_body_matches(plan, caller.0, caller.1, caller.2, prepared),
+        ensures
+            forall|i: int| 0 <= i < prepared.calls@.len() ==> {
+                let call = #[trigger] prepared.calls@[i];
+                call.outputs.start < call.outputs.end <= prepared.typed.types@.len()
+            },
+            forall|i: int, j: int| 0 <= i < j < prepared.calls@.len() ==>
+                (#[trigger] prepared.calls@[i]).outputs.end <= (#[trigger] prepared.calls@[j]).outputs.start,
+    {
+        assert forall|i: int| 0 <= i < prepared.calls@.len() implies {
+            let call = #[trigger] prepared.calls@[i];
+            call.outputs.start < call.outputs.end <= prepared.typed.types@.len()
+        } by {
+            reveal(UseAliases::checked_expansion_call_matches);
+        };
+    }
+
     pub(super) open spec fn prepared_expansion_body_matches(
         &self, plan: FunctionExpansionOrder, file: usize, entry: usize, limit: u64, body: &PreparedExpansionBody,
     ) -> bool {
@@ -3004,7 +3113,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) fn prepare_expansion_body(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, file: usize, entry: usize, limit: u64,
     ) -> (result: Result<PreparedExpansionBody<'p, 'a>, BitFuncError<'p, 'a>>)
-        requires self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+        requires
+            self.can_resolve(), self.function_template_plan(*plan),
+            exists|rank: int| 0 <= rank < plan.order_model().len()
+                && #[trigger] plan.position_model(rank) == Some((file, entry)),
         ensures
             self.expansion_body_preparation_result(*plan, file, entry, limit, result),
             result matches Ok(body) ==> self.prepared_expansion_body_matches(*plan, file, entry, limit, &body),
@@ -3019,9 +3131,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             FuncWiringResult::NeedsExpansion(site) => return Err(BitFuncError::NeedsExpansion(
                 super::super::function_atoms::copy_location(site))),
         };
-        let calls = self.check_expansion_call_groups(plan, file, entry, limit, &typed, wiring, &projections);
+        let ghost rank = choose|rank: int| 0 <= rank < plan.order_model().len()
+            && #[trigger] plan.position_model(rank) == Some((file, entry));
+        let calls = self.check_expansion_call_groups(plan, file, entry, limit, &typed, wiring, &projections, Ghost(rank));
         proof { self.checked_types_keep_wiring(file, entry, limit, typed, *wiring); }
-        let nor_roots = self.prepare_nested_nor_roots(plan, file, entry, limit, &typed, wiring, &projections);
+        let nor_roots = self.prepare_nested_nor_roots(plan, file, entry, limit, &typed, wiring, &projections, Ghost(rank));
         assert(Self::nor_call_slots_disjoint(calls@, nor_roots@)) by {
             reveal(UseAliases::nor_call_slots_disjoint);
             assert forall|i: int, j: int| 0 <= i < calls@.len() && 0 <= j < nor_roots@.len() implies

@@ -8,11 +8,13 @@ mod concatenation;
 mod declarations;
 mod exports;
 mod literal_width;
+mod module_parts;
 mod name_keys;
 mod path;
 mod resolution;
 mod signatures;
 mod sources;
+mod storage_declarations;
 mod structure_declarations;
 mod use_aliases;
 mod use_targets;
@@ -72,6 +74,29 @@ pub use exports::{ExportError, ExportTable, index_exports};
 #[cfg(verus_only)]
 pub use exports::{export_error_evidence, export_table_matches, project_exports_valid};
 pub use name_keys::NameKey;
+pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
+pub use use_aliases::{ModuleDriverError, ModuleDrivers};
+pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
+pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
+    ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError,
+    CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError, PrimitiveModuleError,
+    ModuleOutputTypes, ModuleOutputTypesError,
+    ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
+pub use use_aliases::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+pub use use_aliases::{VramOutputError, VramTarget};
+pub use use_aliases::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
+#[cfg(verus_only)]
+pub use use_aliases::ClockedModuleObservation;
+pub use use_aliases::{ClockedArgumentWiringError, ClockedModuleOutputs, ClockedModuleOutputsError};
+pub use use_aliases::{ClockedDriverBitsError, clocked_driver_bits};
+#[cfg(verus_only)]
+pub use use_aliases::{clocked_driver_bit, clocked_driver_bits_result, clocked_driver_port_model, clocked_driver_selection_matches};
+pub use use_aliases::{ClockedDefinitionLayoutError, ClockedLinkPlan, ClockedModuleError, ClockedPlanError, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement, ClockedWireDriver, plan_clocked_links};
+#[cfg(verus_only)]
+pub use use_aliases::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,
+    clocked_wire_solutions_agree, clocked_wires_match};
+pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
+    ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget, StorageSignature, StorageSignatureError};
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
@@ -81,6 +106,9 @@ pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
 };
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
+pub use storage_declarations::{StorageDeclaration, check_storage_declaration};
+#[cfg(verus_only)]
+pub use storage_declarations::storage_declaration_result;
 pub use structure_declarations::{
     DeclaredField, DeclaredFieldType, StructureDeclaration, StructureNumber, StructureNumberError, StructureNumberErrorKind,
     check_structure_declaration,
@@ -112,7 +140,7 @@ pub use use_aliases::{
 };
 pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
-pub use use_aliases::{SelectionArgument, SelectionArgumentError};
+pub use use_aliases::{CheckedBitSelection, SelectionArgument, SelectionArgumentError};
 pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
 pub use use_aliases::LoweredSingleBitFunc;
 pub use use_aliases::{
@@ -133,6 +161,9 @@ pub use use_aliases::{
     single_bit_source_outputs_evaluations_agree,
 };
 
+pub use use_aliases::clocked_nor_settling_bound;
+#[cfg(verus_only)]
+pub use use_aliases::{clocked_nor_bound_matches, clocked_nor_depths, clocked_nor_has_cycle, clocked_nor_states_settle, fixed_nor_states};
 pub use use_aliases::{CheckedSingleBitFunc, SingleBitDefinition, SingleBitFuncError, SingleBitOperand, SingleBitRhs, UnsupportedSingleBitFunc};
 pub use use_aliases::{
     DefinitionDriver, FuncDriverError, FuncDriverResult, FuncDrivers, OutputDriver,

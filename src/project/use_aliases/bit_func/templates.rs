@@ -177,6 +177,24 @@ impl<'p, 'a> FunctionTemplates<'p, 'a> {
         }
     }
 
+    /// 頂点に対応するネットリストを取り出し、残りの展開結果を破棄する。
+    pub(super) fn into_circuit_at_vertex(mut self, vertex: usize) -> (circuit: Option<LoweredBitFunc>)
+        ensures circuit == if vertex < self.slots_model().len() {
+            match self.slots_model()[vertex as int] {
+                Some(template) => Some(*template.circuit_model()),
+                None => None,
+            }
+        } else { None },
+    {
+        if vertex >= self.slots.len() { return None; }
+        let mut slot = None;
+        self.slots.set_and_swap(vertex, &mut slot);
+        match slot {
+            Some(template) => Some(template.circuit),
+            None => None,
+        }
+    }
+
     pub(super) closed spec fn next_rank(&self) -> usize { self.next }
 
     pub(super) closed spec fn slots_model(&self) -> Seq<Option<FunctionTemplate<'p, 'a>>> { self.slots@ }
@@ -291,6 +309,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         reveal(UseAliases::function_template_matches);
     }
 
+    /// 完成したテンプレートのポート型を、同じ宣言の署名検査に結び付ける。
+    pub(super) proof fn template_signature_evidence(&self, position: (usize, usize), limit: u64, template: &FunctionTemplate)
+        requires self.template_abi_matches(position, limit, template),
+        ensures self.typed_signature_evidence(position.0, position.1, limit, Ok(Some(template.signature_model()))),
+    {
+    }
+
     /// 署名の各ポート幅が、保存したネットリストの入出力配置に対応することを示す。
     pub(super) proof fn template_circuit_evidence(
         &self, position: (usize, usize), limit: u64, template: &FunctionTemplate,
@@ -383,10 +408,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) fn new_function_templates(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, Ghost(width_limit): Ghost<u64>,
     ) -> (table: FunctionTemplates<'p, 'a>)
-        requires self.function_expansion_evidence(Ok(*plan)),
+        requires self.function_template_plan(*plan),
         ensures self.function_templates_match(plan, width_limit, &table), table.next_rank() == 0,
     {
-        proof { self.template_index_evidence(*plan); }
+        proof { self.function_template_indices(*plan); }
         let count = plan.len();
         let mut slots: Vec<Option<FunctionTemplate<'p, 'a>>> = Vec::new();
         let mut i = 0;
@@ -416,7 +441,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         template: FunctionTemplate<'p, 'a>, Ghost(width_limit): Ghost<u64>,
     )
         requires
-            self.function_expansion_evidence(Ok(*plan)),
+            self.function_template_plan(*plan),
             self.function_templates_match(plan, width_limit, old(table)),
             old(table).next_rank() < plan.order_model().len(),
             plan.position_model(old(table).next_rank() as int) matches Some(position)
@@ -427,7 +452,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             final(table).slots_model() == old(table).slots_model().update(plan.order_model()[old(table).next_rank() as int] as int, Some(template)),
     {
         reveal(UseAliases::function_templates_match);
-        proof { self.template_index_evidence(*plan); }
+        proof { self.function_template_indices(*plan); }
         let next = table.next;
         assert(next < table.slots@.len() <= usize::MAX) by {
             vstd::std_specs::vec::axiom_spec_len(&table.slots);
@@ -484,7 +509,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         bit_limit: usize, gate_limit: usize, template: FunctionTemplate,
     )
         requires
-            self.function_expansion_evidence(Ok(*plan)),
+            self.function_template_plan(*plan),
             self.ordered_template_prefix(plan, before, bit_limit, gate_limit),
             before.next_rank() < plan.order_model().len(),
             after.next_rank() == before.next_rank() + 1,
@@ -497,7 +522,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         ensures self.ordered_template_prefix(plan, after, bit_limit, gate_limit),
     {
         reveal(UseAliases::ordered_template_prefix);
-        self.template_index_evidence(*plan);
+        self.function_template_indices(*plan);
         let order = plan.order_model();
         let at = before.next_rank() as int;
         assert forall|rank: int| 0 <= rank < after.next_rank() implies {
@@ -567,7 +592,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         table: &FunctionTemplates, rank: int,
     ) -> (evidence: (FunctionTemplate<'p, 'a>, FunctionTemplates<'p, 'a>, PreparedExpansionBody<'p, 'a>, ExpandedBody<'p, 'a>))
         requires
-            self.function_expansion_evidence(Ok(*plan)),
+            self.function_template_plan(*plan),
             self.ordered_template_build_result(plan, width_limit, bit_limit, gate_limit, Ok(*table)),
             0 <= rank < plan.order_model().len(),
         ensures ({
@@ -577,6 +602,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& table.slots_model()[vertex as int] == Some(template)
             &&& plan.position_model(rank) matches Some(position)
             &&& body.circuit == *template.circuit_model()
+            &&& self.template_abi_matches(position, width_limit, &template)
+            &&& template.bit_limit_model() == bit_limit
             &&& self.prepared_expansion_body_matches(*plan, position.0, position.1, width_limit, &prepared)
             &&& self.expanded_body_lowering_result(plan, &prior, (position.0, position.1, width_limit),
                 &prepared, bit_limit, gate_limit, Ok(body))
@@ -608,15 +635,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         table: &FunctionTemplates,
     )
         requires
-            self.function_expansion_evidence(Ok(*plan)),
+            self.function_template_plan(*plan),
             self.ordered_template_build_result(plan, width_limit, bit_limit, gate_limit, Ok(*table)),
         ensures
-            plan.source_positions_complete(), plan.source_vertices_match(),
             complete_circuit_table(plan, table),
     {
         reveal(UseAliases::ordered_template_build_result);
         reveal(UseAliases::function_templates_match);
-        self.template_index_evidence(*plan);
+        self.function_template_indices(*plan);
         assert forall|rank: int| 0 <= rank < plan.order_model().len() implies {
             let v = #[trigger] plan.order_model()[rank];
             &&& v < table.slots_model().len()
@@ -641,12 +667,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     pub(super) fn expand_templates_in_order(
         &self, plan: &FunctionExpansionOrder<'p, 'a>, width_limit: u64, bit_limit: usize, gate_limit: usize,
     ) -> (result: Result<FunctionTemplates<'p, 'a>, FunctionTemplateBuildError<'p, 'a>>)
-        requires self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+        requires self.can_resolve(), self.function_template_plan(*plan),
         ensures self.ordered_template_build_result(plan, width_limit, bit_limit, gate_limit, result),
     {
         reveal(UseAliases::ordered_template_build_result);
         proof {
-            self.template_index_evidence(*plan);
+            self.function_template_indices(*plan);
             assert forall|rank: int| 0 <= rank < plan.order_model().len()
                 implies (#[trigger] plan.position_model(rank)).is_some() by {
                 assert(plan.order_model()[rank] < plan.order_model().len());
@@ -663,7 +689,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while templates.next_index() < plan.len()
             invariant
                 self.can_resolve(),
-                self.function_expansion_evidence(Ok(*plan)),
+                self.function_template_plan(*plan),
                 self.function_templates_match(plan, width_limit, &templates),
                 self.ordered_template_prefix(plan, &templates, bit_limit, gate_limit),
                 templates.next_rank() <= plan.order_model().len(),
@@ -678,6 +704,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 unreachable!()
             };
             let caller = (position.0, position.1, width_limit);
+            assert(exists|rank: int| 0 <= rank < plan.order_model().len()
+                && #[trigger] plan.position_model(rank) == Some(position));
             let prepared = match self.prepare_expansion_body(plan, position.0, position.1, width_limit) {
                 Ok(body) => body,
                 Err(error) => return Err(FunctionTemplateBuildError::Prepare(position, error)),
@@ -768,7 +796,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> (selected: Vec<ResolvedTemplateCall<'s, 'p, 'a>>)
         requires
             self.can_resolve(),
-            self.function_expansion_evidence(Ok(*plan)),
+            self.function_template_plan(*plan),
             self.function_templates_match(plan, caller.2, table),
             plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
@@ -781,7 +809,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         while index < groups.len()
             invariant
                 self.can_resolve(),
-                self.function_expansion_evidence(Ok(*plan)),
+                self.function_template_plan(*plan),
                 self.function_templates_match(plan, caller.2, table),
                 plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
                 self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, &prepared),
@@ -802,7 +830,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             proof {
                 self.expansion_callee_template_evidence(*plan, caller, &prepared, index as int);
                 self.expansion_child_scope_evidence(*plan, caller, &prepared, index as int);
-                self.template_rank_from_position(*plan, (caller.0, caller.1), group._order@.1, table.next_rank() as int);
+                self.function_template_rank_at(*plan, (caller.0, caller.1), group._order@.1, table.next_rank() as int);
             }
             let template = self.template_for_expansion_call(plan, table, group, Ghost(caller), Ghost(&prepared), Ghost(index as int));
             let inputs = slice_subrange(arguments, group.arguments.start, group.arguments.end);
@@ -971,7 +999,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         Ghost(index): Ghost<int>,
     ) -> (selected: ResolvedNorRoot<'s, 'p, 'a>)
         requires
-            self.can_resolve(), self.function_expansion_evidence(Ok(*plan)),
+            self.can_resolve(), self.function_template_plan(*plan),
             self.function_templates_match(plan, caller.2, table),
             plan.position_model(table.next_rank() as int) == Some((caller.0, caller.1)),
             self.prepared_expansion_body_matches(*plan, caller.0, caller.1, caller.2, prepared),
@@ -986,7 +1014,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         proof {
             self.nor_root_template_evidence(*plan, caller, prepared, index);
-            self.template_rank_from_position(*plan, (caller.0, caller.1), root._caller_rank@, table.next_rank() as int);
+            self.function_template_rank_at(*plan, (caller.0, caller.1), root._caller_rank@, table.next_rank() as int);
             assert forall|i: int| 0 <= i < root.postorder@.len() implies self.expression_template_ready(
                 plan, caller.2, table.next_rank() as int, arguments@.len(), #[trigger] root.postorder@[i]) by {
                 assert(self.expression_template_ready(plan, caller.2, root._caller_rank@, arguments@.len(),

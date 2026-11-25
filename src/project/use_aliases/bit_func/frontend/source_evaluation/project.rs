@@ -367,6 +367,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
         let rank = invocation.rank;
         let derivation = Self::template_evaluations(plan, table);
+        self.whole_function_template_plan(*plan);
         self.completed_templates_ready(plan, width_limit, bit_limit, gate_limit, table);
         let (template, prior, prepared, body) =
             self.completed_template_expansion_at(plan, width_limit, bit_limit, gate_limit, table, rank);

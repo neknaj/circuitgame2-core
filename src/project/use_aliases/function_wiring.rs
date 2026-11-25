@@ -1,5 +1,10 @@
 //! 組み合わせ回路の右辺で使う信号を、入力または先行する定義に結び付ける。
 
+#[cfg(verus_only)]
+mod definition_ranges;
+#[cfg(verus_only)]
+pub(super) use definition_ranges::strict_definition_slots;
+
 use super::function_drivers::{lookup_local_name, name_location};
 use super::local_signal_index::LocalSignalIndex;
 #[cfg(verus_only)]
@@ -181,7 +186,7 @@ fn bind_signal<'p, 'a>(
     }
 }
 
-spec fn signal_site(
+pub(super) open spec fn signal_site(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, position: int,
     definition: usize, name: NameSite,
 ) -> bool {

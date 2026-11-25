@@ -134,7 +134,7 @@ pub enum CallInputError<'p, 'a> {
     },
 }
 
-spec fn leaf_result(
+pub(in crate::project::use_aliases) closed spec fn leaf_result(
     source: &ProjectSource, form: Form, port: &CallPortType, known: Option<SignalType>, limit: u64,
     result: Result<Option<SignalType>, CallInputReason>,
 ) -> bool {
@@ -160,7 +160,55 @@ spec fn leaf_result(
     }
 }
 
-fn check_leaf<'p, 'a>(
+/// 裸の信号名の照合が成功すると、推論した型が保たれ、要求型と一致する。
+pub(in crate::project::use_aliases) proof fn checked_name_leaf_type(
+    source: &ProjectSource, form: Form, port: &CallPortType, known: Option<SignalType>, limit: u64, result: Option<SignalType>,
+)
+    requires
+        form is Atom, form->Atom_kind is Name,
+        leaf_result(source, form, port, known, limit, Ok(result)),
+    ensures
+        result == known,
+        result matches Some(signal) ==> port_types_equal(signal.ty, port.ty),
+{
+}
+
+/// 照合済みのリテラルについて、元の字句と要求された幅の対応を取り出す。
+pub(in crate::project::use_aliases) proof fn checked_literal_leaf_width(
+    source: &ProjectSource, form: Form, port: &CallPortType, known: Option<SignalType>, limit: u64, result: Option<SignalType>,
+)
+    requires
+        form is Atom, form->Atom_kind is Binary || form->Atom_kind is Hexadecimal || form->Atom_kind is Natural,
+        leaf_result(source, form, port, known, limit, Ok(result)),
+    ensures ({
+        let span = form_span(form);
+        let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+        &&& port.ty is Bits
+        &&& result matches Some(signal) && signal.ty is Bits
+            && circuit_literal_width_matches(bytes, Some(port.ty->Bits_0), limit, Ok(signal.ty->Bits_0))
+    }),
+{
+}
+
+/// 1ビット入力に受理された定数は、元の表記の値が1ビットに収まる。
+pub(in crate::project::use_aliases) proof fn checked_nor_literal_width(
+    source: &ProjectSource, form: Form, port: &CallPortType, known: Option<SignalType>, limit: u64, typed: Option<SignalType>,
+)
+    requires
+        port.ty == ResolvedPortType::Bits(1),
+        form is Atom && (form->Atom_kind is Binary || form->Atom_kind is Hexadecimal),
+        leaf_result(source, form, port, known, limit, Ok(typed)),
+    ensures ({
+        let span = form_span(form);
+        circuit_literal_width_matches(source.text.spec_bytes()[span.start as int..span.end as int], Some(1), limit, Ok(1))
+    }),
+{
+    let span = form_span(form);
+    let bytes = source.text.spec_bytes()[span.start as int..span.end as int];
+    crate::project::literal_width::checked_literal_for_port(bytes, 1, limit, typed->Some_0.ty->Bits_0);
+}
+
+pub(in crate::project::use_aliases) fn check_leaf<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], at: usize,
     port: &CallPortType<'_, 'p, 'a>, known: Option<SignalType<'p, 'a>>, limit: u64,
 ) -> (result: Result<Option<SignalType<'p, 'a>>, CallInputReason<'p, 'a>>)

@@ -81,13 +81,70 @@ pub struct PortWidthError<'p, 'a> {
     pub kind: PortWidthErrorKind,
 }
 
+pub(super) open spec fn natural_width_value(source: &str, form: crate::syntax::Form) -> int {
+    let span = form_span(form);
+    decimal_natural_value(source.spec_bytes()[span.start as int..span.end as int])->Some_0
+}
+
+pub(super) open spec fn width_number_result(value: int, max_width: u64) -> Result<u64, PortWidthErrorKind> {
+    if value > u64::MAX {
+        Err(PortWidthErrorKind::NumericRange)
+    } else if value <= 0 {
+        Err(PortWidthErrorKind::Zero)
+    } else if value > max_width {
+        Err(PortWidthErrorKind::LimitExceeded { width: value as u64, limit: max_width })
+    } else {
+        Ok(value as u64)
+    }
+}
+
+// 明示したポート幅と状態素子の幅は同じ規則で検査する。
+pub(super) fn read_explicit_width<'p, 'a>(
+    source: &'p ProjectSource<'a>, forms: &[crate::syntax::Form], atom: usize, max_width: u64,
+) -> (result: Result<(u64, Range<usize>), PortWidthError<'p, 'a>>)
+    requires
+        atom < forms@.len(), forms@[atom as int] is Atom && forms@[atom as int]->Atom_kind is Natural,
+        form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+    ensures ({
+        let value = natural_width_value(source.text, forms@[atom as int]);
+        let span = form_span(forms@[atom as int]);
+        &&& value >= 0
+        &&& match result {
+            Ok((width, found)) => width_number_result(value, max_width) == Ok(width) && found == span
+                && super::location_in_source(super::LocatedName { source, span: found }),
+            Err(error) => width_number_result(value, max_width) == Err(error.kind)
+                && *error.source == *source && error.span == span,
+        }
+    }),
+{
+    let (word, span) = read_indexed_atom(source.text, forms, atom);
+    proof {
+        natural_atom_has_value(word.spec_bytes());
+        super::declarations::located_name_evidence(super::LocatedName { source, span });
+    }
+    let width = match read_natural_u64(word) {
+        Ok(width) => width,
+        Err(NaturalRangeError::OutOfRange) =>
+            return Err(PortWidthError { source, span, kind: PortWidthErrorKind::NumericRange }),
+        Err(NaturalRangeError::InvalidDigits) => {
+            proof { assert(false); }
+            unreachable!()
+        },
+    };
+    if width == 0 {
+        Err(PortWidthError { source, span, kind: PortWidthErrorKind::Zero })
+    } else if width > max_width {
+        let kind = PortWidthErrorKind::LimitExceeded { width, limit: max_width };
+        Err(PortWidthError { source, span, kind })
+    } else {
+        Ok((width, span))
+    }
+}
+
 spec fn port_spec_value(source: &str, syntax: &CircuitForms, site: PortSite) -> int {
     match site.ty {
         PortTypeSite::ImplicitBit => 1,
-        PortTypeSite::Bits { width } => {
-            let span = form_span(syntax.forms@[width as int]);
-            decimal_natural_value(source.spec_bytes()[span.start as int..span.end as int])->Some_0
-        },
+        PortTypeSite::Bits { width } => natural_width_value(source, syntax.forms@[width as int]),
         PortTypeSite::Named { .. } => 0,
     }
 }
@@ -325,6 +382,10 @@ pub(super) proof fn checked_width_sites(
         0 <= file < project.circuits_model().len(),
         checked_name_sites(project.circuits_model()[file].syntax.forms@, widths.inputs@),
         checked_name_sites(project.circuits_model()[file].syntax.forms@, widths.outputs@),
+        forall|i: int| 0 <= i < widths.inputs@.len() ==>
+            ((#[trigger] widths.inputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
+        forall|i: int| 0 <= i < widths.outputs@.len() ==>
+            ((#[trigger] widths.outputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
 {
     assert(0 <= file < project.circuits_model().len());
     let source = &project.sources_model()[file];
@@ -417,34 +478,24 @@ fn check_ports<'p, 'a>(
         proof { port_site_evidence(source.text, syntax, _entry as int, *ports, input, i as int); }
         let ty = match site.ty {
             PortTypeSite::Named { form } => DeclaredPortType::Named { form },
-            other => {
-                let (value, span) = if let PortTypeSite::Bits { width: atom } = other {
-                    let (word, span) = read_indexed_atom(source.text, syntax.forms.as_slice(), atom);
-                    proof { natural_atom_has_value(word.spec_bytes()); }
-                    match read_natural_u64(word) {
-                        Ok(width) => (width, span),
-                        Err(NaturalRangeError::OutOfRange) => {
-                            let error = PortWidthError { source, span, kind: PortWidthErrorKind::NumericRange };
-                            assert(that_width_failed(source, syntax, site, max_width, error));
-                            return Err(error);
-                        },
-                        Err(NaturalRangeError::InvalidDigits) => {
-                            proof { assert(false); }
-                            unreachable!()
-                        },
-                    }
-                } else {
+            PortTypeSite::Bits { width: atom } => {
+                match read_explicit_width(source, syntax.forms.as_slice(), atom, max_width) {
+                    Ok((width, _)) => DeclaredPortType::Bits(width),
+                    Err(error) => {
+                        assert(that_width_failed(source, syntax, site, max_width, error));
+                        return Err(error);
+                    },
+                }
+            },
+            PortTypeSite::ImplicitBit => {
+                if max_width == 0 {
                     let (_, span) = read_indexed_atom(source.text, syntax.forms.as_slice(), site.name);
-                    (1, span)
-                };
-                if value == 0 || value > max_width {
-                    let kind = if value == 0 { PortWidthErrorKind::Zero }
-                        else { PortWidthErrorKind::LimitExceeded { width: value, limit: max_width } };
+                    let kind = PortWidthErrorKind::LimitExceeded { width: 1, limit: max_width };
                     let error = PortWidthError { source, span, kind };
                     assert(that_width_failed(source, syntax, site, max_width, error));
                     return Err(error);
                 }
-                DeclaredPortType::Bits(value)
+                DeclaredPortType::Bits(1)
             },
         };
         let port = CheckedPort { site, ty };

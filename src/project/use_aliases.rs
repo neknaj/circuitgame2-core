@@ -16,12 +16,43 @@ mod call_arity;
 mod call_dependencies;
 mod definitions;
 mod dependency_order;
+mod settling;
+pub use settling::clocked_nor_settling_bound;
+#[cfg(verus_only)]
+pub use settling::{clocked_nor_bound_matches, clocked_nor_depths, clocked_nor_has_cycle, clocked_nor_states_settle, fixed_nor_states};
 mod function_drivers;
 mod function_atoms;
 mod function_literals;
 mod function_types;
 mod function_wiring;
 mod local_signal_index;
+mod module_calls;
+pub use port_types::{StorageSignature, StorageSignatureError};
+pub use module_calls::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
+    ModuleCallSignature, ModuleCallSignatureError, ModuleCallTarget};
+mod module_drivers;
+pub use module_drivers::{ModuleDriverError, ModuleDrivers};
+mod module_types;
+pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
+    ModuleConcat, ModuleConcatOperand, ModuleConcats, ModuleConcatsError,
+    CheckedModuleCall, ModuleCalls, ModuleCallsError, ModuleInferredCallError, PrimitiveModuleError,
+    ModuleOutputTypes, ModuleOutputTypesError,
+    ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
+pub use module_types::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
+pub use module_types::{VramOutputError, VramTarget};
+pub use module_types::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
+#[cfg(verus_only)]
+pub use module_types::ClockedModuleObservation;
+pub use module_types::{ClockedArgumentWiringError, ClockedModuleOutputs, ClockedModuleOutputsError};
+pub use module_types::{ClockedDriverBitsError, clocked_driver_bits};
+#[cfg(verus_only)]
+pub use module_types::{clocked_driver_bit, clocked_driver_bits_result, clocked_driver_port_model, clocked_driver_selection_matches};
+pub use module_types::{ClockedDefinitionLayoutError, ClockedLinkPlan, ClockedModuleError, ClockedPlanError, ClockedStorageLayout, ClockedStorageLayoutError, ClockedStoragePlacement, ClockedWireDriver, plan_clocked_links};
+#[cfg(verus_only)]
+pub use module_types::{clocked_link_plan_result, clocked_regions_cover, clocked_wire_at, clocked_wire_cycle,
+    clocked_wire_solutions_agree, clocked_wires_match};
+mod module_wiring;
+pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod relative;
 mod selection_arguments;
@@ -50,7 +81,7 @@ pub use function_drivers::{
 };
 pub use function_literals::{FuncLiteralError, FuncLiteralWidths};
 pub use function_atoms::{FuncAtomTypeError, FuncAtomTypes, SignalType};
-pub use selection_arguments::{SelectionArgument, SelectionArgumentError};
+pub use selection_arguments::{CheckedBitSelection, SelectionArgument, SelectionArgumentError};
 pub use function_types::{FuncSignalTypeError, FuncSignalTypes};
 pub use single_bit_func::LoweredSingleBitFunc;
 #[cfg(verus_only)]

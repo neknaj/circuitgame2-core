@@ -166,6 +166,50 @@ pub proof fn build_entry_ranges_evidence(source: &str, index: &BuildCircuitIndex
     reveal(build_entry_matches);
 }
 
+#[verifier::opaque]
+spec fn consecutive_references(rows: Seq<BuildDefinition>, first_ref: int) -> bool {
+    forall|i: int| 0 <= i < rows.len() ==> (#[trigger] rows[i]).references.start
+        == if i == 0 { first_ref } else { rows[i - 1].references.end as int }
+}
+
+proof fn reference_start_in_body(rows: Seq<BuildDefinition>, first_ref: int, i: int)
+    requires consecutive_references(rows, first_ref), 0 <= i < rows.len(),
+    ensures rows[i].references.start == if i == 0 { first_ref } else { rows[i - 1].references.end as int },
+{
+    reveal(consecutive_references);
+}
+
+/// 本体を切り出したときの参照区間を、ファイル全体の定義添字で表す。
+proof fn project_reference_boundaries(
+    definitions: Seq<BuildDefinition>, start: int, stop: int, first_ref: int, last_ref: int,
+)
+    requires
+        0 <= start <= stop <= definitions.len(),
+        ({
+            let rows = definitions.subrange(start, stop);
+            &&& last_ref == if rows.len() == 0 { first_ref } else { rows.last().references.end as int }
+            &&& consecutive_references(rows, first_ref)
+        }),
+    ensures
+        last_ref == if start == stop { first_ref } else { definitions[stop - 1].references.end as int },
+        forall|i: int| start <= i < stop ==> (#[trigger] definitions[i]).references.start
+            == if i == start { first_ref } else { definitions[i - 1].references.end as int },
+{
+    let rows = definitions.subrange(start, stop);
+    if start < stop {
+        assert(rows.last() == definitions[stop - 1]);
+    }
+    assert forall|i: int| start <= i < stop implies (#[trigger] definitions[i]).references.start
+        == if i == start { first_ref } else { definitions[i - 1].references.end as int } by {
+        let local = i - start;
+        reference_start_in_body(rows, first_ref, local);
+        assert(rows[local] == definitions[i]);
+        if i > start {
+            assert(rows[local - 1] == definitions[i - 1]);
+        }
+    };
+}
+
 /// 各定義の参照区間を詰めて並べると、その項目全体の参照区間になることを示す。
 pub proof fn build_definition_reference_boundaries(source: &str, index: &BuildCircuitIndex, entry: int)
     requires build_index_matches(source, *index), 0 <= entry < index.syntax.entries@.len(),
@@ -201,18 +245,11 @@ pub proof fn build_definition_reference_boundaries(source: &str, index: &BuildCi
                 frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int);
         flat_body_reference_boundaries(source, forms, body, end, rows, refs, signals,
             frame.references.start as int, frame.references.end as int, frame.signals.start as int, frame.signals.end as int);
-        if start < stop {
-            assert(rows.last() == index.definitions@[stop - 1]);
-        }
-        assert forall|i: int| start <= i < stop implies {
-            let refs = (#[trigger] index.definitions@[i]).references;
-            refs.start == if i == start { frame.references.start } else { index.definitions@[i - 1].references.end }
-        } by {
-            assert(index.definitions@[i] == rows[i - start]);
-            if i > start {
-                assert(index.definitions@[i - 1] == rows[i - start - 1]);
-            }
+        assert(consecutive_references(rows, frame.references.start as int)) by {
+            reveal(consecutive_references);
         };
+        project_reference_boundaries(index.definitions@, start, stop,
+            frame.references.start as int, frame.references.end as int);
     }
 }
 
@@ -499,6 +536,17 @@ pub open spec fn definition_target_range(forms: Seq<Form>, row: BuildDefinition)
     let start = row.form + 2;
     if forms[start] is List { (start + 1, row.expression.start as int) }
     else { (start, row.expression.start as int) }
+}
+
+/// 厳格索引の定義には、少なくとも一つの左辺名がある。
+pub proof fn definition_target_range_nonempty(forms: Seq<Form>, row: BuildDefinition)
+    requires definition_targets_match(forms, row),
+    ensures ({
+        let (start, end) = definition_target_range(forms, row);
+        0 <= start < end <= forms.len()
+    }),
+{
+    reveal(definition_targets_match);
 }
 
 /// ビルド用索引の一行から、左辺の名前が並ぶ構文木の範囲を返す。

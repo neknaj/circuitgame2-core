@@ -1,0 +1,944 @@
+//! 検査済みの親モジュールから子回路の配置と実引数の配線を求める。
+
+pub(super) mod function_templates;
+mod hierarchy;
+pub(super) use hierarchy::ClockedHierarchy;
+use function_templates::FunctionTemplates;
+#[cfg(verus_only)]
+use function_templates::function_templates_cover;
+#[cfg(verus_only)]
+use vstd::laws_cmp::obeys_cmp;
+#[cfg(verus_only)]
+use crate::project::use_aliases::bit_func::ClockedFunctionTemplate;
+use crate::project::use_aliases::bit_func::{ExpandFunctionsError, RoutineBitLayoutError};
+#[cfg(verus_only)]
+mod semantics;
+
+use super::{ModuleCalls, ModuleCallsError, PrimitiveModuleError, UseAliases, copy_location};
+use super::driver_bits::mapped_driver_bit;
+use super::clocked_plan::{ClockedPlanError, ClockedWireDriver, clocked_reserve, clocked_resolve};
+use super::primitive_nor::{read_literal_bit, unsupported_port};
+#[cfg(verus_only)]
+use super::primitive_nor::{PrimitiveOperand, literal_bit, literal_value_fits};
+use crate::project::use_aliases::function_drivers::name_location;
+use crate::netlist::{ClockedInstanceError, ClockedNor, ClockedNorError, NorGate, NorNetlist, Wire};
+use crate::project::{LocatedName, ModuleBodyPosition, ModuleCallTarget, OutputDriver,
+    circuits::{form_location, read_indexed_atom}};
+use crate::syntax::{AtomKind, Form, read_bit_literal};
+use alloc::vec::Vec;
+use vstd::prelude::*;
+#[cfg(verus_only)]
+use crate::project::{DefinitionPosition, ModuleDrivers, circuits::is_form_location};
+#[cfg(verus_only)]
+use crate::netlist::{builtin_nor_template, instance_gates_at, instance_gates_in_extension, wire_available};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
+
+verus! {
+
+/// 親子のモジュールを tick 実行用に組み立てるときの診断。
+#[derive(Debug)]
+pub enum ClockedModuleError<'p, 'a> {
+    /// 親モジュールの型や呼び出しの違反。
+    Parent(ModuleCallsError<'p, 'a>),
+    /// 子モジュールを展開できなかった。
+    Child {
+        /// 親モジュールの呼び出し箇所。
+        call: LocatedName<'p, 'a>,
+        /// 子モジュールのソースに対応する診断。
+        reason: PrimitiveModuleError<'p, 'a>,
+    },
+    /// 子として使う関数の展開に失敗した。
+    Function {
+        /// モジュールで関数を呼び出した位置。
+        call: LocatedName<'p, 'a>,
+        /// 関数側の展開診断。
+        expansion: ExpandFunctionsError<'p, 'a>,
+    },
+    /// 入出力の型が参照する構造体を配置できない。
+    StructureLayout(crate::project::StructureTypeError<'p, 'a>),
+    /// 入出力のポートに平坦なビット範囲を割り当てられない。
+    PortLayout {
+        /// 入力または出力。
+        direction: crate::project::PortDirection,
+        /// 失敗したポートの型注釈。
+        site: LocatedName<'p, 'a>,
+        /// ポート番号、幅、容量を含む診断。
+        layout: crate::netlist::PortBitLayoutError,
+    },
+    /// 現在の変換対象に含まれない型、回路呼び出し、または式。
+    Unsupported(LocatedName<'p, 'a>),
+    /// ゲート数の上限を超える呼び出し箇所。
+    Capacity(LocatedName<'p, 'a>),
+    /// 遅延のない配線だけで閉じる循環。順番は配線をたどる向き。
+    AliasCycle(Vec<LocatedName<'p, 'a>>),
+    /// モジュール宣言間の再帰を構成する呼び出し。末尾の参照先は先頭の呼び出し元に戻る。
+    Recursion(Vec<LocatedName<'p, 'a>>),
+    /// 配線の組み立て中に見つかった違反と、そのインスタンスの位置。
+    Instance(LocatedName<'p, 'a>, ClockedInstanceError),
+    /// 親回路全体の検査で見つかった配線の違反。
+    Netlist(ClockedNorError),
+}
+
+struct SourceInstance<'s, 'p, 'a> {
+    template: &'s ClockedNor,
+    arguments: Vec<ClockedWireDriver>,
+    _output_start: Ghost<usize>,
+    output_sites: Vec<LocatedName<'p, 'a>>,
+    site: LocatedName<'p, 'a>,
+}
+
+spec fn output_driver_matches(drivers: &ModuleDrivers, at: DefinitionPosition, definition: usize, slot: int, output: int)
+    -> bool
+{
+    &&& 0 <= slot < drivers.definitions@.len() == drivers.origins@.len()
+    &&& drivers.origins@[slot].file == at.file && drivers.origins@[slot].entry == at.entry
+    &&& drivers.definitions@[slot].definition == definition
+    &&& drivers.definitions@[slot].result_index == output
+}
+
+spec fn instance_output_end(instances: Seq<SourceInstance>, end: int) -> int {
+    if end == 0 { 0 }
+    else { instances[end - 1]._output_start@ + instances[end - 1].output_sites@.len() }
+}
+
+spec fn instance_output_slots(instances: Seq<SourceInstance>, limit: int) -> bool {
+    &&& instance_output_end(instances, instances.len() as int) == limit
+    &&& forall|i: int| 0 <= i < instances.len() ==>
+        (#[trigger] instances[i])._output_start@ == instance_output_end(instances, i)
+}
+
+spec fn edge_templates_ready(edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>) -> bool {
+    forall|i: int| 0 <= i < edges.len() ==>
+        ((#[trigger] edges[i]) matches Some(child) ==> child < templates.len() && templates[child as int].is_some())
+}
+
+spec fn instance_counts_match(instances: Seq<SourceInstance>, counts: Seq<usize>) -> bool {
+    &&& instances.len() == counts.len()
+    &&& forall|i: int| 0 <= i < instances.len() ==> {
+        let model = (#[trigger] instances[i]).template.netlist_model();
+        &&& counts[i] == model.gates@.len()
+        &&& instances[i].arguments@.len() == model.input_count
+        &&& instances[i].output_sites@.len() == model.outputs@.len()
+    }
+}
+
+spec fn symbolic_output(driver: OutputDriver) -> ClockedWireDriver {
+    match driver {
+        OutputDriver::Input(port) => ClockedWireDriver::Terminal(Wire::Input(port)),
+        OutputDriver::Definition(slot) => ClockedWireDriver::Alias(slot),
+    }
+}
+
+fn symbolic_driver(driver: OutputDriver) -> (wire: ClockedWireDriver)
+    ensures wire == symbolic_output(driver),
+{
+    match driver {
+        OutputDriver::Input(port) | OutputDriver::Definition(port) => mapped_driver_bit(driver, port),
+    }
+}
+
+pub(super) open spec fn resolved_driver(driver: ClockedWireDriver, wires: Seq<Wire>) -> Option<Wire> {
+    match driver {
+        ClockedWireDriver::Terminal(wire) => Some(wire),
+        ClockedWireDriver::Alias(slot) if slot < wires.len() => Some(wires[slot as int]),
+        _ => None,
+    }
+}
+
+pub(super) fn resolve_driver(driver: ClockedWireDriver, wires: &[Wire]) -> (wire: Option<Wire>)
+    ensures wire == resolved_driver(driver, wires@),
+{
+    match driver {
+        ClockedWireDriver::Terminal(wire) => Some(wire),
+        ClockedWireDriver::Alias(target) => {
+            if target < wires.len() { Some(wires[target]) } else { None }
+        },
+    }
+}
+
+fn builtin_instance() -> (result: Result<ClockedNor, ClockedNorError>)
+    ensures result matches Ok(circuit) ==> builtin_nor_template(&circuit.netlist_model()),
+{
+    let mut gates = Vec::with_capacity(1);
+    gates.push(NorGate { left: Wire::Input(0), right: Wire::Input(1) });
+    let mut outputs = Vec::with_capacity(1);
+    outputs.push(Wire::Gate(0));
+    let netlist = NorNetlist { input_count: 2, gates, outputs };
+    proof {
+        assert(netlist.gates@ =~= seq![NorGate { left: Wire::Input(0), right: Wire::Input(1) }]);
+        assert(netlist.outputs@ =~= seq![Wire::Gate(0)]);
+    }
+    ClockedNor::check(netlist)
+}
+
+impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    spec fn source_argument_matches(&self, checked: &ModuleCalls, index: int, arg: int, driver: ClockedWireDriver) -> bool {
+        exists|operand: PrimitiveOperand| #[trigger] self.primitive_operand_resolves(checked, index, arg, operand)
+            && driver == match operand {
+                PrimitiveOperand::Driver(output) => symbolic_output(output),
+                PrimitiveOperand::Literal(bit) => ClockedWireDriver::Terminal(Wire::Constant(bit)),
+            }
+    }
+
+    spec fn source_arguments_match(&self, checked: &ModuleCalls, index: int, arguments: Seq<ClockedWireDriver>) -> bool {
+        &&& arguments.len() == checked.calls@[index].inputs.ports.arguments@.len()
+        &&& forall|arg: int| 0 <= arg < arguments.len() ==>
+            self.source_argument_matches(checked, index, arg, #[trigger] arguments[arg])
+    }
+
+    spec fn instance_matches_source_call(&self, checked: &ModuleCalls, index: int, instance: SourceInstance,
+        edge: Option<usize>, templates: Seq<Option<ClockedNor>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        builtin: &ClockedNor) -> bool
+    {
+        let call = checked.calls@[index];
+        let at = call.at;
+        let parsed = self.targets.project_model().circuits_model()[at.file as int];
+        let frame = parsed.entry_ranges@[at.entry as int];
+        let definition = frame.definitions.start + at.definition;
+        let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
+        &&& instance.site == (LocatedName { source: call.inputs.ports.signature.source, span: call.inputs.ports.signature.call.span })
+        &&& self.source_arguments_match(checked, index, instance.arguments@)
+        &&& at.reference == 0 && call.inputs.ports.signature.call.form == parsed.definitions@[definition].expression.start
+        &&& forall|out: int| 0 <= out < instance.output_sites@.len() ==> {
+            let site = #[trigger] instance.output_sites@[out];
+            let slot = instance._output_start@ + out;
+            &&& output_driver_matches(drivers, at, definition as usize, slot, out)
+            &&& site.span == drivers.definitions@[slot].name.span
+            &&& *site.source == *call.inputs.ports.signature.source
+        }
+        &&& match call.inputs.ports.signature.target {
+            ModuleCallTarget::Nor => *instance.template == *builtin,
+            ModuleCallTarget::Routine { position, .. } => match edge {
+                Some(child) => child < templates.len() && templates[child as int] == Some(*instance.template),
+                None => {
+                    let key = (position.file, position.entry);
+                    functions.contains_key(key) && functions[key].circuit == *instance.template
+                },
+            },
+            ModuleCallTarget::StateElement { .. } => false,
+        }
+    }
+
+    spec fn instances_match_source_calls(&self, checked: &ModuleCalls, instances: Seq<SourceInstance>,
+        edges: Seq<Option<usize>>, templates: Seq<Option<ClockedNor>>, functions: Map<(usize, usize), ClockedFunctionTemplate>,
+        builtin: &ClockedNor) -> bool
+    {
+        &&& instances.len() <= checked.calls@.len() == edges.len()
+        &&& forall|i: int| 0 <= i < instances.len() ==> #[trigger]
+            self.instance_matches_source_call(checked, i, instances[i], edges[i], templates, functions, builtin)
+    }
+
+    spec fn clocked_checked_assembly_matches(&self, checked: &ModuleCalls, edges: Seq<Option<usize>>,
+        templates: Seq<Option<ClockedNor>>, functions: Map<(usize, usize), ClockedFunctionTemplate>, builtin: &ClockedNor, netlist: NorNetlist) -> bool
+    {
+        let drivers = checked.module.expressions.typed.sources.roots.wiring.drivers;
+        &&& builtin_nor_template(&builtin.netlist_model())
+        &&& super::primitive_nor::one_bit_ports(drivers.signature.inputs@, drivers.signature.inputs@.len() as int)
+        &&& super::primitive_nor::one_bit_ports(drivers.signature.outputs@, drivers.signature.outputs@.len() as int)
+        &&& exists|instances: Seq<SourceInstance>, counts: Seq<usize>|
+            #![trigger self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin),
+                source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)]
+            instances.len() == checked.calls@.len()
+            && self.instances_match_source_calls(checked, instances, edges, templates, functions, builtin)
+            && instance_output_slots(instances, drivers.definitions@.len() as int)
+            && source_assembly_matches(instances, counts, drivers.signature.inputs@.len() as usize, drivers.outputs@, netlist)
+    }
+
+    pub(super) fn source_driver_location(&self, _owner: ModuleBodyPosition, _limit: u64, drivers: &crate::project::ModuleDrivers<'p, 'a>, index: usize)
+        -> (site: LocatedName<'p, 'a>)
+        requires self.can_resolve(), self.module_drivers_result(_owner, _limit, Ok(Some(*drivers))),
+            index < drivers.definitions@.len(),
+        ensures
+            crate::project::location_in_source(site),
+            site.span == drivers.definitions@[index as int].name.span,
+            *site.source == self.targets.project_model().sources_model()[drivers.origins@[index as int].file as int],
+    {
+        proof { self.module_driver_sites(_owner, _limit, *drivers, index as int); }
+        let position = drivers.origins[index];
+        let source = &self.targets.project().sources()[position.file];
+        name_location(source, &drivers.definitions[index].name)
+    }
+
+    fn clocked_source_argument(&self, _owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>,
+        index: usize, arg: usize,
+    ) -> (driver: Result<ClockedWireDriver, LocatedName<'p, 'a>>)
+        requires self.can_resolve(), self.module_calls_result(_owner, limit, Ok(Some(*checked))),
+            index < checked.calls@.len(), arg < checked.calls@[index as int].inputs.ports.arguments@.len(),
+        ensures match driver {
+            Ok(wire) => self.source_argument_matches(checked, index as int, arg as int, wire),
+            Err(site) => {
+                let call = checked.calls@[index as int];
+                let parsed = self.targets.project_model().circuits_model()[call.at.file as int];
+                let form = parsed.syntax.forms@[call.inputs.ports.arguments@[arg as int] as int];
+                &&& is_form_location(call.inputs.ports.signature.source, form, site)
+                &&& !(form is Atom && form->Atom_kind is Name)
+            },
+        },
+    {
+        let argument = self.module_argument(_owner, limit, checked, index, arg);
+        let source = argument.source;
+        let forms = argument.forms;
+        let root = argument.root;
+        if let Some(driver) = argument.driver {
+            assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Driver(driver)));
+            return Ok(symbolic_driver(driver));
+        }
+        if matches!(forms[root], Form::Atom { kind: AtomKind::Natural, .. }) {
+            if let Some(bit) = read_literal_bit(source.text, forms, root) {
+                assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Literal(bit)));
+                return Ok(ClockedWireDriver::Terminal(Wire::Constant(bit)));
+            }
+        } else if matches!(forms[root], Form::Atom { kind: AtomKind::Binary | AtomKind::Hexadecimal, .. }) {
+            let (word, _) = read_indexed_atom(source.text, forms, root);
+            if let Some(literal) = read_bit_literal(word) {
+                if let Ok(_) = crate::project::check_circuit_literal_width(word, Some(1), limit) {
+                    proof { crate::syntax::bit_literal_kind_has_digits(word.spec_bytes()); }
+                    let bit = literal.bit(0);
+                    assert(literal_bit(source.text, forms@[root as int], bit) && literal_value_fits(source.text, forms@[root as int]));
+                    assert(self.primitive_operand_resolves(checked, index as int, arg as int, PrimitiveOperand::Literal(bit)));
+                    return Ok(ClockedWireDriver::Terminal(Wire::Constant(bit)));
+                }
+            }
+        }
+        Err(form_location(source, forms, root))
+    }
+
+    fn prepare_module_instances<'s>(&self, owner: ModuleBodyPosition, limit: u64, _bits: usize, _gates: usize, checked: &ModuleCalls<'p, 'a>,
+        edges: &[Option<usize>], templates: &'s [Option<ClockedNor>], functions: &'s FunctionTemplates<'p, 'a>, builtin: &'s ClockedNor,
+    ) -> (result: Result<(Vec<SourceInstance<'s, 'p, 'a>>, Vec<usize>), ClockedModuleError<'p, 'a>>)
+        requires self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
+            function_templates_cover(checked, edges@, functions@, checked.calls@.len() as int),
+            self.clocked_functions_match(functions@, limit, _bits, _gates),
+        ensures
+            result matches Ok((instances, counts)) ==> instance_counts_match(instances@, counts@)
+                && instances@.len() == checked.calls@.len()
+                && instance_output_slots(instances@, checked.module.expressions.typed.sources.roots.wiring.drivers.definitions@.len() as int)
+                && self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
+            !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
+            !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
+    {
+        let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
+        proof {
+            self.module_calls_type_evidence(owner, limit, checked);
+            self.module_output_types_evidence(owner, limit, checked.module);
+            self.module_selections_evidence(owner, limit, checked.module.expressions);
+        }
+        let project = self.targets.project();
+        let mut counts = Vec::new();
+        let mut instances = Vec::new();
+        let mut index = 0;
+        let mut driver = 0;
+        while index < checked.calls.len()
+            invariant
+                self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+                self.module_drivers_result(owner, limit, Ok(Some(*drivers))),
+                *drivers == checked.module.expressions.typed.sources.roots.wiring.drivers,
+                *project == self.targets.project_model(),
+                edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
+                function_templates_cover(checked, edges@, functions@, checked.calls@.len() as int),
+                self.clocked_functions_match(functions@, limit, _bits, _gates),
+                index <= checked.calls@.len(), index == counts@.len() == instances@.len(),
+                instance_counts_match(instances@, counts@),
+                self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin),
+                instance_output_slots(instances@, driver as int),
+                driver <= drivers.definitions@.len(),
+            decreases checked.calls@.len() - index,
+        {
+            let call = &checked.calls[index];
+            let signature = &call.inputs.ports.signature;
+            let site = LocatedName { source: signature.source, span: signature.call.span.start..signature.call.span.end };
+            proof {
+                self.module_calls_item_evidence(owner, limit, checked, index as int);
+                self.module_call_ports_evidence(call.at, limit, call.inputs.ports);
+                self.module_call_site_evidence(call.at, limit, *signature);
+            }
+            let parsed = &project.circuits()[call.at.file];
+            let frame = &parsed.entry_ranges[call.at.entry];
+            let indexed_definition = frame.definitions.start + call.at.definition;
+            let ghost start = driver;
+            if driver < drivers.definitions.len() {
+                proof { self.module_driver_sites(owner, limit, *drivers, driver as int); }
+                let origin = drivers.origins[driver];
+                if origin.file != call.at.file || origin.entry != call.at.entry
+                    || drivers.definitions[driver].definition != indexed_definition
+                {
+                    return Err(ClockedModuleError::Unsupported(self.source_driver_location(owner, limit, drivers, driver)));
+                }
+            }
+            if call.at.reference != 0 || parsed.definitions[indexed_definition].expression.start != signature.call.form {
+                return Err(ClockedModuleError::Unsupported(site));
+            }
+            let template = match &signature.target {
+                ModuleCallTarget::Nor => builtin,
+                ModuleCallTarget::Routine { position, signature: typed, .. } => {
+                    if unsupported_port(typed.inputs.as_slice()).is_some() || unsupported_port(typed.outputs.as_slice()).is_some() {
+                        return Err(ClockedModuleError::Unsupported(site));
+                    }
+                    if let Some(child) = edges[index] {
+                        templates[child].as_ref().unwrap()
+                    } else {
+                        let key = (position.file, position.entry);
+                        assert(function_templates::function_target(checked, edges@, index as int) == Some(key));
+                        let function = functions.get(&key).unwrap();
+                        proof {
+                            self.clocked_function_ports_evidence(key, limit, _bits, _gates, function, *typed);
+                            self.routine_single_bit_layout_counts(*typed, limit, _bits, &function.inputs, &function.outputs);
+                            assert(function.circuit.netlist_model().input_count == typed.inputs@.len());
+                            assert(function.circuit.netlist_model().outputs@.len() == typed.outputs@.len());
+                        }
+                        &function.circuit
+                    }
+                },
+                ModuleCallTarget::StateElement { .. } => return Err(ClockedModuleError::Unsupported(site)),
+            };
+            let netlist = template.checked_netlist();
+            if call.inputs.ports.arguments.len() != netlist.input_count {
+                return Err(ClockedModuleError::Unsupported(site));
+            }
+            let mut output_sites: Vec<LocatedName<'p, 'a>> = Vec::new();
+            let mut output = 0;
+            while output < netlist.outputs.len()
+                invariant
+                    self.can_resolve(), self.module_drivers_result(owner, limit, Ok(Some(*drivers))),
+                    *signature.source == self.targets.project_model().sources_model()[call.at.file as int],
+                    driver <= drivers.definitions@.len(),
+                    driver as int == start + output,
+                    output == output_sites@.len() <= netlist.outputs@.len(),
+                    forall|j: int| 0 <= j < output ==> {
+                        let site = #[trigger] output_sites@[j];
+                        let slot = start + j;
+                        &&& output_driver_matches(drivers, call.at, indexed_definition, slot, j)
+                        &&& site.span == drivers.definitions@[slot].name.span
+                        &&& *site.source == *signature.source
+                    },
+                decreases netlist.outputs@.len() - output,
+            {
+                if driver >= drivers.definitions.len() { return Err(ClockedModuleError::Unsupported(site)); }
+                proof { self.module_driver_sites(owner, limit, *drivers, driver as int); }
+                let row = &drivers.definitions[driver];
+                let origin = drivers.origins[driver];
+                if origin.file != call.at.file || origin.entry != call.at.entry || row.definition != indexed_definition
+                    || row.result_index != output
+                {
+                    return Err(ClockedModuleError::Unsupported(self.source_driver_location(owner, limit, drivers, driver)));
+                }
+                let site = self.source_driver_location(owner, limit, drivers, driver);
+                assert(output_driver_matches(drivers, call.at, indexed_definition, driver as int, output as int));
+                assert(*site.source == *signature.source);
+                let ghost prior = output_sites@;
+                output_sites.push(site);
+                assert forall|j: int| 0 <= j <= output implies {
+                    let site = #[trigger] output_sites@[j];
+                    let slot = start + j;
+                    &&& output_driver_matches(drivers, call.at, indexed_definition, slot, j)
+                    &&& site.span == drivers.definitions@[slot].name.span
+                    &&& *site.source == *signature.source
+                } by {
+                    if j < output {
+                        assert(output_sites@[j] == prior[j]);
+                    } else {
+                        assert(j == output && start + j == driver);
+                    }
+                };
+                driver += 1;
+                output += 1;
+            }
+            let mut arguments: Vec<ClockedWireDriver> = Vec::new();
+            let mut arg = 0;
+            while arg < call.inputs.ports.arguments.len()
+                invariant self.can_resolve(), self.module_calls_result(owner, limit, Ok(Some(*checked))),
+                    index < checked.calls@.len(), *call == checked.calls@[index as int],
+                    arg == arguments@.len() <= call.inputs.ports.arguments@.len(),
+                    forall|k: int| 0 <= k < arg ==>
+                        self.source_argument_matches(checked, index as int, k, #[trigger] arguments@[k]),
+                decreases call.inputs.ports.arguments@.len() - arg,
+            {
+                let value = match self.clocked_source_argument(owner, limit, checked, index, arg) {
+                    Ok(value) => value,
+                    Err(location) => return Err(ClockedModuleError::Unsupported(location)),
+                };
+                let ghost before = arguments@;
+                arguments.push(value);
+                assert forall|k: int| 0 <= k < arguments@.len() implies
+                    self.source_argument_matches(checked, index as int, k, #[trigger] arguments@[k]) by {
+                    if k < arg { assert(arguments@[k] == before[k]); }
+                };
+                arg += 1;
+            }
+            let ghost before_instances = instances@;
+            let ghost before_counts = counts@;
+            counts.push(netlist.gates.len());
+            instances.push(SourceInstance { template, arguments, _output_start: Ghost(start), output_sites, site });
+            assert forall|j: int| 0 <= j < instances@.len() implies
+                (#[trigger] instances@[j])._output_start@ == instance_output_end(instances@, j) by {
+                if j < index { assert(instances@[j] == before_instances[j]); }
+                if j > 0 { assert(instances@[j - 1] == before_instances[j - 1]); }
+            };
+            assert forall|j: int| 0 <= j < instances@.len() implies {
+                let model = (#[trigger] instances@[j]).template.netlist_model();
+                &&& counts@[j] == model.gates@.len()
+                &&& instances@[j].arguments@.len() == model.input_count
+                &&& instances@[j].output_sites@.len() == model.outputs@.len()
+            } by {
+                if j < index { assert(instances@[j] == before_instances[j] && counts@[j] == before_counts[j]); }
+            };
+            assert(self.instance_matches_source_call(checked, index as int, instances@[index as int],
+                edges@[index as int], templates@, functions@, builtin));
+            assert forall|j: int| 0 <= j < instances@.len() implies #[trigger]
+                self.instance_matches_source_call(checked, j, instances@[j], edges@[j], templates@, functions@, builtin) by {
+                if j < index {
+                    assert(instances@[j] == before_instances[j]);
+                    assert(self.instance_matches_source_call(checked, j, before_instances[j], edges@[j], templates@, functions@, builtin));
+                }
+            };
+            index += 1;
+        }
+        if driver < drivers.definitions.len() {
+            return Err(ClockedModuleError::Unsupported(self.source_driver_location(owner, limit, drivers, driver)));
+        }
+        Ok((instances, counts))
+    }
+
+    fn lower_checked_module(&self, owner: ModuleBodyPosition, width_limit: u64, bit_limit: usize, gate_limit: usize,
+        checked: &ModuleCalls<'p, 'a>, edges: &[Option<usize>], templates: &[Option<ClockedNor>],
+        functions: &mut FunctionTemplates<'p, 'a>, builtin: &ClockedNor,
+    ) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
+        requires self.can_resolve(), self.module_calls_result(owner, width_limit, Ok(Some(*checked))),
+            edges@.len() == checked.calls@.len(), edge_templates_ready(edges@, templates@), obeys_cmp::<(usize, usize)>(),
+            builtin_nor_template(&builtin.netlist_model()),
+            self.clocked_functions_match(old(functions)@, width_limit, bit_limit, gate_limit),
+            self.function_targets_are_declared(checked, edges@),
+        ensures
+            self.clocked_functions_match(final(functions)@, width_limit, bit_limit, gate_limit),
+            !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
+            result matches Err(ClockedModuleError::Function { call, expansion }) ==>
+                self.clocked_module_function_error(width_limit, bit_limit, gate_limit, call, expansion),
+            result matches Err(ClockedModuleError::PortLayout { direction, site, layout }) ==>
+                self.clocked_module_port_error(width_limit, bit_limit, direction, site, layout),
+            result matches Ok(circuit) ==> circuit.netlist_model().gates@.len() <= gate_limit
+                && circuit.netlist_model().input_count <= bit_limit && circuit.netlist_model().outputs@.len() <= bit_limit
+                && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
+                && self.clocked_module_ports_match(owner, width_limit, &circuit.netlist_model())
+                && self.clocked_checked_assembly_matches(checked, edges@, templates@, final(functions)@, builtin, circuit.netlist_model()),
+    {
+        let drivers = &checked.module.expressions.typed.sources.roots.wiring.drivers;
+        proof {
+            self.module_calls_type_evidence(owner, width_limit, checked);
+            self.module_output_types_evidence(owner, width_limit, checked.module);
+            self.module_selections_evidence(owner, width_limit, checked.module.expressions);
+            self.module_output_driver(owner, width_limit, *drivers, 0);
+        }
+        let inputs = drivers.signature.inputs.as_slice();
+        let outputs = drivers.signature.outputs.as_slice();
+        if let Some(i) = unsupported_port(inputs) { return Err(ClockedModuleError::Unsupported(copy_location(&inputs[i].annotation))); }
+        if let Some(i) = unsupported_port(outputs) { return Err(ClockedModuleError::Unsupported(copy_location(&outputs[i].annotation))); }
+        let (input_layout, _output_layout) = match self.prepare_routine_bit_layouts(
+            (owner.file, owner.entry), &drivers.signature, width_limit, bit_limit,
+        ) {
+            Ok(layouts) => layouts,
+            Err(RoutineBitLayoutError::Structure(error)) => return Err(ClockedModuleError::StructureLayout(error)),
+            Err(RoutineBitLayoutError::Port(direction, site, layout)) => {
+                assert(self.clocked_module_port_error(width_limit, bit_limit, direction, site, layout));
+                return Err(ClockedModuleError::PortLayout { direction, site, layout });
+            },
+        };
+        proof {
+            self.routine_single_bit_layout_counts(drivers.signature, width_limit, bit_limit, &input_layout, &_output_layout);
+        }
+        self.prepare_clocked_functions(owner, width_limit, bit_limit, gate_limit, checked, edges, functions)?;
+        let (instances, counts) = self.prepare_module_instances(owner, width_limit, bit_limit, gate_limit, checked, edges, templates, functions, builtin)?;
+        let circuit = assemble_source_instances(&instances, &counts, input_layout.total_bits(), &drivers.outputs, gate_limit)?;
+        assert(instances@.len() == checked.calls@.len());
+        assert(self.clocked_checked_assembly_matches(checked, edges@, templates@, functions@, builtin, circuit.netlist_model())) by {
+            let input_count = checked.module.expressions.typed.sources.roots.wiring.drivers.signature.inputs@.len() as usize;
+            assert(input_count == inputs.len());
+            assert(self.instances_match_source_calls(checked, instances@, edges@, templates@, functions@, builtin));
+            assert(instance_output_slots(instances@, drivers.definitions@.len() as int));
+            assert(source_assembly_matches(instances@, counts@, input_count, drivers.outputs@, circuit.netlist_model()));
+        };
+        Ok(circuit)
+    }
+
+    /// 範囲の割り当てに失敗したポートを、検査済みのモジュールの署名に対応付ける。
+    pub closed spec fn clocked_module_port_error(
+        &self, width: u64, bits: usize, direction: crate::project::PortDirection,
+        site: LocatedName, layout: crate::netlist::PortBitLayoutError,
+    ) -> bool {
+        exists|owner: ModuleBodyPosition, checked: ModuleCalls| {
+            &&& #[trigger] self.module_calls_result(owner, width, Ok(Some(checked)))
+            &&& self.routine_bit_layout_failure(checked.module.expressions.typed.sources.roots.wiring.drivers.signature,
+                width, bits, direction, site, layout)
+        }
+    }
+
+    /// 変換後の入出力ビット数が、検査済みの親モジュールのポート宣言と対応する。
+    pub closed spec fn clocked_module_ports_match(&self, owner: ModuleBodyPosition, limit: u64, netlist: &NorNetlist) -> bool {
+        exists|checked: ModuleCalls| #[trigger] self.module_calls_result(owner, limit, Ok(Some(checked))) && {
+            let signature = checked.module.expressions.typed.sources.roots.wiring.drivers.signature;
+            &&& netlist.input_count == signature.inputs@.len()
+            &&& netlist.outputs@.len() == signature.outputs@.len()
+            &&& super::primitive_nor::one_bit_ports(signature.inputs@, signature.inputs@.len() as int)
+            &&& super::primitive_nor::one_bit_ports(signature.outputs@, signature.outputs@.len() as int)
+        }
+    }
+}
+
+spec fn resolved_arguments(instance: SourceInstance, wires: Seq<Wire>) -> Seq<Wire> {
+    Seq::new(instance.arguments@.len(), |i: int| resolved_driver(instance.arguments@[i], wires)->Some_0)
+}
+
+spec fn arguments_valid(instance: SourceInstance, wires: Seq<Wire>) -> bool {
+    forall|i: int| 0 <= i < instance.arguments@.len() ==>
+        resolved_driver(#[trigger] instance.arguments@[i], wires).is_some()
+}
+
+// 各インスタンスの実引数と、割り当てたゲート区間の配線が対応する。
+spec fn instance_assembled(instance: SourceInstance, base: usize, wires: Seq<Wire>, gates: Seq<NorGate>) -> bool {
+    arguments_valid(instance, wires)
+        && instance_gates_at(instance.template.netlist_model().gates@, resolved_arguments(instance, wires), base, gates)
+}
+
+spec fn assembled_gate_prefix(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>,
+    wires: Seq<Wire>, gates: Seq<NorGate>, end: int) -> bool
+{
+    &&& 0 <= end <= instances.len() == regions.len()
+    &&& forall|i: int| 0 <= i < end ==> #[trigger] instance_assembled(instances[i], regions[i].start, wires, gates)
+}
+
+proof fn extend_assembled_gate_prefix(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>,
+    wires: Seq<Wire>, before: Seq<NorGate>, after: Seq<NorGate>, added: int)
+    requires
+        0 <= added < instances.len(),
+        assembled_gate_prefix(instances, regions, wires, before, added),
+        before.len() <= after.len(), after.take(before.len() as int) == before,
+        instance_assembled(instances[added], regions[added].start, wires, after),
+    ensures assembled_gate_prefix(instances, regions, wires, after, added + 1),
+{
+    assert forall|i: int| 0 <= i < added + 1 implies
+        #[trigger] instance_assembled(instances[i], regions[i].start, wires, after) by {
+        if i < added {
+            let instance = instances[i];
+            assert(instance_assembled(instance, regions[i].start, wires, before));
+            instance_gates_in_extension(instance.template.netlist_model().gates@, resolved_arguments(instance, wires),
+                regions[i].start, before, after);
+        }
+    };
+}
+
+/// 子の出力が参照する入力・状態出力・ゲートを、親の予約区間に対応付ける。
+pub(super) open spec fn relocated_child_driver(
+    output: Wire, arguments: Seq<ClockedWireDriver>, states: core::ops::Range<usize>, gates: core::ops::Range<usize>,
+) -> Option<ClockedWireDriver> {
+    match output {
+        Wire::Input(i) if i < arguments.len() => Some(arguments[i as int]),
+        Wire::Input(i) if states.start + (i - arguments.len()) < states.end =>
+            Some(ClockedWireDriver::Terminal(Wire::Input((states.start + (i - arguments.len())) as usize))),
+        Wire::Input(_) => None,
+        Wire::Constant(bit) => Some(ClockedWireDriver::Terminal(Wire::Constant(bit))),
+        Wire::Gate(i) if gates.start + i < gates.end =>
+            Some(ClockedWireDriver::Terminal(Wire::Gate((gates.start + i) as usize))),
+        Wire::Gate(_) => None,
+    }
+}
+
+/// 子の出力を親の配線に移す。子が外部入力を公開する場合は、親の実引数の駆動元をそのまま返す。
+/// 配置対象の状態出力やゲートが予約区間を外れる場合は `None` を返す。
+pub(super) fn relocate_child_output(
+    output: Wire, arguments: &[ClockedWireDriver], states: &core::ops::Range<usize>, gates: &core::ops::Range<usize>,
+) -> (driver: Option<ClockedWireDriver>)
+    ensures driver == relocated_child_driver(output, arguments@, *states, *gates),
+{
+    match output {
+        Wire::Input(i) if i < arguments.len() => Some(arguments[i]),
+        Wire::Input(i) => {
+            let offset = i - arguments.len();
+            if states.start <= states.end && offset < states.end - states.start {
+                Some(ClockedWireDriver::Terminal(Wire::Input(states.start + offset)))
+            } else {
+                None
+            }
+        },
+        Wire::Constant(bit) => Some(ClockedWireDriver::Terminal(Wire::Constant(bit))),
+        Wire::Gate(i) => {
+            if gates.start <= gates.end && i < gates.end - gates.start {
+                Some(ClockedWireDriver::Terminal(Wire::Gate(gates.start + i)))
+            } else {
+                None
+            }
+        },
+    }
+}
+
+spec fn child_output_driver(output: Wire, arguments: Seq<ClockedWireDriver>, gate_base: usize) -> ClockedWireDriver {
+    match output {
+        Wire::Input(i) => arguments[i as int],
+        Wire::Constant(bit) => ClockedWireDriver::Terminal(Wire::Constant(bit)),
+        Wire::Gate(i) => ClockedWireDriver::Terminal(Wire::Gate((gate_base + i) as usize)),
+    }
+}
+
+// 出力番号は、呼び出し順に各インスタンスの出力ポートを並べて決める。
+spec fn child_driver_block_matches(child: SourceInstance, gate_base: usize, drivers: Seq<ClockedWireDriver>) -> bool {
+    let base = child._output_start@;
+    let outputs = child.template.netlist_model().outputs@;
+    &&& base + outputs.len() <= drivers.len()
+    &&& forall|j: int| 0 <= j < outputs.len() ==> (#[trigger] drivers[base + j])
+        == child_output_driver(outputs[j], child.arguments@, gate_base)
+}
+
+spec fn child_drivers_match(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>,
+    end: int, drivers: Seq<ClockedWireDriver>) -> bool
+{
+    &&& 0 <= end <= instances.len() == regions.len()
+    &&& drivers.len() == instance_output_end(instances, end)
+    &&& forall|i: int| 0 <= i < end ==>
+        #[trigger] child_driver_block_matches(instances[i], regions[i].start, drivers)
+}
+
+proof fn extend_child_drivers(instances: Seq<SourceInstance>, regions: Seq<core::ops::Range<usize>>, i: int,
+    before: Seq<ClockedWireDriver>, after: Seq<ClockedWireDriver>)
+    requires
+        0 <= i < instances.len(),
+        child_drivers_match(instances, regions, i, before),
+        before.len() <= after.len(), after.take(before.len() as int) == before,
+        after.len() == instance_output_end(instances, i + 1),
+        child_driver_block_matches(instances[i], regions[i].start, after),
+    ensures child_drivers_match(instances, regions, i + 1, after),
+{
+    assert forall|j: int| 0 <= j <= i implies
+        #[trigger] child_driver_block_matches(instances[j], regions[j].start, after) by {
+        if j < i {
+            let child = instances[j];
+            let start = child._output_start@;
+            let gate_base = regions[j].start;
+            let outputs = child.template.netlist_model().outputs@;
+            assert(child_driver_block_matches(child, gate_base, before));
+            assert forall|out: int| 0 <= out < outputs.len() implies (#[trigger] after[start + out])
+                == child_output_driver(outputs[out], child.arguments@, gate_base) by {
+                assert(after[start + out] == before[start + out]);
+            };
+        }
+    };
+}
+
+spec fn assembled_outputs(drivers: Seq<OutputDriver>, wires: Seq<Wire>, outputs: Seq<Wire>) -> bool {
+    forall|i: int| 0 <= i < outputs.len() ==> Some(#[trigger] outputs[i]) == resolved_driver(symbolic_output(drivers[i]), wires)
+}
+
+spec fn source_assembly_matches(instances: Seq<SourceInstance>, counts: Seq<usize>, inputs: usize,
+    output_drivers: Seq<OutputDriver>, netlist: NorNetlist) -> bool
+{
+    &&& instance_counts_match(instances, counts)
+    &&& instance_output_slots(instances, instance_output_end(instances, instances.len() as int))
+    &&& netlist.input_count == inputs && netlist.outputs@.len() == output_drivers.len()
+    &&& netlist.gates@.len() <= usize::MAX
+    &&& exists|regions: Seq<core::ops::Range<usize>>, drivers: Seq<ClockedWireDriver>, wires: Seq<Wire>|
+        #![trigger child_drivers_match(instances, regions, instances.len() as int, drivers),
+            super::clocked_plan::clocked_wires_match(drivers, wires)]
+        super::clocked_plan::clocked_regions_cover(counts, regions, netlist.gates@.len() as usize)
+        && child_drivers_match(instances, regions, instances.len() as int, drivers)
+        && super::clocked_plan::clocked_wires_match(drivers, wires)
+        && wires.len() == drivers.len()
+        && (forall|i: int| 0 <= i < wires.len() ==>
+            wire_available(#[trigger] wires[i], inputs as nat, netlist.gates@.len()))
+        && assembled_gate_prefix(instances, regions, wires, netlist.gates@, instances.len() as int)
+        && assembled_outputs(output_drivers, wires, netlist.outputs@)
+}
+
+fn resolve_instance_arguments<'p, 'a>(instance: &SourceInstance<'_, 'p, 'a>, wires: &[Wire])
+    -> (result: Result<Vec<Wire>, ClockedModuleError<'p, 'a>>)
+    ensures
+        result matches Ok(arguments) ==> arguments@ == resolved_arguments(*instance, wires@) && arguments_valid(*instance, wires@),
+        !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
+        !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
+{
+    let mut arguments: Vec<Wire> = Vec::new();
+    let mut j = 0;
+    while j < instance.arguments.len()
+        invariant j == arguments@.len() <= instance.arguments@.len(),
+            forall|k: int| 0 <= k < j ==>
+                Some(#[trigger] arguments@[k]) == resolved_driver(instance.arguments@[k], wires@),
+        decreases instance.arguments@.len() - j,
+    {
+        let Some(wire) = resolve_driver(instance.arguments[j], wires) else {
+            return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
+        };
+        let ghost before = arguments@;
+        arguments.push(wire);
+        assert forall|k: int| 0 <= k < arguments@.len() implies
+            Some(#[trigger] arguments@[k]) == resolved_driver(instance.arguments@[k], wires@) by {
+            if k < j { assert(arguments@[k] == before[k]); }
+        };
+        j += 1;
+    }
+    assert forall|k: int| 0 <= k < instance.arguments@.len() implies
+        resolved_driver(#[trigger] instance.arguments@[k], wires@).is_some() by {
+        assert(Some(arguments@[k]) == resolved_driver(instance.arguments@[k], wires@));
+    };
+    assert(arguments@ =~= resolved_arguments(*instance, wires@));
+    Ok(arguments)
+}
+
+fn assemble_child_drivers<'p, 'a>(
+    instances: &[SourceInstance<'_, 'p, 'a>], _counts: &[usize], regions: &[core::ops::Range<usize>], _total: usize,
+) -> (result: Result<(Vec<ClockedWireDriver>, Vec<LocatedName<'p, 'a>>), ClockedModuleError<'p, 'a>>)
+    requires
+        instance_counts_match(instances@, _counts@),
+        instance_output_slots(instances@, instance_output_end(instances@, instances@.len() as int)),
+        super::clocked_plan::clocked_regions_cover(_counts@, regions@, _total),
+    ensures
+        result matches Ok((drivers, sites)) ==> sites@.len() == drivers@.len()
+            && child_drivers_match(instances@, regions@, instances@.len() as int, drivers@),
+        !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
+        !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
+{
+    let mut drivers: Vec<ClockedWireDriver> = Vec::new();
+    let mut sites = Vec::new();
+    let mut i = 0;
+    while i < instances.len()
+        invariant i <= instances@.len(), regions@.len() == instances@.len(), drivers@.len() == sites@.len(),
+            instance_counts_match(instances@, _counts@),
+            super::clocked_plan::clocked_regions_cover(_counts@, regions@, _total),
+            instance_output_slots(instances@, instance_output_end(instances@, instances@.len() as int)),
+            child_drivers_match(instances@, regions@, i as int, drivers@),
+        decreases instances@.len() - i,
+    {
+        let instance = &instances[i];
+        let netlist = instance.template.checked_netlist();
+        let region = &regions[i];
+        let ghost prefix = drivers@;
+        let ghost base = prefix.len();
+        assert(base == instance._output_start@);
+        let ghost outputs = netlist.outputs@;
+        let mut j = 0;
+        while j < netlist.outputs.len()
+            invariant j <= netlist.outputs@.len() == instance.output_sites@.len(), drivers@.len() == sites@.len(),
+                region.start <= region.end <= _total, crate::netlist::clocked_wiring_valid(netlist),
+                netlist.outputs@ == outputs, drivers@.len() == base + j, drivers@.take(base as int) == prefix,
+                forall|k: int| 0 <= k < j ==> (#[trigger] drivers@[base + k])
+                    == child_output_driver(outputs[k], instance.arguments@, region.start),
+            decreases netlist.outputs@.len() - j,
+        {
+            // 状態を持たない子では、増補入力に配置する状態出力がない。
+            let no_states = core::ops::Range { start: 0, end: 0 };
+            let Some(driver) = relocate_child_output(netlist.outputs[j], &instance.arguments, &no_states, region) else {
+                return Err(ClockedModuleError::Unsupported(copy_location(&instance.site)));
+            };
+            assert(driver == child_output_driver(outputs[j as int], instance.arguments@, region.start));
+            let ghost before = drivers@;
+            drivers.push(driver);
+            assert(drivers@.take(base as int) =~= prefix);
+            assert forall|k: int| 0 <= k <= j implies (#[trigger] drivers@[base + k])
+                == child_output_driver(outputs[k], instance.arguments@, region.start) by {
+                if k < j { assert(drivers@[base + k] == before[base + k]); }
+            };
+            sites.push(copy_location(&instance.output_sites[j]));
+            j += 1;
+        }
+        proof {
+            assert(child_driver_block_matches(*instance, region.start, drivers@));
+            extend_child_drivers(instances@, regions@, i as int, prefix, drivers@);
+        }
+        i += 1;
+    }
+    Ok((drivers, sites))
+}
+
+fn assemble_source_instances<'p, 'a>(instances: &[SourceInstance<'_, 'p, 'a>], counts: &[usize], inputs: usize,
+    output_drivers: &[OutputDriver], limit: usize,
+) -> (result: Result<ClockedNor, ClockedModuleError<'p, 'a>>)
+    requires instance_counts_match(instances@, counts@),
+        instance_output_slots(instances@, instance_output_end(instances@, instances@.len() as int)),
+    ensures
+        result matches Ok(circuit) ==> circuit.netlist_model().input_count == inputs
+            && circuit.netlist_model().outputs@.len() == output_drivers@.len()
+            && circuit.netlist_model().gates@.len() <= limit
+            && crate::netlist::clocked_wiring_valid(&circuit.netlist_model())
+            && source_assembly_matches(instances@, counts@, inputs, output_drivers@, circuit.netlist_model()),
+        !(result matches Err(ClockedModuleError::Parent(_) | ClockedModuleError::Recursion(_))),
+        !(result matches Err(ClockedModuleError::Function { .. })) && !(result matches Err(ClockedModuleError::PortLayout { .. })),
+{
+    let (regions, total) = match clocked_reserve(counts, limit) {
+        Ok(plan) => plan,
+        Err(i) => return Err(ClockedModuleError::Capacity(copy_location(&instances[i].site))),
+    };
+    let (drivers, sites) = assemble_child_drivers(instances, counts, &regions, total)?;
+    let wires = match clocked_resolve(drivers.as_slice(), inputs, total) {
+        Ok(wires) => wires,
+        Err(ClockedPlanError::AliasCycle(cycle)) => {
+            let mut path = Vec::new();
+            let mut i = 0;
+            while i < cycle.len()
+                invariant i <= cycle@.len(), sites@.len() == drivers@.len(),
+                    forall|j: int| 0 <= j < cycle@.len() ==> #[trigger] cycle@[j] < drivers@.len(),
+                decreases cycle@.len() - i,
+            {
+                let slot = cycle[i];
+                path.push(copy_location(&sites[slot]));
+                i += 1;
+            }
+            return Err(ClockedModuleError::AliasCycle(path));
+        },
+        Err(ClockedPlanError::Wire(index)) => {
+            return Err(ClockedModuleError::Unsupported(copy_location(&sites[index])));
+        },
+        Err(ClockedPlanError::GateCapacity(_)) => {
+            proof { assert(false); }
+            unreachable!()
+        },
+    };
+    let mut gates = Vec::new();
+    let mut i = 0;
+    while i < instances.len()
+        invariant i <= instances@.len(), gates@.len() <= total,
+            instance_counts_match(instances@, counts@),
+            super::clocked_plan::clocked_regions_cover(counts@, regions@, total),
+            gates@.len() == if i == 0 { 0usize } else { regions@[i - 1].end },
+            assembled_gate_prefix(instances@, regions@, wires@, gates@, i as int),
+        decreases instances@.len() - i,
+    {
+        let instance = &instances[i];
+        let arguments = resolve_instance_arguments(instance, &wires)?;
+        let ghost before = gates@;
+        assert(before.len() == regions@[i as int].start);
+        if let Err(error) = instance.template.append_instance(&mut gates, &arguments, inputs, total) {
+            return Err(ClockedModuleError::Instance(copy_location(&instance.site), error));
+        }
+        proof { extend_assembled_gate_prefix(instances@, regions@, wires@, before, gates@, i as int); }
+        i += 1;
+    }
+    let mut outputs: Vec<Wire> = Vec::new();
+    assert(gates@.len() == total);
+    let mut i = 0;
+    while i < output_drivers.len()
+        invariant i == outputs@.len() <= output_drivers@.len(), assembled_outputs(output_drivers@, wires@, outputs@),
+        decreases output_drivers@.len() - i,
+    {
+        let Some(wire) = resolve_driver(symbolic_driver(output_drivers[i]), &wires) else {
+            return Err(ClockedModuleError::Netlist(ClockedNorError::Output { output: i }));
+        };
+        let ghost before = outputs@;
+        outputs.push(wire);
+        assert forall|k: int| 0 <= k < outputs@.len() implies
+            Some(#[trigger] outputs@[k]) == resolved_driver(symbolic_output(output_drivers@[k]), wires@) by {
+            if k < i { assert(outputs@[k] == before[k]); }
+        };
+        i += 1;
+    }
+    let netlist = NorNetlist { input_count: inputs, gates, outputs };
+    proof {
+        assert(source_assembly_matches(instances@, counts@, inputs, output_drivers@, netlist)) by {
+            assert(super::clocked_plan::clocked_regions_cover(counts@, regions@, netlist.gates@.len() as usize));
+            assert(child_drivers_match(instances@, regions@, instances@.len() as int, drivers@));
+            assert(super::clocked_plan::clocked_wires_match(drivers@, wires@));
+        };
+    }
+    match ClockedNor::check(netlist) {
+        Ok(circuit) => Ok(circuit),
+        Err(error) => Err(ClockedModuleError::Netlist(error)),
+    }
+}
+
+} // verus!

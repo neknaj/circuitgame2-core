@@ -6,25 +6,30 @@ mod outputs;
 mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
+pub(super) use inputs::check_leaf;
+#[cfg(verus_only)]
+pub(super) use inputs::{checked_literal_leaf_width, checked_name_leaf_type, checked_nor_literal_width, leaf_result};
 pub(super) use inputs::CallArgumentProjections;
 pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument, RetainedCallTarget};
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};
 pub(super) use outputs::RootFunctionCall;
 pub use typed::{CallPortType, FuncCallSignature, FuncCallSignatureError, TypedFuncCall};
+pub(super) use typed::signature_port;
+#[cfg(verus_only)]
+pub(super) use typed::signature_port_matches;
 
 use super::{DefinitionBinding, DefinitionReferenceError, ResolvedDefinitionReference, UseAliases};
 #[cfg(verus_only)]
 use super::{DefinitionPosition, FunctionCallSite};
 #[cfg(verus_only)]
 use crate::project::circuits::{parsed_index_evidence, parsed_circuit_matches};
-use crate::project::declarations::key_of;
 #[cfg(verus_only)]
-use crate::project::declarations::{declaration_location_evidence, located_name_evidence};
+use crate::project::declarations::located_name_evidence;
 use crate::project::{LocatedName, ProjectSource};
 #[cfg(verus_only)]
 use crate::project::{CircuitProject, location_in_source};
 use crate::syntax::circuit::{
-    CallShape, Head, RoutineArity, callee_reference_at_form, indexed_call_shape, named_build_entry, routine_arity,
+    CallShape, Head, RoutineArity, callee_reference_at_form, indexed_call_shape, routine_arity,
 };
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
@@ -210,22 +215,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             DefinitionBinding::Declaration { source, form } => (source, form),
             DefinitionBinding::Nor => return None,
         };
-        let project = self.targets.project();
         proof {
             self.resolved_func_declaration(caller.0, caller.1, caller.2, caller.3, *resolved, source, form);
-            self.targets.declarations_cover_project();
         }
-        let table = self.targets.exports().declarations();
-        let key = key_of(form);
-        let (file, name) = table.selected_declaration_position(key,
-            Ghost(*project), Ghost(*source), Ghost(*form));
-        proof { declaration_location_evidence(table, key, source, form); }
-        let circuit = &project.circuits()[file];
-        proof {
-            assert(parsed_circuit_matches(*source, *circuit));
-            parsed_index_evidence(*source, *circuit);
-        }
-        Some((file, named_build_entry(source.text, circuit, name)))
+        Some(self.indexed_declaration_position(source, form))
     }
 
     /// 結果が、同じ右辺の呼び出しと名前解決で選んだ署名に対応することを表す。

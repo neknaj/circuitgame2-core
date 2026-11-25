@@ -895,6 +895,50 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 未処理の先頭だけを調べ、次の定義を走査できることを示す。
+    #[verifier::spinoff_prover]
+    proof fn advance_root_cursor(
+        &self, file: usize, entry: usize, calls: Seq<RootFunctionCall>,
+        cursor: usize, absolute: usize, selected: bool,
+    )
+        requires
+            self.root_call_definitions_in_order(file, entry, calls),
+            cursor <= calls.len(),
+            cursor < calls.len() ==> calls[cursor as int].definition >= absolute,
+            selected == (cursor < calls.len() && calls[cursor as int].definition == absolute),
+        ensures ({
+            let next = cursor + if selected { 1int } else { 0int };
+            &&& next <= calls.len()
+            &&& next < calls.len() ==> calls[next].definition > absolute
+        }),
+    {
+        if selected && cursor + 1 < calls.len() {
+            assert(calls[cursor as int].definition < calls[cursor + 1].definition);
+        }
+    }
+
+    /// 呼び出し範囲を一つ加えた結果を、参照ごとの引数境界に対応付ける。
+    #[verifier::spinoff_prover]
+    proof fn appended_root_range_matches(
+        &self, caller: (usize, usize, u64), calls: Seq<RootFunctionCall>, earlier: Seq<core::ops::Range<usize>>,
+        ranges: Seq<core::ops::Range<usize>>, span: core::ops::Range<usize>, ends: Seq<usize>,
+    )
+        requires
+            earlier.len() < calls.len(), ranges == earlier.push(span),
+            forall|i: int| 0 <= i < earlier.len() ==> self.root_range_matches_reference(caller, calls[i], #[trigger] earlier[i], ends),
+            self.root_range_matches_reference(caller, calls[earlier.len() as int], span, ends),
+        ensures forall|i: int| 0 <= i < ranges.len() ==> self.root_range_matches_reference(caller, calls[i], #[trigger] ranges[i], ends),
+    {
+        assert forall|i: int| 0 <= i < ranges.len() implies
+            self.root_range_matches_reference(caller, calls[i], #[trigger] ranges[i], ends) by {
+            if i < earlier.len() {
+                assert(ranges[i] == earlier[i]);
+            } else {
+                assert(i == earlier.len() && ranges[i] == span);
+            }
+        };
+    }
+
     #[verifier::spinoff_prover]
     #[verifier::rlimit(96)]
     pub(in crate::project::use_aliases) fn check_all_inputs_with_types(
@@ -996,7 +1040,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 forall|i: int| 0 <= i < cursor ==> self.root_range_matches_reference(
                     (file, entry, max_width), calls@[i], #[trigger] projections.ranges@[i],
                     projections.reference_argument_ends@),
-                forall|i: int| cursor <= i < calls@.len() ==> (#[trigger] calls@[i]).definition >= range.start + definition,
+                cursor < calls@.len() ==> calls@[cursor as int].definition >= range.start + definition,
                 self.input_definitions_before(file, entry, definition as int, max_width, types@, wiring),
                 signatures.matches(self, max_width),
             decreases stop - definition,
@@ -1059,24 +1103,14 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     };
                 }
                 projections.ranges.push(span);
-                assert forall|i: int| 0 <= i < projections.ranges@.len() implies self.root_range_matches_reference(
-                    caller, calls@[i], #[trigger] projections.ranges@[i], projections.reference_argument_ends@) by {
-                    if i < previous_ranges.len() {
-                        assert(projections.ranges@[i] == previous_ranges[i]);
-                    } else {
-                        assert(i == cursor && projections.ranges@[i] == span);
-                    }
-                };
+                proof {
+                    self.appended_root_range_matches(caller, calls@, previous_ranges, projections.ranges@,
+                        span, projections.reference_argument_ends@);
+                }
                 cursor += 1;
             }
             proof {
-                assert forall|i: int| cursor <= i < calls@.len()
-                    implies (#[trigger] calls@[i]).definition >= range.start + definition + 1 by {
-                    assert(calls@[previous_cursor as int].definition >= range.start + definition);
-                    if i > previous_cursor {
-                        assert(calls@[i].definition > calls@[previous_cursor as int].definition);
-                    }
-                };
+                self.advance_root_cursor(file, entry, calls@, previous_cursor, absolute, retain_root);
                 self.extend_input_definitions(file, entry, definition, max_width, types@, wiring);
             }
             if retain {

@@ -1,8 +1,11 @@
 //! 通常呼び出しの解決先と、依存辺の根拠になる参照名の位置を求める。
 
 mod graph;
+mod roots;
 mod vertices;
 pub use graph::{FunctionCallSite, FunctionExpansionError, FunctionExpansionOrder};
+#[cfg(verus_only)]
+pub(super) use vertices::function_position;
 
 use super::{ResolvedDefinitionReference, UseAliases};
 #[cfg(verus_only)]

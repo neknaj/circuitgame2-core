@@ -27,6 +27,7 @@ mod index;
 mod names;
 mod ports;
 mod selection_shapes;
+mod storage_sites;
 mod structure;
 mod structure_expressions;
 #[cfg(verus_only)]
@@ -36,6 +37,9 @@ mod test_values;
 #[cfg(verus_only)]
 pub use body::routine_expansion_evidence;
 use body::validate_routine_arguments;
+pub use storage_sites::{StorageSites, storage_sites};
+#[cfg(verus_only)]
+pub use storage_sites::{storage_site_evidence, storage_sites_match};
 pub use body::{DefinitionReferences, first_routine_expansion};
 pub use concat_arguments::concat_argument_range;
 #[cfg(verus_only)]
@@ -58,8 +62,9 @@ pub use call_shapes::{
 };
 #[cfg(verus_only)]
 pub use call_shapes::{
-    call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index, indexed_call_shapes_agree,
-    call_argument_containing_list, call_argument_position_bounds, call_argument_positions, call_argument_positions_agree,
+    call_argument_sequence, call_arguments_match, call_shape_matches, definition_call_index, indexed_call_region, indexed_call_shapes_agree,
+    call_argument_containing_list, call_argument_position_bounds, call_argument_position_is_direct,
+    call_argument_positions, call_argument_positions_agree,
     call_argument_positions_from_steps, call_form_bounds,
     direct_call_argument, direct_call_argument_bounds, exhausted_call_arguments, first_call_argument_evidence, following_call_argument,
     indexed_call_arguments, root_call_shape_location, routine_arity_matches, routine_arity_port_counts,
@@ -74,7 +79,7 @@ pub use build::{
     build_entry_ranges_evidence, build_index_matches,
     build_signal_cursor_evidence, build_signal_evidence, build_signal_owner_unique,
     definition_expression_region, definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
-    definition_targets_match,
+    definition_target_range_nonempty, definition_targets_match,
 };
 pub use definitions::{CircuitDefinitionIndex, index_definition_references};
 #[cfg(verus_only)]
@@ -127,6 +132,8 @@ pub use selection_shapes::{
     BitSelectionShape, BitSelectionTail, FieldSelectionShape, bit_selection_chain, bit_selection_shape,
     field_selection_shape,
 };
+#[cfg(verus_only)]
+pub use call_shapes::indexed_call_selection_leaf;
 #[cfg(verus_only)]
 pub use selection_shapes::{
     bit_selection_path, bit_selection_paths_agree, bit_selection_step_root, build_selection_chain_signal,

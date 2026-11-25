@@ -2,9 +2,79 @@
 //!
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
+mod clocked;
+mod clocked_storage;
+mod clocked_vm;
+pub(crate) mod instances;
 mod port_layout;
+mod state_elements;
+#[cfg(verus_only)]
+mod source_trace;
+#[cfg(verus_only)]
+mod source_vm_trace;
+#[cfg(verus_only)]
+pub(crate) use source_vm_trace::{
+    source_vm_layout_for_orders, source_vm_layout_from_pairs, source_vm_layout_port_evidence, source_vm_lift_stateless,
+    source_vm_paired_rows_agree,
+    source_vm_row_pair, source_vm_stateless_model, source_vm_storage_pair,
+    source_vm_terminal_pair,
+};
+#[cfg(verus_only)]
+pub use source_vm_trace::{
+    SourceDeviceId, SourceDeviceState, SourceStorage, SourceVmCircuit, SourceVmFrame, SourceVmNor,
+    SourceVmLayout, SourceVmState, SourceVmWire, source_vm_layout_matches, source_vm_mapped_wire_value,
+    source_vm_next_frame, source_vm_outputs_match, source_vm_project_observation, source_vm_project_reset,
+    source_vm_project_step, source_vm_project_trace, source_vm_read_wire,
+    source_vm_reset_frame, source_vm_reset_matches, source_vm_state_projection,
+    source_vm_run_trace, source_vm_state_matches, source_vm_step_matches, source_vm_trace,
+    source_vm_trace_outputs_agree, source_vm_traces_agree, source_vm_wire_matches, source_vm_wiring_valid,
+};
 
+pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
+pub use clocked::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatefulInstanceError};
+#[cfg(verus_only)]
+pub use clocked::{clocked_mapped_storage_reads_match, clocked_stateful_arguments, clocked_stateful_instance_reads_match, clocked_stateful_instance_result,
+    clocked_storage_pins_valid};
+pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInputs};
+#[cfg(verus_only)]
+pub use clocked_storage::{clocked_storage_memory_width, clocked_storage_pin_values, clocked_storage_result, clocked_storage_steps_agree,
+    clocked_storage_value_transition};
+pub use clocked_vm::{ClockedVm, ClockedVmError};
+#[cfg(verus_only)]
+pub use clocked_vm::{clocked_storage_output_width, clocked_storage_width_concat, clocked_storage_width_push, clocked_storage_widths_agree,
+    clocked_vm_result, clocked_vm_trace, clocked_vm_trace_from_reset, clocked_vm_trace_push_tick};
+pub(crate) use clocked::wire_within;
+#[cfg(verus_only)]
+pub(crate) use clocked::{clocked_wiring_endpoints, clocked_wiring_from_endpoints};
+#[cfg(verus_only)]
+pub use clocked::{
+    clocked_gate_updates, clocked_wiring_error, clocked_wiring_valid, nor_trace, nor_trace_from_reset, nor_trace_push_tick,
+    nor_traces_agree, reset_matches, tick_matches,
+};
+#[cfg(verus_only)]
+pub use clocked::{clocked_instance_gate_updates_match, clocked_instance_inputs, clocked_instance_outputs_match,
+    clocked_instance_result, clocked_instance_steps_match};
+#[cfg(verus_only)]
+pub use instances::{instance_gates_at, instance_gates_in_extension, instance_outputs_match, instance_wire};
 pub use port_layout::{PortBitLayout, PortBitLayoutError};
+pub use state_elements::{LatchState, RamState, StateAllocationError, StateInputError};
+#[cfg(verus_only)]
+pub use state_elements::{latch_next, ram_address_value, ram_next_memory, ram_read_word, ram_resident_bits, state_bits_fit};
+#[cfg(verus_only)]
+pub use source_trace::{
+    SourceGateId, SourceNor, SourceTickCircuit, SourceTickFrame, SourceWire, source_clocked_layout, source_clocked_layout_valid,
+    source_reset_matches, source_step_matches, source_tick_trace, source_tick_traces_agree, source_trace_from_flat,
+    source_trace_outputs_preserved, source_wiring_valid,
+};
+#[cfg(verus_only)]
+pub(crate) use source_trace::{
+    builtin_nor_source, builtin_nor_source_layout, builtin_nor_template,
+    source_gate_under, source_instance_gate_agrees, source_instance_order, source_instance_order_at,
+    source_instance_outputs_agree, source_wire_in_parent, source_gate_under_distinct, source_gate_belongs_to_call,
+    source_call_gate_order, source_call_order_appended, source_instance_order_appended,
+    source_clocked_layout_from_pairs, source_gate_positions_distinct, source_gate_wiring_pair, source_output_pair_at, source_output_pairs,
+    source_output_wiring_pair, source_trace_gate_index, source_trace_layout_counts, source_wire_pair,
+};
 #[cfg(verus_only)]
 pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_layout_size, port_widths_fit, preceding_port_bits};
 #[cfg(verus_only)]
@@ -68,16 +138,16 @@ pub enum NorEvaluationError {
     },
 }
 
-/// 1ビット配線で構成する組み合わせネットリスト。
+/// 1ビット配線で構成する NOR ネットリスト。
 ///
-/// ゲートの入力から参照できるのは入力ビット、定数、配列内の先行ゲートである。
-/// 出力ビットはどのゲートも参照できる。入出力はポートの宣言順に並び、各ポート内は最下位ビットから並ぶ。
-/// 配線の参照先は [`Self::evaluate`] が検査する。
+/// 組み合わせ評価の [`Self::evaluate`] では、ゲート入力から参照できるゲートを配列内の先行ゲートに限る。
+/// tick 単位の [`ClockedNor::check`] では、同じ回路内の全ゲートを参照できる。
+/// 入出力はポートの宣言順に並び、各ポート内は最下位ビットから並ぶ。
 #[derive(Debug, Eq, PartialEq)]
 pub struct NorNetlist {
     /// 平坦な入力列のビット数。
     pub input_count: usize,
-    /// 参照先が参照元より先に現れる順のゲート列。
+    /// ゲート番号順の配列。組み合わせ評価では、参照先が参照元より先に現れる順に置く。
     pub gates: Vec<NorGate>,
     /// 平坦な出力列の各ビットを駆動する配線。
     pub outputs: Vec<Wire>,

@@ -40,6 +40,9 @@ use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::encode_utf8_decode_utf8;
 
+mod storage;
+pub use storage::{StorageSignature, StorageSignatureError};
+
 verus! {
 
 /// ポートの指定が解決した型。
@@ -157,7 +160,10 @@ spec fn annotation_in_context(context: &PortContext, port: CheckedPort, annotati
 spec fn port_request(context: &PortContext, port: CheckedPort) -> bool {
     let at = annotation_atom(port);
     &&& at < context.forms@.len() && context.forms@[at as int] is Atom
-    &&& port.ty is Named ==> reference_kind(context.forms@[at as int]->Atom_kind)
+    &&& match port.ty {
+        DeclaredPortType::Named { form } => form == at && reference_kind(context.forms@[at as int]->Atom_kind),
+        DeclaredPortType::Bits(_) => !(port.site.ty is Named),
+    }
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -225,10 +231,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     spec fn port_binding_evidence(
-        &self, context: &PortContext, port: CheckedPort,
+        &self, context: &PortContext, at: usize,
         binding: Result<DefinitionBinding, DefinitionReferenceReason>,
     ) -> bool {
-        let at = annotation_atom(port);
         let span = form_span(context.forms@[at as int]);
         exists|word: &str| word.spec_bytes() == context.source.text.spec_bytes()[span.start as int..span.end as int]
             && #[trigger] self.binding_evidence(context.file,
@@ -242,7 +247,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         &&& match (port.ty, typed.ty) {
             (DeclaredPortType::Bits(value), ResolvedPortType::Bits(found)) => value == found,
             (DeclaredPortType::Named { .. }, ResolvedPortType::Struct { source, form }) =>
-                form.head is Struct && self.port_binding_evidence(context, port,
+                form.head is Struct && self.port_binding_evidence(context, annotation_atom(port),
                     Ok(DefinitionBinding::Declaration { source, form })),
             _ => false,
         }
@@ -253,7 +258,49 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> bool {
         error matches TypedSignatureError::TypeReference { direction: reported, reference, reason }
             && port.ty is Named && reported == direction && annotation_in_context(context, port, reference)
-            && self.port_binding_evidence(context, port, Err(reason))
+            && self.port_binding_evidence(context, annotation_atom(port), Err(reason))
+    }
+
+    spec fn type_reference_location(&self, context: &PortContext, at: usize, reference: LocatedName) -> bool {
+        *reference.source == *context.source
+            && reference.span == form_span(context.forms@[at as int])
+            && location_in_source(reference)
+    }
+
+    fn resolve_port_structure(&self, context: &PortContext<'p, 'a>, at: usize)
+        -> (result: Result<(ResolvedPortType<'p, 'a>, LocatedName<'p, 'a>), (LocatedName<'p, 'a>, DefinitionReferenceReason<'p, 'a>)>)
+        requires
+            self.can_resolve(),
+            self.scope_matches(context.file, context.block, Ok(context.namespace)),
+            at < context.forms@.len() && context.forms@[at as int] is Atom
+                && reference_kind(context.forms@[at as int]->Atom_kind),
+            form_spans_valid(context.source.text, context.forms@, context.source.text.spec_bytes().len() as int),
+        ensures match result {
+            Ok((ResolvedPortType::Struct { source, form }, reference)) => self.declared_port_type(ResolvedPortType::Struct { source, form })
+                && self.type_reference_location(context, at, reference)
+                && self.port_binding_evidence(context, at,
+                    Ok(DefinitionBinding::Declaration { source, form })),
+            Ok(_) => false,
+            Err((reference, reason)) => self.type_reference_location(context, at, reference)
+                && self.port_binding_evidence(context, at, Err(reason)),
+        },
+    {
+        let (word, span) = read_indexed_atom(context.source.text, context.forms, at);
+        let reference = LocatedName { source: context.source, span };
+        proof { located_name_evidence(reference); }
+        let Form::Atom { kind: atom_kind, .. } = context.forms[at] else { unreachable!() };
+        let request = ReferenceRequest { block: context.block, word, role: ReferenceUse::StructType };
+        match self.resolve_scoped_binding(context.file, &request, context.namespace, atom_kind) {
+            Ok(binding) => {
+                proof { self.struct_binding_is_struct(context.file, request, context.namespace, atom_kind, binding); }
+                let DefinitionBinding::Declaration { source: origin, form: declaration } = binding else { unreachable!() };
+                proof {
+                    self.binding_declaration_origin(context.file, request, context.namespace, atom_kind, origin, declaration);
+                }
+                Ok((ResolvedPortType::Struct { source: origin, form: declaration }, reference))
+            },
+            Err(reason) => Err((reference, reason)),
+        }
     }
 
     fn resolve_port_type(
@@ -269,35 +316,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => self.type_error_evidence(context, port, direction, error),
         },
     {
-        let form = match port.site.ty {
-            PortTypeSite::ImplicitBit => port.site.name,
-            PortTypeSite::Bits { width } => width,
-            PortTypeSite::Named { form } => form,
-        };
-        let (word, span) = read_indexed_atom(context.source.text, context.forms, form);
-        let annotation = LocatedName { source: context.source, span };
-        proof { located_name_evidence(annotation); }
-        let ty = match port.ty {
-            DeclaredPortType::Bits(width) => ResolvedPortType::Bits(width),
-            DeclaredPortType::Named { .. } => {
-                let Form::Atom { kind: atom_kind, .. } = &context.forms[form] else {
-                    proof { assert(false); }
-                    unreachable!();
+        let (ty, annotation) = match port.ty {
+            DeclaredPortType::Bits(width) => {
+                let form = match port.site.ty {
+                    PortTypeSite::ImplicitBit => port.site.name,
+                    PortTypeSite::Bits { width } => width,
+                    PortTypeSite::Named { .. } => unreachable!(),
                 };
-                let request = ReferenceRequest { block: context.block, word, role: ReferenceUse::StructType };
-                match self.resolve_scoped_binding(context.file, &request, context.namespace, *atom_kind) {
-                    Ok(binding) => {
-                        proof { self.struct_binding_is_struct(context.file, request, context.namespace, *atom_kind, binding); }
-                        let DefinitionBinding::Declaration { source: declaration_source, form: declaration } = binding else {
-                            proof { assert(false); }
-                            unreachable!();
-                        };
-                        ResolvedPortType::Struct { source: declaration_source, form: declaration }
-                    },
-                    Err(reason) => return Err(TypedSignatureError::TypeReference {
-                        direction, reference: annotation, reason,
-                    }),
-                }
+                let (_, span) = read_indexed_atom(context.source.text, context.forms, form);
+                let annotation = LocatedName { source: context.source, span };
+                proof { located_name_evidence(annotation); }
+                (ResolvedPortType::Bits(width), annotation)
+            },
+            DeclaredPortType::Named { form } => match self.resolve_port_structure(context, form) {
+                Ok(typed) => typed,
+                Err((reference, reason)) => return Err(TypedSignatureError::TypeReference { direction, reference, reason }),
             },
         };
         Ok(TypedPort { declared: port, ty, annotation })
@@ -353,6 +386,39 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             at += 1;
         }
         Ok(typed)
+    }
+
+    fn port_context(&self, file: usize, entry: usize) -> (context: PortContext<'p, 'a>)
+        requires
+            self.can_resolve(), file < self.targets.project_model().circuits_model().len(),
+            entry < self.targets.project_model().circuits_model()[file as int].syntax.entries@.len(),
+        ensures
+            self.port_context_evidence(file, entry, &context),
+            form_spans_valid(context.source.text, context.forms@, context.source.text.spec_bytes().len() as int),
+    {
+        let project = self.targets.project();
+        let source = &project.sources()[file];
+        let parsed = &project.circuits()[file];
+        let owner = &parsed.syntax.entries[entry];
+        proof {
+            assert(parsed_circuit_matches(*source, *parsed));
+            parsed_index_evidence(*source, *parsed);
+            indexed_entry_evidence(source.text, parsed.syntax.forms@, parsed.syntax.entries@, entry as int);
+            if let Some(parent) = owner.namespace {
+                namespace_name_evidence(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
+                    parsed.names@, owner.form as int, parent);
+                let i = choose|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]).form == parent
+                    && parsed.names@[i].head is Namespace && parsed.names@[i].block is None;
+                assert(super::is_namespace_block(parsed.names@[i], parent));
+            }
+        }
+        let Ok(namespace) = self.scope_namespace(file, owner.namespace) else {
+            proof { assert(false); }
+            unreachable!();
+        };
+        let context = PortContext { file, block: owner.namespace, namespace, source, forms: parsed.syntax.forms.as_slice() };
+        assert(self.port_context_evidence(file, entry, &context));
+        context
     }
 
     spec fn port_context_evidence(&self, file: usize, entry: usize, context: &PortContext) -> bool {
@@ -643,6 +709,34 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 解決済みの署名にあるビット列は、宣言で検査した正の幅を保つ。
+    pub(super) proof fn typed_signature_bit_widths(
+        &self, file: usize, entry: usize, limit: u64, signature: TypedRoutineSignature,
+    )
+        requires self.typed_signature_evidence(file, entry, limit, Ok(Some(signature))),
+        ensures
+            forall|i: int| 0 <= i < signature.inputs@.len() ==>
+                ((#[trigger] signature.inputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit),
+            forall|i: int| 0 <= i < signature.outputs@.len() ==>
+                ((#[trigger] signature.outputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit),
+    {
+        let project = &self.targets.project_model();
+        let (context, checked) = choose|context: PortContext, checked: CheckedRoutineSignature|
+            #[trigger] self.port_context_evidence(file, entry, &context)
+            && #[trigger] routine_signature_evidence(project, file as int, entry as int, limit, Ok(Some(checked)))
+            && self.typed_after_signature(&context, &checked, Ok(Some(signature)));
+        checked_signature_ports(project, file as int, entry as int, limit, checked);
+        checked_width_sites(project, file as int, entry as int, limit, checked.ports);
+        assert forall|i: int| 0 <= i < signature.inputs@.len() implies
+            ((#[trigger] signature.inputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit) by {
+            assert(self.typed_port_evidence(&context, checked.ports.inputs@[i], signature.inputs@[i]));
+        };
+        assert forall|i: int| 0 <= i < signature.outputs@.len() implies
+            ((#[trigger] signature.outputs@[i]).ty matches ResolvedPortType::Bits(width) ==> 0 < width <= limit) by {
+            assert(self.typed_port_evidence(&context, checked.ports.outputs@[i], signature.outputs@[i]));
+        };
+    }
+
     pub(super) proof fn typed_signature_sites(
         &self, file: usize, entry: usize, max_width: u64, typed: TypedRoutineSignature,
     )
@@ -787,27 +881,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             checked_signature_ports(project, file as int, entry as int, max_width, signature);
             checked_width_sites(project, file as int, entry as int, max_width, signature.ports);
         }
-        let source = &project.sources()[file];
-        let parsed = &project.circuits()[file];
-        let owner = &parsed.syntax.entries[entry];
-        proof {
-            assert(parsed_circuit_matches(*source, *parsed));
-            parsed_index_evidence(*source, *parsed);
-            indexed_entry_evidence(source.text, parsed.syntax.forms@, parsed.syntax.entries@, entry as int);
-            if let Some(parent) = owner.namespace {
-                namespace_name_evidence(source.text, parsed.syntax.forms@, parsed.syntax.entries@,
-                    parsed.names@, owner.form as int, parent);
-                let i = choose|i: int| 0 <= i < parsed.names@.len() && (#[trigger] parsed.names@[i]).form == parent
-                    && parsed.names@[i].head is Namespace && parsed.names@[i].block is None;
-                assert(super::is_namespace_block(parsed.names@[i], parent));
-            }
-        }
-        let Ok(namespace) = self.scope_namespace(file, owner.namespace) else {
-            proof { assert(false); }
-            unreachable!();
-        };
-        let context = PortContext { file, block: owner.namespace, namespace, source, forms: parsed.syntax.forms.as_slice() };
-        assert(self.port_context_evidence(file, entry, &context));
+        let context = self.port_context(file, entry);
         let inputs = self.resolve_port_types(&context, signature.ports.inputs.as_slice(), PortDirection::Input)?;
         let outputs = self.resolve_port_types(&context, signature.ports.outputs.as_slice(), PortDirection::Output)?;
         let ghost input_model = inputs@;

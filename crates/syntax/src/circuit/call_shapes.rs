@@ -78,6 +78,17 @@ pub closed spec fn call_shape_matches(
     }
 }
 
+/// 呼び出しリストが、定義の右辺の範囲に収まることを示す。
+pub proof fn indexed_call_region(
+    source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference, shape: CallShape,
+)
+    requires reference.kind is Callee, call_shape_matches(source, forms, row, reference, Some(shape)),
+    ensures row.expression.start <= shape.form < forms[shape.form as int]->List_end <= row.expression.end,
+{
+    let root = shape.form as int;
+    super::expression_forest::ordinary_call_bounds(source, forms, root, row.expression.end as int);
+}
+
 /// 同じ呼び出し参照のリスト位置、範囲、引数数は一意に定まる。
 pub proof fn indexed_call_shapes_agree(
     source: &str, forms: Seq<Form>, row: BuildDefinition, reference: ExpressionReference,
@@ -175,6 +186,24 @@ pub proof fn call_argument_position_bounds(forms: Seq<Form>, call: CallShape, po
     requires call_argument_positions(forms, call, positions), 0 <= port < positions.len(),
     ensures call.form + 2 <= positions[port] < forms[call.form as int]->List_end <= forms.len(),
 {}
+
+/// 引数列の添字が、入れ子の内部ではなく呼び出し直下の式を指すことを示す。
+pub proof fn call_argument_position_is_direct(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, port: int)
+    requires call_argument_positions(forms, call, positions), nested_list_indices(forms), 0 <= port < positions.len(),
+    ensures direct_call_argument(forms, call, positions[port] as int),
+    decreases port,
+{
+    let end = forms[call.form as int]->List_end;
+    if port == 0 {
+        first_call_argument_evidence(forms, call, positions[0]..end);
+    } else {
+        call_argument_position_is_direct(forms, call, positions, port - 1);
+        let previous = positions[port - 1] as int;
+        let next = positions[port] as int;
+        assert(next == after_form(forms, previous));
+        following_call_argument(forms, call, previous, next);
+    }
+}
 
 /// 呼び出し内のフォームを含む直接引数を見つける。フォーム自体が引数の先頭でもよい。
 proof fn call_argument_containing_form(forms: Seq<Form>, call: CallShape, positions: Seq<usize>, form: int)
@@ -331,6 +360,44 @@ pub proof fn following_call_argument(
     node_end_is_following_direct_form(forms, index, next);
     reveal(following_direct_form);
     assert(form_region_ends_at(forms, call.form + 2, forms[call.form as int]->List_end as int));
+}
+
+/// 呼び出しの直接の選択式が読む裸の信号名は、同じ定義行の信号索引に含まれる。
+pub proof fn indexed_call_selection_leaf(
+    source: &str, forms: Seq<Form>, row: &BuildDefinition, references: Seq<ExpressionReference>,
+    reference: usize, call: &CallShape, signals: Seq<usize>, argument: usize, steps: Seq<super::BitSelectionShape>, leaf: usize,
+)
+    requires
+        definition_call_index(source, forms, *row, references),
+        row.references.start <= reference < row.references.end,
+        call_shape_matches(source, forms, *row, references[reference as int], Some(*call)),
+        row.signals.start <= row.signals.end <= signals.len(),
+        signals.subrange(row.signals.start as int, row.signals.end as int)
+            == expression_signals(source, forms, row.expression.start as int, row.expression.end as int),
+        forms.len() <= usize::MAX, complete_list_indices(forms), nested_list_indices(forms),
+        direct_call_argument(forms, *call, argument as int),
+        super::bit_selection_path(source, forms, argument, steps, leaf),
+        leaf < forms.len() && forms[leaf as int] is Atom && forms[leaf as int]->Atom_kind is Name,
+    ensures exists|position: int| row.signals.start <= position < row.signals.end
+        && #[trigger] signals[position] == leaf,
+{
+    let start = row.expression.start as int;
+    let stop = row.expression.end as int;
+    reveal(nested_list_indices);
+    reveal(expression_region);
+    assert forall|f: int| start <= f < stop && #[trigger] forms[f] is List
+        implies forms[f]->List_end <= stop by {
+        if f != start {
+            assert(forms[start] is List && forms[start]->List_end == stop);
+        }
+    };
+    let refs = references.subrange(row.references.start as int, row.references.end as int);
+    let offset = reference - row.references.start;
+    assert(refs[offset] == references[reference as int]);
+    super::expression_forest::call_argument_selected_signal_index(source, forms, start, stop, offset, argument, steps, leaf);
+    let indexed = signals.subrange(row.signals.start as int, row.signals.end as int);
+    let i = choose|i: int| 0 <= i < indexed.len() && indexed[i] == leaf;
+    assert(signals[row.signals.start + i] == leaf);
 }
 
 /// 呼び出しの直接の裸名に対応する、ファイル全体の信号索引の添字を返す。

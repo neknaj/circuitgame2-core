@@ -3,6 +3,28 @@
 #[cfg(verus_only)]
 mod source_arguments;
 #[cfg(verus_only)]
+mod source_layout;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::{
+    SourceStepTarget, source_step_range_matches, source_step_slots, source_step_target,
+};
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::ranges::{rooted_source_step_ranges, source_slot_partition};
+#[cfg(verus_only)]
+pub(super) use source_layout::body::rooted_function_source_layout;
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::body::{
+    SourceBodyDefinition, source_body_matches_steps, source_body_wires,
+};
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) use source_layout::source_step_ready;
+#[cfg(verus_only)]
+pub(super) use source_layout::{rooted_source_step, rooted_source_step_range};
+#[cfg(verus_only)]
+pub(super) use source_layout::ranges::rooted_source_step_ranges_match;
+#[cfg(verus_only)]
+pub(super) use source_layout::call_mode::rooted_source_call_mode;
+#[cfg(verus_only)]
 pub(super) use source_arguments::{mixed_function_call_evaluation, nor_source_binding_matches, rooted_nor_source_arguments};
 #[cfg(verus_only)]
 pub(in crate::project::use_aliases::bit_func) use source_arguments::{
@@ -38,7 +60,9 @@ use crate::syntax::Form;
 use super::call_group::{
     WiringView, call_group_result, call_group_values, call_group_wires_match, call_output_bit_has_value, wiring_view_is_prefix,
     nested_call_group_frame, nested_call_group_result, nor_call_group_evaluation_matches, nor_call_group_frame,
-    nor_call_group_result, nor_call_group_values,
+    nor_call_group_result, nor_call_group_values, CallGateWiring, call_gate_wiring_matches, flat_call_group_gate,
+    nested_call_group_gate, nor_call_group_gate, flat_call_group_gate_matches, nested_call_group_gate_matches,
+    nor_call_group_gate_matches, bound_call_gate_matches,
 };
 #[cfg(verus_only)]
 use super::super::instances::{instance_gates_match, instance_wire_values};
@@ -50,6 +74,14 @@ use super::call_arguments::{CallerArguments, layout_argument_from_width, layout_
 use super::call_arguments::builtin_nor_call_matches;
 #[cfg(verus_only)]
 use crate::syntax::form_spans_valid;
+
+#[cfg(verus_only)]
+use super::source_wires::{
+    definition_wires_pair, local_slot_wires_pair, source_local_slot_agrees, source_output_wires, source_output_wires_agree,
+    source_wires_pair,
+};
+#[cfg(verus_only)]
+use crate::netlist::{SourceGateId, SourceWire};
 
 verus! {
 
@@ -93,7 +125,7 @@ enum MixedBodyError<'p, 'a> {
     Nor(LocatedName<'p, 'a>, NestedCallWiringError<'p, 'a>),
 }
 
-pub(super) struct WiringStep {
+pub(in crate::project::use_aliases::bit_func) struct WiringStep {
     #[cfg(verus_only)]
     from: usize,
     #[cfg(verus_only)]
@@ -403,6 +435,8 @@ spec fn local_step(
     &&& step.group_before == step.group_after
     &&& slot_wiring_matches(definition, layouts, step.after.definitions, step.after.gates, step.after.origins, at)
     &&& step.after.definitions.take(step.before.definitions.len() as int) == step.before.definitions
+    &&& definition.rhs is Nor ==> step.after.definitions[step.before.definitions.len() as int]
+        == Wire::Gate(step.before.gates.len() as usize)
     &&& gate_step_matches(layouts, step.before.definitions, definition.rhs, step.from,
         step.before.gates, step.after.gates, step.before.origins, step.after.origins)
 }
@@ -733,6 +767,386 @@ proof fn rooted_trace_preserves_prefix(
     }
 }
 
+/// 指定したゲートを追加した段を、履歴の末尾からたどる。
+proof fn rooted_trace_gate_step_before(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
+    gate: int, end: int,
+) -> (at: int)
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        0 <= end < steps.len(), 0 <= gate < steps[end].after.gates.len(),
+    ensures 0 <= at <= end, steps[at].before.gates.len() <= gate < steps[at].after.gates.len(),
+    decreases end,
+{
+    reveal(rooted_mixed_trace);
+    if steps[end].before.gates.len() <= gate {
+        end
+    } else {
+        assert(end > 0) by {
+            if end == 0 { assert(wiring_empty(steps[0].before)); }
+        };
+        assert(steps[end - 1].after == steps[end].before);
+        rooted_trace_gate_step_before(body, layouts, forms, bindings, roots, limit, steps,
+            slot, group, nor, final_wiring, gate, end - 1)
+    }
+}
+
+pub(super) closed spec fn rooted_gate_step_origin(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, final_wiring: WiringView, gate: int, at: int,
+) -> bool {
+    &&& 0 <= at < steps.len()
+    &&& steps[at].before.gates.len() <= gate < steps[at].after.gates.len()
+    &&& wiring_view_is_prefix(steps[at].before, steps[at].after)
+    &&& wiring_view_is_prefix(steps[at].after, final_wiring)
+    &&& final_wiring.gates[gate] == steps[at].after.gates[gate]
+    &&& forall|other: int| 0 <= other < steps.len()
+        && (#[trigger] steps[other]).before.gates.len() <= gate < steps[other].after.gates.len()
+        ==> other == at
+    &&& {
+        let step = steps[at];
+        if step.nor_before != step.nor_after {
+            &&& 0 <= step.nor_before < roots.len()
+            &&& step.from == roots[step.nor_before as int].selected.prepared.output_slot
+            &&& step.nested matches Some(nested)
+            &&& ({
+                let root = roots[step.nor_before as int];
+                nor_call_group_result(&root.selected, *root.references, forms, layouts, &nested.builtin,
+                    step.before, step.after, limit, nested.child_limit, definition_widths(body.definitions@), Ok(()))
+            })
+        } else if step.group_before != step.group_after {
+            &&& 0 <= step.group_before < bindings.len()
+            &&& step.from == bindings[step.group_before as int].group.outputs.start
+            &&& ({
+                let binding = bindings[step.group_before as int];
+                match step.nested {
+                    Some(nested) => nested_call_group_result(&binding._selection@, forms, layouts, &nested.builtin,
+                        step.before, step.after, limit, nested.child_limit, definition_widths(body.definitions@), Ok(())),
+                    None => call_group_result(binding.group, forms, binding.arguments@, layouts, binding.callee,
+                        step.before, step.after, limit, definition_widths(body.definitions@), binding._output_widths@, Ok(())),
+                }
+            })
+        } else {
+            &&& step.from < body.definitions@.len()
+            &&& !binding_covers(bindings, step.from as int) && !nor_binding_covers(roots, step.from as int)
+            &&& body.definitions@[step.from as int].rhs is Nor
+            &&& rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(),
+                step.before.definitions, body.definitions@[step.from as int].rhs) == Some(final_wiring.gates[gate])
+            &&& gate == step.before.gates.len()
+            &&& step.after.gates == step.before.gates.push(final_wiring.gates[gate])
+        }
+    }
+}
+
+/// 最終ゲート列の添字から、ゲートを追加した定義と展開時の配線状態を取り出す。
+///
+/// ゲートを追加しない定義や呼び出しを含んでも、追加区間は重ならず最終ゲート列を覆う。
+#[verifier::spinoff_prover]
+pub(super) proof fn rooted_trace_gate_step(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView,
+    gate: int,
+) -> (at: int)
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        0 <= gate < final_wiring.gates.len(),
+    ensures rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, at),
+{
+    reveal(rooted_mixed_trace);
+    assert(steps.len() > 0);
+    let end = steps.len() as int - 1;
+    assert(steps[end].after == final_wiring);
+    let at = rooted_trace_gate_step_before(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor,
+        final_wiring, gate, end);
+    rooted_wiring_step_keeps_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at, end);
+    assert(final_wiring.gates[gate] == steps[at].after.gates[gate]);
+    assert forall|other: int| 0 <= other < steps.len()
+        && (#[trigger] steps[other]).before.gates.len() <= gate < steps[other].after.gates.len()
+        implies other == at by {
+        if other < at {
+            rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor,
+                final_wiring, other, at - 1);
+            assert(steps[at - 1].after == steps[at].before);
+        } else if at < other {
+            rooted_trace_preserves_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor,
+                final_wiring, at, other - 1);
+            assert(steps[other - 1].after == steps[other].before);
+        }
+    };
+    reveal(wiring_step_valid);
+    reveal(nor_wiring_step_valid);
+    let step = steps[at];
+    if step.nor_before == step.nor_after && step.group_before == step.group_after {
+        reveal(gate_step_matches);
+        let rhs = body.definitions@[step.from as int].rhs;
+        let added = rhs_gate(layouts.inputs.ranges_model(), layouts.definitions.ranges_model(), step.before.definitions, rhs);
+        assert(added.is_some());
+        assert(step.after.gates[gate] == added->Some_0);
+    }
+    at
+}
+
+pub(super) closed spec fn gate_call_in_definition(
+    layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    step: WiringStep, final_wiring: WiringView, gate: int, call: Option<CallGateWiring>,
+) -> bool {
+    if step.nor_before != step.nor_after {
+        &&& 0 <= step.nor_before < roots.len()
+        &&& call matches Some(row)
+        &&& step.nested matches Some(nested)
+        &&& call_gate_wiring_matches(row, step.before.gates, final_wiring.gates, gate)
+        &&& {
+            let root = roots[step.nor_before as int];
+            nor_call_group_gate_matches(row, &root.selected, *root.references, forms, layouts,
+                &nested.builtin, step.before, step.after, gate)
+        }
+    } else if step.group_before != step.group_after {
+        &&& 0 <= step.group_before < bindings.len()
+        &&& call matches Some(row)
+        &&& call_gate_wiring_matches(row, step.before.gates, final_wiring.gates, gate)
+        &&& {
+            let binding = bindings[step.group_before as int];
+            let selected = binding._selection@;
+            match step.nested {
+                Some(nested) => nested_call_group_gate_matches(row, &selected, forms, layouts, &nested.builtin, step.before, step.after, gate),
+                None => flat_call_group_gate_matches(row, binding.group, forms, binding.arguments@, layouts, selected.template,
+                    step.before, step.after, binding._output_widths@, gate),
+            }
+        }
+    } else {
+        call.is_none()
+    }
+}
+
+/// ゲートを追加した段が呼び出しなら、その定義内の参照番号と実引数の配線を取り出す。
+pub(super) proof fn rooted_trace_gate_call<'s, 'p, 'a>(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding<'s, 'p, 'a>>,
+    roots: Seq<NorBinding<'s, 'p, 'a>>, limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize,
+    final_wiring: WiringView, gate: int,
+) -> (result: (int, Option<CallGateWiring<'s, 'p, 'a>>))
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        forall|g: int| 0 <= g < bindings.len() ==> binding_matches_selection(#[trigger] bindings[g], bindings[g]._selection@),
+        0 <= gate < final_wiring.gates.len(),
+    ensures
+        rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, result.0),
+        gate_call_in_definition(layouts, forms, bindings, roots, steps[result.0], final_wiring, gate, result.1),
+{
+    let at = rooted_trace_gate_step(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, gate);
+    let step = steps[at];
+    let widths = definition_widths(body.definitions@);
+    let call = if step.nor_before != step.nor_after {
+        let root = roots[step.nor_before as int];
+        let nested = step.nested->Some_0;
+        Some(nor_call_group_gate(&root.selected, *root.references, forms, layouts, &nested.builtin,
+            step.before, step.after, limit, nested.child_limit, widths, gate))
+    } else if step.group_before != step.group_after {
+        let binding = bindings[step.group_before as int];
+        let selected = binding._selection@;
+        assert(binding_matches_selection(binding, selected));
+        if let Some(nested) = step.nested {
+            Some(nested_call_group_gate(&selected, forms, layouts, &nested.builtin,
+                step.before, step.after, limit, nested.child_limit, widths, gate))
+        } else {
+            Some(flat_call_group_gate(binding.group, forms, binding.arguments@, layouts, selected.template,
+                step.before, step.after, limit, widths, binding._output_widths@, gate))
+        }
+    } else { None };
+    if let Some(row) = call {
+        let end = (row.prior.len() + row.target.gates@.len()) as int;
+        assert(final_wiring.gates.take(end) =~= step.after.gates.take(end));
+    }
+    (at, call)
+}
+
+/// 定義のどの式が展開後のゲートを追加したかを表す。
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) enum FuncGateExpression {
+    /// 入れ子を持たない基底 NOR。
+    Local,
+    /// 通常呼び出しの根、またはその実引数にある子。
+    Function { group: int, child: Option<int> },
+    /// 基底 NOR の根、またはその実引数にある子。子の個数と等しい添字は根を指す。
+    Nor { binding: int, index: int },
+}
+
+/// 最終ゲートを追加した出力スロットと、選んだ呼び出しの配線区間。
+#[cfg(verus_only)]
+pub(in crate::project::use_aliases::bit_func) struct FuncGateOrigin<'s, 'p, 'a> {
+    pub(in crate::project::use_aliases::bit_func) slot: usize,
+    pub(in crate::project::use_aliases::bit_func) reference: usize,
+    pub(in crate::project::use_aliases::bit_func) expression: FuncGateExpression,
+    pub(in crate::project::use_aliases::bit_func) template: Option<&'s super::super::templates::FunctionTemplate<'p, 'a>>,
+    pub(in crate::project::use_aliases::bit_func) base: nat,
+    pub(in crate::project::use_aliases::bit_func) inputs: Seq<Wire>,
+}
+
+pub(in crate::project::use_aliases::bit_func) open spec fn func_gate_origin_matches(
+    origin: FuncGateOrigin, definitions: Seq<CheckedBitDefinition>, selected: Seq<ResolvedTemplateCall>,
+    roots: Seq<NorBinding>, gates: Seq<NorGate>, gate: int,
+) -> bool {
+    &&& origin.slot < definitions.len()
+    &&& 0 <= origin.base <= gate < gates.len()
+    &&& match origin.expression {
+        FuncGateExpression::Local => {
+            &&& !(exists|g: int| 0 <= g < selected.len()
+                && (#[trigger] selected[g]).group.outputs.start <= origin.slot < selected[g].group.outputs.end)
+            &&& !nor_binding_covers(roots, origin.slot as int)
+            &&& definitions[origin.slot as int].rhs is Nor
+            &&& origin.template.is_none() && origin.reference == 0
+        },
+        FuncGateExpression::Function { group, child } => {
+            &&& 0 <= group < selected.len()
+            &&& origin.slot == selected[group].group.outputs.start
+            &&& match child {
+                None => origin.reference == 0 && origin.template == Some(selected[group].template),
+                Some(i) => 0 <= i < selected[group].children@.len()
+                    && selected[group].children@[i].child.reference == selected[group].group.references.start + origin.reference
+                    && origin.template == selected[group].children@[i].template,
+            }
+        },
+        FuncGateExpression::Nor { binding, index } => {
+            &&& 0 <= binding < roots.len()
+            &&& origin.slot == roots[binding].selected.prepared.output_slot
+            &&& 0 <= index <= roots[binding].selected.children@.len()
+            &&& if index == roots[binding].selected.children@.len() {
+                origin.reference == 0 && origin.template.is_none()
+            } else {
+                &&& roots[binding].selected.children@[index].child.reference == roots[binding].references.start + origin.reference
+                &&& origin.template == roots[binding].selected.children@[index].template
+            }
+        },
+    }
+    &&& match origin.template {
+        Some(template) => {
+            let callee = template.circuit_model().netlist_model();
+            let end = origin.base + callee.gates@.len();
+            &&& gate < end <= gates.len()
+            &&& instance_gates_match(gates.take(origin.base as int), callee.gates@, origin.inputs, gates.take(end as int))
+        },
+        None => gate == origin.base,
+    }
+}
+
+pub(super) closed spec fn mixed_gate_origin_link(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, function: &LoweredBitFunc, steps: Seq<WiringStep>, gate: int, origin: FuncGateOrigin,
+) -> bool {
+    let final_wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    exists|at: int, call: Option<CallGateWiring>|
+        #![trigger rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, at),
+            gate_call_in_definition(layouts, forms, bindings, roots, steps[at], final_wiring, gate, call)]
+    {
+        &&& rooted_gate_step_origin(body, layouts, forms, bindings, roots, limit, steps, final_wiring, gate, at)
+        &&& gate_call_in_definition(layouts, forms, bindings, roots, steps[at], final_wiring, gate, call)
+        &&& {
+            let step = steps[at];
+            &&& origin.slot == step.from
+            &&& match call {
+                None => origin.expression is Local && origin.reference == 0 && origin.template.is_none()
+                    && origin.base == step.before.gates.len() && origin.inputs.len() == 0,
+                Some(row) => {
+                    &&& origin.reference == row.reference && origin.template == row.template
+                    &&& origin.base == row.prior.len() && origin.inputs == row.inputs
+                    &&& if step.nor_before != step.nor_after {
+                        origin.expression == FuncGateExpression::Nor { binding: step.nor_before as int, index: row.nested->Some_0.1 }
+                    } else {
+                        let child = match row.nested {
+                            None => None,
+                            Some((calls, index)) => if index == calls.len() { None } else { Some(index) },
+                        };
+                        origin.expression == FuncGateExpression::Function { group: step.group_before as int, child }
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// 実際の関数展開から、各ゲートに対応する型検査済みの式を取り出す。
+pub(super) proof fn mixed_function_gate_origin<'s, 'p, 'a>(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding<'s, 'p, 'a>>,
+    selected: Seq<ResolvedTemplateCall<'s, 'p, 'a>>, roots: Seq<NorBinding<'s, 'p, 'a>>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, limit: usize, function: &LoweredBitFunc, steps: Seq<WiringStep>, gate: int,
+) -> (origin: FuncGateOrigin<'s, 'p, 'a>)
+    requires
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps),
+        bindings_match_calls(bindings, selected),
+        0 <= gate < function.netlist_model().gates@.len(),
+    ensures
+        func_gate_origin_matches(origin, body.definitions@, selected, roots, function.netlist_model().gates@, gate),
+        mixed_gate_origin_link(body, layouts, forms, bindings, roots, limit, function, steps, gate, origin),
+{
+    vstd::slice::axiom_spec_len(body.definitions);
+    let final_wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    assert forall|i: int| 0 <= i < bindings.len() implies
+        binding_matches_selection(#[trigger] bindings[i], bindings[i]._selection@) by {
+        assert(binding_matches_selection(bindings[i], selected[i]));
+    };
+    let (at, call) = rooted_trace_gate_call(body, layouts, forms, bindings, roots, limit, steps,
+        body.definitions@.len() as usize, bindings.len() as usize, roots.len() as usize, final_wiring, gate);
+    let step = steps[at];
+    assert(step.from < body.definitions@.len()) by {
+        reveal(rooted_mixed_trace);
+        reveal(wiring_step_valid);
+        reveal(nor_wiring_step_valid);
+    };
+    if call.is_none() {
+        assert forall|i: int| 0 <= i < selected.len() implies
+            !((#[trigger] selected[i]).group.outputs.start <= step.from < selected[i].group.outputs.end) by {
+            assert(bindings[i].group == selected[i].group);
+        };
+        return FuncGateOrigin { slot: step.from, reference: 0, expression: FuncGateExpression::Local,
+            template: None, base: step.before.gates.len(), inputs: Seq::empty() };
+    }
+    let row = call->Some_0;
+    reveal(nor_call_group_gate_matches);
+    reveal(nested_call_group_gate_matches);
+    reveal(bound_call_gate_matches);
+    let expression = if step.nor_before != step.nor_after {
+        let nested = step.nested->Some_0;
+        assert(builtin_nor_call_matches(&nested.builtin));
+        if row.template.is_none() {
+            assert(row.target.gates@.len() == 1);
+        }
+        FuncGateExpression::Nor { binding: step.nor_before as int, index: row.nested->Some_0.1 }
+    } else {
+        let group = step.group_before as int;
+        assert(binding_matches_selection(bindings[group], selected[group]));
+        if let Some(nested) = step.nested {
+            let (calls, index) = row.nested->Some_0;
+            if row.template.is_none() {
+                reveal(rooted_mixed_trace);
+                reveal(wiring_step_valid);
+                assert(builtin_nor_call_matches(&nested.builtin));
+                assert(row.target.gates@.len() == 1);
+            }
+            FuncGateExpression::Function { group, child: if index == calls.len() { None } else { Some(index) } }
+        } else {
+            FuncGateExpression::Function { group, child: None }
+        }
+    };
+    assert(call_gate_wiring_matches(row, step.before.gates, final_wiring.gates, gate));
+    let end = row.prior.len() + row.target.gates@.len();
+    assert(final_wiring.gates.take(end as int).take(row.prior.len() as int) =~= final_wiring.gates.take(row.prior.len() as int));
+    assert(row.prior == final_wiring.gates.take(row.prior.len() as int));
+    if let Some(template) = row.template {
+        let callee = template.circuit_model().netlist_model();
+        assert(row.target == *callee && gate < row.prior.len() + callee.gates@.len());
+    } else {
+        assert(row.target.gates@.len() == 1);
+        assert(gate == row.prior.len());
+    }
+    let origin = FuncGateOrigin { slot: step.from, reference: row.reference, expression, template: row.template,
+        base: row.prior.len(), inputs: row.inputs };
+    assert(func_gate_origin_matches(origin, body.definitions@, selected, roots, final_wiring.gates, gate));
+    origin
+}
+
 /// 本体に展開した根 NOR の配線状態と、同じ配線を評価した値。
 #[cfg(verus_only)]
 pub(super) struct RootedNorEvaluation<'s, 'p, 'a> {
@@ -861,6 +1275,32 @@ proof fn rooted_trace_nor_evaluation<'s, 'p, 'a>(
     result
 }
 
+proof fn mixed_trace_local_wiring(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    limit: usize, steps: Seq<WiringStep>, slot: usize, group: usize, nor: usize, final_wiring: WiringView, at: int,
+)
+    requires
+        rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring),
+        0 <= at < steps.len(),
+        steps[at].nor_before == steps[at].nor_after,
+        steps[at].group_before == steps[at].group_after,
+        final_wiring.gates.len() == final_wiring.origins.len(),
+    ensures ({
+        let i = steps[at].from as int;
+        &&& 0 <= i < body.definitions@.len()
+        &&& !binding_covers(bindings, i) && !nor_binding_covers(roots, i)
+        &&& slot_wiring_matches(body.definitions@[i], layouts, final_wiring.definitions, final_wiring.gates, final_wiring.origins, i)
+    }),
+{
+    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
+    reveal(rooted_mixed_trace);
+    reveal(wiring_step_valid);
+    let step = steps[at];
+    let i = step.from as int;
+    slot_wiring_is_preserved(body.definitions@[i], layouts, i, step.after.definitions, final_wiring.definitions,
+        step.after.gates, final_wiring.gates, step.after.origins, final_wiring.origins);
+}
+
 /// 通常の定義を変換した箇所では、最終配線から読んだ値が型検査済みの右辺の値に一致する。
 proof fn mixed_trace_local_value(
     body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
@@ -889,15 +1329,107 @@ proof fn mixed_trace_local_value(
             definitions.take(i))
     }),
 {
-    rooted_trace_step_prefix(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
-    reveal(rooted_mixed_trace);
-    reveal(wiring_step_valid);
+    mixed_trace_local_wiring(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, final_wiring, at);
     let step = steps[at];
-    let i = step.from as int;
-    slot_wiring_is_preserved(body.definitions@[i], layouts, i, step.after.definitions, final_wiring.definitions,
-        step.after.gates, final_wiring.gates, step.after.origins, final_wiring.origins);
     slot_values_match_wiring(body.input_widths@, body.definitions@, layouts, final_wiring, layout_limit,
         step.from, inputs, gates);
+}
+
+proof fn mixed_function_local_step(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, limit: usize, function: &LoweredBitFunc, steps: Seq<WiringStep>, i: int,
+) -> (at: int)
+    requires
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps),
+        0 <= i < body.definitions@.len(),
+        !binding_covers(bindings, i), !nor_binding_covers(roots, i),
+    ensures
+        0 <= at < steps.len(),
+        steps[at].from == i,
+        steps[at].nor_before == steps[at].nor_after,
+        steps[at].group_before == steps[at].group_after,
+        ({
+            let wiring = WiringView { definitions: function.definition_wires@, gates: function.netlist.gates@,
+                origins: function.gate_definitions@ };
+            rooted_mixed_trace(body, layouts, forms, bindings, roots, limit, steps, body.definitions@.len() as usize,
+                bindings.len() as usize, roots.len() as usize, wiring)
+        }),
+{
+    let wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    let end = steps.len() as int - 1;
+    vstd::slice::axiom_spec_len(body.definitions);
+    let slot = body.definitions@.len() as usize;
+    let group = bindings.len() as usize;
+    let nor = roots.len() as usize;
+    assert(0 <= end && steps[end].to == slot) by { reveal(rooted_mixed_trace); };
+    let at = rooted_trace_definition_step(body, layouts, forms, bindings, roots, limit, steps, slot, group, nor, wiring, end, i);
+    reveal(wiring_step_valid);
+    let step = steps[at];
+    if step.group_before != step.group_after {
+        let binding = bindings[step.group_before as int];
+        assert(binding.group.outputs.start <= i < binding.group.outputs.end);
+        assert(binding_covers(bindings, i));
+    }
+    at
+}
+
+/// 成功した展開から、一つの通常定義の配線とソース側の対応を得る。
+pub(super) proof fn mixed_function_local_wires(
+    body: &LoweringBody, layouts: &Layouts, forms: Seq<Form>, bindings: Seq<CallBinding>, roots: Seq<NorBinding>,
+    widths: Seq<u64>, drivers: Seq<OutputDriver>, capacity: usize, limit: usize, function: &LoweredBitFunc,
+    steps: Seq<WiringStep>, prior: Seq<Seq<SourceWire>>, order: Seq<SourceGateId>, gate: SourceGateId,
+)
+    requires
+        rooted_mixed_function_success(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps),
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        prior.len() < body.definitions@.len(),
+        !binding_covers(bindings, prior.len() as int), !nor_binding_covers(roots, prior.len() as int),
+        ({
+            let i = prior.len() as int;
+            let range = layouts.definitions.ranges_model()[i];
+            let wires = function.definition_wires@;
+            &&& bit_definition_matches(body.input_widths@, body.definitions@.take(i), body.definitions@[i])
+            &&& definition_wires_pair(order, prior, layouts.definitions.ranges_model(), wires.take(range.start as int))
+            &&& body.definitions@[i].rhs is Nor ==> (wires[range.start as int] matches Wire::Gate(g)
+                && g < order.len() && order[g as int] == gate)
+        }),
+    ensures ({
+        let i = prior.len() as int;
+        let range = layouts.definitions.ranges_model()[i];
+        local_slot_wires_pair(body.input_widths@, prior, body.definitions@[i], gate, order,
+            function.definition_wires@.subrange(range.start as int, range.end as int), function.netlist.gates@)
+    }),
+{
+    let i = prior.len() as int;
+    let wiring = WiringView { definitions: function.definition_wires@,
+        gates: function.netlist.gates@, origins: function.gate_definitions@ };
+    let at = mixed_function_local_step(body, layouts, forms, bindings, roots, widths, drivers, limit, function, steps, i);
+    mixed_trace_local_wiring(body, layouts, forms, bindings, roots, limit, steps, body.definitions@.len() as usize,
+        bindings.len() as usize, roots.len() as usize, wiring, at);
+    source_local_slot_agrees(body.input_widths@, body.definitions@, layouts, capacity, prior,
+        wiring.definitions, wiring.gates, wiring.origins, order, gate);
+}
+
+/// 検査済みの駆動元が指定する公開出力と、関数の最終出力配線を照合する。
+pub(super) proof fn mixed_function_output_wires(
+    body: &LoweringBody, layouts: &Layouts, outputs: Seq<u64>, drivers: Seq<OutputDriver>,
+    capacity: usize, limit: usize, function: &LoweredBitFunc, prior: Seq<Seq<SourceWire>>, order: Seq<SourceGateId>,
+)
+    requires
+        mixed_function_outputs_match(layouts, outputs, drivers, limit, function),
+        body_definition_layouts(body.input_widths@, body.definitions@, capacity, layouts),
+        widths_layout(outputs, capacity, &layouts.outputs),
+        prior.len() == body.definitions@.len(),
+        definition_wires_pair(order, prior, layouts.definitions.ranges_model(), function.definition_wires@),
+        outputs.len() == drivers.len(),
+        forall|port: int| 0 <= port < outputs.len() ==>
+            bit_driver_width(body.input_widths@, body.definitions@, #[trigger] drivers[port]) == Some(outputs[port]),
+    ensures source_wires_pair(order, source_output_wires(body.input_widths@, prior, outputs, drivers), function.netlist.outputs@),
+{
+    port_bit_layout_size(definition_widths(body.definitions@), capacity, &layouts.definitions);
+    source_output_wires_agree(body.input_widths@, body.definitions@, layouts, capacity, prior,
+        function.definition_wires@, order, outputs, drivers, function.netlist.outputs@);
 }
 
 /// 変換に成功した関数で、通常の定義の値を最終配線から求める。
@@ -925,23 +1457,10 @@ pub(super) proof fn mixed_function_local_value(
 {
     let wiring = WiringView { definitions: function.definition_wires@,
         gates: function.netlist.gates@, origins: function.gate_definitions@ };
-    let end = steps@.len() as int - 1;
-    vstd::slice::axiom_spec_len(body.definitions);
+    let at = mixed_function_local_step(body, layouts, forms, bindings, roots, widths, drivers, gate_limit, function, steps@, i);
     let slot = body.definitions@.len() as usize;
     let group = bindings.len() as usize;
     let nor = roots.len() as usize;
-    assert(0 <= end && steps@[end].to == slot) by { reveal(rooted_mixed_trace); };
-    let at = rooted_trace_definition_step(body, layouts, forms, bindings, roots, gate_limit, steps@, slot, group, nor, wiring, end, i);
-    assert(steps@[at].from == i && steps@[at].group_before == steps@[at].group_after) by {
-        reveal(wiring_step_valid);
-        reveal(binding_covers);
-        let step = steps@[at];
-        if step.group_before != step.group_after {
-            assert(bindings[step.group_before as int].group.outputs.start <= i
-                < bindings[step.group_before as int].group.outputs.end);
-            assert(binding_covers(bindings, i));
-        }
-    };
     mixed_trace_local_value(body, layouts, forms, bindings, roots, gate_limit, layout_limit, steps@, slot, group, nor,
         wiring, at, inputs, gates);
 }
@@ -1039,7 +1558,7 @@ pub(in crate::project::use_aliases::bit_func) fn arguments_are_determined_exec(a
 }
 
 #[verifier::opaque]
-spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
+pub(in crate::project::use_aliases::bit_func) closed spec fn nested_arguments_ready(call: &ResolvedTemplateCall) -> bool {
     &&& call.children@.len() > 0
     &&& arguments_are_determined(call.arguments@)
     &&& forall|i: int| 0 <= i < call.children@.len() ==>

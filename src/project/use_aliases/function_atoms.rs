@@ -493,7 +493,7 @@ pub(super) fn copy_location<'p, 'a>(location: &LocatedName<'p, 'a>) -> (copy: Lo
     LocatedName { source: location.source, span: location.span.start..location.span.end }
 }
 
-fn copy_signal_type<'p, 'a>(signal: &Option<SignalType<'p, 'a>>) -> (copy: Option<SignalType<'p, 'a>>)
+pub(super) fn copy_signal_type<'p, 'a>(signal: &Option<SignalType<'p, 'a>>) -> (copy: Option<SignalType<'p, 'a>>)
     ensures copy == *signal,
 {
     match signal {

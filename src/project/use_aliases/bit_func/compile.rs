@@ -1,16 +1,23 @@
 //! プロジェクトの関数を展開し、元の宣言位置からネットリストを取得する。
 
 use super::super::{FunctionExpansionError, FunctionExpansionOrder, UseAliases};
+#[cfg(verus_only)]
+use super::super::call_dependencies::function_position;
 use super::frontend::{BitFuncError, ExpandedBodyError};
 use super::lowering::{BitFuncLowerError, CallGroupError, LoweredBitFunc, MixedWiringError, ProjectedLoweringError};
 use super::templates::{FunctionTemplateBuildError, FunctionTemplates};
-use crate::project::{CircuitProject, LocatedName};
+use crate::netlist::{ClockedNor, PortBitLayout};
+use crate::project::{CircuitProject, LocatedName, TypedRoutineSignature};
 #[cfg(verus_only)]
 use super::templates::complete_circuit_table;
 #[cfg(verus_only)]
+use super::frontend::function_source_model_matches;
+#[cfg(verus_only)]
 use crate::netlist::{NorEvaluationError, nor_evaluation_ready, nor_evaluation_result};
 #[cfg(verus_only)]
-use super::lowering::port_values;
+use super::lowering::{SourceChildModel, port_values};
+#[cfg(verus_only)]
+use crate::netlist::{SourceGateId, SourceTickCircuit, source_clocked_layout};
 #[cfg(verus_only)]
 use alloc::vec::Vec;
 use vstd::prelude::*;
@@ -21,6 +28,21 @@ verus! {
 pub struct ExpandedFunctions<'p, 'a> {
     plan: FunctionExpansionOrder<'p, 'a>,
     table: FunctionTemplates<'p, 'a>,
+}
+
+#[cfg(verus_only)]
+type FunctionSource = (SourceTickCircuit, Seq<SourceGateId>, Map<SourceGateId, int>);
+#[cfg(not(verus_only))]
+type FunctionSource = ();
+
+/// tick 回路と、呼び出しが使う入出力ポートのビット配置。
+pub(in crate::project::use_aliases) struct ClockedFunctionTemplate<'p, 'a> {
+    pub(in crate::project::use_aliases) circuit: ClockedNor,
+    pub(in crate::project::use_aliases) inputs: PortBitLayout,
+    pub(in crate::project::use_aliases) outputs: PortBitLayout,
+    /// 厳格定義から組み立てた回路と、そのゲートを配列で引くための対応。
+    pub(in crate::project::use_aliases) _source: Ghost<FunctionSource>,
+    pub(in crate::project::use_aliases) _signature: Ghost<TypedRoutineSignature<'p, 'a>>,
 }
 
 /// 関数展開の計画または変換で見つかった診断。
@@ -189,6 +211,91 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 指定した関数とその依存先の展開結果に、返した回路または診断を対応付ける。
+    pub closed spec fn expand_reachable_function_result(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize,
+        result: Result<Option<LoweredBitFunc>, ExpandFunctionsError>,
+    ) -> bool {
+        match result {
+            Ok(None) => self.reachable_function_expansion_evidence(root, Ok(None)),
+            Err(ExpandFunctionsError::Plan(error)) => self.reachable_function_expansion_evidence(root, Err(error)),
+            Err(error) => exists|plan: FunctionExpansionOrder, failure: FunctionTemplateBuildError|
+                #![trigger self.reachable_function_expansion_evidence(root, Ok(Some(plan))), expansion_diagnostic(failure)]
+                self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+                && self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Err(failure))
+                && expansion_diagnostic(failure) == error,
+            Ok(Some(circuit)) => exists|plan: FunctionExpansionOrder, table: FunctionTemplates, rank: int|
+                #![trigger self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Ok(table)),
+                    plan.position_model(rank)]
+            {
+                &&& self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+                &&& self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Ok(table))
+                &&& 0 <= rank < plan.order_model().len()
+                &&& plan.position_model(rank) == Some(root)
+                &&& plan.order_model()[rank] < table.slots_model().len()
+                &&& table.slots_model()[plan.order_model()[rank] as int] matches Some(template)
+                &&& circuit == *template.circuit_model()
+            },
+        }
+    }
+
+    /// 到達展開の根に当たるソース回路とゲート順を、厳格定義から求めたことを表す。
+    pub(in crate::project::use_aliases) closed spec fn reachable_function_source_circuit(
+        &self, root: (usize, usize), width_limit: u64, circuit: SourceTickCircuit, order: Seq<SourceGateId>,
+    ) -> bool {
+        exists|plan: FunctionExpansionOrder, table: FunctionTemplates, rank: int, models: Seq<SourceChildModel>| {
+            &&& #[trigger] self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+            &&& #[trigger] self.function_source_layout_prefix(&plan, &table, width_limit, models)
+            &&& 0 <= rank < models.len()
+            &&& #[trigger] plan.position_model(rank) == Some(root)
+            &&& models[rank].circuit == circuit && models[rank].order == order
+        }
+    }
+
+    /// 到達展開で返した関数を、厳格定義から構成したソース回路と照合する。
+    #[verifier::spinoff_prover]
+    pub(in crate::project::use_aliases) proof fn reachable_function_source_layout(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize, value: &LoweredBitFunc,
+    ) -> (witness: ((SourceTickCircuit, Seq<SourceGateId>, Map<SourceGateId, int>), TypedRoutineSignature<'p, 'a>))
+        requires
+            self.can_resolve(),
+            self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, Ok(Some(*value))),
+        ensures ({
+            let (layout, signature) = witness;
+            &&& self.reachable_function_source_circuit(root, width_limit, layout.0, layout.1)
+            &&& source_clocked_layout(&layout.0, value.netlist_model(), layout.1, layout.2)
+            &&& self.typed_signature_evidence(root.0, root.1, width_limit, Ok(Some(signature)))
+            &&& self.routine_bit_layouts_match(signature, width_limit, bit_limit, value.input_layout_model(), value.output_layout_model())
+        }),
+    {
+        reveal(UseAliases::expand_reachable_function_result);
+        let (plan, table, rank) = choose|plan: FunctionExpansionOrder, table: FunctionTemplates, rank: int| {
+            &&& self.reachable_function_expansion_evidence(root, Ok(Some(plan)))
+            &&& #[trigger] self.ordered_template_build_result(&plan, width_limit, bit_limit, gate_limit, Ok(table))
+            &&& 0 <= rank < plan.order_model().len()
+            &&& #[trigger] plan.position_model(rank) == Some(root)
+            &&& plan.order_model()[rank] < table.slots_model().len()
+            &&& table.slots_model()[plan.order_model()[rank] as int] matches Some(template)
+            &&& *value == *template.circuit_model()
+        };
+        self.reachable_function_template_plan(root, plan);
+        let models = self.completed_function_source_layout_prefix(&plan, &table, width_limit, bit_limit, gate_limit, (rank + 1) as nat);
+        let model = models[rank];
+        assert(function_source_model_matches(&plan, &table, rank, model));
+        let vertex = plan.order_model()[rank];
+        let (template, _, _, _) = self.completed_template_expansion_at(&plan, width_limit, bit_limit, gate_limit, &table, rank);
+        assert(template == table.slots_model()[vertex as int]->Some_0);
+        assert(source_clocked_layout(&model.circuit, template.circuit_model().netlist_model(), model.order, model.index));
+        self.template_signature_evidence(root, width_limit, &template);
+        self.template_circuit_evidence(root, width_limit, &template);
+        self.template_port_evidence(root, width_limit, &template);
+        self.routine_bit_layouts_intro(template.signature_model(), width_limit, bit_limit, template.input_widths_model(),
+            template.output_widths_model(), template.structure_layouts_model(), value.input_layout_model(), value.output_layout_model());
+        reveal(UseAliases::reachable_function_source_circuit);
+        assert(self.reachable_function_source_circuit(root, width_limit, model.circuit, model.order));
+        ((model.circuit, model.order, model.index), template.signature_model())
+    }
+
     /// 指定した宣言をソースの規則で評価したとき、入出力の値が対応することを表す。
     pub closed spec fn expanded_function_source_evaluation(
         &self, expanded: &ExpandedFunctions, file: usize, entry: usize, width_limit: u64,
@@ -219,6 +326,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> expected == outputs
         },
     {
+        self.whole_function_template_plan(expanded.plan);
         self.completed_templates_ready(&expanded.plan, width_limit, bit_limit, gate_limit, &expanded.table);
         let rank = choose|rank: int| {
             &&& 0 <= rank < expanded.plan.order_model().len()
@@ -242,6 +350,131 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             self.template_rank_from_position(expanded.plan, (file, entry), rank, other);
             self.project_source_func_evaluations_agree(&expanded.plan, width_limit, rank, inputs, expected, outputs);
         };
+    }
+
+    /// 指定した `func` とその呼び出し先だけを展開し、指定した関数のネットリストを返す。
+    ///
+    /// ファイルと厳格索引項目の添字が関数を指さない場合は `None` を返す。
+    /// 上限の意味は [Self::expand_functions] と同じで、展開する各関数に適用する。
+    /// 構造体型を使う場合は、プロジェクトの型宣言も検査する。
+    ///
+    /// # Errors
+    ///
+    /// 到達した呼び出しを解決できないか、そこに循環がある場合は計画の診断を返す。
+    /// 計画ができた場合は、展開順で最初に変換できなかった関数の位置と診断を返す。
+    pub fn expand_reachable_function(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize,
+    ) -> (result: Result<Option<LoweredBitFunc>, ExpandFunctionsError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures
+            self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, result),
+            result matches Ok(Some(circuit)) ==> nor_evaluation_ready(
+                circuit.netlist_model(), circuit.input_layout_model().total_bits_model() as nat)
+                && circuit.netlist_model().outputs@.len() == circuit.output_layout_model().total_bits_model(),
+    {
+        let plan = match self.prepare_reachable_function_expansion(root) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(ExpandFunctionsError::Plan(error)),
+        };
+        let ghost rank = self.reachable_function_template_plan(root, plan);
+        let table = match self.expand_templates_in_order(&plan, width_limit, bit_limit, gate_limit) {
+            Ok(table) => table,
+            Err(error) => return Err(public_diagnostic(error)),
+        };
+        proof { self.completed_templates_ready(&plan, width_limit, bit_limit, gate_limit, &table); }
+        let vertex = plan.template_vertex(root);
+        proof { plan.template_vertex_at_position(root, rank, vertex); }
+        let Some(vertex) = vertex else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        let ghost built = table;
+        let circuit = table.into_circuit_at_vertex(vertex);
+        assert(0 <= rank < plan.order_model().len());
+        assert(built.slots_model()[vertex as int] matches Some(template) && circuit == Some(*template.circuit_model()));
+        Ok(circuit)
+    }
+
+    /// tick 用の子回路が、指定した関数の展開結果と同じ配線を持つことを表す。
+    pub(in crate::project::use_aliases) closed spec fn clocked_function_template_matches(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize, template: &ClockedFunctionTemplate,
+    ) -> bool {
+        let (source, order, index) = template._source@;
+        let netlist = &template.circuit.netlist_model();
+        &&& self.reachable_function_source_circuit(root, width_limit, source, order)
+        &&& source_clocked_layout(&source, netlist, order, index)
+        &&& template.inputs.total_bits_model() == netlist.input_count
+        &&& template.outputs.total_bits_model() == netlist.outputs@.len()
+        &&& self.typed_signature_evidence(root.0, root.1, width_limit, Ok(Some(template._signature@)))
+        &&& self.routine_bit_layouts_match(template._signature@, width_limit, bit_limit, &template.inputs, &template.outputs)
+        &&& exists|value: LoweredBitFunc| {
+            &&& #[trigger] self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, Ok(Some(value)))
+            &&& *value.netlist_model() == *netlist
+            &&& *value.input_layout_model() == template.inputs
+            &&& *value.output_layout_model() == template.outputs
+        }
+    }
+
+    /// 関数の子回路を、呼び出し元で使うソース回路と配置の証拠に結び付ける。
+    pub(in crate::project::use_aliases) proof fn clocked_function_template_evidence(
+        &self, root: (usize, usize), width: u64, bits: usize, gates: usize, template: &ClockedFunctionTemplate,
+    )
+        requires self.clocked_function_template_matches(root, width, bits, gates, template),
+        ensures
+            self.reachable_function_source_circuit(root, width, template._source@.0, template._source@.1),
+            source_clocked_layout(&template._source@.0, &template.circuit.netlist_model(), template._source@.1, template._source@.2),
+    {
+    }
+
+    /// 呼び出しで照合した署名と、展開済みの関数が使うビット配置を対応付ける。
+    pub(in crate::project::use_aliases) proof fn clocked_function_ports_evidence(
+        &self, root: (usize, usize), width: u64, bits: usize, gates: usize,
+        template: &ClockedFunctionTemplate, signature: TypedRoutineSignature,
+    )
+        requires
+            self.can_resolve(),
+            self.clocked_function_template_matches(root, width, bits, gates, template),
+            self.typed_signature_evidence(root.0, root.1, width, Ok(Some(signature))),
+        ensures
+            self.routine_bit_layouts_match(signature, width, bits, &template.inputs, &template.outputs),
+            template.inputs.total_bits_model() == template.circuit.netlist_model().input_count,
+            template.outputs.total_bits_model() == template.circuit.netlist_model().outputs@.len(),
+    {
+        self.typed_routine_signatures_agree(root.0, root.1, width, template._signature@, signature);
+        self.routine_bit_layouts_transfer(template._signature@, signature, width, bits, &template.inputs, &template.outputs);
+    }
+
+    /// 指定した関数を展開し、各 NOR を保ったまま tick 実行用の子回路にする。
+    ///
+    /// # Errors
+    ///
+    /// 到達する関数の展開に失敗した場合は、元の展開診断を返す。
+    pub(in crate::project::use_aliases) fn expand_clocked_function(
+        &self, root: (usize, usize), width_limit: u64, bit_limit: usize, gate_limit: usize,
+    ) -> (result: Result<ClockedFunctionTemplate<'p, 'a>, ExpandFunctionsError<'p, 'a>>)
+        requires self.can_resolve(), function_position(self.targets.project_model().circuits_model(), root),
+        ensures match result {
+            Ok(template) => self.clocked_function_template_matches(root, width_limit, bit_limit, gate_limit, &template),
+            Err(error) => self.expand_reachable_function_result(root, width_limit, bit_limit, gate_limit, Err(error)),
+        },
+    {
+        let value = self.expand_reachable_function(root, width_limit, bit_limit, gate_limit)?;
+        let Some(value) = value else {
+            proof {
+                reveal(UseAliases::expand_reachable_function_result);
+                self.reachable_function_not_absent(root);
+                assert(false);
+            }
+            unreachable!()
+        };
+        let ghost (source, signature) = self.reachable_function_source_layout(root, width_limit, bit_limit, gate_limit, &value);
+        let ghost expanded = value;
+        let (circuit, inputs, outputs) = value.into_clocked();
+        let template = ClockedFunctionTemplate { circuit, inputs, outputs, _source: Ghost(source), _signature: Ghost(signature) };
+        assert(*expanded.netlist_model() == template.circuit.netlist_model());
+        assert(self.clocked_function_template_matches(root, width_limit, bit_limit, gate_limit, &template));
+        Ok(template)
     }
 
     /// プロジェクト内のすべての `func` を依存順にネットリストへ展開する。
@@ -288,6 +521,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(plan) => plan,
             Err(error) => return Err(ExpandFunctionsError::Plan(error)),
         };
+        proof { self.whole_function_template_plan(plan); }
         let table = match self.expand_templates_in_order(&plan, width_limit, bit_limit, gate_limit) {
             Ok(table) => table,
             Err(error) => return Err(public_diagnostic(error)),

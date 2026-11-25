@@ -121,7 +121,7 @@ pub(super) proof fn ordinary_call_bounds(source: &str, forms: Seq<Form>, call: i
     requires ordinary_call_at(source, forms, call, stop),
     ensures 0 <= call < forms.len() && forms[call] is List
         && call < stop
-        && call + 2 <= forms[call]->List_end <= forms.len()
+        && call + 2 <= forms[call]->List_end <= stop <= forms.len()
         && forms[call + 1] is Atom,
 {
 }
@@ -564,6 +564,86 @@ pub(super) proof fn call_argument_signal_index(
     ensures expression_signals(source, forms, first, stop).contains(name),
     decreases stop - first,
 {
+    assert(super::bit_selection_path(source, forms, name, Seq::empty(), name));
+    call_argument_selected_signal_index(source, forms, first, stop, reference, name, Seq::empty(), name);
+}
+
+proof fn direct_argument_selection_has_signal(
+    source: &str, forms: Seq<Form>, start: int, stop: int,
+    argument: usize, steps: Seq<super::BitSelectionShape>, name: usize,
+)
+    requires
+        forms.len() <= usize::MAX, complete_list_indices(forms),
+        expression_region(forms, start, stop), expression_forest(source, forms, start, stop),
+        direct_form_in_range(forms, start, stop, argument as int),
+        super::bit_selection_path(source, forms, argument, steps, name),
+        name < forms.len() && forms[name as int] is Atom && forms[name as int]->Atom_kind is Name,
+    ensures expression_signals(source, forms, start, stop).contains(name),
+    decreases stop - start,
+{
+    reveal(direct_form_in_range);
+    reveal(expression_region);
+    reveal(complete_list_indices);
+    reveal_with_fuel(expression_forest, 1);
+    reveal_with_fuel(expression_signals, 1);
+    let next = after_form(forms, start);
+    let signals = expression_signals(source, forms, start, stop);
+    if start == argument {
+        assert(expression_forest(source, forms, next, next));
+        if forms[start] is List {
+            let (first, end) = choose|first: int, end: int|
+                #[trigger] expression_child_range(source, forms, start, next, first, end)
+                    && start < first <= end <= next && expression_forest(source, forms, first, end);
+            assert(expression_forest(source, forms, start, next));
+            let scope = choose|a: int, b: int| start < a <= b <= next
+                && #[trigger] expression_child_range(source, forms, start, next, a, b);
+            same_child_interval(source, forms, start, next, first, end, scope.0, scope.1);
+            assert(expression_signals(source, forms, next, next).len() == 0);
+            assert(expression_signals(source, forms, start, next) =~= expression_signals(source, forms, first, end));
+            assert(signals =~= expression_signals(source, forms, first, end) + expression_signals(source, forms, next, stop));
+        } else {
+            if steps.len() > 0 {
+                let at = super::bit_selection_step_root(argument, steps, 0);
+                assert(super::bit_selection_shape_matches(source, forms, at, steps[0]));
+                super::bit_selection_shape_positions(source, forms, at, steps[0]);
+                assert(at == start);
+                assert(false);
+            }
+            assert(name == argument);
+            direct_name_in_signal_index(source, forms, start, stop, name);
+            return;
+        }
+        super::selection_shapes::selection_path_preserves_signals(source, forms, argument, next, steps, name);
+        bare_signal_index(source, forms, name as int, after_form(forms, name as int));
+        assert(signals[0] == name);
+    } else {
+        assert(start < next <= argument < stop);
+        assert(direct_form_in_range(forms, next, stop, argument as int));
+        direct_argument_selection_has_signal(source, forms, next, stop, argument, steps, name);
+        let tail = expression_signals(source, forms, next, stop);
+        let i = choose|i: int| 0 <= i < tail.len() && tail[i] == name;
+        assert(signals[signals.len() - tail.len() + i] == name);
+    }
+}
+
+pub(super) proof fn call_argument_selected_signal_index(
+    source: &str, forms: Seq<Form>, first: int, stop: int, reference: int, argument: usize, steps: Seq<super::BitSelectionShape>, name: usize,
+)
+    requires
+        forms.len() <= usize::MAX, complete_list_indices(forms), nested_list_indices(forms),
+        expression_region(forms, first, stop), expression_forest(source, forms, first, stop),
+        0 <= reference < expression_references(source, forms, first, stop).len(),
+        ({
+            let indexed = expression_references(source, forms, first, stop)[reference];
+            let call = indexed.form - 1;
+            &&& indexed.kind is Callee && 0 <= call < forms.len() && forms[call] is List
+            &&& direct_form_in_range(forms, call + 2, forms[call]->List_end as int, argument as int)
+            &&& name < forms.len() && forms[name as int] is Atom && forms[name as int]->Atom_kind is Name
+        }),
+        super::bit_selection_path(source, forms, argument, steps, name),
+    ensures expression_signals(source, forms, first, stop).contains(name),
+    decreases stop - first,
+{
     reveal_with_fuel(expression_references, 1);
     reveal_with_fuel(expression_signals, 1);
     reveal_with_fuel(expression_forest, 1);
@@ -573,7 +653,7 @@ pub(super) proof fn call_argument_signal_index(
     assert(0 <= first < stop <= forms.len());
     match forms[first] {
         Form::Atom { .. } => {
-            call_argument_signal_index(source, forms, first + 1, stop, reference, name);
+            call_argument_selected_signal_index(source, forms, first + 1, stop, reference, argument, steps, name);
             let tail = expression_signals(source, forms, first + 1, stop);
             let i = choose|i: int| 0 <= i < tail.len() && tail[i] == name;
             assert(signals[signals.len() - tail.len() + i] == name);
@@ -599,18 +679,18 @@ pub(super) proof fn call_argument_signal_index(
                         && arguments_match(forms, first + 2, end as int, candidate, a, b);
                 same_expression_head(source, forms, first + 1, head, witness);
                 assert(a == first + 2 && b == end);
-                direct_name_in_signal_index(source, forms, a, b, name);
+                direct_argument_selection_has_signal(source, forms, a, b, argument, steps, name);
                 let i = choose|i: int| 0 <= i < child_signals.len() && child_signals[i] == name;
                 assert(signals[i] == name);
             } else if reference < here.len() + children.len() {
                 let offset = reference - here.len();
                 assert(refs[reference] == children[offset]);
-                call_argument_signal_index(source, forms, a, b, offset, name);
+                call_argument_selected_signal_index(source, forms, a, b, offset, argument, steps, name);
                 let i = choose|i: int| 0 <= i < child_signals.len() && child_signals[i] == name;
                 assert(signals[i] == name);
             } else {
                 let offset = reference - here.len() - children.len();
-                call_argument_signal_index(source, forms, end as int, stop, offset, name);
+                call_argument_selected_signal_index(source, forms, end as int, stop, offset, argument, steps, name);
                 let i = choose|i: int| 0 <= i < tail_signals.len() && tail_signals[i] == name;
                 assert(signals[child_signals.len() + i] == name);
             }
