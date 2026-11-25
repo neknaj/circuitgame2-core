@@ -65,4 +65,30 @@ tick は到着済みのイベントだけを確認する。送信タスクは ti
 
 論理 reset は取り込み済みの旧世代のイベントと完了通知を破棄し、旧世代の送信データを追加でキューに入れる処理を打ち切る。UART の送信レジスタや割り込みバッファーに渡したバイトは物理ポートから送信され得る。受信バイトの世代は、受信タスクが UART バッファーから取り出した時点で付ける。
 
+## I²C で LM75B の設定を読む
+
+`ncg2-rp-i2c` は I²C0 を 100 kHz で使う組み込み例。LM75B のアドレス端子 A2〜A0 を Low にすると、7ビットアドレスは `0x48` になる。LM75B を 3.3 V で動かし、SDA と SCL を 3.3 V にプルアップする。基板側の内部プルアップは無効にしている。 [LM75B データシート](https://www.nxp.com/docs/en/data-sheet/LM75B.pdf)
+
+| Pico・Pico 2 | LM75B との接続または観測 |
+| --- | --- |
+| GND | LM75B の GND |
+| GP0 | SDA |
+| GP1 | SCL |
+| GP3 | 通信エラーまたは tick の期限超過で High になる |
+| GP4 | 1 ms 周期の tick が確定するたびに反転する |
+| GP5 | 最後に読み出した設定レジスタのシャットダウンビットを出す |
+
+以前の手順で環境変数 `NCG2_RP_PROGRAM` を設定した場合は、解除してからビルドする。
+
+```sh
+cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,i2c --bin ncg2-rp-i2c
+cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2,i2c --bin ncg2-rp-i2c
+```
+
+出力 ELF は `ncg2-rp-i2c`。UF2 への変換は対象ボードの手順に従う。 [ビルド](#ビルド)
+
+回路は 250 tick ごとに要求信号を立てる。次の tick が確定すると、通信タスクがポインター `0x01` を送り、反復 START で1バイト読む。完了は要求 ID と世代を照合して回路に渡す。tick の確定後に GP5 に値が出る。LM75B の設定が初期値なら GP5 は Low になる。
+
+通信エラーや 20 ms のタイムアウトが起きると GP3 は High になり、新規の読み出しは停止する。GP4 が反転を続けていれば回路の tick は進んでいる。配線を確認してからボードを reset すると、通信を再開できる。
+
 SPI と I²C の接続仕様を参照する。 [GPU と RP マイコンの実行バックエンド](https://neknaj.github.io/circuitgame2/docs/backends.html)
