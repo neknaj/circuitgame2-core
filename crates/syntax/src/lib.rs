@@ -13,6 +13,10 @@ mod boundary;
 pub mod circuit;
 mod digits;
 mod natural;
+mod recovery_boundary;
+pub use recovery_boundary::{RecoveryBoundary, RecoveryWindow, recovery_boundary_at, recovery_window};
+#[cfg(verus_only)]
+pub use recovery_boundary::{recovery_window_allowed, settled_recovery_boundary};
 pub use bit_literal::{BitLiteral, BitLiteralSize, bit_literal_size, read_bit_literal};
 #[cfg(verus_only)]
 pub use bit_literal::{
