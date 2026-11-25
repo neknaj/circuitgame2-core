@@ -1468,6 +1468,7 @@ pub closed spec fn unvisited_arithmetic_at_source(
         }
 }
 
+#[verifier::spinoff_prover]
 fn capture_arithmetic_sites(calls: &[CallTypeEntry], trace: &[usize], Ghost(forms): Ghost<Seq<Form>>)
     -> (sites: Vec<TypedArithmeticSite>)
     requires call_entries_fit(forms, calls@), arithmetic_trace_fits(calls@, trace@, 0, forms.len()),
@@ -1507,34 +1508,34 @@ fn capture_arithmetic_sites(calls: &[CallTypeEntry], trace: &[usize], Ghost(form
         next += 1;
     }
     assert(trace@.take(next as int) =~= trace@);
-    proof {
-        assert forall|i: int| 0 <= i < sites@.len() implies {
-            let site = #[trigger] sites@[i];
-            defn_call_arguments(forms, site.at, seq![site.arguments.0, site.arguments.1])
-        } by {
-            let entry = calls@[trace@[i] as int];
-            assert(canonical_call(forms, entry));
-            let site = arithmetic_origin(calls@, trace@[i]);
-            let arguments = seq![site.arguments.0, site.arguments.1];
-            let end = subtree_limit(forms, entry.at);
-            assert forall|j: int| 0 <= j < arguments.len() implies {
-                let child = #[trigger] arguments[j];
-                &&& entry.at + 2 <= child < subtree_limit(forms, child) <= end
-                &&& if j + 1 < arguments.len() { subtree_limit(forms, child) == arguments[j + 1] }
-                    else { subtree_limit(forms, child) == end }
-            } by {
-                assert(arguments[j] == entry.arguments@[j].at);
-                if j == 0 { assert(arguments[1] == entry.arguments@[1].at); }
-            };
-            call_arguments_from_intervals(forms, entry.at, arguments);
-        };
-        assert forall|i: int, j: int| 0 <= i < j < sites@.len()
-            implies (#[trigger] sites@[i]).at < (#[trigger] sites@[j]).at by {
-            assert(sites@[i].at == calls@[trace@[i] as int].at);
-            assert(sites@[j].at == calls@[trace@[j] as int].at);
-        };
-    }
+    proof { arithmetic_sites_keep_operand_positions(forms, calls@, trace@, sites@); }
     sites
+}
+
+proof fn arithmetic_sites_keep_operand_positions(
+    forms: Seq<Form>, calls: Seq<CallTypeEntry>, trace: Seq<usize>, sites: Seq<TypedArithmeticSite>,
+)
+    requires call_entries_fit(forms, calls), arithmetic_trace_fits(calls, trace, 0, forms.len()),
+        sites == trace.map_values(|visit: usize| arithmetic_origin(calls, visit)),
+    ensures arithmetic_sites_fit(forms, sites),
+{
+    reveal(arithmetic_trace_fits);
+    assert forall|i: int| 0 <= i < sites.len() implies {
+        let site = #[trigger] sites[i];
+        defn_call_arguments(forms, site.at, seq![site.arguments.0, site.arguments.1])
+    } by {
+        let entry = calls[trace[i] as int];
+        assert(canonical_call(forms, entry));
+        let site = arithmetic_origin(calls, trace[i]);
+        let arguments = seq![site.arguments.0, site.arguments.1];
+        assert(arguments =~= entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at));
+        canonical_call_preserves_arguments(forms, entry, arguments);
+    };
+    assert forall|i: int, j: int| 0 <= i < j < sites.len()
+        implies (#[trigger] sites[i]).at < (#[trigger] sites[j]).at by {
+        assert(sites[i].at == calls[trace[i] as int].at);
+        assert(sites[j].at == calls[trace[j] as int].at);
+    };
 }
 
 proof fn recorded_arithmetic_entry(
@@ -1735,7 +1736,9 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
                     return (outcome, Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }), Vec::new());
                 }
                 let sites = capture_arithmetic_sites(&call_types, visits.as_slice(), Ghost(forms@));
+                let _call_count = call_types.len();
                 proof {
+                    assert(call_types@.len() == _call_count);
                     let caller = DefnPosition { file, item };
                     prove_arithmetic_slot_projection(aliases, caller, forms@, body, outcomes, call_types@,
                         original_issues, visits@, sites@);

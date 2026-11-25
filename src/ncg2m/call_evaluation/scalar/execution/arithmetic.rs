@@ -179,6 +179,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             arithmetic_step_matches(pending, value, waiting@, step),
             step matches Ok(ScalarExecutionSlice::Suspended(after)) ==>
                 after.plan == plan && after.result_type@ == result_type@,
+            !(step matches Ok(ScalarExecutionSlice::Complete(_))),
     {
         reveal(arithmetic_step_matches);
         let ghost initial = pending;
