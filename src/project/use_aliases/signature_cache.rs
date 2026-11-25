@@ -1,6 +1,8 @@
 //! 一回の型検査で解決した呼び出し先の署名を保持する。
 
-use super::{TypedRoutineSignature, TypedSignatureError, UseAliases};
+use super::{MixedTypedSignatureError, MixedUseAliases, TypedRoutineSignature, TypedSignatureError, UseAliases};
+#[cfg(verus_only)]
+use crate::project::mixed_use_targets_match;
 use alloc::collections::BTreeMap;
 #[cfg(verus_only)]
 use vstd::laws_cmp::obeys_cmp;
@@ -24,6 +26,12 @@ impl<'p, 'a> SignatureCache<'p, 'a> {
         let signatures = self.signatures();
         forall|place: RoutinePosition| #[trigger] signatures.contains_key(place) ==>
             aliases.typed_signature_evidence(place.0, place.1, max_width, Ok(Some(signatures[place])))
+    }
+
+    pub(super) open spec fn matches_mixed(&self, aliases: &MixedUseAliases, max_width: u64) -> bool {
+        let signatures = self.signatures();
+        forall|place: RoutinePosition| #[trigger] signatures.contains_key(place) ==>
+            aliases.mixed_typed_signature_matches(place.0, place.1, max_width, Ok(Some(signatures[place])))
     }
 
     pub(super) fn new() -> (cache: Self)
@@ -83,11 +91,7 @@ impl<'p, 'a> SignatureCache<'p, 'a> {
             let Some(signature) = aliases.resolve_routine_signature(file, entry, max_width)? else {
                 return Ok(false);
             };
-            proof {
-                broadcast use vstd::laws_cmp::group_laws_cmp;
-                assert(obeys_cmp::<RoutinePosition>());
-            }
-            let _ = self.signatures.insert((file, entry), signature);
+            self.insert((file, entry), signature);
         }
         proof {
             let signatures = self.signatures();
@@ -103,6 +107,44 @@ impl<'p, 'a> SignatureCache<'p, 'a> {
             };
         }
         Ok(true)
+    }
+
+    /// 混在索引が指す署名を、現在の幅上限で解決して登録する。
+    pub(super) fn prepare_mixed(
+        &mut self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, entry: usize, max_width: u64,
+    ) -> (result: Result<bool, MixedTypedSignatureError<'p, 'a>>)
+        requires
+            mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
+            old(self).matches_mixed(aliases, max_width),
+        ensures
+            final(self).matches_mixed(aliases, max_width),
+            match result {
+                Ok(true) => final(self).signatures().contains_key((file, entry)),
+                Ok(false) => aliases.mixed_typed_signature_matches(file, entry, max_width, Ok(None))
+                    && !aliases.targets_model().project_model().has_mixed_routine_signature(file, entry),
+                Err(error) => aliases.mixed_typed_signature_matches(file, entry, max_width, Err(error)),
+            },
+            forall|place: RoutinePosition| #[trigger] old(self).signatures().contains_key(place) ==>
+                final(self).signatures().contains_key(place)
+                    && final(self).signatures()[place] == old(self).signatures()[place],
+    {
+        if self.get(file, entry).is_none() {
+            let Some(signature) = aliases.resolve_mixed_routine_signature(file, entry, max_width)? else {
+                return Ok(false);
+            };
+            self.insert((file, entry), signature);
+        }
+        Ok(true)
+    }
+
+    fn insert(&mut self, position: RoutinePosition, signature: TypedRoutineSignature<'p, 'a>)
+        ensures final(self).signatures() == old(self).signatures().insert(position, signature),
+    {
+        proof {
+            broadcast use vstd::laws_cmp::group_laws_cmp;
+            assert(obeys_cmp::<RoutinePosition>());
+        }
+        let _ = self.signatures.insert(position, signature);
     }
 }
 

@@ -11,7 +11,7 @@ use super::location_in_source;
 use super::source_indexes::project_source_index_evidence;
 #[cfg(verus_only)]
 use super::widths::{
-    checked_name_sites, checked_width_sites, indexed_port_widths_available, indexed_port_widths_evidence, indexed_width_sites,
+    checked_name_sites, checked_width_sites, indexed_port_widths_available, indexed_port_widths_evidence, indexed_width_counts, indexed_width_sites,
     routine_port_widths_agree, routine_port_widths_evidence,
     routine_widths_success_excludes_other,
 };
@@ -23,6 +23,8 @@ use super::{
 use super::widths::check_indexed_routine_port_widths;
 use crate::syntax::Form;
 use crate::syntax::circuit::{NameSite, NamedBuildCircuit, PortTypeSite};
+#[cfg(verus_only)]
+use crate::syntax::circuit::{RoutineArity, routine_arity_matches};
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 use alloc::vec::Vec;
@@ -768,6 +770,23 @@ impl<'a> ParsedProjectSources<'a> {
             indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Ok(Some(ports)))
                 && #[trigger] checked_signature_evidence(source, parsed.syntax.forms@, &ports, inputs, outputs, Ok(Some(signature)));
         indexed_width_sites(source, &parsed.syntax, entry as int, max_width, ports);
+    }
+
+    pub(in crate::project) proof fn mixed_routine_signature_counts(
+        &self, file: usize, entry: usize, max_width: u64, signature: CheckedRoutineSignature, arity: RoutineArity,
+    )
+        requires
+            self.mixed_routine_signature_evidence(file, entry, max_width, Ok(Some(signature))),
+            routine_arity_matches(self.sources_model()[file as int].text,
+                &self.indexes_model()[file as int]->Circuit_0.syntax, entry as int, Some(arity)),
+        ensures signature.ports.inputs@.len() == arity.inputs && signature.ports.outputs@.len() == arity.outputs,
+    {
+        let source = &self.sources_model()[file as int];
+        let parsed = self.indexes_model()[file as int]->Circuit_0;
+        let (widths, _, _) = choose|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+            indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Ok(Some(widths)))
+                && #[trigger] checked_signature_evidence(source, parsed.syntax.forms@, &widths, inputs, outputs, Ok(Some(signature)));
+        indexed_width_counts(source, &parsed.syntax, entry as int, max_width, widths, arity);
     }
 
     /// 混在ソース集合から回路の署名を検査する。

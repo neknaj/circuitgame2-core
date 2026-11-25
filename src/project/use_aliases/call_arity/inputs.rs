@@ -342,7 +342,7 @@ spec fn known_argument(
     }
 }
 
-spec fn reported_argument(
+pub(in crate::project::use_aliases) open spec fn reported_argument(
     source: &ProjectSource, form: Form, ordinal: usize, port: CallPortType,
     leaf: Result<Option<SignalType>, CallInputReason>, result: Result<Option<SignalType>, CallInputError>,
 ) -> bool {
@@ -353,6 +353,26 @@ spec fn reported_argument(
         }) && index == ordinal && is_form_location(source, form, argument)
             && expected == port.ty && found == reason
             && required_at == (if let Some(annotation) = port.annotation { Some(*annotation) } else { None }),
+    }
+}
+
+// 実引数自体の位置に、要求したポート型の注釈と型違反を添える。
+pub(in crate::project::use_aliases) fn report_call_argument<'p, 'a>(
+    source: &'p ProjectSource<'a>, forms: &[Form], root: usize, ordinal: usize,
+    port: &CallPortType<'_, 'p, 'a>, leaf: Result<Option<SignalType<'p, 'a>>, CallInputReason<'p, 'a>>,
+) -> (result: Result<Option<SignalType<'p, 'a>>, CallInputError<'p, 'a>>)
+    requires root < forms@.len(), form_spans_valid(source.text, forms@, source.text.spec_bytes().len() as int),
+    ensures reported_argument(source, forms@[root as int], ordinal, *port, leaf, result),
+{
+    match leaf {
+        Ok(ty) => Ok(ty),
+        Err(reason) => Err(CallInputError::Argument {
+            index: ordinal,
+            argument: form_location(source, forms, root),
+            expected: port.ty,
+            required_at: match port.annotation { Some(annotation) => Some(copy_location(annotation)), None => None },
+            reason,
+        }),
     }
 }
 
@@ -1204,15 +1224,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let ghost input = known;
             let leaf = check_leaf(source, forms, root, &port, known, max_width);
             let ghost checked = leaf;
-            let value = match leaf {
+            let value = match report_call_argument(source, forms, root, ordinal, &port, leaf) {
                 Ok(value) => value,
-                Err(reason) => {
-                    let error = CallInputError::Argument {
-                        index: ordinal, argument: form_location(source, forms, root),
-                        expected: port.ty,
-                        required_at: if let Some(annotation) = port.annotation { Some(copy_location(annotation)) } else { None },
-                        reason,
-                    };
+                Err(error) => {
                     proof {
                         self::record_argument(context, &call, forms@, wiring, types@, slots, start,
                             root, ordinal, max_width, port, input, checked, Err(error));

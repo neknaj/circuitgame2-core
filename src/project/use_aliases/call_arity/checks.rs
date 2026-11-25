@@ -165,13 +165,13 @@ pub(in crate::project::use_aliases) fn check_indexed_root_count<'p, 'a>(
 pub(in crate::project::use_aliases) fn check_indexed_call_counts<'p, 'a>(
     source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, row: &BuildDefinition,
     count: usize, call: FuncCallArity<'p, 'a>,
-) -> (result: Result<(), FuncArityError<'p, 'a>>)
+) -> (result: Result<FuncCallArity<'p, 'a>, FuncArityError<'p, 'a>>)
     requires
         parsed_circuit_matches(*source, *parsed), *call.source == *source,
         location_in_source(LocatedName { source: call.source, span: call.call.span }),
         row.form + 2 < parsed.syntax.forms@.len(), count == target_count(parsed, *row),
     ensures match result {
-        Ok(()) => call.call.arguments == call.target.port_counts().inputs
+        Ok(checked) => checked == call && call.call.arguments == call.target.port_counts().inputs
             && call.target.port_counts().outputs == expected_outputs(parsed, *row, call),
         Err(error) => call_count_error(parsed, *row, call, error),
     },
@@ -186,7 +186,7 @@ pub(in crate::project::use_aliases) fn check_indexed_call_counts<'p, 'a>(
         let expression = LocatedName { source: call.source, span: call.call.span };
         return Err(FuncArityError::OutputCount { expression, left, callee: Some(call.target), expected, actual: ports.outputs });
     }
-    Ok(())
+    Ok(call)
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
