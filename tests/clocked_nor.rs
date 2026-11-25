@@ -603,6 +603,11 @@ fn lowers_a_source_oscillator_with_a_direct_output() {
         text: "(using nor) (module oscillator (in pin) (out q pin) (def q (nor q 0)))" }]).unwrap();
     let targets = index_use_targets(&project).unwrap();
     let aliases = check_use_aliases(&targets).unwrap();
+    let limits = circuitgame2_core::project::ClockedModuleVmLimits { width: 16, wiring_bits: 2, gates: 1, state_bits: 0 };
+    let hint = aliases.module_expansion_hint(0, 0, limits).unwrap().unwrap();
+    assert_eq!((hint.nor_gates, hint.settling_ticks), (1, None));
+    assert_eq!((hint.location.source.revision, &hint.location.source.text[hint.location.span]), (1, "oscillator"));
+    assert!(aliases.module_settling_hint(0, 0, limits).unwrap().is_none());
     let circuit = aliases.lower_clocked_module(ModuleBodyPosition { file: 0, entry: 1 }, 16, 1).unwrap().unwrap();
     let mut frame = circuit.reset();
     assert_eq!(frame.outputs, [false, false]);
@@ -787,6 +792,14 @@ fn a_module_observes_delayed_function_gates_and_immediate_wires() {
     assert_eq!(frame.outputs, [false, false, false]);
     let mut vm = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap().vm;
     assert_eq!(vm.settling_bound(), Some(2));
+    assert_eq!(vm.nor_gate_count(), 4);
+    let hint = aliases.module_expansion_hint(0, 0, limits).unwrap().unwrap();
+    assert_eq!((hint.nor_gates, hint.settling_ticks), (4, Some(2)));
+    let legacy = aliases.module_settling_hint(0, 0, limits).unwrap().unwrap();
+    assert_eq!((legacy.location.span, legacy.ticks), (hint.location.span, 2));
+    assert!(aliases.module_expansion_hint(0, 1, limits).unwrap().is_none());
+    let buffer = aliases.expand_reachable_function((0, 3), 8, 4, 4).unwrap().unwrap();
+    assert_eq!(buffer.netlist().gates.len(), 2);
     assert_eq!(vm.reset(), frame.outputs);
     for (input, expected) in [
         (true, [true, true, true]),
