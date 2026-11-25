@@ -47,6 +47,11 @@ use typing::check_typed_body;
 #[cfg(verus_only)]
 use typing::typed_body;
 
+#[cfg(verus_only)]
+pub use typing::scalar::{local_scalar_fragment, local_scalar_site_is_typed};
+#[cfg(verus_only)]
+pub(super) use typing::scalar::{scalar_atom_at, scalar_atom_type_origin, scalar_conditional_child_types};
+
 verus! {
 
 /// 式の構文や型の検査で見つかった違反。
@@ -277,7 +282,8 @@ fn read_children3(forms: &[Form], at: usize) -> (children: Option<(usize, usize,
     Some((first, second, third))
 }
 
-pub(super) closed spec fn conditional_positions(
+/// 元の構文木にある `if` の条件と二つの分岐の位置を表す。
+pub closed spec fn conditional_positions(
     source: &str, forms: Seq<Form>, at: usize,
 ) -> Option<(usize, usize, usize)> {
     if at < forms.len() {
@@ -291,6 +297,11 @@ pub(super) closed spec fn conditional_positions(
         None
     }
 }
+
+pub(super) proof fn conditional_position_is_list(source: &str, forms: Seq<Form>, at: usize)
+    requires conditional_positions(source, forms, at).is_some(),
+    ensures at < forms.len() && forms[at as int] is List,
+{}
 
 // 型検査と同じ兄弟の境界から、条件と二つの分岐の位置を得る。
 pub(super) fn read_conditional_positions(

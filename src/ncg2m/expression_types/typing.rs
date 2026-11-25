@@ -7,6 +7,9 @@ use super::fold::checked_fold_item;
 #[cfg(verus_only)]
 use super::fold::fold_item_type;
 
+#[cfg(verus_only)]
+pub(super) mod scalar;
+
 verus! {
 
 #[derive(Clone, Copy)]

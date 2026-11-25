@@ -15,6 +15,9 @@ use super::execution::observation::{frames_agree, type_spelling_agrees};
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::{signature_parameter_types_agree, signature_result_types_agree};
 
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::{local_scalar_site_is_typed, scalar_atom_at, scalar_atom_type_origin};
+
 verus! {
 
 /// 整数リテラルを評価できなかった理由と、リテラルを書いた位置。
@@ -162,6 +165,54 @@ pub(super) closed spec fn scalar_atom_matches<'p, 'a>(
                 && name_atom_result(parameter_names(body.signature.parameters@), frame.parameter_values_model(), word, expected, value),
             _ => result == Ok(None),
         }
+    }
+}
+
+/// 型検査で受理したアトムは、同じ仮引数環境で期待型の値を返す。
+pub(super) proof fn typed_atom_yields_value<'p, 'a>(
+    frame: &ScalarCallFrame<'p, 'a>, at: usize, expected: DataType<'a>,
+    result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
+)
+    requires
+        {
+            let body = frame.body_model();
+            &&& scalar_atom_at(body.forms@, at)
+            &&& local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, at, expected)
+        },
+        scalar_atom_matches(frame, at, expected, result),
+        parameters_match(frame.body_model().signature, frame.parameter_values_model()),
+    ensures result matches Ok(Some(value)) && scalar_fits(value, expected),
+{
+    let body = frame.body_model();
+    let parameters = body.signature.parameters@;
+    let names = parameter_names(parameters);
+    let values = frame.parameter_values_model();
+    let source = body.source.text_model();
+    let word = spelling(source, body.forms@[at as int]);
+    scalar_atom_type_origin(source, body.forms@, parameters, at, expected);
+    match body.forms@[at as int] {
+        Form::Atom { kind: AtomKind::Name, .. } => {
+            if word != "true".spec_bytes() && word != "false".spec_bytes() {
+                let i = choose|i: int| 0 <= i < parameters.len()
+                    && (#[trigger] parameters[i]).name.spec_bytes() == word && parameters[i].ty.ty == expected
+                    && (forall|j: int| 0 <= j < i ==> (#[trigger] parameters[j]).name.spec_bytes() != word);
+                let value = values[i];
+                assert(names[i] == word && scalar_fits(value, expected));
+                assert forall|j: int| 0 <= j < i implies (#[trigger] names[j]) != word by {
+                    assert(names[j] == parameters[j].name.spec_bytes());
+                };
+                assert(scalar_parameter(names, values, word, Some(value)));
+                let found = choose|found: Option<ScalarValue>| #[trigger] scalar_parameter(names, values, word, found);
+                scalar_parameters_agree(names, values, word, Some(value), found);
+            }
+        },
+        _ => {
+            let ty = expected.atom->Builtin_0->Integer_0;
+            if let Err(error) = result {
+                assert(integer_literal_matches(word, Some(ty), Err(error.error)));
+                assert(false);
+            }
+        },
     }
 }
 
