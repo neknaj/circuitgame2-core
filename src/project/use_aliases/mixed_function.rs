@@ -346,13 +346,14 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     ///
     /// ```
     /// use circuitgame2_core::project::{
-    ///     FuncCallTarget, ProjectSourceIndex, SourceSnapshot, check_mixed_use_aliases,
+    ///     FuncArityError, FuncCallTarget, ProjectSourceIndex, SourceSnapshot, check_mixed_use_aliases,
     ///     index_mixed_use_targets, parse_project_sources,
     /// };
     ///
     /// let circuit = "(using nor)
     ///     (func invert (in x) (out y) (def y (nor x x)))
-    ///     (func caller (in a) (out z) (def z (::invert (nor a a))))";
+    ///     (func caller (in a) (out z) (def z (::invert (nor a a))))
+    ///     (func bad (in a) (out z) (def z (::invert a a)))";
     /// let project = parse_project_sources(&[
     ///     SourceSnapshot { path: "helpers.ncg2m", revision: 1, text: "" },
     ///     SourceSnapshot { path: "design.ncg2", revision: 3, text: circuit },
@@ -362,7 +363,8 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// let ProjectSourceIndex::Circuit(index) = &project.indexes()[1] else { panic!() };
     /// let caller = index.names.iter().find(|site| site.name.word == "caller").unwrap();
     /// let entry = index.syntax.entries.iter().position(|item| item.form == caller.form).unwrap();
-    /// let call = aliases.resolve_mixed_func_call_arity(1, entry, 0, 0).unwrap().unwrap();
+    /// let call = aliases.resolve_mixed_func_call_arity(1, entry, 0, 0).unwrap().unwrap()
+    ///     .check_input_count().unwrap();
     /// let FuncCallTarget::Function { arity, declaration, file, .. } = call.target else { panic!() };
     /// assert_eq!(&circuit[declaration.span], "invert");
     /// assert_eq!((file, arity.inputs, arity.outputs), (1, 1, 1));
@@ -371,6 +373,13 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// let nested = aliases.resolve_mixed_func_call_arity(1, entry, 0, 1).unwrap().unwrap();
     /// assert!(matches!(nested.target, FuncCallTarget::Nor));
     /// assert_eq!(nested.call.arguments, 2);
+    /// let bad = index.names.iter().find(|site| site.name.word == "bad").unwrap();
+    /// let entry = index.syntax.entries.iter().position(|item| item.form == bad.form).unwrap();
+    /// let wrong = aliases.resolve_mixed_func_call_arity(1, entry, 0, 0).unwrap().unwrap();
+    /// let Err(FuncArityError::ArgumentCount { call, expected, actual, .. }) = wrong.check_input_count()
+    ///     else { panic!() };
+    /// assert_eq!((expected, actual), (1, 2));
+    /// assert_eq!(&circuit[call.span], "(::invert a a)");
     /// ```
     pub fn resolve_mixed_func_call_arity(&self, file: usize, entry: usize, definition: usize, reference: usize)
         -> (result: Option<Result<FuncCallArity<'p, 'a>, MixedFuncCallError<'p, 'a>>>)
