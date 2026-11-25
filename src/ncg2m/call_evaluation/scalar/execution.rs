@@ -24,6 +24,8 @@ pub(super) mod observation;
 pub use observation::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
 mod slice;
 #[cfg(verus_only)]
+mod progress;
+#[cfg(verus_only)]
 mod termination;
 #[cfg(verus_only)]
 pub use slice::{

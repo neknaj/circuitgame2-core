@@ -933,19 +933,35 @@ spec fn all_slots_projected(
     }
 }
 
+spec fn edges_project_trace(
+    source: &ProjectSource, forms: Seq<Form>, calls: Seq<CallTypeEntry>, trace: Seq<usize>, edges: Seq<DefnCallEdge>,
+) -> bool {
+    &&& edges.len() == trace.len()
+    &&& forall|i: int| 0 <= i < edges.len() ==>
+        edge_projects(source, forms, calls[trace[i] as int], #[trigger] edges[i])
+}
+
 #[verifier::opaque]
 spec fn covered_body_slots(
     aliases: &MixedUseAliases, caller: DefnPosition, source: &str, forms: Seq<Form>, header: DefnHeader,
     edges: Seq<DefnCallEdge>,
 ) -> bool {
-    exists|root: usize, body: usize, outcomes: Seq<CallOutcome>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>|
+    let document = aliases.targets_model().project_model().sources_model()[caller.file as int];
+    exists|root: usize, body: usize, signature: DefnSignature, outcomes: Seq<CallOutcome>,
+        calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>, trace: Seq<usize>|
         #[trigger] indexed_body_site(source, forms, root, body, header)
+            && signature_matches_header(source, header, signature)
             && outcomes.len() == subtree_limit(forms, body) - body
             && #[trigger] call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues)
+            && #[trigger] call_body_outcome(calls, issues, source, forms, body, signature, Ok(signature))
+            && call_trace_fits(calls, trace, body, forms.len())
+            && #[trigger] edges_project_trace(&document, forms, calls, trace, edges)
             && #[trigger] all_slots_projected(source, forms, caller, body, outcomes, edges)
 }
 
 /// 呼び出し列が、型検査とは独立に定義した式の位置にある解決済みの宣言呼び出しをすべて含む。
+///
+/// 各辺は、同じ本体の型検査で使った署名と、実際に検査した呼び出しの記録に対応する。
 #[verifier::opaque]
 pub closed spec fn defn_body_calls_cover_slots(
     aliases: &MixedUseAliases, caller: DefnPosition, edges: Seq<DefnCallEdge>,
@@ -959,6 +975,97 @@ pub closed spec fn defn_body_calls_cover_slots(
         }
         _ => false,
     }
+}
+
+// 同じ型検査の記録から、根の呼び出しとその引数の型を取り出す。
+#[verifier::spinoff_prover]
+pub(crate) proof fn defn_root_call_preserves_scalar_types<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>, site: usize,
+    body: crate::ncg2m::call_evaluation::DefnEvaluationBody<'p, 'a>,
+    callee: crate::ncg2m::call_evaluation::DefnEvaluationBody<'p, 'a>,
+)
+    requires
+        defn_body_calls_cover_slots(aliases, caller, row), site < row.len(), row[site as int].at == body.at,
+        {
+            let project = aliases.targets_model().project_model();
+            let to = row[site as int].to;
+            &&& *body.source == project.sources_model()[caller.file as int]
+            &&& *callee.source == project.sources_model()[to.file as int]
+            &&& project.functional_forms_model(caller.file) == Some(body.forms@)
+            &&& project.defn_signature_matches_index(caller.file, caller.item, Some(body.signature))
+            &&& project.defn_signature_matches_index(to.file, to.item, Some(callee.signature))
+        },
+        body.at < body.forms@.len(), form_span(body.forms@[body.at as int]) == body.signature.body_span,
+        crate::ncg2m::file::retained_forms_in_source_order(body.forms@),
+        body.signature.result_type.ty.list_depth == 0,
+        body.signature.result_type.ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)),
+    ensures
+        body.signature.result_type.ty == callee.signature.result_type.ty,
+        row[site as int].arguments@.len() == callee.signature.parameters@.len(),
+        forall|slot: int| 0 <= slot < row[site as int].arguments@.len() ==> {
+            let at = #[trigger] row[site as int].arguments@[slot];
+            let ty = callee.signature.parameters@[slot].ty.ty;
+            &&& at < body.forms@.len()
+            &&& (local_scalar_fragment(body.source.text_model(), body.forms@, at) && ty.list_depth == 0
+                && (ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
+                ==> local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, at, ty))
+        },
+{
+    reveal(defn_body_calls_cover_slots);
+    reveal(covered_body_slots);
+    let project = aliases.targets_model().project_model();
+    let source = body.source.text_model();
+    let forms = body.forms@;
+    let header = project.indexed_defn(caller.file, caller.item)->Some_0;
+    let edge = row[site as int];
+    let (root, at, signature, outcomes, calls, issues, trace) = choose|
+        root: usize, at: usize, signature: DefnSignature, outcomes: Seq<CallOutcome>,
+        calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>, trace: Seq<usize>|
+        #[trigger] indexed_body_site(source, forms, root, at, header)
+            && signature_matches_header(source, header, signature)
+            && outcomes.len() == subtree_limit(forms, at) - at
+            && #[trigger] call_inputs_match(aliases, caller.file, caller.item, forms, at, outcomes, calls, issues)
+            && #[trigger] call_body_outcome(calls, issues, source, forms, at, signature, Ok(signature))
+            && call_trace_fits(calls, trace, at, forms.len())
+            && #[trigger] edges_project_trace(body.source, forms, calls, trace, row)
+            && #[trigger] all_slots_projected(source, forms, caller, at, outcomes, row);
+    project.indexed_defn_signature_origin(caller.file, caller.item, Some(body.signature));
+    crate::ncg2m::data_types::signature_result_origin(source, header, body.signature);
+    crate::ncg2m::data_types::signatures_from_header_agree(source, header, signature, body.signature);
+    signature_environments_agree(signature, body.signature);
+    reveal(crate::ncg2m::file::retained_forms_in_source_order);
+    crate::ncg2m::file::meta_ast_unique_start(forms, at, body.at);
+    let index = trace[site as int];
+    trace_entry_in_range(calls, trace, at, forms.len(), site as int);
+    let entry = calls[index as int];
+    assert(edge_projects(body.source, forms, entry, edge));
+    let (call, _, target) = trace_entry_resolution(aliases, caller, forms, at, outcomes, calls, issues, index);
+    super::named_call::declared_head_is_deferred_by_local_typing(source, forms, at, call);
+    let to = edge.to;
+    project.indexed_defn_signature_origin(to.file, to.item, Some(target));
+    project.indexed_defn_signature_origin(to.file, to.item, Some(callee.signature));
+    let target_header = project.indexed_defn(to.file, to.item)->Some_0;
+    crate::ncg2m::data_types::signatures_from_header_agree(callee.source.text_model(), target_header, target, callee.signature);
+    signature_environments_agree(target, callee.signature);
+    crate::ncg2m::data_types::signature_result_types_agree(target, callee.signature);
+    assert forall|slot: int| 0 <= slot < entry.arguments@.len() implies
+        (#[trigger] entry.arguments@[slot]).expected == type_shape(callee.signature.parameters@[slot].ty.ty) by {
+        signature_parameter_types_agree(target, callee.signature, slot);
+    };
+    assert(call_signature_types_match(entry, callee.signature));
+    reveal(call_inputs_match);
+    super::typing::scalar::root_call_preserves_checked_types(calls, source, forms, body.signature, callee.signature, at, index);
+    assert forall|slot: int| 0 <= slot < edge.arguments@.len() implies {
+        let arg = #[trigger] edge.arguments@[slot];
+        let ty = callee.signature.parameters@[slot].ty.ty;
+        &&& arg < forms.len()
+        &&& (local_scalar_fragment(source, forms, arg) && ty.list_depth == 0
+            && (ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
+            ==> local_scalar_site_is_typed(source, forms, body.signature.parameters@, arg, ty))
+    } by {
+        assert(canonical_call(forms, entry));
+        assert(edge.arguments@[slot] == entry.arguments@[slot].at);
+    };
 }
 
 #[verifier::opaque]
@@ -1047,6 +1154,7 @@ proof fn finish_expression_slot_coverage(
     aliases: &MixedUseAliases, caller: DefnPosition, source: &str, forms: Seq<Form>,
     root: usize, body: usize, header: DefnHeader, outcomes: Seq<CallOutcome>,
     calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>, edges: Seq<DefnCallEdge>,
+    signature: DefnSignature, trace: Seq<usize>,
 )
     requires
         caller.file < aliases.targets_model().project_model().sources_model().len(),
@@ -1057,6 +1165,11 @@ proof fn finish_expression_slot_coverage(
         outcomes.len() == subtree_limit(forms, body) - body,
         call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
         all_slots_projected(source, forms, caller, body, outcomes, edges),
+        signature_matches_header(source, header, signature),
+        call_body_outcome(calls, issues, source, forms, body, signature, Ok(signature)),
+        call_trace_fits(calls, trace, body, forms.len()),
+        edges_project_trace(&aliases.targets_model().project_model().sources_model()[caller.file as int],
+            forms, calls, trace, edges),
     ensures defn_body_calls_cover_slots(aliases, caller, edges),
 {
     assert(covered_body_slots(aliases, caller, source, forms, header, edges)) by {
@@ -1095,7 +1208,7 @@ proof fn finish_unvisited_expression_evidence(
 fn capture_checked_call_body<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, source: &'a str, forms: &[Form],
     body: usize, calls: &[CallTypeEntry], trace: &[usize],
-    Ghost(entries): Ghost<Seq<MetaItem>>, Ghost(root): Ghost<usize>,
+    Ghost(entries): Ghost<Seq<MetaItem>>, Ghost(root): Ghost<usize>, Ghost(signature): Ghost<DefnSignature<'a>>,
     Ghost(outcomes): Ghost<Seq<CallOutcome<'p, 'a>>>, Ghost(issues): Ghost<Seq<CallIssue<'p, 'a>>>,
 ) -> (result: Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallEdge<'p, 'a>>)
     requires
@@ -1112,6 +1225,8 @@ fn capture_checked_call_body<'p, 'a>(
         outcomes.len() == subtree_limit(forms@, body) - body,
         call_entries_fit(forms@, calls@),
         call_trace_fits(calls@, trace@, body, forms@.len()),
+        signature_matches_header(source, entries[caller.item as int].kind->Defn_0, signature),
+        call_body_outcome(calls@, issues, source, forms@, body, signature, Ok(signature)),
         call_inputs_match(aliases, caller.file, caller.item, forms@, body, outcomes, calls@, issues),
     ensures
         match result {
@@ -1150,7 +1265,7 @@ fn capture_checked_call_body<'p, 'a>(
             };
             prove_expression_slot_projection(aliases, caller, forms@, body, outcomes, calls@, issues, trace@, edges@);
             finish_expression_slot_coverage(aliases, caller, source, forms@, root, body,
-                entries[caller.item as int].kind->Defn_0, outcomes, calls@, issues, edges@);
+                entries[caller.item as int].kind->Defn_0, outcomes, calls@, issues, edges@, signature, trace@);
             assert forall|j: int| 0 <= j < edges@.len() implies {
                 let edge = #[trigger] edges@[j];
                 edge.from == caller && defn_call_edge_matches(aliases, edge)
@@ -1220,8 +1335,9 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
             None => &[],
         };
         assert(recorded@ =~= call_trace_model(trace));
+        assert(outcome == Ok(signature));
         capture_checked_call_body(aliases, DefnPosition { file, item }, source, forms, body, &call_types,
-            recorded, Ghost(entries@), Ghost(root), Ghost(outcomes), Ghost(original_issues))
+            recorded, Ghost(entries@), Ghost(root), Ghost(signature), Ghost(outcomes), Ghost(original_issues))
     } else {
         Ok(Vec::new())
     };

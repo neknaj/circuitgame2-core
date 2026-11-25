@@ -751,6 +751,48 @@ pub proof fn defn_call_plan_site_at_rank(
     edge.at
 }
 
+/// 補助関数の本体が宣言呼び出しの場合、型検査が使った戻り型と局所スカラー引数の型を取り出す。
+pub proof fn defn_call_plan_root_scalar_call<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, plan: &DefnCallPlan<'p, 'a>,
+    rank: usize, site: usize, body: DefnEvaluationBody<'p, 'a>, callee: DefnEvaluationBody<'p, 'a>,
+)
+    requires
+        defn_call_plan_matches(aliases, plan), plan.body_matches_at_rank(rank, body),
+        plan.calls_model_at_rank(rank) matches Some(row) && site < row.len() && {
+            let edge = row[site as int];
+            &&& edge.at == body.at
+            &&& plan.order_model().contains(edge.to)
+            &&& plan.body_matches_at_rank(plan.order_model().index_of(edge.to) as usize, callee)
+        },
+        body.signature.result_type.ty.list_depth == 0,
+        body.signature.result_type.ty.atom matches crate::ncg2m::data_types::DataTypeAtom::Builtin(
+            crate::ncg2m::data_types::BuiltinDataType::Bool | crate::ncg2m::data_types::BuiltinDataType::Integer(_)
+        ),
+    ensures
+        body.signature.result_type.ty == callee.signature.result_type.ty,
+        plan.calls_model_at_rank(rank)->Some_0[site as int].arguments@.len() == callee.signature.parameters@.len(),
+        forall|slot: int| 0 <= slot < plan.calls_model_at_rank(rank)->Some_0[site as int].arguments@.len() ==> {
+            let at = #[trigger] plan.calls_model_at_rank(rank)->Some_0[site as int].arguments@[slot];
+            let ty = callee.signature.parameters@[slot].ty.ty;
+            &&& at < body.forms@.len()
+            &&& (crate::ncg2m::expression_types::local_scalar_fragment(body.source.text_model(), body.forms@, at)
+                && ty.list_depth == 0 && (ty.atom matches crate::ncg2m::data_types::DataTypeAtom::Builtin(
+                    crate::ncg2m::data_types::BuiltinDataType::Bool | crate::ncg2m::data_types::BuiltinDataType::Integer(_)
+                )) ==> crate::ncg2m::expression_types::local_scalar_site_is_typed(
+                    body.source.text_model(), body.forms@, body.signature.parameters@, at, ty,
+                ))
+        },
+{
+    defn_call_plan_edge_order(aliases, plan, rank);
+    let row = plan.calls_model_at_rank(rank)->Some_0;
+    let caller = plan.order_model()[rank as int];
+    let edge = row[site as int];
+    assert(plan.order_model()[plan.order_model().index_of(edge.to)] == edge.to);
+    crate::ncg2m::expression_types::named_call::defn_root_call_preserves_scalar_types(
+        aliases, caller, row, site, body, callee,
+    );
+}
+
 proof fn checked_rows_anchor_arguments(
     aliases: &MixedUseAliases, project: &ParsedProjectSources, vertices: Seq<DefnPosition>,
     rows: Seq<Vec<DefnCallEdge>>, graph: Seq<Vec<Option<usize>>>,

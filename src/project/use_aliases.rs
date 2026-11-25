@@ -69,7 +69,7 @@ mod defn_call_graph;
 pub use defn_name::{DefnNameError, ResolvedDefnName};
 pub use defn_call_graph::{DefnCallGraphError, DefnCallPlan};
 #[cfg(verus_only)]
-pub use defn_call_graph::{defn_call_cycle, defn_call_plan_matches, defn_call_plan_contains, defn_call_plan_local_scalar_body, defn_call_plan_edge_order, defn_call_plan_site_at_rank};
+pub use defn_call_graph::{defn_call_cycle, defn_call_plan_matches, defn_call_plan_contains, defn_call_plan_local_scalar_body, defn_call_plan_root_scalar_call, defn_call_plan_edge_order, defn_call_plan_site_at_rank};
 #[cfg(verus_only)]
 pub use defn_name::{defn_name_resolution, resolved_defn_name_origin, stage_name_has_no_binding};
 mod mixed;

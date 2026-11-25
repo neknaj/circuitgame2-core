@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod declared_progress;
+pub(in crate::ncg2m::expression_types) use declared_progress::root_call_preserves_checked_types;
+
 verus! {
 
 /// 評価器が値を直接求める名前、真偽値、整数のアトムを表す。
