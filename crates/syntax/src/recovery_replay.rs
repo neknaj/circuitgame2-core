@@ -540,6 +540,7 @@ pub(super) proof fn observe_recovery_projection(
         },
     ensures
         whole.repairs@.len() == head.repairs@.len() + changed.repairs@.len() + tail.repairs@.len(),
+        whole.original_lists@.len() == head.original_lists@.len() + changed.original_lists@.len() + tail.original_lists@.len(),
         0 <= form_base && form_base + local.forms@.len() <= whole.forms@.len(),
         0 <= list_base && list_base + local.original_lists@.len() <= whole.original_lists@.len(),
         forall|i: int| 0 <= i < local.forms@.len()

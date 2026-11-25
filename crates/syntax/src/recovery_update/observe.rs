@@ -187,6 +187,7 @@ impl<'p, 's> ReparsedRecovery<'p, 's> {
         requires self.valid(), self.agrees_with(whole), 0 <= section < 3,
         ensures
             self.has_repairs_model() <==> whole.repairs@.len() > 0,
+            whole.original_lists@.len() == self.original_list_base(2) + self.section_model(2).recovered.original_lists@.len(),
             ({
                 let part = self.section_model(section);
                 let base = self.original_list_base(section);
@@ -367,7 +368,7 @@ proof fn form_start_at_least_index(source: &str, forms: Seq<Form>, index: int)
     }
 }
 
-proof fn form_count_bounded(source: &str, forms: Seq<Form>)
+pub(super) proof fn form_count_bounded(source: &str, forms: Seq<Form>)
     requires crate::form_spans_valid(source, forms, source.spec_bytes().len() as int),
     ensures forms.len() <= source.spec_bytes().len(),
 {
