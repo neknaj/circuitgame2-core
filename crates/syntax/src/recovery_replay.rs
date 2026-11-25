@@ -127,16 +127,36 @@ pub(super) open spec fn replay_valid(bytes: Seq<u8>, frames: Seq<ReplayFrame>) -
     }
 }
 
+#[verifier::opaque]
+pub(super) open spec fn replay_checkpoint(
+    bytes: Seq<u8>, frames: Seq<ReplayFrame>, position: int, separator: bool, state: RecoveryState,
+) -> bool {
+    let count = frames.len() as int;
+    &&& replay_valid(bytes, frames)
+    &&& replay_position(frames, count) == position
+    &&& replay_separator(frames, count) == separator
+    &&& replay_at(frames, count) == state
+}
+
+pub(super) proof fn start_recovery(bytes: Seq<u8>)
+    ensures replay_checkpoint(bytes, Seq::empty(), 0, false, initial_recovery()),
+{
+    reveal(replay_valid);
+    reveal(replay_checkpoint);
+}
+
 pub(super) proof fn record_recovery_frame(
-    bytes: Seq<u8>, frames: Seq<ReplayFrame>, segment: Segment, after: RecoveryState,
+    bytes: Seq<u8>, frames: Seq<ReplayFrame>, position: int, separator: bool, segment: Segment,
+    before: RecoveryState, after: RecoveryState,
 )
     requires
-        replay_valid(bytes, frames),
-        recovery_segment_at(bytes, replay_position(frames, frames.len() as int),
-            replay_separator(frames, frames.len() as int), segment),
-        after == apply_recovery_segment(replay_at(frames, frames.len() as int), segment),
-    ensures replay_valid(bytes, frames.push(ReplayFrame { segment, after })),
+        replay_checkpoint(bytes, frames, position, separator, before),
+        recovery_segment_at(bytes, position, separator, segment),
+        after == apply_recovery_segment(before, segment),
+    ensures replay_checkpoint(bytes, frames.push(ReplayFrame { segment, after }),
+        segment.span.end as int, segment.kind.is_atom(), after),
 {
+    reveal(replay_checkpoint);
     reveal(replay_valid);
     let updated = frames.push(ReplayFrame { segment, after });
     assert forall|i: int| 0 <= i < updated.len() implies {
@@ -166,13 +186,15 @@ pub closed spec fn recovered_replay_matches(
     }
 }
 
-pub(super) proof fn seal_recovery(source: &str, frames: Seq<ReplayFrame>, completed: RecoveryState)
+pub(super) proof fn seal_recovery(
+    source: &str, frames: Seq<ReplayFrame>, separator: bool, before: RecoveryState, completed: RecoveryState,
+)
     requires
-        replay_valid(source.spec_bytes(), frames),
-        replay_position(frames, frames.len() as int) == source.spec_bytes().len(),
-        completed == finish_recovery(replay_at(frames, frames.len() as int), source.spec_bytes().len() as int),
+        replay_checkpoint(source.spec_bytes(), frames, source.spec_bytes().len() as int, separator, before),
+        completed == finish_recovery(before, source.spec_bytes().len() as int),
     ensures recovered_replay_matches(source, completed.forms, completed.repairs, completed.original),
 {
+    reveal(replay_checkpoint);
     assert(exists|history: Seq<ReplayFrame>| {
         let eof = source.spec_bytes().len() as int;
         let result = finish_recovery(replay_at(history, history.len() as int), eof);
