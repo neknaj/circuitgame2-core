@@ -21,6 +21,9 @@ embassy-time = "=0.5.1"
 cortex-m-rt = "0.7"
 panic-halt = "=1.0.0"
 
+[build-dependencies]
+circuitgame2-packed-nor = { path = "../../crates/packed-nor" }
+
 [profile.release]
 opt-level = "s"
 lto = true
