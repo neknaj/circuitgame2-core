@@ -125,6 +125,64 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
             },
     {}
 
+    // 待機中の条件が増える場合と、条件の値を受け取って分岐に進む場合を区別する。
+    #[verifier::spinoff_prover]
+    pub(in crate::ncg2m::call_evaluation::scalar) proof fn expression_step_tracks_saved_conditions(
+        &self, step: ScalarExpressionStep<'p, 'a>,
+    )
+        requires self.expression_step_matches(Ok(step)),
+        ensures match step {
+            ScalarExpressionStep::Continue(after) => {
+                let before = self.branches_model();
+                let next = after.branches_model();
+                let body = self.frame_model().body_model();
+                &&& after.frame_model() == self.frame_model()
+                &&& if next.len() > before.len() {
+                    let branch = next.last();
+                    &&& next == before.push(branch)
+                    &&& after.expression_model().at == branch.positions_model().1
+                    &&& after.expression_model().expected == (DataType {
+                        atom: DataTypeAtom::Builtin(BuiltinDataType::Bool), list_depth: 0,
+                    })
+                    &&& branch.positions_model().0 == self.expression_model().at
+                    &&& branch.expected_model() == self.expression_model().expected
+                    &&& conditional_positions(body.source.text_model(), body.forms@, self.expression_model().at)
+                        == Some((branch.positions_model().1, branch.positions_model().2, branch.positions_model().3))
+                } else {
+                    let branch = before.last();
+                    &&& before.len() > 0 && next == before.drop_last()
+                    &&& after.expression_model().expected == branch.expected_model()
+                    &&& (after.expression_model().at == branch.positions_model().2
+                        || after.expression_model().at == branch.positions_model().3)
+                }
+            },
+            ScalarExpressionStep::NeedsForm(after) => expression_positions_agree(*self, after),
+            ScalarExpressionStep::Complete { .. } => true,
+        },
+    {
+        reveal(ScalarExpression::expression_step_matches);
+        let frame = self.frame_model();
+        let site = self.expression_model();
+        if let ScalarExpressionStep::Continue(after) = step {
+            if self.condition_entry_matches(after) {
+                let before = self.branches_model();
+                let next = after.branches_model();
+                let branch = next.last();
+                conditional_match_has_positions(frame.body_model(), site, Some(branch));
+                conditional_children_follow_parent(frame.body_model(), site, branch);
+                assert(next =~= before.push(branch));
+                return;
+            }
+        }
+        let atom = choose|atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>|
+            #[trigger] scalar_atom_matches(&frame, site.at, site.expected, atom)
+            && self.atom_transition_matches(atom, Ok(step));
+        match atom {
+            Ok(Some(value)) => self.received_value_resumes_branch(value, step),
+            _ => {},
+        }
+    }
+
     /// 評価中の式と保留中の条件式が、同じ仮引数環境で型検査を通った局所スカラー式であることを表す。
     pub closed spec fn is_locally_checked(&self) -> bool {
         let frame = self.frame_model();

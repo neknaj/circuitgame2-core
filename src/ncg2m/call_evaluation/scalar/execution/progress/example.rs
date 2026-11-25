@@ -57,7 +57,8 @@ fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
         body.signature.result_type.ty == int_type(),
         plan.calls_model_at_rank(rank) matches Some(row) && site < row.len() && row[site as int].at == body.at,
     ensures result matches Ok(ScalarExecutionSlice::Suspended(after))
-        && (after.searches_checked_scalar_call(aliases) || after.evaluates_checked_expression(aliases)),
+        && (after.searches_checked_scalar_call(aliases) || after.evaluates_checked_expression(aliases))
+        && after.preserves_checked_types(aliases),
 {
     let actual = plan.body_at_rank(rank);
     assert(actual.is_some());
@@ -82,6 +83,8 @@ fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
         plan.bodies_at_rank_agree(rank, body, frame.body_model());
         signature_result_types_agree(body.signature, frame.body_model().signature);
         beginning.first_slice_dispatches_scalar_root_call(aliases, plan, rank, frame, site, first);
+        beginning.starting_execution_preserves_checked_types(aliases, rank, supplied);
+        beginning.suspended_slice_preserves_checked_types(aliases, 1, first->Ok_0->Suspended_0);
     }
     let Ok(ScalarExecutionSlice::Suspended(lookup)) = first else { unreachable!() };
     let ghost search = lookup;
@@ -90,6 +93,7 @@ fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
         search.one_step_slice_matches(result);
         search.scalar_root_search_is_checked(aliases);
         search.checked_scalar_call_lookup_progress(aliases, result);
+        search.suspended_slice_preserves_checked_types(aliases, 1, result->Ok_0->Suspended_0);
     }
     result
 }
