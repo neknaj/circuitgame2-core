@@ -10,7 +10,7 @@ mod body;
 pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
-pub(crate) use body::{indexed_call_body_matches, indexed_call_body_origin};
+pub(crate) use body::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin};
 #[cfg(verus_only)]
 pub(in crate::ncg2m) use body::argument_positions_increase;
 #[cfg(verus_only)]

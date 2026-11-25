@@ -131,4 +131,50 @@ pub(in crate::ncg2m) proof fn scalar_conditional_child_types(
     )));
 }
 
+proof fn local_expression_needs_no_call_types(
+    calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, expected: TypeShape,
+)
+    requires local_scalar_fragment(source, forms, at),
+        typed_expression(calls, source, forms, env, Request { at, expected, list: None }, Goal::Check(expected)).is_ok(),
+    ensures typed_expression(Seq::empty(), source, forms, env, Request { at, expected, list: None }, Goal::Check(expected)).is_ok(),
+    decreases forms.len() - at,
+{
+    reveal(local_scalar_fragment);
+    reveal(typed_expression);
+    if scalar_atom_at(forms, at) {
+        assert(shape(source, forms, at).is_ok());
+        assert(applicable_call(calls, source, forms, at).is_none());
+        assert(applicable_call(Seq::empty(), source, forms, at).is_none());
+    } else {
+        let (condition, yes, no) = conditional_positions(source, forms, at)->Some_0;
+        let boolean = scalar_type(BuiltinDataType::Bool);
+        assert(at < condition < yes < no < forms.len());
+        assert(shape(source, forms, at) == Ok(Expression::Conditional { condition, yes, no }));
+        local_expression_needs_no_call_types(calls, source, forms, env, condition, boolean);
+        local_expression_needs_no_call_types(calls, source, forms, env, yes, expected);
+        local_expression_needs_no_call_types(calls, source, forms, env, no, expected);
+    }
+}
+
+// 呼び出し表を使わない構文では、同じ環境と期待型の局所型判断を得る。
+pub(in crate::ncg2m::expression_types) proof fn checked_local_body_ignores_call_types(
+    calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, body: usize,
+    checked: DefnSignature, actual: DefnSignature,
+)
+    requires
+        same_defn_signature(checked, actual),
+        actual.result_type.ty.list_depth == 0,
+        actual.result_type.ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)),
+        local_scalar_fragment(source, forms, body),
+        typed_body_with_calls(calls, source, forms, environment_view(checked.parameters@),
+            body, type_shape(checked.result_type.ty)) == BodyVerdict::Accepted,
+    ensures local_scalar_site_is_typed(source, forms, actual.parameters@, body, actual.result_type.ty),
+{
+    signature_environments_agree(checked, actual);
+    let env = environment_view(checked.parameters@);
+    let expected = type_shape(checked.result_type.ty);
+    local_expression_needs_no_call_types(calls, source, forms, env, body, expected);
+}
+
+
 }

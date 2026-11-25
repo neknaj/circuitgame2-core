@@ -474,6 +474,36 @@ pub(crate) closed spec fn indexed_call_body_matches<'p, 'a>(
     }
 }
 
+pub(crate) proof fn indexed_call_body_locally_typed(
+    aliases: &MixedUseAliases, file: usize, item: usize, source: &str, forms: Seq<Form>, entries: Seq<MetaItem>,
+    at: usize, checked: DefnSignature, actual: DefnSignature,
+)
+    requires
+        indexed_call_body_matches(aliases, file, item, source, forms, entries, Ok(checked)),
+        same_defn_signature(checked, actual), checked.body_span == actual.body_span,
+        actual.result_type.ty.list_depth == 0,
+        actual.result_type.ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)),
+        at < forms.len(), form_span(forms[at as int]) == actual.body_span,
+        crate::ncg2m::file::retained_forms_in_source_order(forms),
+        local_scalar_fragment(source, forms, at),
+    ensures local_scalar_site_is_typed(source, forms, actual.parameters@, at, actual.result_type.ty),
+{
+    let header = entries[item as int].kind->Defn_0;
+    let (root, body, signature, outcomes, calls, issues) = choose|
+        root: usize, body: usize, signature: DefnSignature, outcomes: Seq<CallOutcome>,
+        calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>|
+        #[trigger] indexed_body_site(source, forms, root, body, header)
+            && signature_matches_header(source, header, signature)
+            && outcomes.len() == subtree_limit(forms, body) - body
+            && #[trigger] call_inputs_match(aliases, file, item, forms, body, outcomes, calls, issues)
+            && #[trigger] call_body_outcome(calls, issues, source, forms, body, signature, Ok(checked));
+    assert(signature == checked);
+    crate::ncg2m::data_types::signature_result_origin(source, header, signature);
+    reveal(crate::ncg2m::file::retained_forms_in_source_order);
+    crate::ncg2m::file::meta_ast_unique_start(forms, at, body);
+    super::typing::scalar::checked_local_body_ignores_call_types(calls, source, forms, body, checked, actual);
+}
+
 proof fn span_within_subtree(forms: Seq<Form>, root: usize, at: usize)
     requires strict_preorder_ranges(forms), root <= at < subtree_limit(forms, root) <= forms.len(),
     ensures form_span(forms[root as int]).start <= form_span(forms[at as int]).start
@@ -619,7 +649,8 @@ pub open spec fn defn_call_edge_matches(aliases: &MixedUseAliases, edge: DefnCal
         &&& edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
         &&& defn_call_arguments(forms, at, edge.arguments@)
     }
-    &&& project.indexed_defn(edge.to.file, edge.to.item).is_some()
+    &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(header)
+        && header.parameters@.len() == edge.arguments@.len()
     &&& exists|name: &str, declaration: ProjectDeclaration|
         #[trigger] defn_name_resolution(aliases, edge.from.file, edge.from.item, name,
             Ok(ResolvedDefnName::Declaration(declaration)))
@@ -653,7 +684,8 @@ proof fn finish_edge_evidence(
                 &&& edge.call.head.end <= edge.call.span.end
             }
             &&& project.functional_forms_model(edge.from.file) == Some(forms)
-            &&& project.indexed_defn(edge.to.file, edge.to.item).is_some()
+            &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(header)
+                && header.parameters@.len() == edge.arguments@.len()
         }),
         at == edge.at,
         at + 1 < forms.len(), forms[at as int] is List, forms[at + 1] is Atom,
@@ -675,9 +707,10 @@ proof fn finish_edge_evidence(
 proof fn trace_entry_resolution<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, forms: Seq<Form>, body: usize,
     outcomes: Seq<CallOutcome<'p, 'a>>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue<'p, 'a>>, index: usize,
-) -> (evidence: (CallForm<'a>, ProjectDeclaration<'p, 'a>))
+) -> (evidence: (CallForm<'a>, ProjectDeclaration<'p, 'a>, DefnSignature<'a>))
     requires
         index < calls.len(),
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
         call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
     ensures
         body <= calls[index as int].at < body + outcomes.len(),
@@ -686,6 +719,10 @@ proof fn trace_entry_resolution<'p, 'a>(
         defn_name_resolution(aliases, caller.file, caller.item, evidence.0.word,
             Ok(ResolvedDefnName::Declaration(evidence.1))),
         calls[index as int].target == (DefnPosition { file: evidence.1.file, item: evidence.1.item }),
+        aliases.targets_model().project_model().defn_signature_matches_index(
+            evidence.1.file, evidence.1.item, Some(evidence.2),
+        ),
+        call_signature_types_match(calls[index as int], evidence.2),
 {
     let project = aliases.targets_model().project_model();
     let entry = calls[index as int];
@@ -694,8 +731,10 @@ proof fn trace_entry_resolution<'p, 'a>(
     assert(entry_witness(entry, outcomes, body)) by { reveal(call_inputs_match); };
     let resolved = outcomes[at - body]->Some_0;
     let declaration = resolved->Ok_0->Declared_declaration;
+    let signature = resolved->Ok_0->Declared_signature;
     assert(body <= at < body + outcomes.len() && outcomes[at - body] == Some(resolved)
         && resolved is Ok && resolved->Ok_0 is Declared
+        && call_signature_types_match(entry, signature)
         && entry.target == (DefnPosition { file: declaration.file, item: declaration.item })) by {
         reveal(entry_witness);
     };
@@ -706,7 +745,7 @@ proof fn trace_entry_resolution<'p, 'a>(
     reveal(form_outcome_matches);
     let form = choose|decoded: Option<CallForm>| #[trigger] call_form_matches(src, forms, at, decoded)
         && decoded.is_some() && call_arity_matches(aliases, caller.file, caller.item, decoded->Some_0, resolved);
-    (form->Some_0, declaration)
+    (form->Some_0, declaration, signature)
 }
 
 proof fn recorded_edge_has_origin<'p, 'a>(
@@ -735,7 +774,7 @@ proof fn recorded_edge_has_origin<'p, 'a>(
     let entry = calls[index as int];
     let at = entry.at;
     let src = project.sources_model()[caller.file as int].text_model();
-    let (form, declaration) = trace_entry_resolution(aliases, caller, forms, body, outcomes, calls, issues, index);
+    let (form, declaration, signature) = trace_entry_resolution(aliases, caller, forms, body, outcomes, calls, issues, index);
     resolved_defn_name_origin(aliases, caller.file, caller.item, form.word, declaration);
     call_form_origin(src, forms, at, form);
     meta_ast_body_origin(src, forms, entries, caller.item as int);
@@ -747,6 +786,11 @@ proof fn recorded_edge_has_origin<'p, 'a>(
     assert(name.spec_bytes() == src.spec_bytes()[edge.call.head.start as int..edge.call.head.end as int]);
     assert(canonical_call(forms, entry)) by { reveal(call_inputs_match); }
     canonical_call_preserves_arguments(forms, entry, edge.arguments@);
+    project.indexed_defn_signature_origin(edge.to.file, edge.to.item, Some(signature));
+    let header = project.indexed_defn(edge.to.file, edge.to.item)->Some_0;
+    let callee = project.sources_model()[edge.to.file as int].text_model();
+    crate::ncg2m::data_types::signature_result_origin(callee, header, signature);
+    assert(edge.arguments@.len() == entry.arguments@.len());
     finish_edge_evidence(aliases, edge, forms, at, name, declaration);
 }
 

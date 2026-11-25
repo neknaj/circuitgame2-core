@@ -227,11 +227,7 @@ pub open spec fn prepared_arguments_match<'plan, 'p, 'a>(
 ) -> bool {
     let ranked = plan.order_model();
     let calls = plan.calls_model_at_rank(rank);
-    &&& args.is_some() == (calls matches Some(edges) && site < edges.len() && {
-        let to = edges[site as int].to;
-        plan.project_model().indexed_defn(to.file, to.item) matches Some(header)
-            && header.parameters@.len() == edges[site as int].arguments@.len()
-    })
+    &&& args.is_some() == (calls matches Some(edges) && site < edges.len())
     &&& match args {
         Some(args) => {
             let (edge, values, body) = args.model();
@@ -255,7 +251,8 @@ pub open spec fn prepared_arguments_match<'plan, 'p, 'a>(
 
 /// 型検査で得た呼び出しの辺から、引数を左から受け取る状態を作る。
 ///
-/// 呼び出し列の添字が範囲外か、辺の引数列と対応する署名の個数が異なるときは `None` を返す。
+/// 呼び出し元の順位または呼び出し列の添字が範囲外なら `None` を返す。
+/// 計画の各辺について、引数の個数は呼び出し先の署名と一致する。
 pub fn prepare_scalar_arguments<'plan, 'p, 'a>(
     plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, site: usize,
 ) -> (args: Option<ScalarArguments<'plan, 'p, 'a>>)
@@ -271,7 +268,6 @@ pub fn prepare_scalar_arguments<'plan, 'p, 'a>(
         let header = project.indexed_defn(edge.to.file, edge.to.item)->Some_0;
         crate::ncg2m::data_types::signature_result_origin(body.source.text_model(), header, body.signature);
     }
-    if body.signature.parameters.len() != edge.arguments.len() { return None; }
     Some(ScalarArguments { callee: Callee { body, from: rank, to }, waiting })
 }
 

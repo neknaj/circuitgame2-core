@@ -15,7 +15,7 @@ use crate::ncg2m::expression_types::{
 use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call, retained_meta_body};
 use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
 #[cfg(verus_only)]
-use crate::ncg2m::expression_types::named_call::{indexed_call_body_matches, indexed_call_body_origin, defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+use crate::ncg2m::expression_types::named_call::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
@@ -290,6 +290,38 @@ impl<'a> ParsedProjectSources<'a> {
             let forms = self.functional_forms_model(file)->Some_0;
             indexed_call_body_origin(aliases, file, item, text, forms, entries, outcome);
         }
+    }
+
+    pub(super) proof fn named_defn_local_scalar_type<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+        checked: DefnSignature<'a>, body: DefnEvaluationBody<'p, 'a>,
+    )
+        requires
+            self.named_defn_body_matches(aliases, file, item, Some(Ok(checked))),
+            self.defn_signature_matches_index(file, item, Some(body.signature)),
+            file < self.sources_model().len(), *body.source == self.sources_model()[file as int],
+            self.functional_forms_model(file) == Some(body.forms@),
+            crate::ncg2m::file::retained_forms_in_source_order(body.forms@),
+            body.at < body.forms@.len(), form_span(body.forms@[body.at as int]) == body.signature.body_span,
+            body.signature.result_type.ty.list_depth == 0,
+            body.signature.result_type.ty.atom matches crate::ncg2m::data_types::DataTypeAtom::Builtin(
+                crate::ncg2m::data_types::BuiltinDataType::Bool | crate::ncg2m::data_types::BuiltinDataType::Integer(_)
+            ),
+            crate::ncg2m::expression_types::local_scalar_fragment(body.source.text_model(), body.forms@, body.at),
+        ensures crate::ncg2m::expression_types::local_scalar_site_is_typed(
+            body.source.text_model(), body.forms@, body.signature.parameters@, body.at, body.signature.result_type.ty,
+        ),
+    {
+        self.named_defn_body_origin(aliases, file, item, Some(Ok(checked)));
+        self.indexed_defn_signature_origin(file, item, Some(checked));
+        self.indexed_defn_signature_origin(file, item, Some(body.signature));
+        let header = self.indexed_defn(file, item)->Some_0;
+        let text = body.source.text_model();
+        crate::ncg2m::data_types::signatures_from_header_agree(text, header, checked, body.signature);
+        signature_result_origin(text, header, checked);
+        signature_result_origin(text, header, body.signature);
+        let entries = self.indexes_model()[file as int]->Functional_0@;
+        indexed_call_body_locally_typed(aliases, file, item, text, body.forms@, entries, body.at, checked, body.signature);
     }
 
     pub(super) fn check_named_defn_body<'p>(
