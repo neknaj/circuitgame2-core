@@ -24,7 +24,7 @@ pub struct ScheduledEvents<T> {
 /// 1回の tick の開始時に固定したイベント列。
 ///
 /// 準備中は列を排他的に借りるため、評価途中に到着したイベントを同じ tick に追加できない。
-pub struct PendingEvents<'a, T> {
+pub(crate) struct PendingEvents<'a, T> {
     events: &'a mut ScheduledEvents<T>,
     target: TickPosition,
 }
@@ -86,7 +86,7 @@ impl<T> ScheduledEvents<T> {
     }
 
     /// 対象 tick のイベント列を、評価を始める時点の内容に固定する。
-    pub fn prepare(&mut self, target: TickPosition) -> (pending: PendingEvents<'_, T>)
+    pub(crate) fn prepare(&mut self, target: TickPosition) -> (pending: PendingEvents<'_, T>)
         ensures
             pending.before_model() == old(self).model(),
             pending.after_model() == final(self).model(),
@@ -189,34 +189,6 @@ impl<'a, T> PendingEvents<'a, T> {
     ///
     /// 回路とデバイスの更新を確定するときに呼び出す。残るイベントの順序を保つ。
     /// 評価が中断した場合は [`Self::cancel`] で取り消す。
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use circuitgame2_core::time::{ScheduledEvent, ScheduledEvents, TickPosition};
-    ///
-    /// let target = TickPosition { generation: 1, tick: 2 };
-    /// let mut events = ScheduledEvents::new();
-    /// for (position, payload) in [
-    ///     (TickPosition { generation: 1, tick: 3 }, "later"),
-    ///     (target, "first"),
-    ///     (TickPosition { generation: 0, tick: 2 }, "earlier generation"),
-    ///     (target, "second"),
-    /// ] {
-    ///     events.enqueue(ScheduledEvent { position, payload });
-    /// }
-    /// let pending = events.prepare(target);
-    /// let (index, first) = pending.next_ready(0).unwrap();
-    /// assert_eq!(first.payload, "first");
-    /// assert_eq!(pending.next_ready(index + 1).unwrap().1.payload, "second");
-    /// let consumed = pending.commit();
-    /// assert_eq!(consumed.len(), 2);
-    /// assert_eq!(consumed[0].payload, "first");
-    /// assert_eq!(consumed[1].payload, "second");
-    /// assert!(events.prepare(target).next_ready(0).is_none());
-    /// let later = TickPosition { generation: 1, tick: 3 };
-    /// assert_eq!(events.prepare(later).next_ready(0).unwrap().1.payload, "later");
-    /// ```
     pub fn commit(self) -> (consumed: Vec<ScheduledEvent<T>>)
         ensures
             self.after_model() == events_at_tick(self.before_model(), self.target_model(), false),

@@ -7,7 +7,8 @@ mod events;
 pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
 #[cfg(verus_only)]
 pub use clock::clock_change_matches;
-pub use event_queue::{PendingEvents, ScheduledEvent, ScheduledEvents};
+pub(crate) use event_queue::PendingEvents;
+pub use event_queue::{ScheduledEvent, ScheduledEvents};
 #[cfg(verus_only)]
 pub use event_queue::{events_at_tick, next_event_matches};
 pub use events::{EventTimeStatus, classify_event_time, ready_event_indices};
