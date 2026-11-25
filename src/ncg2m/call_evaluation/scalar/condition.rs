@@ -8,6 +8,9 @@ use crate::ncg2m::expression_types::conditional_positions;
 use super::DefnEvaluationBody;
 use vstd::prelude::*;
 
+#[cfg(verus_only)]
+use super::execution::observation::{bodies_agree, condition_parts_agree, positions_agree};
+
 verus! {
 
 /// 元の構文木で、決められた型を期待して評価する式。
@@ -40,6 +43,21 @@ pub closed spec fn scalar_condition_matches<'p, 'a>(
             && next.expected_model() == site.expected,
         None => positions.is_none(),
     }
+}
+
+pub(super) proof fn conditional_results_observe_same(
+    a: DefnEvaluationBody, b: DefnEvaluationBody, site_a: ScalarExpressionSite, site_b: ScalarExpressionSite,
+    first: Option<ScalarCondition>, second: Option<ScalarCondition>,
+)
+    requires bodies_agree(a, b), positions_agree(site_a, site_b),
+        scalar_condition_matches(a, site_a, first), scalar_condition_matches(b, site_b, second),
+    ensures match (first, second) {
+        (Some(left), Some(right)) => condition_parts_agree(left, right),
+        (None, None) => true,
+        _ => false,
+    },
+{
+    assert(a.forms@ == b.forms@ && *a.source == *b.source && site_a.at == site_b.at);
 }
 
 impl<'a> ScalarCondition<'a> {
