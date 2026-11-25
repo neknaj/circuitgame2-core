@@ -215,3 +215,35 @@ fn slices_resume_nested_arguments_in_the_original_environment() {
     }
     panic!("the small call graph should finish within the test's step limit");
 }
+
+
+#[test]
+fn scalar_fragment_support_checks_bodies_reachable_through_either_branch() {
+    let snapshots = [SourceSnapshot {
+        path: "support.ncg2m", revision: 1,
+        text: "(defn root (as-type (Fn () Bool) (fn () (if (pass (leaf)) true (pending)))))
+               (defn pass (as-type (Fn (Bool) Bool) (fn (x) x)))
+               (defn leaf (as-type (Fn () Bool) (fn () true)))
+               (defn pending (as-type (Fn () Bool) (fn () (as-type Bool true))))
+               (defn accepted (as-type (Fn () Bool) (fn () (if (pass (leaf)) true false))))",
+    }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    for (item, (body_support, fragment_support)) in
+        [(true, false), (true, true), (true, true), (false, false), (true, true)]
+            .into_iter()
+            .enumerate()
+    {
+        let rank = plan.rank_of(DefnPosition { file: 0, item }).unwrap();
+        assert_eq!(plan.scalar_body_support_at_rank(rank), Some(body_support));
+        assert_eq!(plan.scalar_fragment_support_at_rank(rank), Some(fragment_support));
+    }
+    let accepted = plan.rank_of(DefnPosition { file: 0, item: 4 }).unwrap();
+    let state = ScalarExecution::start(&plan, accepted, Vec::new()).unwrap();
+    let result = state.run_slice(NonZeroUsize::new(128).unwrap()).unwrap();
+    assert!(matches!(result, ScalarExecutionSlice::Complete(ScalarValue::Bool(true))));
+    assert_eq!(plan.scalar_body_support_at_rank(usize::MAX), None);
+    assert_eq!(plan.scalar_fragment_support_at_rank(usize::MAX), None);
+}

@@ -649,6 +649,7 @@ pub(crate) fn retained_meta_body(source: &str, forms: &[Form], entries: &[MetaIt
     ensures retained_forms_in_source_order(forms@), body < forms@.len(),
         form_span(forms@[body as int]) == entries@[item as int].kind->Defn_0.body_span,
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        complete_list_indices(forms@), nested_list_indices(forms@),
 {
     proof { reveal(retained_forms_in_source_order); }
     indexed_meta_body(source, forms, entries, item)
