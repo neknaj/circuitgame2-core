@@ -1,8 +1,10 @@
 //! 混在ソース集合の厳格索引から、関数の呼び出し位置を確定する。
 
 mod arity;
+mod call_types;
 mod typed;
 pub use arity::MixedFuncArityError;
+pub use call_types::{MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError};
 pub use typed::{MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 
 use super::{MixedUseAliases, call_arity::{FuncCallArity, FuncCallTarget}, definitions::DefinitionReferenceSite,
@@ -26,8 +28,8 @@ use crate::syntax::{bare_atom_kind, relative_path_parts};
 use crate::syntax::circuit::{CallShape, ExpressionReferenceKind, Head, NameSite, indexed_call_shape, named_build_entry, routine_arity};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence, call_shape_matches,
-    expression_reference_in_source, namespace_name_evidence, reference_atom, routine_arity_matches,
+    NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence, call_arguments_match, call_shape_matches,
+    expression_reference_in_source, indexed_call_arguments, namespace_name_evidence, reference_atom, routine_arity_matches,
 };
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -577,7 +579,9 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
                 let row = parsed.definitions@[def];
                 let indexed = parsed.references@[row.references.start + reference];
-                call_shape_matches(call.source.text_model(), parsed.syntax.forms@, row, indexed, Some(call.call))
+                &&& call_shape_matches(call.source.text_model(), parsed.syntax.forms@, row, indexed, Some(call.call))
+                &&& call_arguments_match(parsed.syntax.forms@, call.call)
+                &&& call.call.form + 1 == indexed.form
             }
             &&& call.target matches FuncCallTarget::Function { arity, declaration, file: target_file, entry: target_entry }
                 ==> {
@@ -596,6 +600,12 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 }
         }),
     {
+        let project = self.targets_model().project_model();
+        let parsed = &project.indexes_model()[file as int]->Circuit_0;
+        let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        let row = parsed.definitions@[def];
+        let indexed = parsed.references@[row.references.start + reference];
+        indexed_call_arguments(call.source.text_model(), parsed.syntax.forms@, row, indexed, call.call);
         let resolved = choose|resolved: MixedFuncCalleeResolution| {
             &&& #[trigger] self.mixed_func_callee_matches(file, entry, definition, reference, Some(resolved))
             &&& *call.source == *resolved.site.source

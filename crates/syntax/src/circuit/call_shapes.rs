@@ -297,6 +297,7 @@ pub proof fn indexed_call_arguments(
         call_arguments_match(forms, call),
         ordinary_call_at(source, forms, call.form as int, row.expression.end as int),
         row.expression.start <= call.form < row.expression.end,
+        call.form + 1 == reference.form,
 {
     super::expression_forest::ordinary_call_bounds(source, forms, reference.form - 1, row.expression.end as int);
 }

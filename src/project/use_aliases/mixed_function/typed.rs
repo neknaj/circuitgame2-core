@@ -8,14 +8,17 @@ use crate::project::{DeclaredPortType, FuncDriverError, FuncDriverResult, PortDi
     TypedRoutineSignature, TypedSignatureError};
 use crate::project::use_aliases::function_drivers::prepare_indexed_func_drivers;
 #[cfg(verus_only)]
-use crate::project::use_aliases::function_drivers::{indexed_func_driver_evidence, local_names_indexed, names_match_ports};
+use crate::project::use_aliases::function_drivers::{expected_output_context, indexed_checked_driver_sites, indexed_driver_site,
+    indexed_func_driver_evidence, local_names_indexed, names_match_ports};
+#[cfg(verus_only)]
+use crate::project::FuncDrivers;
 use crate::project::use_aliases::local_signal_index::LocalSignalIndex;
 use crate::project::use_aliases::port_types::check_shared_types;
 #[cfg(verus_only)]
 use crate::project::use_aliases::port_types::{first_shared_type_mismatch, shared_input_bounds, shared_types_before};
 use crate::syntax::circuit::{NamedBuildCircuit, PortTypeSite};
 #[cfg(verus_only)]
-use crate::syntax::circuit::indexed_entry_evidence;
+use crate::syntax::circuit::{RoutineArity, indexed_entry_evidence};
 use alloc::vec::Vec;
 #[cfg(verus_only)]
 use crate::project::widths::checked_name_sites;
@@ -155,6 +158,7 @@ spec fn mixed_port_result(
     match result {
         Ok(typed) => {
             &&& typed.declared == port && *typed.annotation.source == *context.source && typed.annotation.span == annotation
+            &&& location_in_source(typed.annotation)
             &&& match (port.ty, typed.ty) {
                 (DeclaredPortType::Bits(width), ResolvedPortType::Bits(found)) => width == found,
                 (DeclaredPortType::Named { .. }, ResolvedPortType::Struct { source, form }) => exists|word: &str, declaration: ProjectDeclaration| {
@@ -171,6 +175,7 @@ spec fn mixed_port_result(
         },
         Err(MixedTypedSignatureError::TypeReference { direction: actual, reference, reason }) => {
             &&& port.ty is Named && actual == direction && *reference.source == *context.source && reference.span == annotation
+            &&& location_in_source(reference)
             &&& exists|word: &str, found: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>| {
                 &&& word.spec_bytes() == context.source.text.spec_bytes()[annotation.start as int..annotation.end as int]
                 &&& #[trigger] scoped_circuit_name_matches(aliases, context.file, context.scope, word, Head::Struct, found)
@@ -228,6 +233,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         }
         let (word, span) = read_indexed_atom(source.text, forms, at);
         let annotation = LocatedName { source, span };
+        proof { crate::project::declarations::located_name_evidence(annotation); }
         let ty = match port.ty {
             DeclaredPortType::Bits(width) => ResolvedPortType::Bits(width),
             DeclaredPortType::Named { .. } => {
@@ -437,13 +443,39 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 let port = #[trigger] typed.inputs@[i];
                 &&& port.declared.site.name < forms.len() && forms[port.declared.site.name as int] is Atom
                 &&& *port.annotation.source == project.sources_model()[file as int]
+                &&& location_in_source(port.annotation)
             }
             &&& forall|i: int| 0 <= i < typed.outputs@.len() ==> {
                 let port = #[trigger] typed.outputs@[i];
                 &&& port.declared.site.name < forms.len() && forms[port.declared.site.name as int] is Atom
                 &&& *port.annotation.source == project.sources_model()[file as int]
+                &&& location_in_source(port.annotation)
             }
         }),
+    {
+        let project = self.targets_model().project_model();
+        let raw = self.mixed_typed_declared_signature(file, entry, max_width, typed);
+        project.mixed_routine_signature_ports(file, entry, max_width, raw);
+        shared_input_bounds(raw.output_sources@, typed.inputs@, typed.outputs@, typed.output_inputs@);
+    }
+
+    proof fn mixed_typed_declared_signature(
+        &self, file: usize, entry: usize, max_width: u64, typed: TypedRoutineSignature<'p, 'a>,
+    ) -> (raw: CheckedRoutineSignature)
+        requires self.mixed_typed_signature_matches(file, entry, max_width, Ok(Some(typed))),
+        ensures
+            self.targets_model().project_model().mixed_routine_signature_evidence(file, entry, max_width, Ok(Some(raw))),
+            typed.inputs@.len() == raw.ports.inputs@.len(), typed.outputs@.len() == raw.ports.outputs@.len(),
+            typed.output_inputs@.len() == typed.outputs@.len(),
+            shared_types_before(raw.output_sources@, typed.inputs@, typed.outputs@, typed.output_inputs@),
+            forall|i: int| 0 <= i < typed.inputs@.len() ==>
+                (#[trigger] typed.inputs@[i]).declared == raw.ports.inputs@[i]
+                    && *typed.inputs@[i].annotation.source == self.targets_model().project_model().sources_model()[file as int]
+                    && location_in_source(typed.inputs@[i].annotation),
+            forall|i: int| 0 <= i < typed.outputs@.len() ==>
+                (#[trigger] typed.outputs@[i]).declared == raw.ports.outputs@[i]
+                    && *typed.outputs@[i].annotation.source == self.targets_model().project_model().sources_model()[file as int]
+                    && location_in_source(typed.outputs@[i].annotation),
     {
         let project = self.targets_model().project_model();
         let (context, raw) = choose|context: MixedPortContext, raw: CheckedRoutineSignature|
@@ -456,10 +488,29 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             &&& func_scope_path(context.parsed, context.scope.block, context.scope.namespace)
             &&& typed_ports_result(self, &context, raw.ports.inputs@, PortDirection::Input, Ok(typed.inputs))
             &&& typed_ports_result(self, &context, raw.ports.outputs@, PortDirection::Output, Ok(typed.outputs))
+            &&& typed.output_inputs@.len() == typed.outputs@.len()
             &&& shared_types_before(raw.output_sources@, typed.inputs@, typed.outputs@, typed.output_inputs@)
         };
-        project.mixed_routine_signature_ports(file, entry, max_width, raw);
-        shared_input_bounds(raw.output_sources@, typed.inputs@, typed.outputs@, typed.output_inputs@);
+        raw
+    }
+
+    /// 選んだ宣言のポート型の列が、同じ宣言の入出力数と一致することを示す。
+    pub proof fn mixed_typed_signature_arity(
+        &self, file: usize, entry: usize, max_width: u64, typed: TypedRoutineSignature<'p, 'a>, arity: RoutineArity,
+    )
+        requires
+            self.mixed_typed_signature_matches(file, entry, max_width, Ok(Some(typed))),
+            ({
+                let project = self.targets_model().project_model();
+                routine_arity_matches(project.sources_model()[file as int].text_model(),
+                    &project.indexes_model()[file as int]->Circuit_0.syntax, entry as int, Some(arity))
+            }),
+        ensures typed.inputs@.len() == arity.inputs, typed.outputs@.len() == arity.outputs,
+    {
+        let project = self.targets_model().project_model();
+        let raw = self.mixed_typed_declared_signature(file, entry, max_width, typed);
+        project.sources_model()[file as int].text_model_is_text();
+        project.mixed_routine_signature_counts(file, entry, max_width, raw, arity);
     }
 
     /// 混在プロジェクトの関数で、ポート型を解決し、入力と出力の駆動元を検査する。
@@ -548,6 +599,37 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     && indexed_func_driver_evidence(source, parsed, entry, typed, Err(error)),
             }
         }
+    }
+
+    pub(super) proof fn mixed_driver_output_context(
+        &self, file: usize, entry: usize, max_width: u64, drivers: FuncDrivers,
+    )
+        requires
+            self.mixed_func_driver_matches(file, entry, max_width, Ok(FuncDriverResult::Checked(drivers))),
+            self.targets_model().project_model().has_source_indexes(),
+        ensures ({
+            let project = self.targets_model().project_model();
+            let source = &project.sources_model()[file as int];
+            let parsed = &project.indexes_model()[file as int]->Circuit_0;
+            &&& has_mixed_func(&project, file, entry)
+            &&& expected_output_context(source, parsed, entry as int, drivers)
+            &&& forall|i: int| 0 <= i < drivers.definitions@.len()
+                ==> indexed_driver_site(source, parsed, entry as int, #[trigger] drivers.definitions@[i])
+        }),
+    {
+        let project = self.targets_model().project_model();
+        let source = &project.sources_model()[file as int];
+        let index = &project.indexes_model()[file as int];
+        let parsed = &index->Circuit_0;
+        project_source_index_evidence(*source, *index);
+        parsed_index_evidence(*source, *parsed);
+        build_entry_ranges_evidence(source.text, &parsed.build_model(), entry as int);
+        let result = Ok(FuncDriverResult::Checked(drivers));
+        let signature = choose|signature: TypedRoutineSignature|
+            #[trigger] self.mixed_typed_signature_matches(file, entry, max_width, Ok(Some(signature)))
+                && indexed_func_driver_evidence(source, parsed, entry, signature, result);
+        indexed_checked_driver_sites(source, parsed, entry, signature, drivers);
+        self.mixed_typed_signature_ports(file, entry, max_width, signature);
     }
 }
 

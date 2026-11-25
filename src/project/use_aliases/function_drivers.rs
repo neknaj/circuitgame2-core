@@ -886,6 +886,30 @@ pub(super) closed spec fn indexed_func_driver_evidence(
     }
 }
 
+pub(super) proof fn indexed_checked_driver_sites(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize,
+    signature: TypedRoutineSignature, checked: FuncDrivers,
+)
+    requires indexed_func_driver_evidence(source, parsed, entry, signature, Ok(FuncDriverResult::Checked(checked))),
+    ensures
+        checked.signature == signature,
+        checked.outputs@.len() == signature.outputs@.len(),
+        forall|i: int| 0 <= i < checked.outputs@.len() && (#[trigger] checked.outputs@[i]) is Definition
+            ==> checked.outputs@[i]->Definition_0 < checked.definitions@.len(),
+        forall|i: int| 0 <= i < checked.definitions@.len()
+            ==> indexed_driver_site(source, parsed, entry as int, #[trigger] checked.definitions@[i]),
+        forall|i: int, j: int| 0 <= i < j < checked.definitions@.len() ==> {
+            let first = #[trigger] checked.definitions@[i];
+            let last = #[trigger] checked.definitions@[j];
+            first.definition < last.definition || first.definition == last.definition && first.result_index < last.result_index
+        },
+{
+    let result = Ok(FuncDriverResult::Checked(checked));
+    let (inputs, outputs, definitions) = choose|ins: Seq<NameSite>, outs: Seq<NameSite>, defs: Seq<DefinitionDriver>|
+        #[trigger] after_collecting_names(source, parsed, entry, &signature, ins, outs, defs, result);
+    assert(definitions == checked.definitions@);
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 署名、明示的な出力の駆動元、または診断が実際の関数とそのソースに対応することを表す。
     pub closed spec fn func_driver_evidence(

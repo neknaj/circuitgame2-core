@@ -70,6 +70,7 @@ pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepa
 mod defn_name;
 mod mixed_function;
 pub use mixed_function::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
+    MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError,
     MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 mod defn_call_graph;
 pub use defn_name::{DefnNameError, ResolvedDefnName};

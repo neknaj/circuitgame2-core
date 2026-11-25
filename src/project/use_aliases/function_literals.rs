@@ -243,7 +243,7 @@ spec fn literal_prefix(
         ==> #[trigger] driver_literal_result(source, parsed, drivers, map, i, limit, Ok(widths[i]))
 }
 
-spec fn literal_widths_match(
+pub(super) closed spec fn literal_widths_match(
     source: &ProjectSource, parsed: &NamedBuildCircuit, drivers: &FuncDrivers,
     limit: u64, result: Result<Vec<Option<u64>>, FuncLiteralError>,
 ) -> bool {
@@ -258,7 +258,7 @@ spec fn literal_widths_match(
         }
 }
 
-fn check_literals<'p, 'a>(
+pub(super) fn check_literals<'p, 'a>(
     source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit, _entry: usize, drivers: &FuncDrivers<'p, 'a>, limit: u64,
 ) -> (result: Result<Vec<Option<u64>>, FuncLiteralError<'p, 'a>>)
     requires
@@ -266,6 +266,7 @@ fn check_literals<'p, 'a>(
         _entry < parsed.syntax.entries@.len(),
         expected_output_context(source, parsed, _entry as int, *drivers),
     ensures literal_widths_match(source, parsed, drivers, limit, result),
+        result matches Ok(widths) ==> widths@.len() == drivers.definitions@.len(),
         result matches Err(error) ==> !(error is Arity),
 {
     let map = index_outputs(drivers);
