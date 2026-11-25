@@ -4,6 +4,10 @@ use crate::{Lexer, SegmentKind, SourceCursor};
 use core::ops::Range;
 #[cfg(verus_only)]
 use crate::{Segment, is_suffix, recovery_segment_at, recovery_segments_agree};
+#[cfg(verus_only)]
+use crate::recovery_replay::{
+    ReplayFrame, apply_recovery_segment, replay_at, replay_position, replay_separator, replay_valid,
+};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::{string::StringSliceAdditionalSpecFns, utf8::{encode_utf8_decode_utf8, encode_utf8_valid_utf8, is_char_boundary, valid_utf8}};
@@ -207,6 +211,62 @@ proof fn observed_checkpoint(source: &str, offset: usize, observed: Seq<Step>)
         };
         assert(observed =~= trace);
     }
+}
+
+proof fn checkpoint_frame_agrees(bytes: Seq<u8>, trace: Seq<Step>, frames: Seq<ReplayFrame>, i: int)
+    requires
+        recovery_prefix(bytes, trace), replay_valid(bytes, frames),
+        0 <= i < trace.len(), i < frames.len(),
+    ensures
+        trace[i].segment == frames[i].segment,
+        trace[i].depth == frames[i].after.open.len(),
+        trace[i].depth == 0 ==> frames[i].after.root is None,
+    decreases i,
+{
+    if i > 0 {
+        checkpoint_frame_agrees(bytes, trace, frames, i - 1);
+    }
+    reveal(recovery_prefix);
+    reveal(replay_valid);
+    reveal(apply_recovery_segment);
+    recovery_segments_agree(bytes, offset_at(trace, i), needs_separator_at(trace, i),
+        trace[i].segment, frames[i].segment);
+}
+
+/// 確認済み境界の直後からは、未終了のリストと根の修復記録を引き継がずに回復できる。
+///
+/// 末尾で閉じ括弧を補う前の遷移列を用いる。
+pub(super) proof fn settled_boundary_in_replay(
+    source: &str, offset: usize, frames: Seq<ReplayFrame>,
+) -> (index: int)
+    requires
+        settled_recovery_boundary(source, offset),
+        replay_valid(source.spec_bytes(), frames),
+        replay_position(frames, frames.len() as int) == source.spec_bytes().len(),
+    ensures
+        0 <= index <= frames.len(),
+        replay_position(frames, index) == offset,
+        !replay_separator(frames, index),
+        replay_at(frames, index).open.len() == 0,
+        replay_at(frames, index).root is None,
+{
+    let bytes = source.spec_bytes();
+    let trace = choose|trace: Seq<Step>| #[trigger] recovery_prefix(bytes, trace)
+        && ends_at_boundary(trace, offset as int);
+    let n = trace.len() as int;
+    let m = frames.len() as int;
+    if m < n {
+        if m > 0 {
+            checkpoint_frame_agrees(bytes, trace, frames, m - 1);
+        }
+        assert(offset_at(trace, m) == bytes.len());
+        trace_offsets_increase(bytes, trace, m, n);
+        assert(false);
+    }
+    if n > 0 {
+        checkpoint_frame_agrees(bytes, trace, frames, n - 1);
+    }
+    n
 }
 
 impl<'a> RecoveryBoundary<'a> {

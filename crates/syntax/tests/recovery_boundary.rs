@@ -79,8 +79,11 @@ fn relative_to_tail(mut whole: Recovered, offset: usize) -> Recovered {
 fn shifted_join_matches_fresh_recovery_of_the_same_tail() {
     let prefix = "(unchanged 🐈)";
     let old_middle = "(abc)";
-    let current_middle = "(abc (deeply nested))";
-    let tail = ") (intact) (partial \"invalid\\q\" (head foo\"text\")) (unfinished";
+    let current_middle = "(abc (deeply nested) \"broken\\q\")";
+    let tail = concat!(
+        ") (intact) (partial \"invalid\\q\" (head foo\"text\"))",
+        " (broken \"line\r\n (nested)) (unfinished",
+    );
     let old = format!("{prefix}{old_middle}{tail}");
     let current = format!("{prefix}{current_middle}{tail}");
     let start = prefix.len();
@@ -90,11 +93,11 @@ fn shifted_join_matches_fresh_recovery_of_the_same_tail() {
     assert_eq!(window.old, start..old_end);
     assert_eq!(window.current, start..current_end);
     let fresh = parse_recovering(tail);
-    assert_eq!(relative_to_tail(parse_recovering(&old), old_end), fresh);
-    assert_eq!(
-        relative_to_tail(parse_recovering(&current), current_end),
-        fresh
-    );
+    let prior = parse_recovering(&old);
+    let edited = parse_recovering(&current);
+    assert_eq!(edited.repairs.len(), prior.repairs.len() + 1);
+    assert_eq!(relative_to_tail(prior, old_end), fresh);
+    assert_eq!(relative_to_tail(edited, current_end), fresh);
     assert!(recovery_window(&old, &current, start, old_end, current_end - 1).is_none());
     assert!(recovery_window(&old, &format!("{current}x"), start, old_end, current_end).is_none());
     assert!(
