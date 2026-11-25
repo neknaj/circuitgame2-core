@@ -24,13 +24,63 @@ fn checks_an_unselected_if_branch_at_its_original_source_position() {
 
 #[test]
 fn distinguishes_deferred_syntax_from_a_type_error() {
-    let expression = "(fold-nat 1 0 (i acc) acc)";
-    let source = "(defn f (as-type (Fn () Nat) (fn () (fold-nat 1 0 (i acc) acc))))";
+    let expression = "(head (list 1))";
+    let source = "(defn f (as-type (Fn () Nat) (fn () (head (list 1)))))";
     let start = source.find(expression).unwrap();
     assert_eq!(
         check_defn_body(source).unwrap_err(),
         DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Form(
             start..start + expression.len(),
+        ))),
+    );
+}
+
+#[test]
+fn reports_fold_binder_errors_in_original_coordinates() {
+    use circuitgame2_core::ncg2m::expression_types::FoldSyntaxError;
+
+    let source = "; 反復\n(defn f (as-type (Fn () Nat) (fn () (fold-nat 0 0 (same same) same))))";
+    let first = source.find("same").unwrap();
+    let duplicate = first + "same ".len();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Fold(
+            FoldSyntaxError::Duplicate { first: first..first + 4, duplicate: duplicate..duplicate + 4 },
+        ))),
+    );
+}
+
+#[test]
+fn checks_fold_bodies_at_the_accumulator_type_including_zero_iterations() {
+    let source = "(defn f (as-type (Fn () Bool) (fn () (fold-nat 1 false (i acc) (if acc true false)))))";
+    assert!(check_defn_body(source).is_ok());
+    let source = "(defn f (as-type (Fn () Nat) (fn () (fold-nat 0 0 (i acc) false))))";
+    let start = source.find("false").unwrap();
+    let DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch { span, .. })) =
+        check_defn_body(source).unwrap_err() else {
+            panic!("expected a mismatch in the fold body");
+        };
+    assert_eq!(span, start..start + "false".len());
+}
+
+#[test]
+fn checks_fold_list_elements_and_infers_the_initial_value_type() {
+    for source in [
+        "(defn f (as-type (Fn () (List Bool)) (fn ()
+            (fold-list (list (list true)) (list false) (entry acc) entry))))",
+        "(defn f (as-type (Fn () Nat) (fn ()
+            (let ((result (fold-list (list true false) 0 (item acc) (if item acc 1)))) result))))",
+    ] {
+        assert!(check_defn_body(source).is_ok(), "{source}");
+    }
+
+    let source = "; 反復\n(defn f (as-type (Fn () Nat) (fn ()
+        (fold-list true false (item acc) acc))))";
+    let start = source.find("true").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::FoldListInput(
+            start..start + "true".len(),
         ))),
     );
 }
