@@ -3,11 +3,14 @@
 use super::*;
 use crate::{Recovered, parse_recovering};
 #[cfg(verus_only)]
-use crate::{inserted_closes_match, original_list_ranges, repair_input_spans_valid};
+use crate::{inserted_closes_match, original_list_ranges, original_list_roots, repair_input_spans_valid};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::valid_utf8;
+
+mod names;
+pub use names::{RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_names};
 
 verus! {
 
@@ -49,6 +52,11 @@ pub struct OriginalCircuitList {
 }
 
 impl OriginalCircuitList {
+    /// 元入力全体に対するリストのバイト範囲を表す。
+    pub closed spec fn span_model(&self) -> Range<usize> {
+        self.span
+    }
+
     /// 各フォームの診断を、解析時のファイル全体に対する UTF-8 バイト範囲で返す。
     ///
     /// 結果は解析時の `checked` と同じ順に並ぶ。回路文法に従う項目や元入力の範囲を確認できない項目は `None`。
@@ -249,6 +257,7 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
             && inserted_closes_match(source, recovered.forms@, recovered.repairs@)
             && repair_input_spans_valid(source, recovered.repairs@, source.spec_bytes().len() as int)
             && original_list_ranges(source, recovered.original_lists@, recovered.repairs@, source.spec_bytes().len() as int)
+            && original_list_roots(recovered.forms@, recovered.original_lists@)
             && original@.len() == recovered.original_lists@.len()
             && original_circuit_lists(source, recovered.original_lists@, original@),
     }

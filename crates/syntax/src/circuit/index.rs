@@ -12,7 +12,7 @@ pub use recovery::{circuit_recovery_matches, circuit_recovery_results_agree_on_s
     complete_recovery_agrees_with_index};
 pub use recovery::{
     CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
-    recover_circuit_forms,
+    RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_forms, recover_circuit_names,
 };
 
 verus! {

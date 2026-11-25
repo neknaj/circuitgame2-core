@@ -290,21 +290,41 @@ fn read_named_form<'a>(
         },
 {
     let entry = &syntax.entries[index];
+    proof {
+        indexed_entry_evidence(source, syntax.forms@, syntax.entries@, index as int);
+        if let Some(parent) = entry.namespace {
+            let head = choose|head: Head| #[trigger] header_matches(source, syntax.forms@, parent as int, false, head);
+            namespace_head_is_unique(source, syntax.forms@[parent + 1], head);
+        }
+    }
+    read_named_entry(source, &syntax.forms, entry)
+}
+
+pub(super) fn read_named_entry<'a>(
+    source: &'a str, forms: &[Form], entry: &Entry,
+) -> (result: Option<NamedForm<'a>>)
+    requires
+        header_matches(source, forms@, entry.form as int, entry.namespace.is_some(), entry.head),
+        entry.namespace matches Some(parent) ==> header_matches(source, forms@, parent as int, false, Head::Namespace),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures
+        match result {
+            Some(named) => named_form_matches(source, forms@, *entry, named),
+            None => !named_head(entry.head),
+        },
+{
     if !has_project_name(entry.head) {
         return None;
     }
     proof {
-        indexed_entry_evidence(source, syntax.forms@, syntax.entries@, index as int);
-        named_first_argument(source, syntax.forms@, entry.form as int, entry.namespace.is_some(), entry.head);
+        named_first_argument(source, forms@, entry.form as int, entry.namespace.is_some(), entry.head);
     }
-    let name = read_name_site(source, &syntax.forms, entry.form + 2);
+    let name = read_name_site(source, forms, entry.form + 2);
     let namespace = if let Some(parent) = entry.namespace {
         proof {
-            let head = choose|head: Head| #[trigger] header_matches(source, syntax.forms@, parent as int, false, head);
-            namespace_head_is_unique(source, syntax.forms@[parent + 1], head);
-            named_first_argument(source, syntax.forms@, parent as int, false, Head::Namespace);
+            named_first_argument(source, forms@, parent as int, false, Head::Namespace);
         }
-        Some(read_name_site(source, &syntax.forms, parent + 2))
+        Some(read_name_site(source, forms, parent + 2))
     } else {
         None
     };
