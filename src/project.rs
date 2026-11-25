@@ -58,6 +58,7 @@ pub use circuits::{
     CircuitProject, CircuitProjectError, CircuitProjectFailure, parse_circuit_project,
     parse_circuit_project_with_recovery,
 };
+pub(crate) use circuits::read_source_span;
 #[cfg(verus_only)]
 pub use circuits::{
     circuit_project_accepts, circuit_project_error, circuit_project_failure, parsed_circuit_matches,

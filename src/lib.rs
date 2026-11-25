@@ -7,6 +7,7 @@
 extern crate alloc;
 
 pub mod editor;
+pub mod ncg2m;
 pub mod netlist;
 pub mod project;
 pub use circuitgame2_syntax as syntax;

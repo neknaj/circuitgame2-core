@@ -262,7 +262,7 @@ pub(super) fn read_indexed_atom<'a>(text: &'a str, forms: &[Form], index: usize)
 }
 
 /// 検査済みの UTF-8 の両端から、元のバイト範囲に対応する文字列を借りる。
-pub(super) fn read_source_span(text: &str, start: usize, end: usize) -> (word: &str)
+pub(crate) fn read_source_span(text: &str, start: usize, end: usize) -> (word: &str)
     requires
         start < end <= text.spec_bytes().len(),
         is_char_boundary(text.spec_bytes(), start as int),
