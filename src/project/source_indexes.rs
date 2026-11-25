@@ -4,9 +4,16 @@ use alloc::vec::Vec;
 use crate::ncg2m::data_types::{DefnSignature, read_header_signature};
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::signature_matches_header;
-use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_file};
+use crate::ncg2m::expression_types::{ExpressionCheckFailure, check_indexed_meta_defn};
 #[cfg(verus_only)]
-use crate::ncg2m::file::{meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
+use crate::ncg2m::expression_types::{
+    DefnBodyError, defn_body_matches, indexed_meta_body_agrees_with_standalone, meta_defn_check_matches, meta_defn_check_origin,
+    same_defn_body_outcome,
+};
+use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms};
+use crate::syntax::Form;
+#[cfg(verus_only)]
+use crate::ncg2m::file::{meta_ast_matches, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
 use super::circuits::index_project_circuit;
 #[cfg(verus_only)]
@@ -29,6 +36,8 @@ verus! {
 pub struct ParsedProjectSources<'a> {
     sources: Vec<ProjectSource<'a>>,
     indexes: Vec<ProjectSourceIndex<'a>>,
+    // NCG2M の S 式を言語別索引と同じ添字に保持する。
+    meta_asts: Vec<Option<Vec<Form>>>,
 }
 
 /// ファイルの拡張子に対応する構文索引。
@@ -109,6 +118,87 @@ impl<'a> ParsedProjectSources<'a> {
         Some(read_header_signature(source.text(), header))
     }
 
+    /// 指定した補助関数の本体を、保持している構文木と署名を使って型検査する。
+    ///
+    /// ファイルや項目の添字が範囲外の場合と、補助関数に当たらない項目では `None` を返す。
+    /// 診断や署名の範囲は、同じ添字で `sources()` から得られるファイルの先頭を基準とする。
+    /// 署名の取り出しと式の走査に使う作業領域を確保する。構文木はプロジェクトの解析時に作ったものを使う。
+    pub fn check_defn_body(&self, file: usize, item: usize)
+        -> (result: Option<Result<DefnSignature<'a>, ExpressionCheckFailure<'a>>>)
+        ensures self.defn_body_matches_index(file, item, result),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() {
+            return None;
+        }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        let source = &self.sources()[file];
+        proof {
+            use_type_invariant(self);
+            assert(retained_ast_matches(*source, *index, self.meta_asts@[file as int]));
+            project_source_index_evidence(*source, *index);
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        check_indexed_meta_defn(source.text(), forms, items, item)
+    }
+
+    /// 本体の検査結果が、同じファイルの索引と構文木に対応することを表す。
+    pub closed spec fn defn_body_matches_index(
+        &self, file: usize, item: usize, result: Option<Result<DefnSignature<'a>, ExpressionCheckFailure<'a>>>,
+    ) -> bool {
+        if file >= self.indexes_model().len() {
+            result.is_none()
+        } else {
+            let source = self.sources_model()[file as int].text_model();
+            match self.indexes_model()[file as int] {
+                ProjectSourceIndex::Functional(items) => self.meta_asts@[file as int] matches Some(forms)
+                    && meta_ast_matches(source, forms@, items@)
+                    && meta_file_matches(source, Ok(items))
+                    && meta_defn_check_matches(source, forms@, items@, item, result),
+                ProjectSourceIndex::Circuit(_) => result.is_none(),
+            }
+        }
+    }
+
+    /// 索引の補助関数の有無と本体の検査結果が対応することを示す。
+    pub proof fn indexed_body_check_origin(
+        &self, file: usize, item: usize, result: Option<Result<DefnSignature<'a>, ExpressionCheckFailure<'a>>>,
+    )
+        requires self.defn_body_matches_index(file, item, result),
+        ensures result.is_some() == self.indexed_defn(file, item).is_some(),
+            result matches Some(Ok(signature)) ==>
+                self.defn_signature_matches_index(file, item, Some(signature)),
+    {
+        if file < self.indexes_model().len() {
+            if let ProjectSourceIndex::Functional(items) = self.indexes_model()[file as int] {
+                let forms = self.meta_asts@[file as int]->Some_0;
+                let source = self.sources_model()[file as int].text_model();
+                meta_defn_check_origin(source, forms@, items@, item, result);
+            }
+        }
+    }
+
+    /// ファイルが単独の補助関数宣言なら、索引を使う検査と単独宣言の検査が一致することを示す。
+    pub proof fn indexed_body_agrees_with_standalone(
+        &self, file: usize, indexed: Option<Result<DefnSignature<'a>, ExpressionCheckFailure<'a>>>,
+        standalone: Result<DefnSignature<'a>, DefnBodyError<'a>>,
+    )
+        requires
+            file < self.indexes_model().len(),
+            self.indexes_model()[file as int] is Functional,
+            self.defn_body_matches_index(file, 0, indexed),
+            defn_body_matches(self.sources_model()[file as int].text_model(), standalone),
+            !(standalone matches Err(DefnBodyError::Header(_))),
+        ensures indexed matches Some(result) && same_defn_body_outcome(result, standalone),
+    {
+        let source = self.sources_model()[file as int].text_model();
+        let items = self.indexes_model()[file as int]->Functional_0;
+        let forms = self.meta_asts@[file as int]->Some_0;
+        indexed_meta_body_agrees_with_standalone(source, forms@, items, indexed, standalone);
+    }
+
     /// 指定された索引項目と、型検査で使う署名が対応することを表す。
     pub closed spec fn defn_signature_matches_index(
         &self, file: usize, item: usize, result: Option<DefnSignature<'a>>,
@@ -169,12 +259,22 @@ impl<'a> ParsedProjectSources<'a> {
 
     #[verifier::type_invariant]
     spec fn indexes_correspond(&self) -> bool {
-        self.has_source_indexes()
+        &&& self.has_source_indexes()
+        &&& self.meta_asts@.len() == self.indexes@.len()
+        &&& forall|i: int| 0 <= i < self.indexes@.len() ==>
+            #[trigger] retained_ast_matches(self.sources@[i], self.indexes@[i], self.meta_asts@[i])
     }
 
     /// 入力と正規化したソースが対応し、同じ位置に各言語の索引があることを表す。
     pub open spec fn matches(&self, inputs: Seq<SourceSnapshot>) -> bool {
         project_sources_match(inputs, self.sources_model()) && self.has_source_indexes()
+    }
+}
+
+spec fn retained_ast_matches(source: ProjectSource, index: ProjectSourceIndex, ast: Option<Vec<Form>>) -> bool {
+    match index {
+        ProjectSourceIndex::Circuit(_) => ast.is_none(),
+        ProjectSourceIndex::Functional(items) => ast matches Some(forms) && meta_ast_matches(source.text, forms@, items@),
     }
 }
 
@@ -321,19 +421,19 @@ proof fn indexed_input_prefix(
 }
 
 fn parse_source_file<'a>(source: &ProjectSource<'a>)
-    -> (result: Result<ProjectSourceIndex<'a>, ProjectFileSyntaxError>)
+    -> (result: Result<(ProjectSourceIndex<'a>, Option<Vec<Form>>), ProjectFileSyntaxError>)
     ensures match result {
-        Ok(index) => project_source_index_matches(*source, index),
+        Ok((index, ast)) => project_source_index_matches(*source, index) && retained_ast_matches(*source, index, ast),
         Err(error) => syntax_error_matches(source.kind, source.text, error),
     },
 {
     match source.kind {
         SourceKind::Circuit => match index_project_circuit(source) {
-            Ok(index) => Ok(ProjectSourceIndex::Circuit(index)),
+            Ok(index) => Ok((ProjectSourceIndex::Circuit(index), None)),
             Err(error) => Err(ProjectFileSyntaxError::Circuit(error)),
         },
-        SourceKind::Functional => match index_meta_file(source.text) {
-            Ok(index) => Ok(ProjectSourceIndex::Functional(index)),
+        SourceKind::Functional => match index_meta_with_forms(source.text) {
+            Ok((index, forms)) => Ok((ProjectSourceIndex::Functional(index), Some(forms))),
             Err(error) => Err(ProjectFileSyntaxError::Functional(error)),
         },
     }
@@ -381,18 +481,24 @@ pub fn parse_project_sources<'a>(inputs: &[SourceSnapshot<'a>])
         Err(error) => return Err(ProjectSourceParseError::Collection(error)),
     };
     let mut indexes: Vec<ProjectSourceIndex> = Vec::new();
+    let mut meta_asts: Vec<Option<Vec<Form>>> = Vec::with_capacity(sources.len());
     let mut file = 0;
     while file < sources.len()
         invariant
             project_sources_match(inputs@, sources@),
             valid_source_snapshots(inputs@),
-            file == indexes@.len() <= sources@.len(),
+            file == indexes@.len() == meta_asts@.len() <= sources@.len(),
             forall|i: int| 0 <= i < file ==> #[trigger] project_source_index_matches(sources@[i], indexes@[i]),
+            forall|i: int| 0 <= i < file ==>
+                #[trigger] retained_ast_matches(sources@[i], indexes@[i], meta_asts@[i]),
         decreases sources@.len() - file,
     {
         let source = &sources[file];
         match parse_source_file(source) {
-            Ok(index) => indexes.push(index),
+            Ok((index, ast)) => {
+                indexes.push(index);
+                meta_asts.push(ast);
+            },
             Err(error) => {
                 let input = source.first_input;
                 let id = source.id.copy_for_diagnostic();
@@ -410,7 +516,7 @@ pub fn parse_project_sources<'a>(inputs: &[SourceSnapshot<'a>])
         indexed_input_prefix(inputs@, sources@, indexes@, inputs@.len() as int);
         collected_source_ids_unique(inputs@, sources@);
     }
-    Ok(ParsedProjectSources { sources, indexes })
+    Ok(ParsedProjectSources { sources, indexes, meta_asts })
 }
 
 }

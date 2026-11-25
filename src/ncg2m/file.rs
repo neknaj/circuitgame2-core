@@ -8,13 +8,13 @@ use crate::syntax::{
 };
 #[cfg(verus_only)]
 use crate::syntax::{
-    complete_list_indices, form_span, list_source_delimiters, nested_list_indices, sexpr_form_model, strict_syntax_rejection,
+    complete_list_indices, form_span, list_source_delimiters, nested_list_indices, strict_preorder_ranges, strict_sexpr_derivation, sexpr_form_model, strict_syntax_rejection,
     strict_token_errors_agree, structural_error_location, syntax_error_evidence, well_formed_sexpr,
     circuit::{directive_arguments_match, directive_error_evidence, directive_errors_agree},
 };
 use super::defn::{DefnHeader, DefnHeaderError, is_name, read_defn_at, span_of};
 #[cfg(verus_only)]
-use super::defn::{HeaderContents, declaration_model, form_span_readable, header_contents, plain_name, readable_span, signature_spans_valid, usable_forms};
+use super::defn::{HeaderContents, defn_header_matches, declaration_model, form_span_readable, header_contents, indexed_body_site, plain_name, readable_span, signature_spans_valid, standalone_header_is_only_root, tagged_arguments, usable_forms};
 use super::forms::{is_spelling, source_word, subtree_end};
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
@@ -435,8 +435,159 @@ fn read_directive(source: &str, forms: &[Form], root: usize, head: Head)
     }
 }
 
+pub(super) proof fn indexed_standalone_header(
+    source: &str, forms: Seq<Form>, entries: Vec<MetaItem>, standalone: super::defn::DefnHeader,
+)
+    requires
+        meta_ast_matches(source, forms, entries@),
+        meta_file_matches(source, Ok(entries)),
+        defn_header_matches(source, Ok(standalone)),
+    ensures
+        entries@.len() == 1,
+        entries@[0].kind is Defn,
+        header_contents(entries@[0].kind->Defn_0) == header_contents(standalone),
+{
+    standalone_header_is_only_root(source, forms, standalone);
+    let content = ItemContents::Defn(header_contents(standalone));
+    let single = (form_span(forms[0]), None, content);
+    let end = forms.len() as usize;
+    assert(tagged_arguments(source, forms, 0, "defn", true).is_some());
+    assert(forms[0] is List && 1 < subtree_limit(forms, 0) <= forms.len());
+    assert(plain_name(forms[1]));
+    assert(spelling(source, forms[1]) == "defn".spec_bytes());
+    reveal_strlit("defn");
+    reveal_strlit("namespace");
+    reveal_strlit("use");
+    reveal_strlit("export");
+    vstd::utf8::encode_utf8_decode_utf8("defn"@);
+    vstd::utf8::encode_utf8_decode_utf8("namespace"@);
+    vstd::utf8::encode_utf8_decode_utf8("use"@);
+    vstd::utf8::encode_utf8_decode_utf8("export"@);
+    assert(word_tag(spelling(source, forms[1])) == Some(ItemTag::Defn));
+    assert(item_tag(source, forms, 0) == Some(ItemTag::Defn));
+    assert(item_model(source, forms, 0, false) == Ok(content));
+    region_advanced(source, forms, 0, end, None, Seq::empty(), content, end);
+    region_finished(source, forms, end, None, Seq::empty().push(single));
+    assert(region_model(source, forms, 0, end, None, Seq::empty()) == Ok(Seq::empty().push(single)));
+    assert(region_model(source, forms, 0, end, None, Seq::empty()) == Ok(entry_views(entries@)));
+    assert(entry_views(entries@) == Seq::empty().push(single));
+    assert(entry_views(entries@).len() == entries@.len());
+    assert(entry_views(entries@)[0] == entry_view(entries@[0]));
+}
+
+pub(super) proof fn meta_ast_unique_start(forms: Seq<Form>, first: usize, second: usize)
+    requires strict_preorder_ranges(forms), first < forms.len(), second < forms.len(),
+        form_span(forms[first as int]).start == form_span(forms[second as int]).start,
+    ensures first == second,
+{
+    if first < second { starts_in_source_order(forms, first as int, second as int); }
+    if second < first { starts_in_source_order(forms, second as int, first as int); }
+}
+
 spec fn meta_forms(source: &str, forms: Seq<Form>) -> bool {
     usable_forms(source, forms) && list_source_delimiters(source, forms, false)
+}
+
+spec fn defn_item_at(source: &str, forms: Seq<Form>, at: usize, kind: MetaItemKind) -> bool {
+    match kind {
+        MetaItemKind::Defn(header) => exists|body: usize| #[trigger] indexed_body_site(source, forms, at, body, header),
+        _ => true,
+    }
+}
+
+spec fn defn_items_in_forms(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>) -> bool {
+    forall|i: int| 0 <= i < entries.len() ==> {
+        let entry = #[trigger] entries[i];
+        entry.kind matches MetaItemKind::Defn(header) ==> exists|root: usize, body: usize|
+            #[trigger] indexed_body_site(source, forms, root, body, header)
+    }
+}
+
+pub(crate) closed spec fn meta_ast_matches(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>) -> bool {
+    &&& usable_forms(source, forms)
+    &&& strict_preorder_ranges(forms)
+    &&& sexpr_form_model(source) == Some(forms)
+    &&& defn_items_in_forms(source, forms, entries)
+}
+
+pub(super) proof fn meta_ast_source(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>)
+    requires meta_ast_matches(source, forms, entries),
+    ensures sexpr_form_model(source) == Some(forms),
+{}
+
+pub(super) proof fn meta_ast_body_origin(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>, item: int)
+    -> (site: (usize, usize))
+    requires meta_ast_matches(source, forms, entries), 0 <= item < entries.len(), entries[item].kind is Defn,
+    ensures usable_forms(source, forms), strict_preorder_ranges(forms), sexpr_form_model(source) == Some(forms),
+        indexed_body_site(source, forms, site.0, site.1, entries[item].kind->Defn_0),
+{
+    let header = entries[item].kind->Defn_0;
+    choose|root: usize, body: usize| #[trigger] indexed_body_site(source, forms, root, body, header)
+}
+
+
+proof fn starts_in_source_order(forms: Seq<Form>, earlier: int, later: int)
+    requires strict_preorder_ranges(forms), 0 <= earlier < later < forms.len(),
+    ensures form_span(forms[earlier]).start < form_span(forms[later]).start,
+{
+    reveal(strict_preorder_ranges);
+    assert(crate::syntax::preorder_range_pair(forms[earlier], forms[later], later));
+}
+
+fn find_form_start(forms: &[Form], byte: usize) -> (found: Option<usize>)
+    requires strict_preorder_ranges(forms@),
+    ensures found matches Some(at) ==> at < forms@.len() && form_span(forms@[at as int]).start == byte,
+        found.is_none() ==> (forall|i: int| 0 <= i < forms@.len()
+            ==> form_span(#[trigger] forms@[i]).start != byte),
+{
+    let mut low = 0;
+    let mut high = forms.len();
+    while low < high
+        invariant
+            strict_preorder_ranges(forms@),
+            low <= high <= forms@.len(),
+            forall|i: int| 0 <= i < low ==> form_span(#[trigger] forms@[i]).start < byte,
+            forall|i: int| high <= i < forms@.len() ==> byte < form_span(#[trigger] forms@[i]).start,
+        decreases high - low,
+    {
+        let middle = low + (high - low) / 2;
+        let start = span_of(&forms[middle]).start;
+        if start == byte {
+            return Some(middle);
+        } else if start < byte {
+            assert forall|i: int| low <= i <= middle implies form_span(#[trigger] forms@[i]).start < byte by {
+                if i < middle { starts_in_source_order(forms@, i, middle as int); }
+            };
+            low = middle + 1;
+        } else {
+            assert forall|i: int| middle <= i < high implies byte < form_span(#[trigger] forms@[i]).start by {
+                if middle < i { starts_in_source_order(forms@, middle as int, i); }
+            };
+            high = middle;
+        }
+    }
+    None
+}
+
+pub(super) fn indexed_meta_body(
+    _source: &str, forms: &[Form], entries: &[MetaItem], item: usize,
+) -> (body: usize)
+    requires meta_ast_matches(_source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defn,
+    ensures usable_forms(_source, forms@), body < forms@.len(),
+        exists|root: usize| #[trigger] indexed_body_site(_source, forms@, root, body, entries@[item as int].kind->Defn_0),
+{
+    let ghost witness = meta_ast_body_origin(_source, forms@, entries@, item as int);
+    let MetaItemKind::Defn(header) = &entries[item].kind else { unreachable!() };
+    let Some(found) = find_form_start(forms, header.body_span.start) else { unreachable!() };
+    proof {
+        if found < witness.1 {
+            starts_in_source_order(forms@, found as int, witness.1 as int);
+        } else if witness.1 < found {
+            starts_in_source_order(forms@, witness.1 as int, found as int);
+        }
+        assert(found == witness.1);
+    }
+    found
 }
 
 spec fn item_model(source: &str, forms: Seq<Form>, root: usize, in_namespace: bool)
@@ -460,7 +611,7 @@ fn read_item(source: &str, forms: &[Form], root: usize, in_namespace: bool)
     requires meta_forms(source, forms@), root < forms@.len(),
     ensures
         kind_result(result) == item_model(source, forms@, root, in_namespace),
-        result matches Ok(kind) ==> binding_kind_span_valid(source, kind),
+        result matches Ok(kind) ==> binding_kind_span_valid(source, kind) && defn_item_at(source, forms@, root, kind),
         result matches Ok(MetaItemKind::Namespace { path }) ==> !in_namespace
             && root + 3 <= subtree_limit(forms@, root)
             && forms@[root as int] is List
@@ -594,8 +745,9 @@ fn read_region(
     source: &str, forms: &[Form], first: usize, end: usize, parent: Option<usize>, entries: &mut Vec<MetaItem>,
 ) -> (result: Result<(), MetaFileError>)
     requires meta_forms(source, forms@), index_region(forms@, first, end, parent),
-        meta_binding_spans_valid(source, old(entries)@),
-    ensures result.is_ok() ==> meta_binding_spans_valid(source, final(entries)@),
+        meta_binding_spans_valid(source, old(entries)@), defn_items_in_forms(source, forms@, old(entries)@),
+    ensures result.is_ok() ==> meta_binding_spans_valid(source, final(entries)@)
+        && defn_items_in_forms(source, forms@, final(entries)@),
         region_model(source, forms@, first, end, parent, entry_views(old(entries)@))
         == match result { Ok(()) => Ok(entry_views(final(entries)@)), Err(error) => Err(error) },
     decreases end - first,
@@ -607,6 +759,7 @@ fn read_region(
             meta_forms(source, forms@), first <= at, index_region(forms@, at, end, parent),
             initial == entry_views(old(entries)@),
             meta_binding_spans_valid(source, entries@),
+            defn_items_in_forms(source, forms@, entries@),
             region_model(source, forms@, first, end, parent, initial)
                 == region_model(source, forms@, at, end, parent, entry_views(entries@)),
         decreases end - at,
@@ -644,6 +797,21 @@ fn read_region(
             } by {
                 if i < previous.len() {
                     assert(entries@[i] == previous[i]);
+                }
+            };
+        };
+        assert(defn_items_in_forms(source, forms@, entries@)) by {
+            assert forall|i: int| 0 <= i < entries@.len() implies {
+                let row = #[trigger] entries@[i];
+                row.kind matches MetaItemKind::Defn(header) ==> exists|root: usize, body: usize|
+                    #[trigger] indexed_body_site(source, forms@, root, body, header)
+            } by {
+                if i < previous.len() {
+                    assert(entries@[i] == previous[i]);
+                } else if let MetaItemKind::Defn(header) = entry.kind {
+                    let root = at;
+                    let body = choose|body: usize| #[trigger] indexed_body_site(source, forms@, root, body, header);
+                    assert(indexed_body_site(source, forms@, root, body, header));
                 }
             };
         };
@@ -742,6 +910,21 @@ pub fn index_meta_file(source: &str) -> (result: Result<Vec<MetaItem>, MetaFileE
     ensures result.is_ok() == valid_meta_file(source), meta_file_matches(source, result),
         result matches Ok(items) ==> meta_binding_spans_valid(source, items@),
 {
+    match index_meta_with_forms(source) {
+        Ok((items, _)) => Ok(items),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn index_meta_with_forms(source: &str)
+    -> (result: Result<(Vec<MetaItem>, Vec<Form>), MetaFileError>)
+    ensures result.is_ok() == valid_meta_file(source),
+        match result {
+            Ok((items, forms)) => meta_file_matches(source, Ok(items))
+                && meta_binding_spans_valid(source, items@) && meta_ast_matches(source, forms@, items@),
+            Err(error) => meta_file_matches(source, Err(error)),
+        },
+{
     let forms = match syntax::parse(source) {
         Ok(forms) => forms,
         Err(error) => return Err(MetaFileError::Syntax(error)),
@@ -749,8 +932,13 @@ pub fn index_meta_file(source: &str) -> (result: Result<Vec<MetaItem>, MetaFileE
     let mut entries = Vec::new();
     assert(entry_views(entries@) =~= Seq::<EntryView>::empty());
     assert(meta_binding_spans_valid(source, entries@));
+    assert(defn_items_in_forms(source, forms@, entries@));
     read_region(source, &forms, 0, forms.len(), None, &mut entries)?;
-    Ok(entries)
+    assert(strict_sexpr_derivation(source, forms@));
+    assert(usable_forms(source, forms@));
+    assert(strict_preorder_ranges(forms@)) by { reveal(strict_sexpr_derivation); }
+    assert(meta_ast_matches(source, forms@, entries@));
+    Ok((entries, forms))
 }
 
 }

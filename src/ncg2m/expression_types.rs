@@ -10,10 +10,15 @@ use super::data_types::{
     read_type_value,
 };
 #[cfg(verus_only)]
-use super::data_types::{data_type_matches, signature_matches_header};
+use super::data_types::{data_type_matches, same_defn_signature, signature_matches_header,
+    signature_parameter_types_agree, signature_projection_agrees, signature_result_types_agree};
 use super::defn::{DefnHeaderError, is_name, parse_defn_input, read_type, span_of, tagged};
 #[cfg(verus_only)]
-use super::defn::{defn_body_site, defn_header_matches, plain_name, tagged_arguments, type_at, usable_forms};
+use super::defn::{defn_body_site, defn_body_sites_agree, defn_header_matches, indexed_body_site, plain_name, standalone_header_is_only_root, tagged_arguments, type_at, usable_forms};
+use super::file::{MetaItem, MetaItemKind, indexed_meta_body};
+#[cfg(verus_only)]
+use super::file::{indexed_standalone_header, meta_ast_body_origin, meta_ast_matches, meta_ast_source,
+    meta_ast_unique_start, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches};
 use super::forms::{is_spelling, source_word, subtree_end};
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
@@ -115,16 +120,50 @@ enum Expression {
 }
 
 #[derive(Clone, Copy)]
-struct Request<'a> {
+struct TypeShape {
+    builtin: Option<BuiltinDataType>,
+    list_depth: usize,
+}
+
+#[cfg(verus_only)]
+type TypeBinding = (Seq<u8>, TypeShape);
+
+#[derive(Clone, Copy)]
+struct Request {
     at: usize,
-    expected: DataType<'a>,
+    expected: TypeShape,
 }
 
 #[derive(Clone, Copy)]
-enum CheckStep<'a> {
+enum CheckStep {
     Done,
-    One(Request<'a>),
-    Three(Request<'a>, Request<'a>, Request<'a>),
+    One(Request),
+    Three(Request, Request, Request),
+}
+
+spec fn type_shape(ty: DataType) -> TypeShape {
+    TypeShape {
+        builtin: match ty.atom {
+            DataTypeAtom::Builtin(base) => Some(base),
+            DataTypeAtom::Named(_) => None,
+        },
+        list_depth: ty.list_depth,
+    }
+}
+
+fn shape_of_type(ty: DataType) -> (shape: TypeShape)
+    ensures shape == type_shape(ty),
+{
+    let builtin = match ty.atom {
+        DataTypeAtom::Builtin(base) => Some(base),
+        DataTypeAtom::Named(_) => None,
+    };
+    TypeShape { builtin, list_depth: ty.list_depth }
+}
+
+// 本体検査では、段階固有型の解決を保留する。環境は仮引数の綴り、共通型、リストの深さを使う。
+spec fn environment_view(parameters: Seq<SignatureParameter>) -> Seq<TypeBinding> {
+    parameters.map_values(|parameter: SignatureParameter| (parameter.name.spec_bytes(), type_shape(parameter.ty.ty)))
 }
 
 spec fn keyword(word: Seq<u8>) -> Option<FormTag> {
@@ -262,31 +301,31 @@ fn read_shape<'a>(source: &'a str, forms: &[Form], at: usize) -> (result: Result
 }
 
 
-spec fn parameter_type(parameters: Seq<SignatureParameter>, word: Seq<u8>, from: nat) -> Option<DataType>
+spec fn parameter_type(parameters: Seq<TypeBinding>, word: Seq<u8>, from: nat) -> Option<TypeShape>
     decreases parameters.len() - from,
 {
     if from >= parameters.len() {
         None
-    } else if parameters[from as int].name.spec_bytes() == word {
-        Some(parameters[from as int].ty.ty)
+    } else if parameters[from as int].0 == word {
+        Some(parameters[from as int].1)
     } else {
         parameter_type(parameters, word, from + 1)
     }
 }
 
-fn find_parameter<'a>(parameters: &[SignatureParameter<'a>], word: &str) -> (ty: Option<DataType<'a>>)
-    ensures ty == parameter_type(parameters@, word.spec_bytes(), 0),
+fn find_parameter(parameters: &[SignatureParameter], word: &str) -> (ty: Option<TypeShape>)
+    ensures ty == parameter_type(environment_view(parameters@), word.spec_bytes(), 0),
 {
     let mut from = 0;
     while from < parameters.len()
         invariant
             from <= parameters@.len(),
-            parameter_type(parameters@, word.spec_bytes(), 0) == parameter_type(parameters@, word.spec_bytes(), from as nat),
+            parameter_type(environment_view(parameters@), word.spec_bytes(), 0) == parameter_type(environment_view(parameters@), word.spec_bytes(), from as nat),
         decreases parameters@.len() - from,
     {
         reveal_with_fuel(parameter_type, 2);
         if is_spelling(parameters[from].name, word) {
-            return Some(parameters[from].ty.ty);
+            return Some(shape_of_type(parameters[from].ty.ty));
         }
         from += 1;
     }
@@ -331,49 +370,65 @@ fn check_depth<'a>(expected: usize, actual: usize, span: Range<usize>)
     }
 }
 
-spec fn types_agree<'a>(expected: DataType<'a>, actual: DataType<'a>, span: Range<usize>)
+spec fn builtin_type<'a>(builtin: BuiltinDataType, list_depth: usize) -> DataType<'a> {
+    DataType { atom: DataTypeAtom::Builtin(builtin), list_depth }
+}
+
+fn materialize_builtin<'a>(builtin: BuiltinDataType, list_depth: usize) -> (ty: DataType<'a>)
+    ensures ty == builtin_type(builtin, list_depth),
+{
+    DataType { atom: DataTypeAtom::Builtin(builtin), list_depth }
+}
+
+spec fn types_agree<'a>(expected: TypeShape, actual: TypeShape, span: Range<usize>)
     -> Result<(), ExpressionCheckFailure<'a>>
 {
     match depth_agrees(expected.list_depth, actual.list_depth, span) {
         Err(error) => Err(error),
-        Ok(()) => match (expected.atom, actual.atom) {
-            (DataTypeAtom::Builtin(a), DataTypeAtom::Builtin(b)) => {
+        Ok(()) => match (expected.builtin, actual.builtin) {
+            (Some(a), Some(b)) => {
                 if a == b { Ok(()) }
-                else { Err(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch { span, expected, actual })) }
+                else { Err(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch {
+                    span, expected: builtin_type(a, expected.list_depth), actual: builtin_type(b, actual.list_depth),
+                })) }
             }
             _ => Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(span))),
         }
     }
 }
 
-fn conform<'a>(expected: DataType<'a>, actual: DataType<'a>, span: Range<usize>)
+fn conform<'a>(expected: TypeShape, actual: TypeShape, span: Range<usize>)
     -> (result: Result<(), ExpressionCheckFailure<'a>>)
     ensures result == types_agree(expected, actual, span),
 {
     check_depth(expected.list_depth, actual.list_depth, span.start..span.end)?;
-    match (expected.atom, actual.atom) {
-        (DataTypeAtom::Builtin(a), DataTypeAtom::Builtin(b)) => {
+    match (expected.builtin, actual.builtin) {
+        (Some(a), Some(b)) => {
             if builtin_equal(a, b) {
                 Ok(())
             } else {
-                Err(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch { span, expected, actual }))
+                Err(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch {
+                    span,
+                    expected: materialize_builtin(a, expected.list_depth),
+                    actual: materialize_builtin(b, actual.list_depth),
+                }))
             }
         }
         _ => Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(span))),
     }
 }
 
-spec fn scalar_type<'a>(builtin: BuiltinDataType) -> DataType<'a> {
-    DataType { atom: DataTypeAtom::Builtin(builtin), list_depth: 0 }
+spec fn scalar_type(builtin: BuiltinDataType) -> TypeShape {
+    TypeShape { builtin: Some(builtin), list_depth: 0 }
 }
 
-fn scalar<'a>(builtin: BuiltinDataType) -> (ty: DataType<'a>)
+fn scalar(builtin: BuiltinDataType) -> (ty: TypeShape)
     ensures ty == scalar_type(builtin),
 {
-    DataType { atom: DataTypeAtom::Builtin(builtin), list_depth: 0 }
+    TypeShape { builtin: Some(builtin), list_depth: 0 }
 }
 
-spec fn literal_integer_type(negative: bool, expected: DataType) -> IntegerType {
+spec fn literal_integer_type(negative: bool, expected: TypeShape) -> IntegerType {
     if negative || expected == scalar_type(BuiltinDataType::Integer(IntegerType::Int)) {
         IntegerType::Int
     } else {
@@ -381,7 +436,7 @@ spec fn literal_integer_type(negative: bool, expected: DataType) -> IntegerType 
     }
 }
 
-spec fn literal_check<'a>(word: Seq<u8>, ty: IntegerType, span: Range<usize>) -> Result<CheckStep<'a>, ExpressionCheckFailure<'a>> {
+spec fn literal_check<'a>(word: Seq<u8>, ty: IntegerType, span: Range<usize>) -> Result<CheckStep, ExpressionCheckFailure<'a>> {
     let result = choose|r: Result<IntegerValue, IntegerLiteralError>| integer_literal_matches(word, Some(ty), r);
     match result {
         Ok(_) => Ok(CheckStep::Done),
@@ -389,7 +444,7 @@ spec fn literal_check<'a>(word: Seq<u8>, ty: IntegerType, span: Range<usize>) ->
     }
 }
 
-fn read_integer<'a>(word: &str, ty: IntegerType, span: Range<usize>) -> (result: Result<CheckStep<'a>, ExpressionCheckFailure<'a>>)
+fn read_integer<'a>(word: &str, ty: IntegerType, span: Range<usize>) -> (result: Result<CheckStep, ExpressionCheckFailure<'a>>)
     ensures result == literal_check(word.spec_bytes(), ty, span),
 {
     match read_integer_literal(word, Some(ty)) {
@@ -398,7 +453,7 @@ fn read_integer<'a>(word: &str, ty: IntegerType, span: Range<usize>) -> (result:
     }
 }
 
-spec fn annotation_value<'a>(syntax: super::defn::DataTypeSyntax) -> Option<DataType<'a>> {
+spec fn annotation_value(syntax: super::defn::DataTypeSyntax) -> Option<TypeShape> {
     let base = match syntax.name {
         super::defn::DataTypeName::Bool => Some(BuiltinDataType::Bool),
         super::defn::DataTypeName::Nat => Some(BuiltinDataType::Integer(IntegerType::Nat)),
@@ -408,14 +463,14 @@ spec fn annotation_value<'a>(syntax: super::defn::DataTypeSyntax) -> Option<Data
         super::defn::DataTypeName::Deferred => None,
     };
     match base {
-        Some(base) => Some(DataType { atom: DataTypeAtom::Builtin(base), list_depth: syntax.list_depth }),
+        Some(base) => Some(TypeShape { builtin: Some(base), list_depth: syntax.list_depth }),
         None => None,
     }
 }
 
 spec fn step_model<'a>(
-    source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter<'a>>, request: Request<'a>,
-) -> Result<CheckStep<'a>, ExpressionCheckFailure<'a>> {
+    source: &'a str, forms: Seq<Form>, parameters: Seq<TypeBinding>, request: Request,
+) -> Result<CheckStep, ExpressionCheckFailure<'a>> {
     let at = request.at;
     let span = form_span(forms[at as int]);
     let expected = request.expected;
@@ -483,11 +538,11 @@ spec fn step_children_fit(forms: Seq<Form>, at: usize, step: CheckStep) -> bool 
 }
 
 fn read_check_step<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], request: Request<'a>,
-) -> (result: Result<CheckStep<'a>, ExpressionCheckFailure<'a>>)
+    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], request: Request,
+) -> (result: Result<CheckStep, ExpressionCheckFailure<'a>>)
     requires usable_forms(source, forms@), request.at < forms@.len(),
     ensures
-        result == step_model(source, forms@, parameters@, request),
+        result == step_model(source, forms@, environment_view(parameters@), request),
         result matches Ok(step) ==> step_children_fit(forms@, request.at, step),
 {
     let at = request.at;
@@ -512,7 +567,7 @@ fn read_check_step<'a>(
         }
         Expression::Integer { negative } => {
             let ty = if negative || (expected.list_depth == 0
-                && matches!(expected.atom, DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Int)))) {
+                && matches!(expected.builtin, Some(BuiltinDataType::Integer(IntegerType::Int)))) {
                 IntegerType::Int
             } else {
                 IntegerType::Nat
@@ -531,8 +586,9 @@ fn read_check_step<'a>(
             if matches!(named.ty.atom, DataTypeAtom::Named(_)) {
                 return Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(named.name_span)));
             }
-            conform(expected, named.ty, span)?;
-            Ok(CheckStep::One(Request { at: value, expected: named.ty }))
+            let actual = shape_of_type(named.ty);
+            conform(expected, actual, span)?;
+            Ok(CheckStep::One(Request { at: value, expected: actual }))
         }
         Expression::Conditional { condition, yes, no } => Ok(CheckStep::Three(
             Request { at: condition, expected: scalar(BuiltinDataType::Bool) },
@@ -550,7 +606,7 @@ enum BodyVerdict<'a> {
 
 #[verifier::opaque]
 spec fn expression_check<'a>(
-    source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter<'a>>, request: Request<'a>,
+    source: &'a str, forms: Seq<Form>, parameters: Seq<TypeBinding>, request: Request,
 ) -> BodyVerdict<'a>
     decreases forms.len() - request.at,
 {
@@ -578,7 +634,7 @@ spec fn expression_check<'a>(
 
 #[verifier::opaque]
 spec fn pending_check<'a>(
-    source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter<'a>>, pending: Seq<Request<'a>>,
+    source: &'a str, forms: Seq<Form>, parameters: Seq<TypeBinding>, pending: Seq<Request>,
 ) -> BodyVerdict<'a>
     decreases pending.len(),
 {
@@ -592,7 +648,7 @@ spec fn pending_check<'a>(
     }
 }
 
-spec fn next_requests<'a>(pending: Seq<Request<'a>>, step: CheckStep<'a>) -> Seq<Request<'a>> {
+spec fn next_requests<'a>(pending: Seq<Request>, step: CheckStep) -> Seq<Request> {
     match step {
         CheckStep::Done => pending,
         CheckStep::One(child) => pending.push(child),
@@ -601,7 +657,7 @@ spec fn next_requests<'a>(pending: Seq<Request<'a>>, step: CheckStep<'a>) -> Seq
 }
 
 proof fn pending_push<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<SignatureParameter<'a>>, pending: Seq<Request<'a>>, tail: Request<'a>,
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>, tail: Request,
 )
     ensures pending_check(source, forms, env, pending.push(tail)) == match expression_check(source, forms, env, tail) {
         BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
@@ -613,20 +669,20 @@ proof fn pending_push<'a>(
 }
 
 proof fn pending_singleton<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<SignatureParameter<'a>>, request: Request<'a>,
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, request: Request,
 )
     ensures pending_check(source, forms, env, Seq::empty().push(request)) == expression_check(source, forms, env, request),
 {
     reveal(pending_check);
-    let empty = Seq::<Request<'a>>::empty();
+    let empty = Seq::<Request>::empty();
     assert(pending_check(source, forms, env, empty) == BodyVerdict::Accepted);
     pending_push(source, forms, env, empty, request);
 
 }
 
 proof fn popped_error<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<SignatureParameter<'a>>, pending: Seq<Request<'a>>,
-    request: Request<'a>, error: ExpressionCheckFailure<'a>,
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>,
+    request: Request, error: ExpressionCheckFailure<'a>,
 )
     requires request.at < forms.len(), step_model(source, forms, env, request) == Err(error),
     ensures pending_check(source, forms, env, pending.push(request)) == BodyVerdict::Rejected(error),
@@ -636,8 +692,8 @@ proof fn popped_error<'a>(
 }
 
 proof fn popped_step<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<SignatureParameter<'a>>, pending: Seq<Request<'a>>,
-    request: Request<'a>, step: CheckStep<'a>,
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>,
+    request: Request, step: CheckStep,
 )
     requires request.at < forms.len(), step_children_fit(forms, request.at, step),
         step_model(source, forms, env, request) == Ok(step),
@@ -672,7 +728,7 @@ spec fn requests_ready(forms: Seq<Form>, pending: Seq<Request>) -> bool {
         subtree_limit(forms, (#[trigger] pending[j]).at) <= (#[trigger] pending[i]).at
 }
 
-proof fn append_ready<'a>(forms: Seq<Form>, pending: Seq<Request<'a>>, child: Request<'a>)
+proof fn append_ready<'a>(forms: Seq<Form>, pending: Seq<Request>, child: Request)
     requires requests_ready(forms, pending), child.at < subtree_limit(forms, child.at) <= forms.len(),
         forall|i: int| 0 <= i < pending.len() ==> subtree_limit(forms, child.at) <= (#[trigger] pending[i]).at,
     ensures requests_ready(forms, pending.push(child)),
@@ -686,7 +742,7 @@ proof fn append_ready<'a>(forms: Seq<Form>, pending: Seq<Request<'a>>, child: Re
     };
 }
 
-proof fn step_advances<'a>(forms: Seq<Form>, pending: Seq<Request<'a>>, parent: Request<'a>, step: CheckStep<'a>)
+proof fn step_advances<'a>(forms: Seq<Form>, pending: Seq<Request>, parent: Request, step: CheckStep)
     requires requests_ready(forms, pending.push(parent)), step_children_fit(forms, parent.at, step),
     ensures
         requests_ready(forms, next_requests(pending, step)),
@@ -737,15 +793,15 @@ fn check_body<'a>(
     source: &'a str, forms: &[Form], signature: &DefnSignature<'a>, body: usize,
 ) -> (result: BodyVerdict<'a>)
     requires usable_forms(source, forms@), body < forms@.len(),
-    ensures result == expression_check(source, forms@, signature.parameters@,
-        Request { at: body, expected: signature.result_type.ty }),
+    ensures result == expression_check(source, forms@, environment_view(signature.parameters@),
+        Request { at: body, expected: type_shape(signature.result_type.ty) }),
 {
-    let start = Request { at: body, expected: signature.result_type.ty };
+    let start = Request { at: body, expected: shape_of_type(signature.result_type.ty) };
     let _size = forms.len();
     let _end = subtree_end(forms, body);
     let mut pending = Vec::new();
     pending.push(start);
-    let ghost env = signature.parameters@;
+    let ghost env = environment_view(signature.parameters@);
     proof {
         assert(complete_list_indices(forms@));
         let root = forms@[body as int];
@@ -761,8 +817,8 @@ fn check_body<'a>(
     while pending.len() != 0
         invariant
             usable_forms(source, forms@),
-            env == signature.parameters@,
-            start == (Request { at: body, expected: signature.result_type.ty }),
+            env == environment_view(signature.parameters@),
+            start == (Request { at: body, expected: type_shape(signature.result_type.ty) }),
             requests_ready(forms@, pending@),
             pending_check(source, forms@, env, pending@) == expression_check(source, forms@, env, start),
         decreases forms@.len() - pending_first(forms@, pending@),
@@ -804,10 +860,10 @@ spec fn body_witness<'a>(
     &&& sexpr_form_model(source) == Some(forms)
     &&& defn_body_site(source, forms, 0, body)
     &&& match result {
-        Ok(checked) => checked == signature && expression_check(source, forms, signature.parameters@,
-            Request { at: body, expected: signature.result_type.ty }) == BodyVerdict::Accepted,
-        Err(DefnBodyError::Body(error)) => expression_check(source, forms, signature.parameters@,
-            Request { at: body, expected: signature.result_type.ty }) == BodyVerdict::Rejected(error),
+        Ok(checked) => checked == signature && expression_check(source, forms, environment_view(signature.parameters@),
+            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Accepted,
+        Err(DefnBodyError::Body(error)) => expression_check(source, forms, environment_view(signature.parameters@),
+            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Rejected(error),
         Err(DefnBodyError::Header(_)) => false,
     }
 }
@@ -866,13 +922,13 @@ pub fn check_defn_body(source: &str) -> (result: Result<DefnSignature<'_>, DefnB
     let input = forms.as_slice();
     let checked = check_body(source, input, &signature, body);
     assert(input@ == forms@);
-    assert(checked == expression_check(source, input@, signature.parameters@, Request {
-        at: body, expected: signature.result_type.ty,
+    assert(checked == expression_check(source, input@, environment_view(signature.parameters@), Request {
+        at: body, expected: type_shape(signature.result_type.ty),
     }));
     match checked {
         BodyVerdict::Accepted => {
-            assert(expression_check(source, forms@, signature.parameters@, Request {
-                at: body, expected: signature.result_type.ty,
+            assert(expression_check(source, forms@, environment_view(signature.parameters@), Request {
+                at: body, expected: type_shape(signature.result_type.ty),
             }) == BodyVerdict::Accepted);
             assert(body_witness(source, Ok(signature), header, signature, forms@, body));
             Ok(signature)
@@ -883,5 +939,143 @@ pub fn check_defn_body(source: &str) -> (result: Result<DefnSignature<'_>, DefnB
         }
     }
 }
+
+
+spec fn meta_body_witness<'a>(
+    source: &'a str, forms: Seq<Form>, header: super::defn::DefnHeader,
+    result: Result<DefnSignature<'a>, ExpressionCheckFailure<'a>>, signature: DefnSignature<'a>,
+    root: usize, body: usize,
+) -> bool {
+    &&& indexed_body_site(source, forms, root, body, header)
+    &&& signature_matches_header(source, header, signature)
+    &&& match result {
+        Ok(checked) => checked == signature && expression_check(source, forms, environment_view(signature.parameters@),
+            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Accepted,
+        Err(error) => expression_check(source, forms, environment_view(signature.parameters@),
+            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Rejected(error),
+    }
+}
+
+pub(crate) closed spec fn meta_defn_check_matches(
+    source: &str, forms: Seq<Form>, entries: Seq<MetaItem>, item: usize,
+    result: Option<Result<DefnSignature, ExpressionCheckFailure>>,
+) -> bool {
+    if item >= entries.len() {
+        result.is_none()
+    } else {
+        match entries[item as int].kind {
+            MetaItemKind::Defn(header) => result matches Some(checked)
+                && (exists|signature: DefnSignature, root: usize, body: usize|
+                    #[trigger] meta_body_witness(source, forms, header, checked, signature, root, body)),
+            _ => result.is_none(),
+        }
+    }
+}
+
+pub(crate) proof fn meta_defn_check_origin(
+    source: &str, forms: Seq<Form>, entries: Seq<MetaItem>, item: usize,
+    result: Option<Result<DefnSignature, ExpressionCheckFailure>>,
+)
+    requires meta_defn_check_matches(source, forms, entries, item, result),
+    ensures
+        result.is_some() == (item < entries.len() && entries[item as int].kind is Defn),
+        result matches Some(Ok(signature)) ==> signature_matches_header(source, entries[item as int].kind->Defn_0, signature),
+{
+    if let Some(Ok(signature)) = result {
+        let header = entries[item as int].kind->Defn_0;
+        let (found, root, body) = choose|projected: DefnSignature, root: usize, body: usize|
+            #[trigger] meta_body_witness(source, forms, header, Ok(signature), projected, root, body);
+        assert(signature == found);
+    }
+}
+
+pub(crate) fn check_indexed_meta_defn<'a>(
+    source: &'a str, forms: &[Form], entries: &[MetaItem], item: usize,
+) -> (result: Option<Result<DefnSignature<'a>, ExpressionCheckFailure<'a>>>)
+    requires meta_ast_matches(source, forms@, entries@), meta_binding_spans_valid(source, entries@),
+    ensures meta_defn_check_matches(source, forms@, entries@, item, result),
+{
+    if item >= entries.len() {
+        return None;
+    }
+    let MetaItemKind::Defn(header) = &entries[item].kind else { return None; };
+    proof { meta_defn_signature_spans(source, entries@, item as int); }
+    let body = indexed_meta_body(source, forms, entries, item);
+    let signature = read_header_signature(source, header);
+    let ghost root = choose|root: usize| #[trigger] indexed_body_site(source, forms@, root, body, *header);
+    match check_body(source, forms, &signature, body) {
+        BodyVerdict::Accepted => {
+            assert(meta_body_witness(source, forms@, *header, Ok(signature), signature, root, body));
+            Some(Ok(signature))
+        }
+        BodyVerdict::Rejected(error) => {
+            assert(meta_body_witness(source, forms@, *header, Err(error), signature, root, body));
+            Some(Err(error))
+        }
+    }
+}
+
+
+
+proof fn signature_environments_agree(left: DefnSignature, right: DefnSignature)
+    requires same_defn_signature(left, right),
+    ensures
+        environment_view(left.parameters@) == environment_view(right.parameters@),
+        type_shape(left.result_type.ty) == type_shape(right.result_type.ty),
+{
+    signature_result_types_agree(left, right);
+    let a = environment_view(left.parameters@);
+    let b = environment_view(right.parameters@);
+    assert forall|i: int| 0 <= i < a.len() implies #[trigger] a[i] == b[i] by {
+        signature_parameter_types_agree(left, right, i);
+        assert(a[i] == (left.parameters@[i].name.spec_bytes(), type_shape(left.parameters@[i].ty.ty)));
+        assert(b[i] == (right.parameters@[i].name.spec_bytes(), type_shape(right.parameters@[i].ty.ty)));
+    };
+    assert(a =~= b);
+}
+
+/// 検査を通った署名の内容、または本体の診断値全体が一致することを表す。
+pub open spec fn same_defn_body_outcome(
+    indexed: Result<DefnSignature, ExpressionCheckFailure>, standalone: Result<DefnSignature, DefnBodyError>,
+) -> bool {
+    match (indexed, standalone) {
+        (Ok(left), Ok(right)) => same_defn_signature(left, right),
+        (Err(left), Err(DefnBodyError::Body(right))) => left == right,
+        _ => false,
+    }
+}
+
+pub(crate) proof fn indexed_meta_body_agrees_with_standalone(
+    source: &str, forms: Seq<Form>, entries: Vec<MetaItem>,
+    indexed: Option<Result<DefnSignature, ExpressionCheckFailure>>,
+    standalone: Result<DefnSignature, DefnBodyError>,
+)
+    requires
+        meta_ast_matches(source, forms, entries@), meta_file_matches(source, Ok(entries)),
+        meta_defn_check_matches(source, forms, entries@, 0, indexed),
+        defn_body_matches(source, standalone),
+        !(standalone matches Err(DefnBodyError::Header(_))),
+    ensures indexed matches Some(result) && same_defn_body_outcome(result, standalone),
+{
+    let (header, signature, parsed, body) =
+        choose|header: super::defn::DefnHeader, signature: DefnSignature, forms: Seq<Form>, body: usize|
+            #[trigger] body_witness(source, standalone, header, signature, forms, body);
+    assert(sexpr_form_model(source) == Some(forms)) by {
+        meta_ast_source(source, forms, entries@);
+    };
+    assert(parsed == forms);
+    indexed_standalone_header(source, forms, entries, header);
+    standalone_header_is_only_root(source, forms, header);
+    let indexed_header = entries@[0].kind->Defn_0;
+    let checked = indexed->Some_0;
+    let (located, root, indexed_body) = choose|projected: DefnSignature, root: usize, body: usize|
+        #[trigger] meta_body_witness(source, forms, indexed_header, checked, projected, root, body);
+    meta_ast_body_origin(source, forms, entries@, 0);
+    meta_ast_unique_start(forms, root, 0);
+    defn_body_sites_agree(source, forms, 0, body, indexed_body);
+    signature_projection_agrees(source, indexed_header, header, located, signature);
+    signature_environments_agree(located, signature);
+}
+
 
 }

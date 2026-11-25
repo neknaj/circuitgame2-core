@@ -86,3 +86,52 @@ fn distinguishes_misplaced_fn_and_a_boolean_spelling_shared_with_a_parameter() {
         ))),
     );
 }
+
+#[test]
+fn verifies_an_indexed_body_in_the_original_file_coordinates() {
+    use circuitgame2_core::project::{NameKey, SourceSnapshot, index_mixed_declarations, parse_project_sources};
+
+    let text = "; 複数の宣言
+(namespace logic
+  (defmacro unused () (list))
+  (defn valid (as-type (Fn (Nat) Nat) (fn (x) (if true x 1))))
+  (defn invalid (as-type (Fn () Nat) (fn () (if true 0 false)))))
+";
+    let snapshots = [
+        SourceSnapshot { path: "main.ncg2", revision: 1, text: "(using nor)" },
+        SourceSnapshot { path: "logic.ncg2m", revision: 22, text },
+    ];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let declarations = index_mixed_declarations(&project).unwrap();
+    let valid = declarations.declaration(NameKey { parent: Some("logic"), name: "valid" }).unwrap();
+    let invalid = declarations.declaration(NameKey { parent: Some("logic"), name: "invalid" }).unwrap();
+
+    let signature = project.check_defn_body(valid.file, valid.item).unwrap().unwrap();
+    assert_eq!(&text[signature.body_span], "(if true x 1)");
+    let error = project.check_defn_body(invalid.file, invalid.item).unwrap().unwrap_err();
+    let ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch { span, .. }) = error else {
+        panic!("expected a type mismatch");
+    };
+    assert_eq!(&text[span.clone()], "false");
+    assert_eq!(span.start, text.find("false").unwrap());
+    assert_eq!(project.sources()[invalid.file].revision, 22);
+    assert!(project.check_defn_body(0, 0).is_none());
+    assert!(project.check_defn_body(1, 1).is_none());
+    assert!(project.check_defn_body(usize::MAX, 0).is_none());
+}
+
+#[test]
+fn agrees_with_the_standalone_entry_point() {
+    use circuitgame2_core::project::{SourceSnapshot, parse_project_sources};
+
+    for text in [
+        "(defn f (as-type (Fn (Int) Int) (fn (x) (if true x -9223372036854775808))))",
+        "(defn f (as-type (Fn () Nat) (fn () (if true 0 false))))",
+        "(defn f (as-type (Fn () (List HostEvent)) (fn () (list))))",
+    ] {
+        let inputs = [SourceSnapshot { path: "helper.ncg2m", revision: 0, text }];
+        let project = parse_project_sources(&inputs).unwrap();
+        let indexed = project.check_defn_body(0, 0).unwrap().map_err(DefnBodyError::Body);
+        assert_eq!(indexed, check_defn_body(text));
+    }
+}

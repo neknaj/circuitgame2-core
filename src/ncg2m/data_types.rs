@@ -184,6 +184,61 @@ pub proof fn signature_parameter_origin(source: &str, header: DefnHeader, signat
     assert(parameter_matches(source, header.parameters@[at], signature.parameters@[at]));
 }
 
+/// 型名の綴り、リストの深さ、元ソースの範囲が一致することを表す。
+pub open spec fn same_located_data_type(left: LocatedDataType, right: LocatedDataType) -> bool {
+    &&& left.span == right.span
+    &&& left.name_span == right.name_span
+    &&& left.ty.list_depth == right.ty.list_depth
+    &&& match (left.ty.atom, right.ty.atom) {
+        (DataTypeAtom::Builtin(a), DataTypeAtom::Builtin(b)) => a == b,
+        (DataTypeAtom::Named(a), DataTypeAtom::Named(b)) => a.spec_bytes() == b.spec_bytes(),
+        _ => false,
+    }
+}
+
+spec fn signature_parameter_agrees(left: SignatureParameter, right: SignatureParameter) -> bool {
+    left.name_span == right.name_span && left.name.spec_bytes() == right.name.spec_bytes()
+        && same_located_data_type(left.ty, right.ty)
+}
+
+/// 署名の範囲、仮引数の綴りと順序、仮引数型、戻り値型が一致することを表す。
+pub closed spec fn same_defn_signature(left: DefnSignature, right: DefnSignature) -> bool {
+    &&& left.span == right.span && left.name_span == right.name_span && left.body_span == right.body_span
+    &&& same_located_data_type(left.result_type, right.result_type)
+    &&& left.parameters@.len() == right.parameters@.len()
+    &&& forall|i: int| 0 <= i < left.parameters@.len() ==>
+        #[trigger] signature_parameter_agrees(left.parameters@[i], right.parameters@[i])
+}
+
+pub(super) proof fn signature_projection_agrees(
+    source: &str, left_header: DefnHeader, right_header: DefnHeader, left: DefnSignature, right: DefnSignature,
+)
+    requires
+        super::defn::header_contents(left_header) == super::defn::header_contents(right_header),
+        signature_matches_header(source, left_header, left),
+        signature_matches_header(source, right_header, right),
+    ensures same_defn_signature(left, right),
+{
+    assert forall|i: int| 0 <= i < left.parameters@.len()
+        implies #[trigger] signature_parameter_agrees(left.parameters@[i], right.parameters@[i]) by {
+        assert(parameter_matches(source, left_header.parameters@[i], left.parameters@[i]));
+        assert(parameter_matches(source, right_header.parameters@[i], right.parameters@[i]));
+    };
+}
+
+pub(super) proof fn signature_result_types_agree(left: DefnSignature, right: DefnSignature)
+    requires same_defn_signature(left, right),
+    ensures same_located_data_type(left.result_type, right.result_type), left.parameters@.len() == right.parameters@.len(),
+{}
+
+pub(super) proof fn signature_parameter_types_agree(left: DefnSignature, right: DefnSignature, index: int)
+    requires same_defn_signature(left, right), 0 <= index < left.parameters@.len(),
+    ensures left.parameters@[index].name.spec_bytes() == right.parameters@[index].name.spec_bytes(),
+        same_located_data_type(left.parameters@[index].ty, right.parameters@[index].ty),
+{
+    assert(signature_parameter_agrees(left.parameters@[index], right.parameters@[index]));
+}
+
 pub(crate) fn read_header_signature<'a>(source: &'a str, header: &DefnHeader) -> (value: DefnSignature<'a>)
     requires signature_spans_valid(source, *header),
     ensures signature_matches_header(source, *header, value),

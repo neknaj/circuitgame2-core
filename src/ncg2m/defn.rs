@@ -342,7 +342,7 @@ fn header_sites(source: &str, forms: &[Form], root: usize) -> (result: Result<(u
     ensures
         result == sites_model(source, forms@, root),
         result matches Ok((name, types, output, names, body))
-            ==> name < forms@.len() && types < forms@.len() && output < forms@.len()
+            ==> root < body && name < forms@.len() && types < forms@.len() && output < forms@.len()
                 && names < forms@.len() && body < forms@.len()
                 && forms@[types as int] is List && forms@[names as int] is List,
 {
@@ -707,6 +707,24 @@ pub(super) closed spec fn defn_body_site(source: &str, forms: Seq<Form>, root: u
     sites_model(source, forms, root) matches Ok((_, _, _, _, at)) && at == body
 }
 
+pub(super) proof fn standalone_header_is_only_root(source: &str, forms: Seq<Form>, header: DefnHeader)
+    requires defn_header_matches(source, Ok(header)), sexpr_form_model(source) == Some(forms),
+    ensures
+        well_formed_sexpr(source), forms.len() > 0, subtree_limit(forms, 0) == forms.len(),
+        defn_at_matches(source, forms, 0, Ok(header)),
+        tagged_arguments(source, forms, 0, "defn", true).is_some(),
+        header.span == form_span(forms[0]),
+{
+    assert(header_model(source, forms) == Ok(header_contents(header)));
+    assert(declaration_model(source, forms, 0) == Ok(header_contents(header)));
+    assert(sites_model(source, forms, 0).is_ok());
+}
+
+pub(super) proof fn defn_body_sites_agree(source: &str, forms: Seq<Form>, root: usize, first: usize, second: usize)
+    requires defn_body_site(source, forms, root, first), defn_body_site(source, forms, root, second),
+    ensures first == second,
+{}
+
 pub(super) fn parse_defn_input(source: &str)
     -> (result: Result<(Vec<Form>, DefnHeader, usize), DefnHeaderError>)
     ensures
@@ -737,12 +755,23 @@ pub(super) fn parse_defn_input(source: &str)
     Ok((forms, header, body))
 }
 
+pub(super) open spec fn indexed_body_site(
+    source: &str, forms: Seq<Form>, root: usize, body: usize, header: DefnHeader,
+) -> bool {
+    &&& root < body < forms.len()
+    &&& header.span == form_span(forms[root as int])
+    &&& header.body_span == form_span(forms[body as int])
+    &&& defn_body_site(source, forms, root, body)
+    &&& defn_at_matches(source, forms, root, Ok(header))
+}
+
 pub(super) fn read_defn_at(source: &str, forms: &[Form], root: usize)
     -> (result: Result<DefnHeader, DefnHeaderError>)
     requires usable_forms(source, forms@), root < forms@.len(),
     ensures defn_at_matches(source, forms@, root, result),
         result matches Ok(header) ==> readable_span(source, header.name_span)
-            && signature_spans_valid(source, header),
+            && signature_spans_valid(source, header)
+            && (exists|body: usize| #[trigger] indexed_body_site(source, forms@, root, body, header)),
 {
     match read_defn_with_body(source, forms, root) {
         Ok((header, _)) => Ok(header),
@@ -757,7 +786,7 @@ fn read_defn_with_body(source: &str, forms: &[Form], root: usize)
         Ok((header, body)) => defn_at_matches(source, forms@, root, Ok(header))
             && readable_span(source, header.name_span)
             && signature_spans_valid(source, header)
-            && defn_body_site(source, forms@, root, body) && body < forms@.len(),
+            && indexed_body_site(source, forms@, root, body, header),
         Err(error) => defn_at_matches(source, forms@, root, Err(error)),
     },
 {
