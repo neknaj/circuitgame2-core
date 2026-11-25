@@ -1,6 +1,6 @@
 //! 呼び出しを名前解決し、参照先の宣言から必要な入出力数を求める。
 
-mod checks;
+pub(super) mod checks;
 mod inputs;
 mod outputs;
 mod typed;

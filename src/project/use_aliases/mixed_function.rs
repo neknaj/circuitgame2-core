@@ -1,6 +1,8 @@
 //! 混在ソース集合の厳格索引から、関数の呼び出し位置を確定する。
 
+mod arity;
 mod typed;
+pub use arity::MixedFuncArityError;
 pub use typed::{MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 
 use super::{MixedUseAliases, call_arity::{FuncCallArity, FuncCallTarget}, definitions::DefinitionReferenceSite,
@@ -16,7 +18,7 @@ use crate::project::source_indexes::DefnScope;
 use crate::project::{AbsoluteResolutionError, LocatedName, MixedAbsoluteTarget, NameKey, ParsedProjectSources,
     ProjectDeclaration, ProjectDeclarationKind, ProjectSourceIndex};
 #[cfg(verus_only)]
-use crate::project::{exports::mixed_exports_use_project_declarations, mixed_absolute_resolution_evidence,
+use crate::project::{exports::mixed_exports_use_project_declarations, location_in_source, mixed_absolute_resolution_evidence,
     mixed_declaration_origin, mixed_key_resolution, mixed_use_targets_match};
 use crate::syntax::{AtomKind, classify_bare_atom, split_relative_path};
 #[cfg(verus_only)]
@@ -420,6 +422,7 @@ impl<'a> ParsedProjectSources<'a> {
         let indexed = parsed.references@[row.references.start + reference];
         &&& self.has_func_callee(file, entry, definition, reference)
         &&& call_shape_matches(self.sources_model()[file as int].text_model(), parsed.syntax.forms@, row, indexed, Some(call))
+        &&& location_in_source(LocatedName { source: &self.sources_model()[file as int], span: call.span })
     }
 
     fn indexed_func_shape(&self, file: usize, entry: usize, definition: usize, reference: usize) -> (call: CallShape)
@@ -444,6 +447,7 @@ impl<'a> ParsedProjectSources<'a> {
         proof { build_definition_scope_evidence(source.text, &model, entry as int, def as int); }
         let shape = indexed_call_shape(source.text, &parsed.syntax.forms, row, &parsed.references, row.references.start + reference);
         let Some(call) = shape else { proof { assert(false); } unreachable!() };
+        proof { crate::project::declarations::located_name_evidence(LocatedName { source, span: call.span }); }
         call
     }
 }
@@ -567,6 +571,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             let project = self.targets_model().project_model();
             &&& project.has_func_callee(file, entry, definition, reference)
             &&& *call.source == project.sources_model()[file as int]
+            &&& location_in_source(LocatedName { source: call.source, span: call.call.span })
             &&& {
                 let parsed = project.indexes_model()[file as int]->Circuit_0;
                 let def = parsed.entry_ranges@[entry as int].definitions.start + definition;

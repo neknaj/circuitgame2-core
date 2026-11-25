@@ -56,7 +56,7 @@ pub enum MixedFuncDriverError<'p, 'a> {
     Driver(FuncDriverError<'p, 'a>),
 }
 
-spec fn has_mixed_func(project: &ParsedProjectSources, file: usize, entry: usize) -> bool {
+pub(super) open spec fn has_mixed_func(project: &ParsedProjectSources, file: usize, entry: usize) -> bool {
     &&& project.has_mixed_routine_signature(file, entry)
     &&& project.indexes_model()[file as int]->Circuit_0.syntax.entries@[entry as int].head is Func
 }

@@ -127,6 +127,15 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         ensures self.mixed_func_driver_matches(file, entry, max_width, Ok(FuncDriverResult::Checked(wiring.drivers))),
     {}
 
+    pub(in crate::project::use_aliases::mixed_function) proof fn mixed_wiring_index_origin(
+        &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiring,
+    )
+        requires self.mixed_func_wiring_matches(file, entry, max_width, Ok(FuncWiringResult::Checked(wiring))),
+        ensures
+            self.targets_model().project_model().has_source_indexes(),
+            has_mixed_func(&self.targets_model().project_model(), file, entry),
+    {}
+
     /// 厳格索引上の信号参照と、検査済み結線の駆動元を対応付ける。
     pub proof fn mixed_wiring_signal_driver(
         &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiring, definition: usize, position: usize,
