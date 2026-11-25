@@ -1,7 +1,7 @@
 //! 確定した回路フォームの境界から、局所の診断を記録して兄弟の検査を続ける。
 
 use super::*;
-use crate::{Recovered, parse_recovering};
+use crate::{Recovered, ReparsedRecovery, parse_recovering};
 #[cfg(verus_only)]
 use crate::{inserted_closes_match, original_list_ranges, original_list_roots, repair_input_spans_valid};
 #[cfg(verus_only)]
@@ -69,6 +69,36 @@ impl OriginalCircuitList {
         ensures diagnostics@ == self.source_diagnostics_model(),
     {
         self.source_diagnostics.as_slice()
+    }
+
+    /// 診断の主範囲と関連範囲が、指定された元リストの中にあることを示す。
+    pub proof fn source_diagnostics_lie_in_original_list(&self, source: &str)
+        requires one_original_circuit_list(source, self.span_model(), *self),
+        ensures forall|i: int| 0 <= i < self.source_diagnostics_model().len()
+            ==> match #[trigger] self.source_diagnostics_model()[i] {
+                Some(diagnostic) => original_diagnostic_within(source, self.span_model(), diagnostic),
+                None => true,
+            },
+    {
+        let outer = self.span_model();
+        let diagnostics = self.source_diagnostics@;
+        assert forall|i: int| 0 <= i < diagnostics.len() implies
+            match #[trigger] diagnostics[i] {
+                Some(diagnostic) => original_diagnostic_within(source, outer, diagnostic),
+                None => true,
+            } by {
+                assert(original_diagnostic_matches(source, outer, self.checked@[i].outcome, diagnostics[i]));
+                if let Some(diagnostic) = diagnostics[i] {
+                    match self.checked@[i].outcome {
+                        RecoveredFormOutcome::Valid(_) => assert(false),
+                        RecoveredFormOutcome::Rejected { kind, span, .. } => {
+                            assert(can_rebase(source, outer, span.start, span.end));
+                            assert(related_range_valid(source, outer, kind));
+                            assert(original_diagnostic_within(source, outer, diagnostic));
+                        },
+                    }
+                }
+            }
     }
 
     /// ファイル内の位置で表した診断の列を返す。
@@ -390,7 +420,85 @@ pub fn recover_circuit_forms(source: &str) -> (result: CircuitRecovery)
     }
 }
 
-spec fn one_original_circuit_list(source: &str, span: Range<usize>, list: OriginalCircuitList) -> bool {
+impl<'p, 's> ReparsedRecovery<'p, 's> {
+    /// 局所再解析で確定した元リストを、現在の文書の回路フォームとして検査する。
+    ///
+    /// 区間は接頭部、変更区間、接尾部の順に 0 から数える。
+    /// 区間やリストの添字が範囲外の場合、または範囲を一つのリストとして厳格に読めない場合は `None`。
+    /// 診断の主範囲と関連範囲は、どちらも現在の文書を基準とする。
+    pub fn inspect_original_list(&self, section: usize, list: usize) -> (result: Option<OriginalCircuitList>)
+        ensures
+            result.is_some() <==> {
+                let source = self.source_model();
+                let part = self.section_model(section as int);
+                let local = part.recovered.original_lists@[list as int];
+                &&& section < 3
+                &&& list < part.recovered.original_lists@.len()
+                &&& original_list_is_inspectable(source,
+                    (part.byte_base + local.start) as usize..(part.byte_base + local.end) as usize)
+            },
+            result matches Some(selected) ==> {
+                let part = self.section_model(section as int);
+                let relative = part.recovered.original_lists@[list as int];
+                let span = selected.span_model();
+                &&& section < 3
+                &&& list < part.recovered.original_lists@.len()
+                &&& span.start as int == part.byte_base + relative.start
+                &&& span.end as int == part.byte_base + relative.end
+                &&& crate::located_span(self.source_model(), span)
+                &&& one_original_circuit_list(self.source_model(), span, selected)
+            },
+    {
+        let span = self.original_list_span(section, list)?;
+        let source = self.source();
+        proof { encode_utf8_valid_utf8(source@); }
+        inspect_original_circuit_list(source, &span)
+    }
+}
+
+spec fn single_strict_list(fragment: &str, forms: Seq<Form>) -> bool {
+    &&& forms.len() > 0
+    &&& forms[0] is List && forms[0]->List_end == forms.len()
+    &&& form_span(forms[0]) == (0usize..fragment.spec_bytes().len() as usize)
+}
+
+/// 指定の範囲全体を、一つのリストとして厳格に読めることを表す。
+pub closed spec fn original_list_is_inspectable(source: &str, span: Range<usize>) -> bool {
+    exists|fragment: &str| {
+        &&& fragment.spec_bytes() == source.spec_bytes()[span.start as int..span.end as int]
+        &&& well_formed_sexpr(fragment)
+        &&& match #[trigger] sexpr_form_model(fragment) {
+            Some(forms) => single_strict_list(fragment, forms),
+            None => false,
+        }
+    }
+}
+
+proof fn inspectability_matches_fragment(source: &str, span: Range<usize>, fragment: &str)
+    requires fragment.spec_bytes() == source.spec_bytes()[span.start as int..span.end as int],
+    ensures original_list_is_inspectable(source, span) <==> {
+        &&& well_formed_sexpr(fragment)
+        &&& match sexpr_form_model(fragment) {
+            Some(forms) => single_strict_list(fragment, forms),
+            None => false,
+        }
+    },
+{
+    if original_list_is_inspectable(source, span) {
+        let other = choose|other: &str| {
+            &&& other.spec_bytes() == source.spec_bytes()[span.start as int..span.end as int]
+            &&& well_formed_sexpr(other)
+            &&& match #[trigger] sexpr_form_model(other) {
+                Some(forms) => single_strict_list(other, forms),
+                None => false,
+            }
+        };
+        crate::sexpr_models_agree_on_bytes(fragment, other);
+    }
+}
+
+/// 確定した元リストの構文木と診断が、現在の本文の範囲に対応することを表す。
+pub closed spec fn one_original_circuit_list(source: &str, span: Range<usize>, list: OriginalCircuitList) -> bool {
     &&& list.span == span
     &&& list.source_diagnostics@.len() == list.checked@.len()
     &&& original_diagnostics_match(source, span, list.checked@, list.source_diagnostics@)
@@ -445,6 +553,27 @@ spec fn related_range_valid(source: &str, outer: Range<usize>, kind: HeaderError
     match kind {
         HeaderError::MixedTestItems { first_head: (start, end) } => can_rebase(source, outer, start, end),
         _ => true,
+    }
+}
+
+/// 回路文法の主診断と関連箇所が、元リスト内の文字境界を指すことを表す。
+pub open spec fn original_diagnostic_within(
+    source: &str, outer: Range<usize>, diagnostic: CircuitFormError,
+) -> bool {
+    let bytes = source.spec_bytes();
+    match diagnostic {
+        CircuitFormError::Header { kind, span } => {
+            &&& outer.start <= span.start <= span.end <= outer.end <= bytes.len()
+            &&& is_char_boundary(bytes, span.start as int)
+            &&& is_char_boundary(bytes, span.end as int)
+            &&& match kind {
+                HeaderError::MixedTestItems { first_head: (start, end) } =>
+                    outer.start <= start <= end <= outer.end
+                    && is_char_boundary(bytes, start as int) && is_char_boundary(bytes, end as int),
+                _ => true,
+            }
+        },
+        CircuitFormError::Syntax(_) => false,
     }
 }
 
@@ -570,9 +699,12 @@ fn inspect_original_circuit_list(source: &str, span: &Range<usize>) -> (list: Op
         span.start < span.end <= source.spec_bytes().len(),
         is_char_boundary(source.spec_bytes(), span.start as int),
         is_char_boundary(source.spec_bytes(), span.end as int),
-    ensures list matches Some(list) ==> one_original_circuit_list(source, *span, list),
+    ensures
+        list.is_some() <==> original_list_is_inspectable(source, *span),
+        list matches Some(list) ==> one_original_circuit_list(source, *span, list),
 {
     let fragment = source_span(source, span.start, span.end);
+    proof { inspectability_matches_fragment(source, *span, fragment); }
     let forms = parse(fragment).ok()?;
     let Some(Form::List { span: inner, end: inner_end }) = forms.first() else { return None; };
     if *inner_end != forms.len() || inner.start != 0 || inner.end != fragment.as_bytes().len() {
