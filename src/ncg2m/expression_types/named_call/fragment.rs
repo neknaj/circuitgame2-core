@@ -70,6 +70,18 @@ pub proof fn scalar_syntax_call_arguments(source: &str, forms: Seq<Form>, at: us
         }
 }
 
+/// 対応する呼び出しの実引数は、元の構文木から取得したどの引数列でも対応する式を指す。
+pub proof fn scalar_syntax_matches_call_arguments(source: &str, forms: Seq<Form>, at: usize, arguments: Seq<usize>)
+    requires
+        scalar_evaluator_syntax(source, forms, at), scalar_call_syntax_at(source, forms, at),
+        defn_call_arguments(forms, at, arguments),
+    ensures forall|i: int| 0 <= i < arguments.len()
+        ==> scalar_evaluator_syntax(source, forms, #[trigger] arguments[i]),
+{
+    let origin = scalar_syntax_call_arguments(source, forms, at);
+    super::body::call_argument_positions_are_unique(forms, at, origin, arguments);
+}
+
 // Nat の範囲を超える十進字句も構文には属し、回路用の十六進ビット列はこの断片の外にある。
 #[allow(dead_code)]
 proof fn integer_range_is_separate_from_scalar_syntax() {
@@ -78,6 +90,15 @@ proof fn integer_range_is_separate_from_scalar_syntax() {
     reveal(scalar_evaluator_syntax);
     assert(scalar_evaluator_syntax("18446744073709551616", decimal, 0));
     assert(!scalar_evaluator_syntax("#x0", hex, 0));
+}
+
+/// 対応する構文が、アトム、条件式、または補助関数の呼び出し形のいずれかであることを示す。
+pub proof fn scalar_syntax_form_kind(source: &str, forms: Seq<Form>, at: usize)
+    requires scalar_evaluator_syntax(source, forms, at),
+    ensures super::super::scalar_atom_at(forms, at)
+        || conditional_positions(source, forms, at).is_some() || scalar_call_syntax_at(source, forms, at),
+{
+    reveal(scalar_evaluator_syntax);
 }
 
 // 呼び出し形を先に見分け、型規則の呼び出し表を使う分岐につなぐ。

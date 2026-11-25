@@ -8,6 +8,8 @@ use crate::ncg2m::expression_types::named_call::{
     defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
 };
 
+mod scalar_closure;
+
 verus! {
 
 impl<'p, 'a> DefnCallPlan<'p, 'a> {

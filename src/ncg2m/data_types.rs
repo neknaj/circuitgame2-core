@@ -235,12 +235,12 @@ pub(crate) proof fn signatures_from_header_agree(
     signature_projection_agrees(source, header, header, first, second);
 }
 
-pub(super) proof fn signature_result_types_agree(left: DefnSignature, right: DefnSignature)
+pub(crate) proof fn signature_result_types_agree(left: DefnSignature, right: DefnSignature)
     requires same_defn_signature(left, right),
     ensures same_located_data_type(left.result_type, right.result_type), left.parameters@.len() == right.parameters@.len(),
 {}
 
-pub(super) proof fn signature_parameter_types_agree(left: DefnSignature, right: DefnSignature, index: int)
+pub(crate) proof fn signature_parameter_types_agree(left: DefnSignature, right: DefnSignature, index: int)
     requires same_defn_signature(left, right), 0 <= index < left.parameters@.len(),
     ensures left.parameters@[index].name.spec_bytes() == right.parameters@[index].name.spec_bytes(),
         same_located_data_type(left.parameters@[index].ty, right.parameters@[index].ty),

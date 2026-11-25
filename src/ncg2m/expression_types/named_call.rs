@@ -10,7 +10,8 @@ mod body;
 #[cfg(verus_only)]
 mod fragment;
 #[cfg(verus_only)]
-pub use fragment::{scalar_call_syntax_at, scalar_evaluator_syntax, scalar_syntax_call_arguments, scalar_syntax_if_children};
+pub use fragment::{scalar_call_syntax_at, scalar_evaluator_syntax, scalar_syntax_call_arguments,
+    scalar_syntax_form_kind, scalar_syntax_if_children, scalar_syntax_matches_call_arguments};
 pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
