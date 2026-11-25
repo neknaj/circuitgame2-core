@@ -3,7 +3,7 @@
 use super::*;
 use crate::{Recovered, ReparsedRecovery, parse_recovering};
 #[cfg(verus_only)]
-use crate::{inserted_closes_match, original_list_ranges, original_list_roots, repair_input_spans_valid};
+use crate::{inserted_closes_match, original_list_ranges, original_list_roots, recovered_replay_matches, repair_input_spans_valid};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
@@ -284,6 +284,7 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
             && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
             && check_trace(source, forms@, checked@, (forms@.len() as int, None)),
         CircuitRecovery::WithSyntaxRepairs { recovered, original } => !well_formed_sexpr(source)
+            && recovered_replay_matches(source, recovered.forms@, recovered.repairs@, recovered.original_lists@)
             && complete_list_indices(recovered.forms@)
             && nested_list_indices(recovered.forms@)
             && list_source_delimiters(source, recovered.forms@, true)
@@ -296,6 +297,23 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
             && original_circuit_lists(source, recovered.original_lists@, original@),
     }
 }
+
+/// 構文修復を要した場合の再生結果と、元入力に残る各リストの検査結果を取り出す。
+pub proof fn circuit_recovery_repair_evidence(source: &str, recovery: &CircuitRecovery)
+    requires circuit_recovery_matches(source, *recovery), recovery is WithSyntaxRepairs,
+    ensures match recovery {
+        CircuitRecovery::WithSyntaxRepairs { recovered, original } => {
+            &&& recovered_replay_matches(source, recovered.forms@, recovered.repairs@, recovered.original_lists@)
+            &&& original@.len() == recovered.original_lists@.len()
+            &&& forall|i: int| 0 <= i < original@.len() ==> {
+                let checked = #[trigger] original@[i];
+                &&& checked.is_some() == original_list_is_inspectable(source, recovered.original_lists@[i])
+                &&& checked matches Some(list) ==> one_original_circuit_list(source, recovered.original_lists@[i], list)
+            }
+        },
+        _ => false,
+    },
+{}
 
 /// 妥当なソースでは、回復解析と厳格解析の構文木と索引項目が一致する。
 ///
@@ -697,9 +715,10 @@ spec fn original_circuit_lists(
     source: &str, spans: Seq<Range<usize>>, lists: Seq<Option<OriginalCircuitList>>,
 ) -> bool {
     &&& lists.len() <= spans.len()
-    &&& forall|i: int| 0 <= i < lists.len() ==> match #[trigger] lists[i] {
-        Some(list) => one_original_circuit_list(source, spans[i], list),
-        None => true,
+    &&& forall|i: int| 0 <= i < lists.len() ==> {
+        let checked = #[trigger] lists[i];
+        &&& checked.is_some() == original_list_is_inspectable(source, spans[i])
+        &&& checked matches Some(list) ==> one_original_circuit_list(source, spans[i], list)
     }
 }
 
@@ -727,9 +746,10 @@ fn inspect_original_circuit_lists(source: &str, recovered: &Recovered) -> (lists
         let ghost previous = lists@;
         let ghost picked = list;
         lists.push(list);
-        assert forall|i: int| 0 <= i < lists@.len() implies match #[trigger] lists@[i] {
-            Some(list) => one_original_circuit_list(source, recovered.original_lists@[i], list),
-            None => true,
+        assert forall|i: int| 0 <= i < lists@.len() implies {
+            let checked = #[trigger] lists@[i];
+            &&& checked.is_some() == original_list_is_inspectable(source, recovered.original_lists@[i])
+            &&& checked matches Some(list) ==> one_original_circuit_list(source, recovered.original_lists@[i], list)
         } by {
             if i < at { assert(lists@[i] == previous[i]); } else { assert(lists@[i] == picked); }
         };
