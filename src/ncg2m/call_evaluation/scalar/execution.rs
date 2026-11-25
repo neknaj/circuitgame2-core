@@ -34,7 +34,8 @@ mod progress;
 mod termination;
 #[cfg(verus_only)]
 pub use slice::{
-    finite_scalar_execution_from_progress, finite_scalar_executions_agree, resumed_scalar_execution_matches, scalar_execution_slice_matches, scalar_execution_terminal_extends,
+    finite_scalar_execution_from_progress, finite_scalar_executions_agree, resumed_scalar_execution_matches,
+    resumed_scalar_step_counts_match, scalar_execution_slice_steps_match, terminal_scalar_step_counts_agree, scalar_execution_slice_matches, scalar_execution_terminal_extends,
 };
 
 verus! {

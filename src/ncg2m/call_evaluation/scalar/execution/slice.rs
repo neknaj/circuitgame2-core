@@ -40,6 +40,21 @@ pub closed spec fn scalar_execution_slice_matches<'plan, 'p, 'a>(
     exists|path: Seq<ScalarExecution<'plan, 'p, 'a>>| #[trigger] execution_path_result(start, fuel, path, result)
 }
 
+// 終端を返した遷移では、新しい継続を軌跡へ追加しない。
+spec fn consumed_steps(path: Seq<ScalarExecution>, suspended: bool) -> nat {
+    if suspended { (path.len() - 1) as nat } else { path.len() }
+}
+
+/// 消費数が、終端へ達するまで、または枠を使い切るまでに実行した遷移数と一致する。
+pub closed spec fn scalar_execution_slice_steps_match<'plan, 'p, 'a>(
+    start: ScalarExecution<'plan, 'p, 'a>, fuel: nat,
+    result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>, steps: nat,
+) -> bool {
+    exists|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+        #[trigger] execution_path_result(start, fuel, path, result)
+        && steps == consumed_steps(path, result matches Ok(ScalarExecutionSlice::Suspended(_)))
+}
+
 impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     /// 実行枠を使い切ったとき、再開状態の全継続が元の型判断を保つことを示す。
     pub proof fn suspended_slice_preserves_checked_types(
@@ -277,6 +292,40 @@ pub proof fn resumed_scalar_execution_matches<'plan, 'p, 'a>(
     let a = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(
         start, first, path, Ok(ScalarExecutionSlice::Suspended(suspended)));
     let b = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(suspended, next, path, result);
+    let joined = join_execution_paths(start, first, suspended, next, result, a, b);
+    assert(execution_path_result(start, first + next, joined, result));
+}
+
+/// 一時停止後の実行を続けると、両枠の消費数の和が一つの実行枠の遷移数に対応する。
+pub proof fn resumed_scalar_step_counts_match<'plan, 'p, 'a>(
+    start: ScalarExecution<'plan, 'p, 'a>, first: nat,
+    suspended: ScalarExecution<'plan, 'p, 'a>, next: nat,
+    result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>, next_steps: nat,
+)
+    requires
+        scalar_execution_slice_matches(start, first, Ok(ScalarExecutionSlice::Suspended(suspended))),
+        scalar_execution_slice_steps_match(suspended, next, result, next_steps),
+    ensures scalar_execution_slice_steps_match(start, first + next, result, first + next_steps),
+{
+    let a = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(
+        start, first, path, Ok(ScalarExecutionSlice::Suspended(suspended)));
+    let b = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(suspended, next, path, result)
+        && next_steps == consumed_steps(path, result matches Ok(ScalarExecutionSlice::Suspended(_)));
+    let joined = join_execution_paths(start, first, suspended, next, result, a, b);
+    assert(consumed_steps(joined, result matches Ok(ScalarExecutionSlice::Suspended(_))) == first + next_steps);
+}
+
+proof fn join_execution_paths<'plan, 'p, 'a>(
+    start: ScalarExecution<'plan, 'p, 'a>, first: nat,
+    suspended: ScalarExecution<'plan, 'p, 'a>, next: nat,
+    result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    a: Seq<ScalarExecution<'plan, 'p, 'a>>, b: Seq<ScalarExecution<'plan, 'p, 'a>>,
+) -> (joined: Seq<ScalarExecution<'plan, 'p, 'a>>)
+    requires execution_path_result(start, first, a, Ok(ScalarExecutionSlice::Suspended(suspended))),
+        execution_path_result(suspended, next, b, result),
+    ensures execution_path_result(start, first + next, joined, result),
+        joined.len() + 1 == a.len() + b.len(),
+{
     reveal(execution_path);
     let joined = a + b.subrange(1, b.len() as int);
     assert(joined[0] == start && joined.last() == b.last());
@@ -298,6 +347,7 @@ pub proof fn resumed_scalar_execution_matches<'plan, 'p, 'a>(
     };
     assert(execution_path(start, joined));
     assert(execution_path_result(start, first + next, joined, result));
+    joined
 }
 
 /// 次の遷移が存在し、評価を続ける先も条件を満たす状態から、有限の評価軌跡を構成する。
@@ -396,6 +446,47 @@ pub proof fn finite_scalar_executions_agree<'plan, 'p, 'a>(
 {
     let a = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start_a, fuel_a, path, result_a);
     let b = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start_b, fuel_b, path, result_b);
+    terminal_paths_agree(start_a, start_b, fuel_a, fuel_b, result_a, result_b, a, b);
+}
+
+/// 観測が一致する初期状態から終端を得た二つの軌跡は、遷移数と終端の観測が一致する。
+pub proof fn terminal_scalar_step_counts_agree<'plan, 'p, 'a>(
+    start_a: ScalarExecution<'plan, 'p, 'a>, start_b: ScalarExecution<'plan, 'p, 'a>,
+    fuel_a: nat, fuel_b: nat,
+    result_a: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    result_b: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    steps_a: nat, steps_b: nat,
+)
+    requires
+        scalar_execution_states_observe_same(start_a, start_b),
+        scalar_execution_slice_steps_match(start_a, fuel_a, result_a, steps_a),
+        scalar_execution_slice_steps_match(start_b, fuel_b, result_b, steps_b),
+        !(result_a matches Ok(ScalarExecutionSlice::Suspended(_))),
+        !(result_b matches Ok(ScalarExecutionSlice::Suspended(_))),
+    ensures steps_a == steps_b && scalar_execution_steps_observe_same(result_a, result_b),
+{
+    let a = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start_a, fuel_a, path, result_a)
+        && steps_a == consumed_steps(path, false);
+    let b = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start_b, fuel_b, path, result_b)
+        && steps_b == consumed_steps(path, false);
+    terminal_paths_agree(start_a, start_b, fuel_a, fuel_b, result_a, result_b, a, b);
+}
+
+proof fn terminal_paths_agree<'plan, 'p, 'a>(
+    start_a: ScalarExecution<'plan, 'p, 'a>, start_b: ScalarExecution<'plan, 'p, 'a>,
+    fuel_a: nat, fuel_b: nat,
+    result_a: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    result_b: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    a: Seq<ScalarExecution<'plan, 'p, 'a>>, b: Seq<ScalarExecution<'plan, 'p, 'a>>,
+)
+    requires
+        scalar_execution_states_observe_same(start_a, start_b),
+        execution_path_result(start_a, fuel_a, a, result_a),
+        execution_path_result(start_b, fuel_b, b, result_b),
+        !(result_a matches Ok(ScalarExecutionSlice::Suspended(_))),
+        !(result_b matches Ok(ScalarExecutionSlice::Suspended(_))),
+    ensures a.len() == b.len() && scalar_execution_steps_observe_same(result_a, result_b),
+{
     reveal(execution_path);
     if a.len() < b.len() {
         let i = a.len() - 1;
@@ -433,6 +524,29 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 Err(_) => true,
             },
     {
+        self.run_slice_with_steps(fuel).0
+    }
+
+    /// 指定した枠で評価し、結果と実際に行った遷移数を返す。
+    ///
+    /// 完了またはエラーを返す最後の遷移も数える。一時停止時の消費数は枠と等しい。
+    ///
+    /// # Errors
+    ///
+    /// 整数診断や未対応式の診断も、エラーに到達した時点の消費数とともに返す。
+    pub fn run_slice_with_steps(self, fuel: NonZeroUsize)
+        -> (outcome: (Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>, usize))
+        ensures
+            scalar_execution_slice_matches(self, fuel@ as nat, outcome.0),
+            scalar_execution_slice_steps_match(self, fuel@ as nat, outcome.0, outcome.1 as nat),
+            0 < outcome.1 <= fuel@,
+            match outcome.0 {
+                Ok(ScalarExecutionSlice::Suspended(state)) =>
+                    state.result_type_model() == self.result_type_model() && outcome.1 == fuel@,
+                Ok(ScalarExecutionSlice::Complete(value)) => scalar_fits(value, self.result_type_model()),
+                Err(_) => true,
+            },
+    {
         let budget = fuel.get();
         let mut remaining = budget;
         let ghost start = self;
@@ -461,20 +575,27 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                     let result = Ok(ScalarExecutionSlice::Complete(value));
                     assert(execution_path_result(start, fuel@ as nat, path, result));
                     assert(scalar_execution_slice_matches(start, fuel@ as nat, result));
-                    return result;
+                    let steps = budget - remaining + 1;
+                    assert(steps == consumed_steps(path, false));
+                    assert(scalar_execution_slice_steps_match(start, fuel@ as nat, result, steps as nat));
+                    return (result, steps);
                 },
                 Err(error) => {
                     let result = Err(error);
                     assert(execution_path_result(start, fuel@ as nat, path, result));
                     assert(scalar_execution_slice_matches(start, fuel@ as nat, result));
-                    return result;
+                    let steps = budget - remaining + 1;
+                    assert(steps == consumed_steps(path, false));
+                    assert(scalar_execution_slice_steps_match(start, fuel@ as nat, result, steps as nat));
+                    return (result, steps);
                 },
             }
             remaining -= 1;
         }
         let result = Ok(ScalarExecutionSlice::Suspended(state));
         assert(execution_path_result(start, fuel@ as nat, path, result));
-        result
+        assert(scalar_execution_slice_steps_match(start, fuel@ as nat, result, budget as nat));
+        (result, budget)
     }
 }
 
