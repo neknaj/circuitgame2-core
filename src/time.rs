@@ -10,7 +10,7 @@ pub use clock::clock_change_matches;
 pub(crate) use event_queue::PendingEvents;
 pub use event_queue::{ScheduledEvent, ScheduledEvents};
 #[cfg(verus_only)]
-pub use event_queue::{events_at_tick, next_event_matches};
+pub use event_queue::{events_at_tick, events_by_reset_generation, next_event_matches};
 pub use events::{EventTimeStatus, classify_event_time, ready_event_indices};
 #[cfg(verus_only)]
 pub use events::{event_indices_match, event_time_status};
