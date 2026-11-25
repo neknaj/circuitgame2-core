@@ -1,5 +1,11 @@
 //! 論理 tick と有理数で表した時刻の対応を扱う。
 
+mod clock;
+
+pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
+#[cfg(verus_only)]
+pub use clock::clock_change_matches;
+
 use vstd::prelude::*;
 
 #[cfg(verus_only)]
