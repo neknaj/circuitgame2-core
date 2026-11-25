@@ -1,5 +1,6 @@
 //! 外付けデバイスとホストの間で要求と応答の対応を管理する。
 
+mod events;
 mod host_requests;
 mod ledger;
 mod request_ids;
@@ -7,6 +8,9 @@ mod response;
 mod scheduling;
 mod session;
 
+pub use events::{DeviceEvent, ScheduleInputError};
+#[cfg(verus_only)]
+pub use events::{device_response_keys, device_response_keys_step};
 pub use host_requests::{CommittedHostRequest, CommittedHostRequests, DeviceHostRequest, HostRequest, HostRequestCommitError};
 #[cfg(verus_only)]
 pub use host_requests::{host_request_keys, host_request_order, request_ranks_match};
