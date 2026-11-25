@@ -174,6 +174,9 @@ pub use use_aliases::{FuncLiteralError, FuncLiteralWidths};
 pub use use_aliases::{FuncAtomTypeError, FuncAtomTypes, SignalType};
 pub use use_aliases::{CheckedBitSelection, SelectionArgument, SelectionArgumentError};
 pub use use_aliases::{FuncSignalTypeError, FuncSignalTypes};
+pub use use_aliases::{SignalOccurrence, SignalOccurrenceKind, SignalRole};
+#[cfg(verus_only)]
+pub use use_aliases::{signal_occurrence_valid, signal_occurrences_in_document};
 pub use use_aliases::LoweredSingleBitFunc;
 pub use use_aliases::{
     BitFuncError, BitFuncLowerError, CheckedBitFunc, ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic,

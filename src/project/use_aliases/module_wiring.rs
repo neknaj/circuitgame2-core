@@ -237,6 +237,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 &&& (range.start <= position < range.end ==> {
                     let bound = group@[position - range.start];
                     &&& bound.definition.body == at && bound.form == circuit.signals@[position]
+                    &&& *bound.site.source == project.sources_model()[at.file as int]
+                    &&& crate::project::location_in_source(bound.site)
                     &&& match bound.driver {
                         OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
                         OutputDriver::Definition(i) => i < wiring.drivers.definitions@.len(),
@@ -268,6 +270,51 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && local_lookup_matches(prepared.inputs@, prepared.drivers.definitions@, prepared.drivers.definitions@.len() as int,
                     name.word.spec_bytes(), Some(bound.driver));
         }
+    }
+
+    /// 右辺の信号名が参照元の文書にあり、駆動元の添字が範囲内であることを示す。
+    pub(super) proof fn module_reference_at(
+        &self, owner: ModuleBodyPosition, limit: u64, wiring: ModuleWiring, member: int, index: int,
+    )
+        requires
+            self.module_wiring_result(owner, limit, Ok(Some(wiring))),
+            0 <= member < wiring.drivers.body.members@.len(),
+            member < wiring.signals@.len(),
+            0 <= index < wiring.signals@[member]@.len(),
+        ensures ({
+            let bound = wiring.signals@[member]@[index];
+            let file = wiring.drivers.body.members@[member].file;
+            &&& *bound.site.source == self.targets.project_model().sources_model()[file as int]
+            &&& crate::project::location_in_source(bound.site)
+            &&& match bound.driver {
+                OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
+                OutputDriver::Definition(i) => i < wiring.drivers.definitions@.len(),
+            }
+        }),
+    {
+        let project = self.targets.project_model();
+        let at = wiring.drivers.body.members@[member];
+        let range = project.circuits_model()[at.file as int].entry_ranges@[at.entry as int].signals;
+        self.module_signal_index_item(owner, limit, wiring, member, range.start as int + index);
+        assert(range.start <= range.start + index < range.end);
+    }
+
+    /// 定義ごとに出典があり、各本体に参照列があることを示す。
+    pub(super) proof fn module_observation_wiring(
+        &self, owner: ModuleBodyPosition, limit: u64, wiring: ModuleWiring,
+    )
+        requires self.module_wiring_result(owner, limit, Ok(Some(wiring))),
+        ensures
+            wiring.drivers.origins@.len() == wiring.drivers.definitions@.len(),
+            wiring.signals@.len() == wiring.drivers.body.members@.len(),
+    {
+        let project = self.targets.project_model();
+        let prepared = choose|prepared: IndexedModuleDrivers|
+            #[trigger] self.indexed_module_drivers_result(owner, limit, Ok(Some(prepared)))
+            && wiring.drivers == prepared.drivers && wiring.signals@.len() == prepared.drivers.body.members@.len()
+            && module_signals_prefix(&project, &prepared, wiring.signals@);
+        self.indexed_module_drivers_evidence(owner, limit, &prepared);
+        self.module_driver_origin_count(owner, limit, wiring.drivers);
     }
 
     /// 型検査が使う駆動元を、配線検査の成功結果から取り出す。
