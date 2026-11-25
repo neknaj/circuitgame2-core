@@ -1,20 +1,17 @@
 # circuitgame2-core
 
-NCG2 の CLI と Web で共用する Rust ライブラリ。回路ソースの厳格解析とエラー回復、プロジェクト内の名前解決、回路の型・幅・結線の検査を提供する。構造体はフィールドの配置と型参照の循環も検査できる。
+Neknaj Circuit Game 2 の CLI と GUI で使う Rust ライブラリ。NCG2 の回路ソースを解析し、名前解決と型・ビット幅・結線の検査を行う。組み合わせ回路を評価でき、ラッチや RAM を含む順序回路は tick ごとに実行できる。
 
-信号の転送、定数 `0`・`1`、基底 NOR、`bit`・`slice`・`field`・`as`・`raw`・`concat` を使う `func` をネットリストに変換して評価できる。
+編集用の API は構文エラーから回復し、診断を返す。NCG2M ではファイルの構文解析と整数式の評価に加え、条件式やリスト演算などを含む補助関数の本体を型検査できる。
 
-`def` の右辺には、単独の二進・十六進リテラルや、信号名またはそのフィールドに対する `bit`・`slice` の入れ子を書ける。`concat` は、型が確定した裸のビット列信号と定数 `0`・`1` を引数に取る。構造体ポートの直結と `as`・`raw` の変換では、フィールドに割り当てていないビットも保持する。
+CLI で回路を試す手順をプロジェクトの README にまとめている。 [CLI 入門](https://github.com/neknaj/circuitgame2#cli-で回路を試す)
 
-関数呼び出しを含むプロジェクトは、[`UseAliases::expand_functions`](src/project/use_aliases/bit_func/compile.rs) で依存順に展開できる。`def` の右辺で通常関数や基底 NOR を呼び出すときは、型が確定した信号名、型に合うリテラル、出力が一つの呼び出しを引数に使える。
+## Rust から使う
 
-## 使い方
-
-以下の NOR の例は Rust 1.99.1 と次の依存コミットで実行できる。利用側の `Cargo.toml` に依存関係を追加する。
+以下の例は Rust 1.99.1 で実行できる。利用側の `Cargo.toml` の `[dependencies]` に次の行を追加する。
 
 ```toml
-[dependencies]
-circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "4d586ea5a0a46db457f883881585e448fd69d85e" }
+circuitgame2-core = { version = "0.1.0", git = "https://github.com/neknaj/circuitgame2-core", rev = "50227bfd6da7573459c179812d55d8d61ec134d9" }
 ```
 
 次のコードを `src/main.rs` に置き、`cargo run` を実行する。2入力の NOR を定義し、入力が両方 `false` のときだけ出力が `true` になることを確かめる。
@@ -51,7 +48,7 @@ fn main() {
 - [NCG2 の設計と仕様](https://neknaj.github.io/circuitgame2/docs/)
 - [不具合報告・質問](https://github.com/neknaj/circuitgame2-core/issues)
 
-## 開発
+## テストと形式検証
 
 Rust のバージョンは [rust-toolchain.toml](rust-toolchain.toml) に固定している。以下のコマンドはリポジトリのルートで実行する。
 
@@ -75,7 +72,7 @@ cargo build --workspace --locked --target wasm32-unknown-unknown
 cargo verus verify --workspace --locked
 ```
 
-[検証設計](https://github.com/neknaj/circuitgame2/blob/main/doc/verification.md)に、各処理で証明する性質を記載している。
+各処理で証明する性質は検証設計に、コメントと証明の書き方はコーディング規約に記載している。 [検証設計](https://github.com/neknaj/circuitgame2/blob/main/doc/verification.md) · [コーディング規約](https://github.com/neknaj/circuitgame2/tree/main/doc/coding_standards)
 
 ## ライセンス
 
