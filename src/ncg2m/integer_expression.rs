@@ -8,7 +8,7 @@ use super::forms::{is_spelling, source_word, subtree_end};
 use super::forms::{spelling, subtree_limit};
 use super::integers::{
     IntegerLiteralError, IntegerOperation, IntegerType, IntegerValue,
-    evaluate_int, evaluate_nat, int_to_nat, nat_to_int, read_integer_literal,
+    evaluate_int, evaluate_nat, int_to_nat, nat_to_int, read_integer_literal, read_integer_operation,
 };
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid, sexpr_form_model, strict_syntax_rejection, well_formed_sexpr};
@@ -124,9 +124,7 @@ spec fn literal_model(form: Form, index: usize) -> Option<Literal> {
 }
 
 spec fn builtin_model(word: Seq<u8>) -> Option<Builtin> {
-    if word == "add".spec_bytes() { Some(Builtin::Arithmetic(IntegerOperation::Add)) }
-    else if word == "sub".spec_bytes() { Some(Builtin::Arithmetic(IntegerOperation::Sub)) }
-    else if word == "mul".spec_bytes() { Some(Builtin::Arithmetic(IntegerOperation::Mul)) }
+    if let Some(op) = super::integers::integer_operation_spelling(word) { Some(Builtin::Arithmetic(op)) }
     else if word == "int-to-nat".spec_bytes() { Some(Builtin::Convert(IntegerType::Nat)) }
     else if word == "nat-to-int".spec_bytes() { Some(Builtin::Convert(IntegerType::Int)) }
     else if word == "as-type".spec_bytes() { Some(Builtin::Annotate) }
@@ -152,9 +150,7 @@ fn literal(form: &Form, index: usize) -> (result: Option<Literal>)
 fn builtin(word: &str) -> (head: Option<Builtin>)
     ensures head == builtin_model(word.spec_bytes()),
 {
-    if is_spelling(word, "add") { Some(Builtin::Arithmetic(IntegerOperation::Add)) }
-    else if is_spelling(word, "sub") { Some(Builtin::Arithmetic(IntegerOperation::Sub)) }
-    else if is_spelling(word, "mul") { Some(Builtin::Arithmetic(IntegerOperation::Mul)) }
+    if let Some(op) = read_integer_operation(word) { Some(Builtin::Arithmetic(op)) }
     else if is_spelling(word, "int-to-nat") { Some(Builtin::Convert(IntegerType::Nat)) }
     else if is_spelling(word, "nat-to-int") { Some(Builtin::Convert(IntegerType::Int)) }
     else if is_spelling(word, "as-type") { Some(Builtin::Annotate) }

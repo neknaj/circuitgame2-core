@@ -5,11 +5,12 @@ use circuitgame2_core::ncg2m::call_evaluation::scalar::{
     ScalarValue, bind_scalar_call, prepare_scalar_arguments, prepare_scalar_entry, prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
-use circuitgame2_core::ncg2m::integers::IntegerValue;
+use circuitgame2_core::ncg2m::integers::{IntegerOperation, IntegerValue};
 use circuitgame2_core::project::{
-    DefnCallGraphError, DefnPosition, SourceSnapshot, check_mixed_use_aliases,
+    DefnCallError, DefnCallGraphError, DefnPosition, PreparedDefnCall, SourceSnapshot, check_mixed_use_aliases,
     index_mixed_use_targets, parse_project_sources,
 };
+use circuitgame2_core::syntax::{Form, parse};
 
 #[test]
 fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
@@ -253,4 +254,36 @@ fn scalar_fragment_support_checks_bodies_reachable_through_either_branch() {
         Err(ScalarEntryError::UnknownDefinition)));
     assert_eq!(plan.scalar_body_support_at_rank(usize::MAX), None);
     assert_eq!(plan.scalar_fragment_support_at_rank(usize::MAX), None);
+}
+
+#[test]
+fn arithmetic_fallback_preserves_shadowing_and_operand_positions() {
+    let source = "(defn add (as-type (Fn (Nat) Nat) (fn (x) x)))
+        (use ::add mul)
+        (defn caller (as-type (Fn () Nat)
+            (fn () (if true (sub (add 1) (mul 0)) (sub 0)))))";
+    let snapshots = [SourceSnapshot { path: "arithmetic.ncg2m", revision: 14, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let forms = parse(source).unwrap();
+    let form_at = |prefix| {
+        let first_byte = source.find(prefix).unwrap();
+        forms.iter().position(|form| matches!(form, Form::List { span, .. } if span.start == first_byte)).unwrap()
+    };
+    let operation = aliases.prepare_defn_call(0, 2, form_at("(sub (add")).unwrap().unwrap();
+    let PreparedDefnCall::Arithmetic { site, operation, arguments } = operation else { panic!() };
+    assert_eq!(operation, IntegerOperation::Sub);
+    assert_eq!(arguments, (form_at("(add 1)"), form_at("(mul 0)")));
+    assert_eq!(site.source.revision, 14);
+    assert_eq!(&source[site.head], "sub");
+    assert_eq!(&source[site.span], "(sub (add 1) (mul 0))");
+    for head in ["(add 1)", "(mul 0)"] {
+        let resolved = aliases.prepare_defn_call(0, 2, form_at(head)).unwrap().unwrap();
+        assert!(matches!(resolved, PreparedDefnCall::Declared { declaration, .. } if declaration.item == 0));
+    }
+    let malformed = aliases.prepare_defn_call(0, 2, form_at("(sub 0)")).unwrap();
+    assert!(matches!(malformed, Err(DefnCallError::ArithmeticArity {
+        operation: IntegerOperation::Sub, found: 1, ..
+    })));
 }

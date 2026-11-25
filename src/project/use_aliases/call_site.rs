@@ -6,6 +6,9 @@ use super::{defn_name_resolution, resolved_defn_name_origin};
 use crate::ncg2m::data_types::DefnSignature;
 use crate::ncg2m::expression_types::DefnBodyCallError;
 use crate::ncg2m::expression_types::named_call::CallForm;
+use crate::ncg2m::integers::{IntegerOperation, read_integer_operation};
+#[cfg(verus_only)]
+use crate::ncg2m::integers::integer_operation_spelling;
 use crate::project::{ProjectDeclaration, ProjectSource};
 #[cfg(verus_only)]
 use crate::project::mixed_use_targets_match;
@@ -13,6 +16,8 @@ use crate::project::mixed_use_targets_match;
 use crate::syntax::{Form, form_span};
 use core::ops::Range;
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -63,6 +68,15 @@ pub enum PreparedDefnCall<'p, 'a> {
         /// 引数の型と戻り値の型を保持する署名。
         signature: DefnSignature<'a>,
     },
+    /// 宣言や別名に束縛されていない組み込みの加減乗。直下に引数が二つある。
+    Arithmetic {
+        /// 元の呼び出し位置。
+        site: DefnCallSite<'p, 'a>,
+        /// 呼び出す整数演算。
+        operation: IntegerOperation,
+        /// 左の引数と右の引数の、元の構文木における添字。
+        arguments: (usize, usize),
+    },
     /// 段階に応じた組み込みの探索に渡す呼び出し。
     StageName(DefnCallSite<'p, 'a>),
 }
@@ -88,6 +102,15 @@ pub enum DefnCallError<'p, 'a> {
         /// 呼び出しの直下にある引数の個数。
         found: usize,
     },
+    /// 組み込みの加減乗の直下にある引数が二つではなかった。
+    ArithmeticArity {
+        /// 引数を含む呼び出し全体の範囲。
+        site: DefnCallSite<'p, 'a>,
+        /// 呼び出す整数演算。
+        operation: IntegerOperation,
+        /// 呼び出しの直下にある引数の個数。
+        found: usize,
+    },
 }
 
 pub(crate) open spec fn site_matches(source: ProjectSource, call: CallForm, site: DefnCallSite) -> bool {
@@ -109,7 +132,13 @@ pub(crate) open spec fn call_arity_matches(
         }
         Ok(PreparedDefnCall::StageName(site)) =>
             site_matches(source, call, site)
-                && defn_name_resolution(aliases, file, item, call.word, Ok(ResolvedDefnName::StageName)),
+                && defn_name_resolution(aliases, file, item, call.word, Ok(ResolvedDefnName::StageName))
+                && integer_operation_spelling(call.word.spec_bytes()).is_none(),
+        Ok(PreparedDefnCall::Arithmetic { site, operation, arguments }) =>
+            site_matches(source, call, site)
+                && defn_name_resolution(aliases, file, item, call.word, Ok(ResolvedDefnName::StageName))
+                && integer_operation_spelling(call.word.spec_bytes()) == Some(operation)
+                && call.arguments == 2 && call.binary_arguments == Some(arguments),
         Err(DefnCallError::Name { site, error }) =>
             site_matches(source, call, site)
                 && defn_name_resolution(aliases, file, item, call.word, Err(error)),
@@ -119,7 +148,12 @@ pub(crate) open spec fn call_arity_matches(
             &&& project.indexed_defn(declaration.file, declaration.item) matches Some(header)
                 && expected == header.parameters@.len()
             &&& found == call.arguments && found != expected
-        }
+        },
+        Err(DefnCallError::ArithmeticArity { site, operation, found }) =>
+            site_matches(source, call, site)
+                && defn_name_resolution(aliases, file, item, call.word, Ok(ResolvedDefnName::StageName))
+                && integer_operation_spelling(call.word.spec_bytes()) == Some(operation)
+                && found == call.arguments && found != 2,
     }
 }
 
@@ -143,7 +177,8 @@ pub open spec fn prepared_call_site<'p, 'a>(result: Result<PreparedDefnCall<'p, 
 {
     match result {
         Ok(PreparedDefnCall::Declared { site, .. }) | Ok(PreparedDefnCall::StageName(site))
-        | Err(DefnCallError::Name { site, .. }) | Err(DefnCallError::Arity { site, .. }) => site,
+        | Ok(PreparedDefnCall::Arithmetic { site, .. }) | Err(DefnCallError::Name { site, .. })
+        | Err(DefnCallError::Arity { site, .. }) | Err(DefnCallError::ArithmeticArity { site, .. }) => site,
     }
 }
 
@@ -170,9 +205,18 @@ pub proof fn prepared_defn_call_origin(
         &&& match result {
             Ok(PreparedDefnCall::Declared { declaration, signature, .. }) =>
                 project.defn_signature_matches_index(declaration.file, declaration.item, Some(signature)),
+            Ok(PreparedDefnCall::Arithmetic { arguments, operation, .. }) => {
+                &&& project.functional_forms_model(file) matches Some(forms)
+                    && crate::project::defn_call_arguments(forms, at, seq![arguments.0, arguments.1])
+                &&& exists|word: &str| #[trigger] defn_name_resolution(
+                    aliases, file, item, word, Ok(ResolvedDefnName::StageName))
+                    && word.spec_bytes() == site.source.text_model().spec_bytes()[site.head.start as int..site.head.end as int]
+                    && integer_operation_spelling(word.spec_bytes()) == Some(operation)
+            },
             Err(DefnCallError::Arity { declaration, expected, found, .. }) => found != expected
                 && (project.indexed_defn(declaration.file, declaration.item) matches Some(header)
                     && expected == header.parameters@.len()),
+            Err(DefnCallError::ArithmeticArity { found, .. }) => found != 2,
             _ => true,
         }
     },
@@ -180,7 +224,12 @@ pub proof fn prepared_defn_call_origin(
     let project = aliases.targets_model().project_model();
     let form = choose|form: Option<CallForm>| #[trigger] project.defn_call_form_matches(file, item, at, form)
         && form.is_some() && call_arity_matches(aliases, file, item, form->Some_0, result);
-    project.defn_call_form_origin(file, item, at, form->Some_0);
+    let call = form->Some_0;
+    project.defn_call_form_origin(file, item, at, call);
+    if let Ok(PreparedDefnCall::Arithmetic { operation, .. }) = result {
+        assert(defn_name_resolution(aliases, file, item, call.word, Ok(ResolvedDefnName::StageName)));
+        assert(integer_operation_spelling(call.word.spec_bytes()) == Some(operation));
+    }
 }
 
 /// 呼び出しを含む本体の検査結果が、元の補助関数の索引と保持した構文木に対応することを表す。
@@ -304,11 +353,12 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// `item` は NCG2M のファイル内索引で補助関数を指す。 `at` は元ファイルの
     /// S 式構文木で呼び出し形を指す。呼び出し形が見つからなければ `None` を返す。
     /// 補助関数を参照する場合、引数で使う期待型と戻り値の型は返した署名に含まれる。
+    /// 無修飾名の宣言や別名がなければ、組み込みの加減乗を調べる。
     /// この入口は本体の式の位置をたどる。構文テンプレート内の式はマクロ段階で扱う。
     ///
     /// # Errors
     ///
-    /// 呼び出し先の名前の違反を先に返す。名前が補助関数を指す場合は、次に引数の個数を検査する。
+    /// 呼び出し先の名前の違反を先に返し、参照先が確定したら引数の個数を検査する。
     /// 各診断は元の呼び出し範囲を保持し、参照先がある場合はその位置も返す。
     ///
     /// # Examples
@@ -347,7 +397,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         let project = self.targets().project();
         let Some(form) = project.defn_call_form(file, item, at) else { return None; };
         let _indexes = project.indexes();
-        proof { project.defn_call_file_exists(file, item, at, form); }
+        proof { project.defn_call_form_origin(file, item, at, form); }
         Some(self.prepare_decoded_call(file, item, &form))
     }
 
@@ -355,6 +405,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         -> (result: Result<PreparedDefnCall<'p, 'a>, DefnCallError<'p, 'a>>)
         requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
             file < self.targets_model().project_model().sources_model().len(),
+            form.binary_arguments.is_some() == (form.arguments == 2),
         ensures call_arity_matches(self, file, item, *form, result),
     {
         let project = self.targets().project();
@@ -373,7 +424,13 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     Ok(PreparedDefnCall::Declared { site, declaration, signature })
                 }
             }
-            Ok(ResolvedDefnName::StageName) => Ok(PreparedDefnCall::StageName(site)),
+            Ok(ResolvedDefnName::StageName) => match read_integer_operation(form.word) {
+                Some(operation) => match form.binary_arguments {
+                    Some(arguments) => Ok(PreparedDefnCall::Arithmetic { site, operation, arguments }),
+                    None => Err(DefnCallError::ArithmeticArity { site, operation, found: form.arguments }),
+                },
+                None => Ok(PreparedDefnCall::StageName(site)),
+            },
             Err(error) => Err(DefnCallError::Name { site, error }),
         };
         found

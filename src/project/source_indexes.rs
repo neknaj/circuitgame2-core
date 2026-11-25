@@ -187,13 +187,6 @@ impl<'a> ParsedProjectSources<'a> {
         }
     }
 
-    pub(super) proof fn defn_call_file_exists(
-        &self, file: usize, item: usize, at: usize, call: CallForm,
-    )
-        requires self.has_source_indexes(), self.defn_call_form_matches(file, item, at, Some(call)),
-        ensures file < self.sources_model().len(),
-    {}
-
     /// 指定の NCG2M ファイルについて、解析時に保持した S 式構文木を表す。
     pub closed spec fn functional_forms_model(&self, file: usize) -> Option<Seq<Form>> {
         if file < self.meta_asts@.len() {
@@ -211,10 +204,15 @@ impl<'a> ParsedProjectSources<'a> {
         ensures
             file < self.sources_model().len(),
             self.indexed_defn(file, item).is_some(),
+            call.binary_arguments.is_some() == (call.arguments == 2),
+            call.word.spec_bytes() == self.sources_model()[file as int].text_model().spec_bytes()[
+                call.head_span.start as int..call.head_span.end as int],
             self.functional_forms_model(file) matches Some(forms) && {
                 &&& at + 1 < forms.len()
                 &&& forms[at as int] is List && forms[at + 1] is Atom
                 &&& call.span == form_span(forms[at as int]) && call.head_span == form_span(forms[at + 1])
+                &&& call.binary_arguments matches Some((left, right)) ==>
+                    crate::project::defn_call_arguments(forms, at, seq![left, right])
             },
     {
         let forms = self.meta_asts@[file as int]->Some_0@;

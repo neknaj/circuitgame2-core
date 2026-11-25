@@ -676,6 +676,10 @@ pub(crate) proof fn meta_call_form_origin(
         at + 1 < forms.len(),
         forms[at as int] is List, forms[at + 1] is Atom,
         call.span == form_span(forms[at as int]), call.head_span == form_span(forms[at + 1]),
+        call.word.spec_bytes() == source.spec_bytes()[call.head_span.start as int..call.head_span.end as int],
+        call.binary_arguments.is_some() == (call.arguments == 2),
+        call.binary_arguments matches Some((left, right)) ==>
+            super::expression_types::named_call::defn_call_arguments(forms, at, seq![left, right]),
 {
     let header = entries[item as int].kind->Defn_0;
     let (root, body) = choose|root: usize, body: usize| #[trigger] indexed_body_site(source, forms, root, body, header)
