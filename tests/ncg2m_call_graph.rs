@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{
-    ScalarArgumentsStep, ScalarBindingError, ScalarExecution, ScalarExecutionError, ScalarExecutionSlice, ScalarExpression, ScalarExpressionStep, ScalarInvocationError,
-    ScalarInvocationSlice, ScalarValue, bind_scalar_call,
-    prepare_scalar_arguments, prepare_scalar_invocation,
+    ScalarArgumentsStep, ScalarBindingError, ScalarEntryError, ScalarExecution, ScalarExecutionError,
+    ScalarExecutionSlice, ScalarExpression, ScalarExpressionStep, ScalarInvocationError, ScalarInvocationSlice,
+    ScalarValue, bind_scalar_call, prepare_scalar_arguments, prepare_scalar_entry, prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
 use circuitgame2_core::ncg2m::integers::IntegerValue;
@@ -241,9 +241,16 @@ fn scalar_fragment_support_checks_bodies_reachable_through_either_branch() {
         assert_eq!(plan.scalar_fragment_support_at_rank(rank), Some(fragment_support));
     }
     let accepted = plan.rank_of(DefnPosition { file: 0, item: 4 }).unwrap();
-    let state = ScalarExecution::start(&plan, accepted, Vec::new()).unwrap();
+    let entry = prepare_scalar_entry(&plan, DefnPosition { file: 0, item: 4 }).unwrap();
+    assert_eq!(entry.rank(), accepted);
+    assert!(matches!(entry.start(vec![ScalarValue::Bool(false)]), Err(ScalarBindingError::Arity { .. })));
+    let state = entry.start(Vec::new()).unwrap();
     let result = state.run_slice(NonZeroUsize::new(128).unwrap()).unwrap();
     assert!(matches!(result, ScalarExecutionSlice::Complete(ScalarValue::Bool(true))));
+    assert!(matches!(prepare_scalar_entry(&plan, DefnPosition { file: 0, item: 0 }),
+        Err(ScalarEntryError::UnsupportedFragment)));
+    assert!(matches!(prepare_scalar_entry(&plan, DefnPosition { file: 1, item: 0 }),
+        Err(ScalarEntryError::UnknownDefinition)));
     assert_eq!(plan.scalar_body_support_at_rank(usize::MAX), None);
     assert_eq!(plan.scalar_fragment_support_at_rank(usize::MAX), None);
 }

@@ -15,6 +15,7 @@ use super::DefnEvaluationBody;
 mod arguments;
 mod atom;
 mod condition;
+mod entry;
 mod execution;
 mod expression;
 mod invocation;
@@ -24,6 +25,7 @@ pub use arguments::{PendingScalarArgument, ScalarArguments, ScalarArgumentsStep,
 #[cfg(verus_only)]
 pub use arguments::prepared_arguments_match;
 pub use condition::{ScalarCondition, ScalarExpressionSite};
+pub use entry::{ScalarEntry, ScalarEntryError, prepare_scalar_entry};
 pub use execution::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice};
 #[cfg(verus_only)]
 pub use execution::{

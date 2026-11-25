@@ -179,9 +179,12 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
     /// 宣言の位置から評価順の順位を得る。計画に含まれなければ `None` を返す。
     pub fn rank_of(&self, position: DefnPosition) -> (rank: Option<usize>)
         ensures
+            self.order_nodes_valid(),
             rank.is_some() == self.order_model().contains(position),
             rank matches Some(i) ==> i < self.order_model().len()
-                && i == self.order_model().index_of(position),
+                && i == self.order_model().index_of(position)
+                && self.order_model()[i as int] == position
+                && self.project_model().indexed_defn(position.file, position.item).is_some(),
     {
         proof { use_type_invariant(self); }
         let Some(node) = vertex_index(self.vertices.as_slice(), position) else {
@@ -196,6 +199,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         };
         let rank = self.ranks[node];
         proof {
+            reveal(ordered_edges);
             let ranked = self.order_model();
             assert(self.order@[rank as int] == node);
             assert(ranked[rank as int] == position);
