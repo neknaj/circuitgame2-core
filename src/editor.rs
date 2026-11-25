@@ -57,45 +57,110 @@ impl EditedSource {
     }
 }
 
+/// 置換の失敗条件とその検査順。
+pub open spec fn source_edit_error(
+    source: &str, range: Range<usize>, replacement: &str,
+) -> Option<SourceEditError> {
+    let bytes = source.spec_bytes();
+    let start = range.start as int;
+    let end = range.end as int;
+    if start > end {
+        Some(SourceEditError::ReversedRange)
+    } else if end > bytes.len() {
+        Some(SourceEditError::OutsideSource)
+    } else if !is_char_boundary(bytes, start) {
+        Some(SourceEditError::InsideCharacter { offset: range.start })
+    } else if !is_char_boundary(bytes, end) {
+        Some(SourceEditError::InsideCharacter { offset: range.end })
+    } else if start + bytes.len() - end + replacement.spec_bytes().len() > isize::MAX {
+        Some(SourceEditError::SourceTooLong)
+    } else {
+        None
+    }
+}
+
 /// 元の接頭部、置換テキスト、元の接尾部を順に並べた結果と、置換できない場合の診断を定める。
 pub open spec fn source_edit_matches(
     source: &str, range: Range<usize>, replacement: &str, result: Result<EditedSource, SourceEditError>,
 ) -> bool {
-    let bytes = source.spec_bytes();
-    let start = range.start as int;
-    let end = range.end as int;
-    let inserted = replacement.spec_bytes();
-    if start > end {
-        result == Err(SourceEditError::ReversedRange)
-    } else if end > bytes.len() {
-        result == Err(SourceEditError::OutsideSource)
-    } else if !is_char_boundary(bytes, start) {
-        result == Err(SourceEditError::InsideCharacter { offset: range.start })
-    } else if !is_char_boundary(bytes, end) {
-        result == Err(SourceEditError::InsideCharacter { offset: range.end })
-    } else if start + bytes.len() - end + inserted.len() > isize::MAX {
-        result == Err(SourceEditError::SourceTooLong)
-    } else {
-        result matches Ok(text) && text.bytes_model() == bytes[..start] + inserted + bytes[end..]
+    match source_edit_error(source, range, replacement) {
+        Some(error) => result == Err(error),
+        None => result matches Ok(text)
+            && text.bytes_model() == source.spec_bytes()[..range.start]
+                + replacement.spec_bytes() + source.spec_bytes()[range.end..],
     }
 }
 
+/// 置換後の本文を構成する、検査済みの三つの区間。
+pub struct SourceEditParts<'a> {
+    /// 置換開始位置より前の元の本文。
+    pub prefix: &'a str,
+    /// 挿入するテキスト。
+    pub replacement: &'a str,
+    /// 置換終了位置から始まる元の本文。
+    pub suffix: &'a str,
+    /// 三つの区間を連結したときの UTF-8 バイト数。
+    pub byte_len: usize,
+}
+
+/// 検査済みの区間が元の指定と同じ本文を構成することを表す。
+pub open spec fn source_edit_parts_match(
+    source: &str, range: Range<usize>, replacement: &str,
+    result: Result<SourceEditParts, SourceEditError>,
+) -> bool {
+    match source_edit_error(source, range, replacement) {
+        Some(error) => result == Err(error),
+        None => result matches Ok(parts)
+            && parts.prefix.spec_bytes() == source.spec_bytes()[..range.start]
+            && parts.replacement == replacement
+            && parts.suffix.spec_bytes() == source.spec_bytes()[range.end..]
+            && parts.byte_len == parts.prefix.spec_bytes().len() + parts.replacement.spec_bytes().len()
+                + parts.suffix.spec_bytes().len()
+            && parts.byte_len <= isize::MAX,
+    }
+}
+
+/// 置換範囲を検査し、本文を構築するための借用とバイト数を返す。
+///
+/// # Errors
+///
+/// 範囲の順序、ソースの末尾、始点と終点の文字境界、置換後のバイト数の順に検査する。
+pub fn prepare_source_edit<'a>(
+    source: &'a str, range: Range<usize>, replacement: &'a str,
+) -> (result: Result<SourceEditParts<'a>, SourceEditError>)
+    ensures source_edit_parts_match(source, range, replacement, result),
+{
+    if range.start > range.end {
+        return Err(SourceEditError::ReversedRange);
+    }
+    let length = source.as_bytes().len();
+    if range.end > length {
+        return Err(SourceEditError::OutsideSource);
+    }
+    if !source.is_char_boundary(range.start) {
+        return Err(SourceEditError::InsideCharacter { offset: range.start });
+    }
+    if !source.is_char_boundary(range.end) {
+        return Err(SourceEditError::InsideCharacter { offset: range.end });
+    }
+    let kept = length - (range.end - range.start);
+    let limit = isize::MAX as usize;
+    let inserted = replacement.as_bytes().len();
+    if kept > limit || inserted > limit - kept {
+        return Err(SourceEditError::SourceTooLong);
+    }
+
+    let (prefix, _) = source.split_at(range.start);
+    let (_, suffix) = source.split_at(range.end);
+    Ok(SourceEditParts { prefix, replacement, suffix, byte_len: kept + inserted })
+}
+
 fn append_bytes(target: &mut Vec<u8>, bytes: &[u8])
+    requires old(target)@.len() + bytes@.len() <= isize::MAX,
     ensures final(target)@ == old(target)@ + bytes@,
 {
-    let ghost prefix = target@;
-    let mut index = 0;
-    while index < bytes.len()
-        invariant
-            index <= bytes@.len(),
-            target@ == prefix + bytes@.take(index as int),
-        decreases bytes@.len() - index,
-    {
-        target.push(bytes[index]);
-        assert(bytes@.take(index as int).push(bytes@[index as int]) =~= bytes@.take(index + 1));
-        index += 1;
-    }
-    assert(bytes@.take(bytes@.len() as int) =~= bytes@);
+    target.extend_from_slice(bytes);
+    assert(target@ =~= old(target)@ + bytes@);
 }
 
 /// 元ソースの UTF-8 半開バイト範囲を置換し、新しいテキストを返す。
@@ -121,40 +186,20 @@ pub fn apply_source_edit(source: &str, range: Range<usize>, replacement: &str)
     -> (result: Result<EditedSource, SourceEditError>)
     ensures source_edit_matches(source, range, replacement, result),
 {
-    if range.start > range.end {
-        return Err(SourceEditError::ReversedRange);
-    }
-    let length = source.as_bytes().len();
-    if range.end > length {
-        return Err(SourceEditError::OutsideSource);
-    }
-    if !source.is_char_boundary(range.start) {
-        return Err(SourceEditError::InsideCharacter { offset: range.start });
-    }
-    if !source.is_char_boundary(range.end) {
-        return Err(SourceEditError::InsideCharacter { offset: range.end });
-    }
-    let kept = length - (range.end - range.start);
-    let limit = isize::MAX as usize;
-    let inserted = replacement.as_bytes();
-    if kept > limit || inserted.len() > limit - kept {
-        return Err(SourceEditError::SourceTooLong);
-    }
-
-    let (prefix, _) = source.split_at(range.start);
-    let (_, suffix) = source.split_at(range.end);
-    // 追記時の容量拡張を避けるため、置換後の長さで先に確保する。
-    let mut bytes = Vec::with_capacity(kept + inserted.len());
-    append_bytes(&mut bytes, prefix.as_bytes());
-    append_bytes(&mut bytes, inserted);
-    append_bytes(&mut bytes, suffix.as_bytes());
+    let parts = match prepare_source_edit(source, range, replacement) {
+        Ok(parts) => parts,
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::with_capacity(parts.byte_len);
+    append_bytes(&mut bytes, parts.prefix.as_bytes());
+    append_bytes(&mut bytes, parts.replacement.as_bytes());
+    append_bytes(&mut bytes, parts.suffix.as_bytes());
     proof {
-        encode_utf8_valid_utf8(prefix@);
-        encode_utf8_valid_utf8(replacement@);
-        encode_utf8_valid_utf8(suffix@);
-        valid_utf8_concat(prefix.spec_bytes(), replacement.spec_bytes());
-        valid_utf8_concat(prefix.spec_bytes() + replacement.spec_bytes(), suffix.spec_bytes());
-        assert(bytes@ =~= source.spec_bytes()[..range.start] + replacement.spec_bytes() + source.spec_bytes()[range.end..]);
+        encode_utf8_valid_utf8(parts.prefix@);
+        encode_utf8_valid_utf8(parts.replacement@);
+        encode_utf8_valid_utf8(parts.suffix@);
+        valid_utf8_concat(parts.prefix.spec_bytes(), parts.replacement.spec_bytes());
+        valid_utf8_concat(parts.prefix.spec_bytes() + parts.replacement.spec_bytes(), parts.suffix.spec_bytes());
     }
     Ok(EditedSource { bytes })
 }
