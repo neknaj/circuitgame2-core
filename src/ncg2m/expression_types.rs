@@ -34,6 +34,11 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+mod inference;
+use inference::infer_type;
+#[cfg(verus_only)]
+use inference::inferred_type;
+
 verus! {
 
 /// 式の構文や型の検査で見つかった違反。
@@ -1194,14 +1199,11 @@ spec fn binding_types<'a>(
         Ok(body_env)
     } else {
         let row = rows[at as int];
-        match synthesized_type(source, forms, outer, row.value) {
+        match inferred_type(source, forms, outer, row.value) {
             Err(error) => Err(error),
-            Ok(ty) => match expression_check(source, forms, outer, Request { at: row.value, expected: ty, list: None }) {
-                BodyVerdict::Rejected(error) => Err(error),
-                BodyVerdict::Accepted => {
-                    let local = (spelling(source, forms[row.name as int]), ty);
-                    binding_types(source, forms, outer, rows, at + 1, Seq::empty().push(local) + body_env)
-                }
+            Ok(ty) => {
+                let local = (spelling(source, forms[row.name as int]), ty);
+                binding_types(source, forms, outer, rows, at + 1, Seq::empty().push(local) + body_env)
             },
         }
     }
@@ -1260,10 +1262,7 @@ fn read_binding_types<'a>(
         assert(row.name < forms@.len() && row.value < forms@.len());
         let outer_locals = slice_subrange(locals.as_slice(), 0, outer_count);
         assert(outer_locals@ =~= original);
-        let ty = synthesize_type(source, forms, parameters, outer_locals, row.value)?;
-        if let BodyVerdict::Rejected(error) = check_expression(source, forms, parameters, outer_locals, row.value, ty) {
-            return Err(error);
-        }
+        let ty = infer_type(source, forms, parameters, outer_locals, row.value)?;
         let local = LocalType { name: source_word(source, forms, row.name), ty };
         proof { pushed_local(parameters@, locals@, local); }
         let ghost old_locals = locals@;
@@ -1377,8 +1376,8 @@ pub proof fn checked_body_signature_origin(source: &str, signature: DefnSignatur
 /// `if` は条件、左の分岐、右の分岐の順に検査する。
 /// `list` は期待型の要素型で各要素を左から検査する。空のリストにも同じ期待型を使う。
 /// 関数本体と先行する `let` の本体位置で `let` を扱う。束縛の右辺は外側の型環境で
-/// 左から検査し、すべて検査できた後に本体へ束縛を導入する。右辺の型はリテラル、
-/// 局所名の参照、`as-type` から求める。
+/// 左から検査し、すべて検査できた後に本体へ束縛を導入する。右辺ではリテラル、局所名の参照、
+/// `as-type`、`if`、空でない `list` の型を求める。各分岐や各要素の型を個別に求め、一致を確かめる。
 /// 本体が検査を通れば、元ソースの範囲を持つ署名を返す。
 ///
 /// # Errors

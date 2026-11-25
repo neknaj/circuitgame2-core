@@ -114,6 +114,38 @@ fn let_requires_a_type_annotation_for_an_empty_rhs_list() {
 }
 
 #[test]
+fn let_infers_list_elements_and_if_branches_independently() {
+    let source = "(defn f (as-type (Fn () (List Nat)) (fn ()
+        (let ((xs (if true (list 0 1) (list 2)))) xs))))";
+    assert!(check_defn_body(source).is_ok());
+
+    for expr in ["(list 1 -2)", "(if true 1 -2)"] {
+        let source = format!("(defn f (as-type (Fn () Nat) (fn () (let ((x {expr})) 0))))");
+        let start = source.find("-2").unwrap();
+        let error = check_defn_body(&source).unwrap_err();
+        let DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch {
+            span, expected, actual,
+        })) = error else {
+            panic!("expected a mismatch between independently inferred types");
+        };
+        assert_eq!(span, start..start + 2);
+        assert_eq!(expected.atom, DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Nat)));
+        assert_eq!(actual.atom, DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Int)));
+    }
+}
+
+#[test]
+fn infers_deep_lists_without_using_the_host_call_stack() {
+    let depth = 30_000;
+    let mut source = "(defn f (as-type (Fn () Bool) (fn () (let ((xs ".to_owned();
+    source.push_str(&"(list ".repeat(depth));
+    source.push_str("true");
+    source.push_str(&")".repeat(depth));
+    source.push_str(")) true))))");
+    assert!(check_defn_body(&source).is_ok());
+}
+
+#[test]
 fn checks_deep_annotations_without_using_the_host_call_stack() {
     let depth = 30_000;
     let mut source = "(defn f (as-type (Fn (Int) Int) (fn (x) ".to_owned();
