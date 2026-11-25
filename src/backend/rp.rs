@@ -229,7 +229,8 @@ fn supported(board: Board, instance: u8, signal: Signal, pin: u8) -> (ok: bool)
     }
 }
 
-spec fn controller_model(assignment: Assignment) -> Option<(Controller, u8)> {
+/// 割り当てが使用する周辺機能の種別と番号を表す。GPIO 単独の割り当ては `None` になる。
+pub open spec fn assignment_controller(assignment: Assignment) -> Option<(Controller, u8)> {
     match assignment {
         Assignment::Uart { instance, .. } => Some((Controller::Uart, instance)),
         Assignment::Spi { instance, .. } => Some((Controller::Spi, instance)),
@@ -239,7 +240,7 @@ spec fn controller_model(assignment: Assignment) -> Option<(Controller, u8)> {
 }
 
 fn controller(assignment: Assignment) -> (device: Option<(Controller, u8)>)
-    ensures device == controller_model(assignment),
+    ensures device == assignment_controller(assignment),
 {
     match assignment {
         Assignment::Uart { instance, .. } => Some((Controller::Uart, instance)),
@@ -249,7 +250,8 @@ fn controller(assignment: Assignment) -> (device: Option<(Controller, u8)>)
     }
 }
 
-spec fn pin_model(assignment: Assignment) -> Seq<(Signal, u8)> {
+/// 割り当てが使用する信号と GPIO 番号を、検査時の順序で表す。
+pub open spec fn assignment_pins(assignment: Assignment) -> Seq<(Signal, u8)> {
     match assignment {
         Assignment::GpioInput { pin } => seq![(Signal::GpioInput, pin)],
         Assignment::GpioOutput { pin, .. } => seq![(Signal::GpioOutput, pin)],
@@ -263,7 +265,7 @@ spec fn pin_model(assignment: Assignment) -> Seq<(Signal, u8)> {
 }
 
 fn pins(assignment: Assignment) -> (group: ([(Signal, u8); 4], usize))
-    ensures group.1 <= 4, group.0@.take(group.1 as int) == pin_model(assignment),
+    ensures group.1 <= 4, group.0@.take(group.1 as int) == assignment_pins(assignment),
 {
     let unused = (Signal::GpioInput, 0);
     let group = match assignment {
@@ -276,19 +278,19 @@ fn pins(assignment: Assignment) -> (group: ([(Signal, u8); 4], usize))
         ], 4),
         Assignment::I2c { data, clock, .. } => ([(Signal::I2cData, data), (Signal::I2cClock, clock), unused, unused], 2),
     };
-    assert(group.0@.take(group.1 as int) =~= pin_model(assignment));
+    assert(group.0@.take(group.1 as int) =~= assignment_pins(assignment));
     group
 }
 
 spec fn first_controller(input: Seq<Assignment>, stop: int, value: (Controller, u8)) -> Option<usize> {
-    if exists|i: int| 0 <= i < stop && #[trigger] controller_model(input[i]) == Some(value) {
-        Some(choose|i: usize| i < stop && #[trigger] controller_model(input[i as int]) == Some(value)
-            && forall|j: int| 0 <= j < i ==> #[trigger] controller_model(input[j]) != Some(value))
+    if exists|i: int| 0 <= i < stop && #[trigger] assignment_controller(input[i]) == Some(value) {
+        Some(choose|i: usize| i < stop && #[trigger] assignment_controller(input[i as int]) == Some(value)
+            && forall|j: int| 0 <= j < i ==> #[trigger] assignment_controller(input[j]) != Some(value))
     } else { None }
 }
 
 spec fn controller_error(input: Seq<Assignment>, i: int) -> Option<AssignmentError> {
-    match controller_model(input[i]) {
+    match assignment_controller(input[i]) {
         None => None,
         Some((controller, instance)) => if instance > 1 {
             Some(AssignmentError::UnknownInstance { assignment: i as usize, controller, instance })
@@ -324,9 +326,9 @@ fn check_controller(input: &[Assignment], i: usize) -> (error: Option<Assignment
     let mut k = 0;
     while k < i
         invariant k <= i < input@.len(),
-            controller_model(input@[i as int]) == Some((kind, instance)),
+            assignment_controller(input@[i as int]) == Some((kind, instance)),
             instance <= 1,
-            forall|j: int| 0 <= j < k ==> #[trigger] controller_model(input@[j]) != Some((kind, instance)),
+            forall|j: int| 0 <= j < k ==> #[trigger] assignment_controller(input@[j]) != Some((kind, instance)),
         decreases i - k,
     {
         if let Some((earlier, number)) = controller(input[k]) {
@@ -336,16 +338,16 @@ fn check_controller(input: &[Assignment], i: usize) -> (error: Option<Assignment
                     let first = model->Some_0;
                     assert(first == k) by {
                         if first < k {
-                            assert(controller_model(input@[first as int]) != Some((kind, instance)));
+                            assert(assignment_controller(input@[first as int]) != Some((kind, instance)));
                         } else if k < first {
-                            assert(controller_model(input@[k as int]) != Some((kind, instance)));
+                            assert(assignment_controller(input@[k as int]) != Some((kind, instance)));
                         }
                     };
                 }
                 return Some(AssignmentError::DuplicateInstance { first_assignment: k, assignment: i, controller: kind, instance });
             }
         }
-        assert(controller_model(input@[k as int]) != Some((kind, instance)));
+        assert(assignment_controller(input@[k as int]) != Some((kind, instance)));
         k += 1;
     }
     None
@@ -353,9 +355,9 @@ fn check_controller(input: &[Assignment], i: usize) -> (error: Option<Assignment
 
 spec fn prior_pin(input: Seq<Assignment>, i: int, stop: int, row: int, pos: int, pin: u8) -> bool {
     &&& 0 <= row <= i
-    &&& 0 <= pos < pin_model(input[row]).len()
+    &&& 0 <= pos < assignment_pins(input[row]).len()
     &&& (row < i || pos < stop)
-    &&& pin_model(input[row])[pos].1 == pin
+    &&& assignment_pins(input[row])[pos].1 == pin
 }
 
 spec fn earlier(row: int, pos: int, other_row: int, other_pos: int) -> bool {
@@ -367,17 +369,17 @@ spec fn first_pin(input: Seq<Assignment>, i: int, stop: int, pin: u8) -> Option<
         let (row, pos) = choose|row: int, pos: int| #[trigger] prior_pin(input, i, stop, row, pos, pin)
             && forall|r: int, p: int| #[trigger] prior_pin(input, i, stop, r, p, pin)
                 ==> !earlier(r, p, row, pos);
-        Some(PinSite { assignment: row as usize, signal: pin_model(input[row])[pos].0 })
+        Some(PinSite { assignment: row as usize, signal: assignment_pins(input[row])[pos].0 })
     } else { None }
 }
 
 fn find_pin(input: &[Assignment], i: usize, stop: usize, pin: u8) -> (prior: Option<PinSite>)
-    requires i < input@.len(), stop <= pin_model(input@[i as int]).len(),
+    requires i < input@.len(), stop <= assignment_pins(input@[i as int]).len(),
     ensures prior == first_pin(input@, i as int, stop as int, pin),
 {
     let mut row = 0;
     while row <= i
-        invariant row <= i + 1, i < input@.len(), stop <= pin_model(input@[i as int]).len(),
+        invariant row <= i + 1, i < input@.len(), stop <= assignment_pins(input@[i as int]).len(),
             forall|r: int, p: int| r < row ==> !#[trigger] prior_pin(input@, i as int, stop as int, r, p, pin),
         decreases i + 1 - row,
     {
@@ -385,8 +387,8 @@ fn find_pin(input: &[Assignment], i: usize, stop: usize, pin: u8) -> (prior: Opt
         let end = if row == i { stop } else { length };
         let mut pos = 0;
         while pos < end
-            invariant row <= i < input@.len(), stop <= pin_model(input@[i as int]).len(),
-                group@.take(length as int) == pin_model(input@[row as int]), length <= 4,
+            invariant row <= i < input@.len(), stop <= assignment_pins(input@[i as int]).len(),
+                group@.take(length as int) == assignment_pins(input@[row as int]), length <= 4,
                 end == if row == i { stop } else { length },
                 pos <= end <= length,
                 forall|r: int, p: int| r < row ==> !#[trigger] prior_pin(input@, i as int, stop as int, r, p, pin),
@@ -394,7 +396,7 @@ fn find_pin(input: &[Assignment], i: usize, stop: usize, pin: u8) -> (prior: Opt
             decreases end - pos,
         {
             let (signal, candidate) = group[pos];
-            assert(pin_model(input@[row as int])[pos as int] == (signal, candidate));
+            assert(assignment_pins(input@[row as int])[pos as int] == (signal, candidate));
             if candidate == pin {
                 proof {
                     let ghost r = row as int;
@@ -427,9 +429,9 @@ fn find_pin(input: &[Assignment], i: usize, stop: usize, pin: u8) -> (prior: Opt
 }
 
 spec fn pin_error(board: Board, input: Seq<Assignment>, i: int, j: int) -> Option<AssignmentError> {
-    let (signal, pin) = pin_model(input[i])[j];
+    let (signal, pin) = assignment_pins(input[i])[j];
     let site = PinSite { assignment: i as usize, signal };
-    let instance = match controller_model(input[i]) { Some(value) => value.1, None => 0 };
+    let instance = match assignment_controller(input[i]) { Some(value) => value.1, None => 0 };
     if !gpio_exposed(pin) {
         Some(AssignmentError::UnexposedPin { site, pin })
     } else if !signal_supported(board, instance, signal, pin) {
@@ -444,7 +446,7 @@ spec fn pin_error(board: Board, input: Seq<Assignment>, i: int, j: int) -> Optio
 
 spec fn valid_assignment(board: Board, input: Seq<Assignment>, i: int) -> bool {
     &&& controller_error(input, i) is None
-    &&& forall|j: int| 0 <= j < pin_model(input[i]).len() ==> #[trigger] pin_error(board, input, i, j) is None
+    &&& forall|j: int| 0 <= j < assignment_pins(input[i]).len() ==> #[trigger] pin_error(board, input, i, j) is None
 }
 
 /// 全割り当ての GPIO と周辺機能が有効で、同じ資源を重ねて使わないことを表す。
@@ -458,9 +460,96 @@ pub closed spec fn first_assignment_error(board: Board, input: Seq<Assignment>, 
         && !#[trigger] valid_assignment(board, input, i)
         && (forall|prior: int| 0 <= prior < i ==> #[trigger] valid_assignment(board, input, prior))
         && (controller_error(input, i) == Some(error) || controller_error(input, i) is None
-            && exists|j: int| 0 <= j < pin_model(input[i]).len()
+            && exists|j: int| 0 <= j < assignment_pins(input[i]).len()
                 && #[trigger] pin_error(board, input, i, j) == Some(error)
                 && (forall|prior: int| 0 <= prior < j ==> #[trigger] pin_error(board, input, i, prior) is None))
+}
+
+/// 割り当てた GPIO がボードに露出し、指定された信号を扱えることを示す。
+pub proof fn pin_compatibility(board: Board, input: Seq<Assignment>, row: int, position: int)
+    requires
+        assignments_valid(board, input),
+        0 <= row < input.len(),
+        0 <= position < assignment_pins(input[row]).len(),
+    ensures
+        gpio_exposed(assignment_pins(input[row])[position].1),
+        signal_supported(
+            board,
+            match assignment_controller(input[row]) { Some(c) => c.1, None => 0 },
+            assignment_pins(input[row])[position].0,
+            assignment_pins(input[row])[position].1,
+        ),
+{
+    assert(valid_assignment(board, input, row));
+    assert(pin_error(board, input, row, position) is None);
+}
+
+/// 異なる信号位置に同じ GPIO 番号が割り当てられていないことを示す。
+pub proof fn pins_distinct(board: Board, input: Seq<Assignment>, row: int, position: int, other_row: int, other_position: int)
+    requires
+        assignments_valid(board, input),
+        0 <= row < input.len(),
+        0 <= other_row < input.len(),
+        0 <= position < assignment_pins(input[row]).len(),
+        0 <= other_position < assignment_pins(input[other_row]).len(),
+        row != other_row || position != other_position,
+    ensures
+        assignment_pins(input[row])[position].1
+            != assignment_pins(input[other_row])[other_position].1,
+{
+    if earlier(row, position, other_row, other_position) {
+        no_pin_reuse(board, input, row, position, other_row, other_position);
+    } else {
+        no_pin_reuse(board, input, other_row, other_position, row, position);
+    }
+}
+
+proof fn no_pin_reuse(board: Board, input: Seq<Assignment>, row: int, position: int, later_row: int, later_position: int)
+    requires
+        assignments_valid(board, input),
+        0 <= row < input.len(),
+        0 <= later_row < input.len(),
+        0 <= position < assignment_pins(input[row]).len(),
+        0 <= later_position < assignment_pins(input[later_row]).len(),
+        earlier(row, position, later_row, later_position),
+    ensures
+        assignment_pins(input[row])[position].1
+            != assignment_pins(input[later_row])[later_position].1,
+{
+    let pin = assignment_pins(input[later_row])[later_position].1;
+    assert(valid_assignment(board, input, later_row));
+    assert(pin_error(board, input, later_row, later_position) is None);
+    if assignment_pins(input[row])[position].1 == pin {
+        assert(prior_pin(input, later_row, later_position, row, position, pin));
+        assert(first_pin(input, later_row, later_position, pin) is Some);
+    }
+}
+
+/// 周辺機能の番号が範囲内にあり、他の割り当てが同じ種別・番号を使わないことを示す。
+pub proof fn controller_is_unique(board: Board, input: Seq<Assignment>, row: int, device: (Controller, u8))
+    requires
+        assignments_valid(board, input),
+        0 <= row < input.len(),
+        assignment_controller(input[row]) == Some(device),
+    ensures
+        device.1 <= 1,
+        forall|other: int| 0 <= other < input.len() && other != row
+            ==> #[trigger] assignment_controller(input[other]) != Some(device),
+{
+    assert(valid_assignment(board, input, row));
+    assert(controller_error(input, row) is None);
+    assert forall|other: int| 0 <= other < input.len() && other != row
+        implies #[trigger] assignment_controller(input[other]) != Some(device) by {
+        if assignment_controller(input[other]) == Some(device) {
+            let (first, last) = if other < row { (other, row) } else { (row, other) };
+            assert(first < last);
+            assert(assignment_controller(input[first]) == Some(device));
+            assert(assignment_controller(input[last]) == Some(device));
+            assert(first_controller(input, last, device) is Some);
+            assert(valid_assignment(board, input, last));
+            assert(controller_error(input, last) is None);
+        }
+    };
 }
 
 impl<'a> CheckedAssignments<'a> {
@@ -520,15 +609,15 @@ pub fn check_assignments<'a>(board: Board, input: &'a [Assignment])
         let mut j = 0;
         while j < count
             invariant
-                i < input@.len(), count <= 4, group@.take(count as int) == pin_model(input@[i as int]),
+                i < input@.len(), count <= 4, group@.take(count as int) == assignment_pins(input@[i as int]),
                 j <= count, controller_error(input@, i as int) is None,
-                instance == match controller_model(input@[i as int]) { Some(value) => value.1, None => 0 },
+                instance == match assignment_controller(input@[i as int]) { Some(value) => value.1, None => 0 },
                 forall|k: int| 0 <= k < i ==> #[trigger] valid_assignment(board, input@, k),
                 forall|p: int| 0 <= p < j ==> #[trigger] pin_error(board, input@, i as int, p) is None,
             decreases count - j,
         {
             let (signal, pin) = group[j];
-            assert(pin_model(input@[i as int])[j as int] == (signal, pin));
+            assert(assignment_pins(input@[i as int])[j as int] == (signal, pin));
             let site = PinSite { assignment: i, signal };
             let error = if !exposed(pin) {
                 Some(AssignmentError::UnexposedPin { site, pin })
@@ -563,21 +652,21 @@ pub proof fn assignment_errors_agree(board: Board, input: Seq<Assignment>, left:
     let i = choose|i: int| 0 <= i < input.len() && !#[trigger] valid_assignment(board, input, i)
         && (forall|prior: int| 0 <= prior < i ==> #[trigger] valid_assignment(board, input, prior))
         && (controller_error(input, i) == Some(left) || controller_error(input, i) is None
-            && exists|j: int| 0 <= j < pin_model(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(left)
+            && exists|j: int| 0 <= j < assignment_pins(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(left)
                 && (forall|prior: int| 0 <= prior < j ==> #[trigger] pin_error(board, input, i, prior) is None));
     let other = choose|i: int| 0 <= i < input.len() && !#[trigger] valid_assignment(board, input, i)
         && (forall|prior: int| 0 <= prior < i ==> #[trigger] valid_assignment(board, input, prior))
         && (controller_error(input, i) == Some(right) || controller_error(input, i) is None
-            && exists|j: int| 0 <= j < pin_model(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(right)
+            && exists|j: int| 0 <= j < assignment_pins(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(right)
                 && (forall|prior: int| 0 <= prior < j ==> #[trigger] pin_error(board, input, i, prior) is None));
     assert(i == other) by {
         if i < other { assert(valid_assignment(board, input, i)); }
         if other < i { assert(valid_assignment(board, input, other)); }
     };
     if controller_error(input, i) is None {
-        let j = choose|j: int| 0 <= j < pin_model(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(left)
+        let j = choose|j: int| 0 <= j < assignment_pins(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(left)
             && (forall|prior: int| 0 <= prior < j ==> #[trigger] pin_error(board, input, i, prior) is None);
-        let other_j = choose|j: int| 0 <= j < pin_model(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(right)
+        let other_j = choose|j: int| 0 <= j < assignment_pins(input[i]).len() && #[trigger] pin_error(board, input, i, j) == Some(right)
             && (forall|prior: int| 0 <= prior < j ==> #[trigger] pin_error(board, input, i, prior) is None);
         assert(j == other_j) by {
             if j < other_j { assert(pin_error(board, input, i, j) is None); }

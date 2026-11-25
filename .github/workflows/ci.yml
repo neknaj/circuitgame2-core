@@ -32,11 +32,11 @@ jobs:
       - name: Run native tests and doctests
         run: cargo test --workspace --locked
 
-      - name: Build the packed NOR kernel for RP2040 and RP2350
+      - name: Build the packed NOR and device timing crates for RP2040 and RP2350
         run: |
           rustup target add thumbv6m-none-eabi thumbv8m.main-none-eabihf
-          cargo build --locked --release -p circuitgame2-packed-nor --target thumbv6m-none-eabi
-          cargo build --locked --release -p circuitgame2-packed-nor --target thumbv8m.main-none-eabihf
+          cargo build --locked --release -p circuitgame2-packed-nor -p circuitgame2-device-timing --target thumbv6m-none-eabi
+          cargo build --locked --release -p circuitgame2-packed-nor -p circuitgame2-device-timing --target thumbv8m.main-none-eabihf
 
       - name: Install Verus 0.2026.11.02.8bf68ee
         working-directory: ${{ runner.temp }}

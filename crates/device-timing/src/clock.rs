@@ -1,5 +1,8 @@
 //! tick と reset の準備および確定を扱う。
 
+#[cfg(not(verus_only))]
+use verus_builtin_macros::verus;
+#[cfg(verus_only)]
 use vstd::prelude::*;
 
 verus! {
@@ -33,7 +36,7 @@ pub enum ClockError {
 /// # Examples
 ///
 /// ```
-/// use circuitgame2_core::time::{ClockError, SimulationClock, TickPosition};
+/// use circuitgame2_device_timing::{ClockError, SimulationClock, TickPosition};
 ///
 /// let mut clock = SimulationClock::new();
 /// let old_tick = clock.prepare_tick().unwrap();
@@ -178,19 +181,8 @@ impl SimulationClock {
         {
             return Err(ClockError::StaleChange);
         }
-        self.commit_current(change);
-        Ok(())
-    }
-
-    /// 呼び出し側で現在の時計との対応を保証した変更を確定する。
-    pub(crate) fn commit_current(&mut self, change: PendingClockChange)
-        requires old(self).position_model() == change.change_model().0,
-        ensures
-            final(self).position_model() == change.change_model().1,
-            clock_change_matches(old(self).position_model(), final(self).position_model()),
-    {
-        proof { use_type_invariant(&change); }
         self.position = change.to;
+        Ok(())
     }
 }
 
