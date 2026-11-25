@@ -718,7 +718,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
-    pub(in crate::project::use_aliases) closed spec fn function_expansion_order_matches(
+    pub closed spec fn function_expansion_order_matches(
         &self, found: Seq<IndexedDefinitionBinding>, result: Result<FunctionExpansionOrder, Vec<FunctionCallSite>>,
     ) -> bool {
         exists|flat: Seq<IndexedFunctionCallSite>, graph: Seq<Vec<Option<usize>>>,
@@ -738,7 +738,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     /// 解決済みのプロジェクトから、関数の展開順または再帰を構成する呼び出し列を得る。
-    pub(in crate::project::use_aliases) fn function_expansion_order(
+    pub(in crate::project) fn function_expansion_order(
         &self, found: &[IndexedDefinitionBinding<'p, 'a>],
     ) -> (result: Result<FunctionExpansionOrder<'p, 'a>, Vec<FunctionCallSite<'p, 'a>>>)
         requires self.can_resolve(), self.definition_bindings_match(found@),

@@ -7,12 +7,12 @@ use super::use_aliases::own_conflict;
 use super::use_aliases::owned_conflict_matches;
 use super::{
     AliasDisposition, CircuitBasisError, CircuitProject, DefinitionBatchError,
-    IndexedDefinitionBinding, LocatedName, OwnedUseAliasConflict, UseTargetError, UseTargets,
+    FunctionCallSite, FunctionExpansionOrder, IndexedDefinitionBinding, LocatedName, OwnedUseAliasConflict, UseAliases, UseTargetError, UseTargets,
     check_use_aliases, index_use_targets, validate_circuit_basis,
 };
 #[cfg(verus_only)]
 use super::{
-    UseAliasConflict, UseAliases, alias_conflict_evidence, basis_result_evidence,
+    UseAliasConflict, alias_conflict_evidence, basis_result_evidence,
     circuit_basis_valid, use_aliases_match, use_target_error_evidence, use_targets_match,
 };
 use alloc::vec::Vec;
@@ -58,6 +58,162 @@ pub enum DefinitionAnalysisError<'p, 'a> {
     },
 }
 
+/// 基底と `use` の参照先を検査し、別名と定義参照の検査に使う状態。
+pub struct PreparedDefinitionAnalysis<'p, 'a> {
+    basis: Option<LocatedName<'p, 'a>>,
+    targets: UseTargets<'p, 'a>,
+}
+
+/// 別名の索引と、同じ索引で解決した定義参照。
+pub struct CheckedDefinitionAnalysis<'t, 'p, 'a> {
+    aliases: UseAliases<'t, 'p, 'a>,
+    definitions: Vec<IndexedDefinitionBinding<'p, 'a>>,
+}
+
+/// 準備したプロジェクトの別名または定義参照に見つかった最初の違反。
+#[derive(Debug)]
+pub enum PreparedDefinitionError<'t, 'p, 'a> {
+    /// 別名が他の束縛と衝突した。
+    Alias(OwnedUseAliasConflict<'p, 'a>),
+    /// `def` の参照先を解決できないか、用途に合わない。
+    Definition {
+        /// 最初に違反した参照の診断。
+        error: DefinitionBatchError<'p, 'a>,
+        /// 参照を調べる前に確定した束縛と警告。
+        aliases: UseAliases<'t, 'p, 'a>,
+    },
+}
+
+impl<'t, 'p, 'a> CheckedDefinitionAnalysis<'t, 'p, 'a> {
+    #[verifier::type_invariant]
+    spec fn valid(self) -> bool {
+        self.aliases.can_resolve() && self.aliases.definition_bindings_match(self.definitions@)
+    }
+
+    /// この検査で使った別名の索引を表す。
+    pub closed spec fn aliases_model(&self) -> UseAliases<'t, 'p, 'a> {
+        self.aliases
+    }
+
+    /// この検査で解決した定義参照の列を表す。
+    pub closed spec fn definitions_model(&self) -> Seq<IndexedDefinitionBinding<'p, 'a>> {
+        self.definitions@
+    }
+
+    /// 別名の検索と重複警告に使う索引を返す。
+    pub fn aliases(&self) -> (aliases: &UseAliases<'t, 'p, 'a>)
+        ensures *aliases == self.aliases_model(), aliases.can_resolve(),
+    {
+        proof { use_type_invariant(self); }
+        &self.aliases
+    }
+
+    /// 検査時に解決した参照を使い、関数の展開順を求める。
+    ///
+    /// # Errors
+    ///
+    /// 関数呼び出しが循環する場合は、閉路を構成する呼び出し先名の元ソース範囲を返す。
+    pub fn function_expansion_order(&self)
+        -> (result: Result<FunctionExpansionOrder<'p, 'a>, Vec<FunctionCallSite<'p, 'a>>>)
+        ensures self.aliases_model().function_expansion_order_matches(self.definitions_model(), result),
+    {
+        proof { use_type_invariant(self); }
+        self.aliases.function_expansion_order(self.definitions.as_slice())
+    }
+}
+
+impl<'p, 'a> PreparedDefinitionAnalysis<'p, 'a> {
+    #[verifier::type_invariant]
+    spec fn valid(self) -> bool {
+        self.targets.covers_project() && self.targets.exports_model().declarations_model().well_formed()
+    }
+
+    /// 解決済みの `use` と共有宣言を返す。
+    pub fn targets(&self) -> (targets: &UseTargets<'p, 'a>)
+        ensures *targets == self.targets_model(),
+    {
+        &self.targets
+    }
+
+    /// 検査した基底宣言の元ソース範囲を表す。
+    pub closed spec fn basis_model(&self) -> Option<LocatedName<'p, 'a>> {
+        self.basis
+    }
+
+    /// 検査で共有する `use` と宣言の索引を表す。
+    pub closed spec fn targets_model(&self) -> UseTargets<'p, 'a> {
+        self.targets
+    }
+
+    /// 別名と定義参照の検査結果を、準備したプロジェクトと照合する。
+    pub closed spec fn resolution_matches(
+        &self, result: Result<CheckedDefinitionAnalysis, PreparedDefinitionError>,
+    ) -> bool {
+        match result {
+            Ok(checked) => use_aliases_match(&self.targets, checked.aliases)
+                && checked.aliases.can_resolve()
+                && checked.aliases.definition_bindings_match(checked.definitions@),
+            Err(PreparedDefinitionError::Alias(error)) =>
+                exists|conflict: UseAliasConflict| #![trigger owned_conflict_matches(conflict, error)]
+                    alias_conflict_evidence(&self.targets, conflict) && owned_conflict_matches(conflict, error),
+            Err(PreparedDefinitionError::Definition { error, aliases }) =>
+                use_aliases_match(&self.targets, aliases) && aliases.can_resolve()
+                    && aliases.definition_batch_error_evidence(error),
+        }
+    }
+
+    /// 別名を検査し、その索引で定義参照を元ソース順に解決する。
+    ///
+    /// # Errors
+    ///
+    /// 最初の別名の衝突または解決できない定義参照を返す。定義参照の失敗には別名の警告も付く。
+    pub fn resolve(&self)
+        -> (result: Result<CheckedDefinitionAnalysis<'_, 'p, 'a>, PreparedDefinitionError<'_, 'p, 'a>>)
+        ensures self.resolution_matches(result),
+    {
+        proof { use_type_invariant(self); }
+        let aliases = match check_use_aliases(&self.targets) {
+            Ok(aliases) => aliases,
+            Err(conflict) => {
+                let error = own_conflict(conflict);
+                return Err(PreparedDefinitionError::Alias(error));
+            },
+        };
+        match aliases.resolve_definitions() {
+            Ok(definitions) => Ok(CheckedDefinitionAnalysis { aliases, definitions }),
+            Err(error) => Err(PreparedDefinitionError::Definition { error, aliases }),
+        }
+    }
+}
+
+/// 基底宣言、共有宣言、公開指定、`use` の参照先を検査する。
+///
+/// # Errors
+///
+/// 最初に違反が見つかった段階の診断を返す。
+pub fn prepare_definition_analysis<'p, 'a>(project: &'p CircuitProject<'a>)
+    -> (result: Result<PreparedDefinitionAnalysis<'p, 'a>, DefinitionAnalysisError<'p, 'a>>)
+    requires project.has_parsed_sources(),
+    ensures match result {
+        Ok(prepared) => circuit_basis_valid(project)
+            && basis_result_evidence(project, Ok(prepared.basis_model()))
+            && use_targets_match(project, prepared.targets_model())
+            && prepared.targets_model().covers_project()
+            && prepared.targets_model().exports_model().declarations_model().well_formed(),
+        Err(error) => (error is Basis || error is UseTarget) && definition_analysis_evidence(project, Err(error)),
+    },
+{
+    let basis = match validate_circuit_basis(project) {
+        Ok(basis) => basis,
+        Err(error) => return Err(DefinitionAnalysisError::Basis(error)),
+    };
+    let targets = match index_use_targets(project) {
+        Ok(targets) => targets,
+        Err(error) => return Err(DefinitionAnalysisError::UseTarget(error)),
+    };
+    Ok(PreparedDefinitionAnalysis { basis, targets })
+}
+
 spec fn alias_report_matches(project: &CircuitProject, report: UseAliasReport, aliases: UseAliases) -> bool {
     &&& use_targets_match(project, report.targets)
     &&& use_aliases_match(&report.targets, aliases)
@@ -100,27 +256,22 @@ pub fn analyze_definitions<'p, 'a>(project: &'p CircuitProject<'a>)
     requires project.has_parsed_sources(),
     ensures definition_analysis_evidence(project, result),
 {
-    let basis = match validate_circuit_basis(project) {
-        Ok(basis) => basis,
-        Err(error) => return Err(DefinitionAnalysisError::Basis(error)),
+    let prepared = match prepare_definition_analysis(project) {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(error),
     };
-    assert(basis_result_evidence(project, Ok(basis)));
     assert(circuit_basis_valid(project));
-    let targets = match index_use_targets(project) {
-        Ok(targets) => targets,
-        Err(error) => return Err(DefinitionAnalysisError::UseTarget(error)),
+    let resolved = prepared.resolve();
+    proof { reveal(PreparedDefinitionAnalysis::resolution_matches); }
+    let (aliases, definitions) = match resolved {
+        Ok(checked) => (checked.aliases, Ok(checked.definitions)),
+        Err(PreparedDefinitionError::Alias(error)) => return Err(DefinitionAnalysisError::Alias(error)),
+        Err(PreparedDefinitionError::Definition { error, aliases }) => (aliases, Err(error)),
     };
-    let aliases = match check_use_aliases(&targets) {
-        Ok(aliases) => aliases,
-        Err(conflict) => {
-            let error = own_conflict(conflict);
-            return Err(DefinitionAnalysisError::Alias(error));
-        },
-    };
-    let definitions = aliases.resolve_definitions();
     let ghost evidence = aliases;
     let dispositions = aliases.into_dispositions();
-    let report = UseAliasReport { targets, dispositions };
+    let report = UseAliasReport { targets: prepared.targets, dispositions };
+    let basis = prepared.basis;
     assert(alias_report_matches(project, report, evidence));
     match definitions {
         Ok(definitions) => {
