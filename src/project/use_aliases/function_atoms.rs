@@ -618,7 +618,7 @@ spec fn structure_atom_step(
     }
 }
 
-spec fn selection_type_matches(
+pub(super) closed spec fn selection_type_matches(
     source: &ProjectSource, forms: Seq<Form>, root: usize, shape: BitSelectionShape,
     input: Option<SignalType>, expected: Option<TypedPort>, result: Result<Option<SignalType>, FuncSignalTypeError>,
 ) -> bool {
@@ -679,7 +679,7 @@ proof fn selection_type_successes_agree(
     }
 }
 
-fn check_selection_type<'p, 'a>(
+pub(super) fn check_selection_type<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], root: usize, shape: &BitSelectionShape,
     input: Option<SignalType<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
 ) -> (result: Result<Option<SignalType<'p, 'a>>, FuncSignalTypeError<'p, 'a>>)
@@ -719,7 +719,7 @@ fn check_selection_type<'p, 'a>(
 }
 
 #[verifier::opaque]
-spec fn nested_selection_type_matches(
+pub(super) closed spec fn nested_selection_type_matches(
     source: &ProjectSource, forms: Seq<Form>, root: usize, steps: Seq<BitSelectionShape>, leaf: usize,
     input: Option<SignalType>, expected: Option<TypedPort>, result: Result<Option<SignalType>, FuncSignalTypeError>,
 ) -> bool {
@@ -782,7 +782,7 @@ proof fn nested_selection_type_successes_agree(
 }
 
 /// 最内段の信号型を確認し、最外段の幅を出力ポートの型と照合する。
-fn check_nested_selection_type<'p, 'a>(
+pub(super) fn check_nested_selection_type<'p, 'a>(
     source: &'p ProjectSource<'a>, forms: &[Form], root: usize, steps: &[BitSelectionShape], leaf: usize,
     input: Option<SignalType<'p, 'a>>, expected: Option<&TypedPort<'p, 'a>>,
 ) -> (result: Result<Option<(SignalType<'p, 'a>, CheckedBitSelection)>, FuncSignalTypeError<'p, 'a>>)

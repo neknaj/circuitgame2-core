@@ -1,8 +1,8 @@
 use circuitgame2_core::project::{
     BitFuncError, CallInputError, CallInputReason, FuncAtomTypeError, FuncCallInputsError, FuncSignalTypeError,
-    FuncWiringResult, ResolvedPortType, SelectionArgumentError, SourceSnapshot,
-    StructureExpressionTypeError, StructureOperationError, check_use_aliases, index_use_targets,
-    parse_circuit_project,
+    FuncWiringResult, MixedFuncTypeError, ResolvedPortType, SelectionArgumentError, SourceSnapshot,
+    StructureExpressionTypeError, StructureOperationError, check_mixed_use_aliases, check_use_aliases,
+    index_mixed_use_targets, index_use_targets, parse_circuit_project, parse_project_sources,
 };
 
 #[test]
@@ -241,6 +241,47 @@ fn checks_and_lowers_nested_selections_through_public_apis() {
     })) = error else { panic!("{error:?}") };
     assert_eq!(&text[site.span], "4");
     assert_eq!(&text[width_origin.span], "(slice a 0 4 2)");
+}
+
+#[test]
+fn checks_mixed_root_selections_against_their_driver_and_output_types() {
+    let text = concat!(
+        "; 信号の幅\n(using nor) ",
+        "(func accepted (in (a (bits 8))) (out y) ",
+        "  (def base (::lib::same a)) (def evens (slice base 0 4 2)) (def y (bit (slice evens 0 2) 1))) ",
+        "(func outside (in (a (bits 8))) (out y) ",
+        "  (def evens (slice a 0 4 2)) (def y (bit evens 4))) ",
+        "(func mismatch (in (a (bits 8))) (out (y (bits 2))) (def y (bit a 1)))",
+    );
+    let library = "(namespace lib (export same) (func same (in (a (bits 8))) (out (a (bits 8)))))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "design.ncg2", revision: 14, text },
+        SourceSnapshot { path: "library.ncg2", revision: 3, text: library },
+        SourceSnapshot { path: "tools.ncg2m", revision: 2, text: "" },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let checked = aliases.check_mixed_func_input_types(0, 1, 8).unwrap();
+    let output = checked.signals[2].as_ref().unwrap();
+    assert!(matches!(output.ty, ResolvedPortType::Bits(1)));
+    assert_eq!(
+        (&text[output.origin.span.clone()], output.origin.source.revision),
+        ("(bit (slice evens 0 2) 1)", 14),
+    );
+
+    let error = aliases.check_mixed_func_input_types(0, 2, 8).unwrap_err();
+    let MixedFuncTypeError::SelectionArgument(SelectionArgumentError::Outside {
+        site, width_origin, input_width: 4, last: 4, ..
+    }) = error else { panic!("{error:?}") };
+    assert_eq!((&text[site.span], site.source.revision), ("4", 14));
+    assert_eq!((&text[width_origin.span], width_origin.source.revision), ("(slice a 0 4 2)", 14));
+
+    let error = aliases.check_mixed_func_input_types(0, 3, 8).unwrap_err();
+    let MixedFuncTypeError::Signal(FuncAtomTypeError::OutputType { reference, expected, actual }) = error
+        else { panic!("{error:?}") };
+    assert_eq!(&text[reference.span], "(bit a 1)");
+    assert_eq!(&text[expected.origin.span], "2");
+    assert!(matches!(actual.ty, ResolvedPortType::Bits(1)));
 }
 
 #[test]
