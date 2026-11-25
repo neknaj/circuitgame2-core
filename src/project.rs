@@ -51,14 +51,15 @@ pub use widths::{
 #[cfg(verus_only)]
 pub use analysis::definition_analysis_evidence;
 pub use analysis::{
-    DefinitionAnalysis, DefinitionAnalysisError, UseAliasReport, analyze_definitions,
+    CheckedDefinitionAnalysis, DefinitionAnalysis, DefinitionAnalysisError, PreparedDefinitionAnalysis,
+    PreparedDefinitionError, UseAliasReport, analyze_definitions, prepare_definition_analysis,
 };
 pub use basis::{CircuitBasisError, validate_circuit_basis};
 #[cfg(verus_only)]
 pub use basis::{basis_result_evidence, circuit_basis_valid};
 pub use circuits::{
     CircuitProject, CircuitProjectError, CircuitProjectFailure, parse_circuit_project,
-    parse_circuit_project_with_recovery,
+    parse_circuit_project_with_cached_indexes, parse_circuit_project_with_recovery,
 };
 pub(crate) use circuits::read_source_span;
 #[cfg(verus_only)]

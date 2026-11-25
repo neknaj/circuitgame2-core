@@ -40,6 +40,31 @@ pub struct BuildEntryRanges {
     pub signals: Range<usize>,
 }
 
+impl Clone for BuildDefinition {
+    fn clone(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        Self {
+            form: self.form,
+            expression: self.expression.start..self.expression.end,
+            references: self.references.start..self.references.end,
+            signals: self.signals.start..self.signals.end,
+        }
+    }
+}
+
+impl Clone for BuildEntryRanges {
+    fn clone(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        Self {
+            definitions: self.definitions.start..self.definitions.end,
+            references: self.references.start..self.references.end,
+            signals: self.signals.start..self.signals.end,
+        }
+    }
+}
+
 /// 厳格な回路フォームの索引と、ビルドで使う平坦な定義・参照配列。
 #[derive(Debug)]
 pub struct BuildCircuitIndex {
@@ -62,12 +87,47 @@ pub(super) struct BuildRows {
     pub(super) signals: Vec<usize>,
 }
 
+fn copy_index_values<T: Clone>(values: &Vec<T>) -> (copy: Vec<T>)
+    requires forall|a: T, b: T| #[trigger] vstd::pervasive::cloned(a, b) ==> a == b,
+    ensures copy@ == values@,
+{
+    let copy = values.clone();
+    assert(copy@ =~= values@) by {
+        assert forall|i: int| 0 <= i < values@.len()
+            implies copy@[i] == #[trigger] values@[i] by {
+            assert(vstd::pervasive::cloned(values@[i], copy@[i]));
+        };
+    };
+    copy
+}
+
 impl BuildRows {
     pub(super) fn new() -> (rows: Self)
         ensures rows.entry_ranges@.len() == 0 && rows.definitions@.len() == 0
             && rows.references@.len() == 0 && rows.signals@.len() == 0,
     {
         Self { entry_ranges: Vec::new(), definitions: Vec::new(), references: Vec::new(), signals: Vec::new() }
+    }
+}
+
+pub(super) fn copy_build_parts(syntax: &CircuitForms, rows: &BuildRows) -> (index: BuildCircuitIndex)
+    ensures
+        index.syntax.forms@ == syntax.forms@,
+        index.syntax.entries@ == syntax.entries@,
+        index.entry_ranges@ == rows.entry_ranges@,
+        index.definitions@ == rows.definitions@,
+        index.references@ == rows.references@,
+        index.signals@ == rows.signals@,
+{
+    BuildCircuitIndex {
+        syntax: CircuitForms {
+            forms: copy_index_values(&syntax.forms),
+            entries: copy_index_values(&syntax.entries),
+        },
+        entry_ranges: copy_index_values(&rows.entry_ranges),
+        definitions: copy_index_values(&rows.definitions),
+        references: copy_index_values(&rows.references),
+        signals: rows.signals.clone(),
     }
 }
 
@@ -130,10 +190,74 @@ pub closed spec fn build_index_matches(source: &str, index: BuildCircuitIndex) -
             index.entry_ranges@, index.definitions@, index.references@, index.signals@)
 }
 
+pub(super) proof fn copied_build_index_matches(
+    source: &str, original: BuildCircuitIndex, copy: BuildCircuitIndex,
+)
+    requires
+        build_index_matches(source, original),
+        copy.syntax.forms@ == original.syntax.forms@,
+        copy.syntax.entries@ == original.syntax.entries@,
+        copy.entry_ranges@ == original.entry_ranges@,
+        copy.definitions@ == original.definitions@,
+        copy.references@ == original.references@,
+        copy.signals@ == original.signals@,
+    ensures build_index_matches(source, copy),
+{
+}
+
+/// 本文が同じなら、構文と平坦な索引を別のソース参照に引き継げる。
+pub(super) proof fn build_index_transfers_on_bytes(left: &str, right: &str, index: BuildCircuitIndex)
+    requires left.spec_bytes() == right.spec_bytes(), build_index_matches(left, index),
+    ensures build_index_matches(right, index),
+{
+    let forms = index.syntax.forms@;
+    let entries = index.syntax.entries@;
+    let definitions = index.definitions@;
+    let references = index.references@;
+    let signals = index.signals@;
+    super::index::circuit_index_agrees_on_bytes(left, right, forms, entries);
+    reveal(build_rows_match);
+    assert(build_rows_match(left, forms, entries, index.entry_ranges@, definitions, references, signals));
+    assert forall|i: int| 0 <= i < entries.len() implies {
+        let range = #[trigger] index.entry_ranges@[i];
+        build_entry_matches(right, forms, entries[i].form as int, entries[i].head,
+            range, definitions, references, signals)
+    } by {
+        let range = index.entry_ranges@[i];
+        let head = entries[i].head;
+        let form = entries[i].form as int;
+        assert(build_entry_matches(left, forms, form, head, range, definitions, references, signals));
+        reveal(build_entry_matches);
+        if head is Func || head is Module || head is ModulePart {
+            let end = forms[form]->List_end as int;
+            let lo = range.references.start as int;
+            let hi = range.references.end as int;
+            let sl = range.signals.start as int;
+            let sh = range.signals.end as int;
+            let body_defs = definitions[range.definitions.start as int..range.definitions.end as int];
+            let body = choose|body: int| #[trigger] routine_signature_matches(left, forms, form + 2, end, head, body)
+                && flat_body_matches(left, forms, body, end, end, body_defs, references.take(hi),
+                    signals.take(sh), lo, hi, sl, sh);
+            super::ports::routine_signature_agrees_on_bytes(
+                left, right, forms, form + 2, end, 0, head, body, (HeaderError::ExpectedList, 0..0),
+            );
+            super::body::flat_body_transfers_on_bytes(left, right, forms, body, end, end, body_defs,
+                references.take(hi), signals.take(sh), lo, hi, sl, sh);
+            assert(routine_signature_matches(right, forms, form + 2, end, head, body));
+        }
+    };
+    assert(build_rows_match(right, forms, entries, index.entry_ranges@, definitions, references, signals));
+}
+
 pub(super) proof fn build_has_circuit_index(source: &str, index: &BuildCircuitIndex)
     requires build_index_matches(source, *index),
-    ensures circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@),
+    ensures
+        circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@),
+        index.entry_ranges@.len() == index.syntax.entries@.len(),
 {
+    reveal(build_rows_match);
+    assert(build_rows_match(source, index.syntax.forms@, index.syntax.entries@, index.entry_ranges@,
+        index.definitions@, index.references@, index.signals@));
 }
 
 pub(super) proof fn indexed_build_entry_evidence(source: &str, index: &BuildCircuitIndex, entry: int)
@@ -651,6 +775,28 @@ pub fn definition_target_atoms(forms: &[Form], row: &BuildDefinition) -> (range:
     start..end
 }
 
+pub(super) fn build_circuit_index_from_rows(
+    _source: &str, syntax: CircuitForms, rows: BuildRows,
+) -> (index: BuildCircuitIndex)
+    requires
+        circuit_index_matches(_source, syntax.forms@, syntax.entries@),
+        build_rows_match(_source, syntax.forms@, syntax.entries@, rows.entry_ranges@,
+            rows.definitions@, rows.references@, rows.signals@),
+    ensures
+        build_index_matches(_source, index),
+        index.syntax == syntax,
+        index.entry_ranges@.len() == syntax.entries@.len(),
+{
+    reveal(build_rows_match);
+    BuildCircuitIndex {
+        syntax,
+        entry_ranges: rows.entry_ranges,
+        definitions: rows.definitions,
+        references: rows.references,
+        signals: rows.signals,
+    }
+}
+
 /// 回路ソースを検査しながら、ビルドに必要な定義と参照を索引に載せる。
 ///
 /// 定義の右辺を検査する走査で参照も集める。各定義はファイルの参照配列に対する範囲を持つ。
@@ -685,14 +831,7 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
     let indexed = index_parsed_headers_into(source, forms.as_slice(), true, &mut rows);
     proof { super::index::circuit_result_diagnostics(source, indexed); }
     let entries = indexed?;
-    proof { reveal(build_rows_match); }
-    Ok(BuildCircuitIndex {
-        syntax: CircuitForms { forms, entries },
-        entry_ranges: rows.entry_ranges,
-        definitions: rows.definitions,
-        references: rows.references,
-        signals: rows.signals,
-    })
+    Ok(build_circuit_index_from_rows(source, CircuitForms { forms, entries }, rows))
 }
 
 } // verus!

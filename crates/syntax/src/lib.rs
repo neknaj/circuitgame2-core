@@ -111,8 +111,7 @@ verus! {
 ///
 /// `span` は元入力に対する半開バイト範囲である。開始位置と終了位置は UTF-8 の文字境界にある。
 /// リストの `end` は、その部分木を過ぎた最初の添字である。
-#[verifier::allow(autoderive_clone_without_spec)]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum Form {
     /// リストの子またはトップレベルに現れる一つの字句。
     Atom {
@@ -128,6 +127,17 @@ pub enum Form {
         /// 同じ構文木の配列で部分木が終わる位置。末尾の部分木では配列の長さに等しい。
         end: usize,
     },
+}
+
+impl Clone for Form {
+    fn clone(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        match self {
+            Self::Atom { kind, span } => Self::Atom { kind: *kind, span: span.start..span.end },
+            Self::List { span, end } => Self::List { span: span.start..span.end, end: *end },
+        }
+    }
 }
 
 /// 字句文法で認識したアトムの種別。

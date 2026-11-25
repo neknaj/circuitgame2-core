@@ -50,6 +50,38 @@ fn snapshot<'a>(path: &'a str, revision: u64, text: &'a str) -> SourceSnapshot<'
 }
 
 #[test]
+fn cached_circuit_index_preserves_references_and_rejects_stale_text() {
+    use circuitgame2_core::{
+        project::{CircuitProjectError, parse_circuit_project, parse_circuit_project_with_cached_indexes},
+        syntax::circuit::CachedCircuitRecovery,
+    };
+
+    let text = "(using nor)\n(func gate (in a b) (out z) (def z (nor a b)))";
+    let cache = CachedCircuitRecovery::analyze_with_build_index(text.to_owned());
+    let inputs = [snapshot("./回路/gate.ncg2", 4, text), snapshot("回路/gate.ncg2", 4, text)];
+    let prior = [Some(&cache)];
+    let reused = parse_circuit_project_with_cached_indexes(&inputs, &prior).unwrap();
+    let strict = parse_circuit_project(&inputs).unwrap();
+    let indexed = &reused.circuits()[0];
+    let expected = &strict.circuits()[0];
+    assert_eq!(reused.sources().len(), 1);
+    assert_eq!(reused.sources()[0].revision, 4);
+    assert_eq!(indexed.syntax, expected.syntax);
+    assert_eq!(indexed.names, expected.names);
+    assert_eq!(indexed.references, expected.references);
+
+    let malformed = [snapshot("./回路/gate.ncg2", 5, ")")];
+    let failed = parse_circuit_project_with_cached_indexes(&malformed, &prior).unwrap_err();
+    let strict = parse_circuit_project(&malformed).unwrap_err();
+    let CircuitProjectError::Syntax { id, revision, error } = failed else {
+        panic!("reused a stale circuit index");
+    };
+    assert_eq!(id.components(), ["回路", "gate.ncg2"]);
+    assert_eq!(revision, 5);
+    assert!(matches!(strict, CircuitProjectError::Syntax { error: original, .. } if original == error));
+}
+
+#[test]
 fn deduplicates_alias_paths_but_keeps_distinct_files_with_identical_contents() {
     let first = collect_sources(&[
         snapshot("lib/main.ncg2", 7, "(using nor)"),
