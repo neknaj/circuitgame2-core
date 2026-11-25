@@ -1,5 +1,6 @@
+use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{
-    ScalarBindingError, ScalarInvocationError, ScalarInvocationStep, ScalarValue, bind_scalar_call,
+    ScalarBindingError, ScalarInvocationError, ScalarInvocationSlice, ScalarValue, bind_scalar_call,
     prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
@@ -123,15 +124,16 @@ fn scalar_invocation_uses_argument_order_and_the_callee_frame() {
     let value = ScalarValue::Integer(IntegerValue::Int(25));
 
     let call = prepare_scalar_invocation(&plan, rank(0), 0, vec![value]).unwrap().unwrap();
-    let ScalarInvocationStep::Continue(call) = call.advance().unwrap() else { panic!() };
-    let ScalarInvocationStep::Continue(call) = call.advance().unwrap() else { panic!() };
-    let ScalarInvocationStep::Enter { rank: callee, frame } = call.advance().unwrap() else { panic!() };
+    let ScalarInvocationSlice::Suspended(call) = call.run_slice(NonZeroUsize::new(1).unwrap()).unwrap()
+    else { panic!() };
+    let ScalarInvocationSlice::Enter { rank: callee, frame } = call.run_slice(NonZeroUsize::new(2).unwrap()).unwrap()
+    else { panic!() };
     assert_eq!(callee, rank(1));
     assert_eq!(frame.parameters(), &[value, ScalarValue::Integer(IntegerValue::Int(-2))]);
     assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(value));
 
     let nested = prepare_scalar_invocation(&plan, rank(2), 0, vec![value]).unwrap().unwrap();
-    let Err(ScalarInvocationError::Deferred { source: error_source, span }) = nested.advance()
+    let Err(ScalarInvocationError::Deferred { source: error_source, span }) = nested.run_slice(NonZeroUsize::new(3).unwrap())
     else { panic!() };
     assert_eq!(error_source.revision, 31);
     assert_eq!(&source[span], "(forward x)");

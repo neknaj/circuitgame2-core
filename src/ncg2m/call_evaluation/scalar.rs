@@ -14,9 +14,15 @@ use super::DefnEvaluationBody;
 
 mod atom;
 mod invocation;
-pub use invocation::{ScalarInvocation, ScalarInvocationError, ScalarInvocationStep, prepare_scalar_invocation};
+pub use invocation::{
+    ScalarInvocation, ScalarInvocationError, ScalarInvocationSlice, ScalarInvocationStep,
+    prepare_scalar_invocation,
+};
 #[cfg(verus_only)]
-pub use invocation::scalar_invocation_applicable;
+pub use invocation::{
+    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_results_agree,
+    invocation_terminal_slice_extends, resumed_invocation_slices_match, scalar_invocation_applicable,
+};
 pub use atom::ScalarLiteralError;
 #[cfg(verus_only)]
 pub use atom::atomic_body_matches;

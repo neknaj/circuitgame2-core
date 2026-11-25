@@ -3,12 +3,20 @@
 use super::*;
 use super::super::{CallArgumentStep, CallArguments};
 #[cfg(verus_only)]
-use super::atom::scalar_atom_matches;
+use super::atom::{scalar_atom_matches, scalar_atom_results_agree};
 use crate::ncg2m::defn::span_of;
 #[cfg(verus_only)]
 use crate::project::{DefnCallEdge, defn_call_argument_origin};
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::signature_result_origin;
+
+mod slice;
+pub use slice::ScalarInvocationSlice;
+#[cfg(verus_only)]
+pub use slice::{
+    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_results_agree,
+    invocation_terminal_slice_extends, resumed_invocation_slices_match,
+};
 
 verus! {
 
@@ -179,6 +187,83 @@ impl<'plan, 'p, 'a> ScalarInvocation<'plan, 'p, 'a> {
                 }
                 _ => false,
             }
+        }
+    }
+}
+
+/// 呼び出し元、呼び出し先、引数の値列が同じ再開状態を表す。
+pub open spec fn invocation_states_agree(
+    first: ScalarInvocation, second: ScalarInvocation,
+) -> bool {
+    &&& first.caller_model() == second.caller_model()
+    &&& first.callee_model() == second.callee_model()
+    &&& first.ranks_model() == second.ranks_model()
+    &&& first.edge_model() == second.edge_model()
+    &&& first.arguments_model() == second.arguments_model()
+}
+
+/// 診断が同じ元文書・範囲・理由を表す。
+pub open spec fn invocation_errors_agree(
+    first: ScalarInvocationError, second: ScalarInvocationError,
+) -> bool {
+    match (first, second) {
+        (ScalarInvocationError::Literal(a), ScalarInvocationError::Literal(b)) =>
+            *a.source == *b.source && a.span == b.span && a.error == b.error,
+        (ScalarInvocationError::Deferred { source: a, span: left },
+            ScalarInvocationError::Deferred { source: b, span: right }) => *a == *b && left == right,
+        _ => false,
+    }
+}
+
+spec fn invocation_step_atom<'plan, 'p, 'a>(
+    result: Result<ScalarInvocationStep<'plan, 'p, 'a>, ScalarInvocationError<'p, 'a>>,
+) -> Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>> {
+    match result {
+        Ok(ScalarInvocationStep::Continue(after)) => Ok(Some(after.arguments_model().last())),
+        Err(ScalarInvocationError::Literal(error)) => Err(error),
+        _ => Ok(None),
+    }
+}
+
+proof fn invocation_steps_agree(
+    first: ScalarInvocation, second: ScalarInvocation,
+    a: Result<ScalarInvocationStep, ScalarInvocationError>,
+    b: Result<ScalarInvocationStep, ScalarInvocationError>,
+)
+    requires invocation_states_agree(first, second), first.advance_matches(a), second.advance_matches(b),
+    ensures match (a, b) {
+        (Ok(ScalarInvocationStep::Continue(left)), Ok(ScalarInvocationStep::Continue(right))) =>
+            invocation_states_agree(left, right),
+        (Ok(ScalarInvocationStep::Enter { rank: left, frame: a }), Ok(ScalarInvocationStep::Enter { rank: right, frame: b })) =>
+            left == right && a.body_model() == b.body_model() && a.parameter_values_model() == b.parameter_values_model(),
+        (Err(left), Err(right)) => invocation_errors_agree(left, right),
+        _ => false,
+    },
+{
+    let slot = first.arguments_model().len() as int;
+    let edge = first.edge_model();
+    let callee = first.callee_model();
+    if slot != edge.arguments@.len() {
+        let argument = edge.arguments@[slot];
+        let expected = callee.signature.parameters@[slot].ty.ty;
+        scalar_atom_results_agree(&first.caller_model(), argument, expected,
+            invocation_step_atom(a), invocation_step_atom(b));
+        if let (Ok(ScalarInvocationStep::Continue(left)), Ok(ScalarInvocationStep::Continue(right))) = (a, b) {
+            let before = first.arguments_model();
+            let left_values = left.arguments_model();
+            let right_values = right.arguments_model();
+            assert(left_values.take(slot) == before && right_values.take(slot) == before);
+            assert(left_values.last() == right_values.last());
+            assert forall|i: int| 0 <= i < left_values.len()
+                implies (#[trigger] left_values[i]) == (#[trigger] right_values[i]) by {
+                if i < slot {
+                    assert(left_values[i] == left_values.take(slot)[i]);
+                    assert(right_values[i] == right_values.take(slot)[i]);
+                } else {
+                    assert(i == slot && i == left_values.len() - 1 && i == right_values.len() - 1);
+                }
+            };
+            assert(left_values =~= right_values);
         }
     }
 }

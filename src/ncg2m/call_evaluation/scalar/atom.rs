@@ -152,6 +152,22 @@ pub(super) closed spec fn scalar_atom_matches<'p, 'a>(
     }
 }
 
+/// 同じ式位置・環境・期待型から得た値か診断は一意である。
+pub(super) proof fn scalar_atom_results_agree<'p, 'a>(
+    frame: &ScalarCallFrame<'p, 'a>, at: usize, expected: DataType<'a>,
+    first: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
+    second: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
+)
+    requires scalar_atom_matches(frame, at, expected, first),
+        scalar_atom_matches(frame, at, expected, second),
+    ensures match (first, second) {
+        (Ok(a), Ok(b)) => a == b,
+        (Err(a), Err(b)) => *a.source == *b.source && a.span == b.span && a.error == b.error,
+        _ => false,
+    },
+{
+}
+
 /// 本体が真偽値、整数、または仮引数のアトムなら、その値または整数診断を定める。
 pub closed spec fn atomic_body_matches<'p, 'a>(
     frame: &ScalarCallFrame<'p, 'a>, result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
