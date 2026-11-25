@@ -17,7 +17,7 @@ use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::circuit::NameSite;
 use crate::syntax::circuit::{
-    CircuitFormError, CircuitRecovery, NamedBuildCircuit, index_named_build_forms,
+    CachedCircuitRecovery, CircuitFormError, CircuitRecovery, NamedBuildCircuit, index_named_build_forms,
     recover_circuit_forms,
 };
 #[cfg(verus_only)]
@@ -360,7 +360,28 @@ pub fn parse_circuit_project<'a>(
             Err(error) => circuit_project_error(inputs@, error),
         },
 {
-    match parse_circuit_project_internal(inputs, false) {
+    parse_circuit_project_with_cached_indexes(inputs, &[])
+}
+
+/// 同じ本文の検査済み索引を使ってプロジェクトの厳格解析を行う。
+///
+/// キャッシュはソース入力と同順に渡す。その位置にキャッシュがなく、または本文が異なる場合は
+/// 通常どおり解析する。パスと文書版は、キャッシュの有無にかかわらずソース入力から決める。
+///
+/// # Errors
+///
+/// 入力の収集、未対応言語、回路ソースの最初の構文違反を通常の厳格解析と同じように報告する。
+pub fn parse_circuit_project_with_cached_indexes<'a>(
+    inputs: &[SourceSnapshot<'a>], cached: &[Option<&CachedCircuitRecovery>],
+) -> (result: Result<CircuitProject<'a>, CircuitProjectError<'a>>)
+    ensures
+        result.is_ok() <==> circuit_project_accepts(inputs@),
+        match result {
+            Ok(project) => project.matches(inputs@),
+            Err(error) => circuit_project_error(inputs@, error),
+        },
+{
+    match parse_circuit_project_internal(inputs, false, cached) {
         Ok(project) => Ok(project),
         Err(failure) => Err(failure.error),
     }
@@ -382,7 +403,7 @@ pub fn parse_circuit_project_with_recovery<'a>(
             Err(failure) => circuit_project_failure(inputs@, failure),
         },
 {
-    parse_circuit_project_internal(inputs, true)
+    parse_circuit_project_internal(inputs, true, &[])
 }
 
 pub(super) fn index_project_circuit<'a>(source: &ProjectSource<'a>)
@@ -401,6 +422,7 @@ pub(super) fn index_project_circuit<'a>(source: &ProjectSource<'a>)
 fn parse_circuit_project_internal<'a>(
     inputs: &[SourceSnapshot<'a>],
     recover: bool,
+    cached: &[Option<&CachedCircuitRecovery>],
 ) -> (result: Result<CircuitProject<'a>, CircuitProjectFailure<'a>>)
     ensures
         result.is_ok() <==> circuit_project_accepts(inputs@),
@@ -441,7 +463,22 @@ fn parse_circuit_project_internal<'a>(
                 recovery: None,
             });
         }
-        let parsed = match index_project_circuit(source) {
+        let candidate = if source.first_input < cached.len() {
+            match cached[source.first_input] {
+                Some(cache) => cache.reuse_build_index(source.text),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let indexed = match candidate {
+            Some(parsed) => {
+                proof { assert(parsed_circuit_matches(*source, parsed)); }
+                Ok(parsed)
+            },
+            None => index_project_circuit(source),
+        };
+        let parsed = match indexed {
             Ok(parsed) => parsed,
             Err(error) => {
                 let id = source.id.copy_for_diagnostic();

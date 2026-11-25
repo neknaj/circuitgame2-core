@@ -403,6 +403,51 @@ pub fn recover_circuit_forms(source: &str) -> (result: CircuitRecovery)
         circuit_recovery_matches(source, result),
         result is Complete <==> circuit_source_matches(source),
 {
+    recover_circuit_forms_into(source, false, &mut BuildRows::new())
+}
+
+/// 正常なソースを一度字句解析し、回路フォームと定義・参照の索引を作る。
+///
+/// # Errors
+///
+/// 回路文法に違反する場合は、ソース上の根拠を保持した回復結果を返す。
+pub fn recover_circuit_build_index(source: &str)
+    -> (result: Result<BuildCircuitIndex, CircuitRecovery>)
+    ensures
+        result.is_ok() <==> circuit_source_matches(source),
+        match result {
+            Ok(index) => build_index_matches(source, index)
+                && complete_list_indices(index.syntax.forms@) && nested_list_indices(index.syntax.forms@)
+                && list_source_delimiters(source, index.syntax.forms@, false)
+                && form_spans_valid(source, index.syntax.forms@, source.spec_bytes().len() as int),
+            Err(recovery) => circuit_recovery_matches(source, recovery) && !(recovery is Complete),
+        },
+{
+    let mut rows = BuildRows::new();
+    let recovery = recover_circuit_forms_into(source, true, &mut rows);
+    match recovery {
+        CircuitRecovery::Complete(syntax) => {
+            Ok(super::super::build::build_circuit_index_from_rows(source, syntax, rows))
+        },
+        _ => Err(recovery),
+    }
+}
+
+fn recover_circuit_forms_into(source: &str, collect: bool, rows: &mut BuildRows)
+    -> (result: CircuitRecovery)
+    requires
+        rows.entry_ranges@.len() == 0 && rows.definitions@.len() == 0
+            && rows.references@.len() == 0 && rows.signals@.len() == 0,
+    ensures
+        circuit_recovery_matches(source, result),
+        result is Complete <==> circuit_source_matches(source),
+        match result {
+            CircuitRecovery::Complete(syntax) => collect ==>
+                build_rows_match(source, syntax.forms@, syntax.entries@, final(rows).entry_ranges@,
+                    final(rows).definitions@, final(rows).references@, final(rows).signals@),
+            _ => true,
+        },
+{
     let forms = match parse(source) {
         Ok(forms) => forms,
         Err(_) => {
@@ -411,7 +456,7 @@ pub fn recover_circuit_forms(source: &str) -> (result: CircuitRecovery)
             return CircuitRecovery::WithSyntaxRepairs { recovered, original };
         },
     };
-    match index_parsed_headers(source, forms.as_slice()) {
+    match index_parsed_headers_into(source, forms.as_slice(), collect, rows) {
         Ok(entries) => CircuitRecovery::Complete(CircuitForms { forms, entries }),
         Err(_) => {
             let checked = inspect_circuit_forms(source, forms.as_slice());

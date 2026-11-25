@@ -14,7 +14,7 @@ pub use recovery::{circuit_recovery_matches, circuit_recovery_results_agree_on_s
     complete_recovery_agrees_with_index, one_original_circuit_list, original_diagnostic_within, original_list_is_inspectable};
 pub use recovery::{
     CachedCircuitRecovery, CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
-    RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_forms, recover_circuit_names,
+    RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_build_index, recover_circuit_forms, recover_circuit_names,
     recover_circuit_names_with_cache,
 };
 
@@ -403,7 +403,7 @@ proof fn circuit_acceptance_agrees_on_bytes(left: &str, right: &str)
     }
 }
 
-proof fn circuit_index_agrees_on_bytes(left: &str, right: &str, forms: Seq<Form>, entries: Seq<Entry>)
+pub(super) proof fn circuit_index_agrees_on_bytes(left: &str, right: &str, forms: Seq<Form>, entries: Seq<Entry>)
     requires left.spec_bytes() == right.spec_bytes(), circuit_index_matches(left, forms, entries),
     ensures circuit_index_matches(right, forms, entries),
 {

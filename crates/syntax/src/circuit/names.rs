@@ -430,15 +430,34 @@ pub fn index_named_build_forms(source: &str) -> (result: Result<NamedBuildCircui
         },
 {
     let built = index_build_forms(source)?;
+    Ok(name_build_index(source, built))
+}
+
+pub(super) fn name_build_index<'a>(source: &'a str, built: BuildCircuitIndex)
+    -> (named: NamedBuildCircuit<'a>)
+    requires
+        build_index_matches(source, built),
+        complete_list_indices(built.syntax.forms@) && nested_list_indices(built.syntax.forms@),
+        form_spans_valid(source, built.syntax.forms@, source.spec_bytes().len() as int),
+    ensures
+        build_index_matches(source, named.build_model()),
+        named.entry_ranges@.len() == named.syntax.entries@.len(),
+        circuit_index_matches(source, named.syntax.forms@, named.syntax.entries@),
+        complete_list_indices(named.syntax.forms@) && nested_list_indices(named.syntax.forms@),
+        form_spans_valid(source, named.syntax.forms@, source.spec_bytes().len() as int),
+        named_forms_match(source, named.syntax.forms@, named.syntax.entries@,
+            named.names@, named.syntax.entries@.len() as int),
+{
+    proof { super::build::build_has_circuit_index(source, &built); }
     let names = collect_named_forms(source, &built.syntax);
-    Ok(NamedBuildCircuit {
+    NamedBuildCircuit {
         syntax: built.syntax,
         names,
         entry_ranges: built.entry_ranges,
         definitions: built.definitions,
         references: built.references,
         signals: built.signals,
-    })
+    }
 }
 
 fn collect_named_forms<'a>(source: &'a str, syntax: &CircuitForms) -> (names: Vec<NamedForm<'a>>)

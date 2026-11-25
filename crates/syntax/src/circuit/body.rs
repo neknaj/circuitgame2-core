@@ -802,6 +802,43 @@ pub(super) open spec fn flat_body_matches(
         ==> exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).form == i
 }
 
+/// 同じ UTF-8 本文では、同じ本体の宣言・参照範囲を再利用できる。
+pub(super) proof fn flat_body_transfers_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, end: int, cursor: int,
+    rows: Seq<BuildDefinition>, references: Seq<ExpressionReference>, signals: Seq<usize>,
+    first: int, stop: int, first_signal: int, stop_signal: int,
+)
+    requires
+        left.spec_bytes() == right.spec_bytes(),
+        flat_body_matches(left, forms, start, end, cursor, rows, references, signals,
+            first, stop, first_signal, stop_signal),
+    ensures
+        flat_body_matches(right, forms, start, end, cursor, rows, references, signals,
+            first, stop, first_signal, stop_signal),
+{
+    reveal(flat_body_matches);
+    assert forall|i: int| is_definition_at(right, forms, start, end, i) && i < cursor
+        implies exists|j: int| 0 <= j < rows.len() && (#[trigger] rows[j]).form == i by {
+        assert(is_definition_at(left, forms, start, end, i));
+    };
+    assert forall|i: int| 0 <= i < rows.len() implies
+        flat_definition_matches(right, forms, start, end, #[trigger] rows[i], references, signals) by {
+        let row = rows[i];
+        assert(flat_definition_matches(left, forms, start, end, row, references, signals));
+        reveal(flat_definition_matches);
+        let lo = row.expression.start as int;
+        let hi = row.expression.end as int;
+        super::expression_forest::expression_forest_agrees_on_bytes(
+            left, right, forms, lo, hi, (HeaderError::ExpectedList, 0..0),
+        );
+        super::expression_forest::expression_collections_agree_on_bytes(left, right, forms, lo, hi);
+        assert forall|j: int| row.references.start <= j < row.references.end
+            implies expression_reference_in_source(right, forms, #[trigger] references[j]) by {
+            assert(expression_reference_in_source(left, forms, references[j]));
+        };
+    };
+}
+
 /// 平坦な本体の一行から、参照範囲と元ソースの根拠を取り出す。
 pub(super) proof fn flat_body_reference_boundaries(
     source: &str, forms: Seq<Form>, body: int, end: int, rows: Seq<BuildDefinition>,
