@@ -10,11 +10,11 @@ use super::window::select_recovery_window;
 use super::window::original_lists_ordered;
 #[cfg(verus_only)]
 use crate::{original_list_ranges, recovered_replay_matches};
-use crate::circuit::build::{BuildRows, copy_build_parts};
+use crate::circuit::build::{BuildRows, copy_build_parts, index_build_forms};
 use crate::circuit::names::name_build_index;
 #[cfg(verus_only)]
 use super::{
-    build_index_matches, circuit_recovery_matches, circuit_recovery_transfers_on_sexpr_bytes,
+    build_index_matches, circuit_recovery_matches, circuit_recovery_transfers_on_sexpr_bytes, circuit_source_error,
     circuit_index_matches, circuit_source_matches, complete_list_indices, form_spans_valid, named_forms_match,
     nested_list_indices, well_formed_sexpr,
 };
@@ -98,6 +98,54 @@ impl CachedCircuitRecovery {
             assert(text@ == source@ && circuit_recovery_matches(text, recovery));
         };
         Self { source, recovery, build_rows }
+    }
+
+    /// 本文を一度だけ厳格解析し、現在の名前索引と再利用できる回復構文を返す。
+    ///
+    /// 名前は `source` から借用する。キャッシュは同じ本文と索引を所有する。
+    ///
+    /// # Errors
+    ///
+    /// 通常の厳格解析と同じ順で最初の構文違反を返す。
+    pub fn index_and_record(source: &str)
+        -> (result: Result<(NamedBuildCircuit<'_>, Self), super::super::CircuitFormError>)
+        ensures
+            result.is_ok() <==> circuit_source_matches(source),
+            forall|error: super::super::CircuitFormError| #[trigger] circuit_source_error(source, error) <==> result == Err(error),
+            match result {
+                Ok((named, cache)) =>
+                    cache.source_model() == source@
+                    && cache.build_model().is_some()
+                    && build_index_matches(source, named.build_model())
+                    && circuit_index_matches(source, named.syntax.forms@, named.syntax.entries@)
+                    && complete_list_indices(named.syntax.forms@) && nested_list_indices(named.syntax.forms@)
+                    && form_spans_valid(source, named.syntax.forms@, source.spec_bytes().len() as int)
+                    && named.entry_ranges@.len() == named.syntax.entries@.len()
+                    && named_forms_match(source, named.syntax.forms@, named.syntax.entries@,
+                        named.names@, named.syntax.entries@.len() as int),
+                Err(error) => circuit_source_error(source, error),
+            },
+    {
+        let built = index_build_forms(source)?;
+        let ghost model = built;
+        let recovery = CircuitRecovery::Complete(built.syntax);
+        let rows = BuildRows {
+            entry_ranges: built.entry_ranges,
+            definitions: built.definitions,
+            references: built.references,
+            signals: built.signals,
+        };
+        let mut text = String::new();
+        text.push_str(source);
+        proof {
+            reveal(circuit_recovery_matches);
+            assert(circuit_recovery_matches(source, recovery));
+            assert(exists|other: &str| other@ == text@ && #[trigger] circuit_recovery_matches(other, recovery)
+                && build_index_matches(other, model));
+        }
+        let cache = Self { source: text, recovery, build_rows: Some(rows) };
+        let Some(named) = cache.reuse_build_index(source) else { unreachable!() };
+        Ok((named, cache))
     }
 
     /// 同じ本文のビルド索引を複製し、名前の文字列を現在の本文から借用する。

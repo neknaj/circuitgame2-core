@@ -381,8 +381,46 @@ pub fn parse_circuit_project_with_cached_indexes<'a>(
             Err(error) => circuit_project_error(inputs@, error),
         },
 {
-    match parse_circuit_project_internal(inputs, false, cached) {
-        Ok(project) => Ok(project),
+    match parse_circuit_project_internal(inputs, false, cached, &[]) {
+        Ok((project, _)) => Ok(project),
+        Err(failure) => Err(failure.error),
+    }
+}
+
+/// 指定した入力位置と、本文を所有する索引の対応を表す。
+pub open spec fn recorded_circuit_index_matches(
+    source: ProjectSource, requested: Seq<bool>, index: Option<CachedCircuitRecovery>,
+) -> bool {
+    let input = source.input_index_model();
+    &&& index.is_some() == (input < requested.len() && requested[input as int])
+    &&& index matches Some(cache) ==> cache.source_model() == source.text_model()@ && cache.build_model().is_some()
+}
+
+/// 厳格解析と同時に、指定したファイルの再利用用索引を作る。
+///
+/// `requested` はソース入力と同順に指定し、足りない位置は偽として扱う。
+/// 同じ識別子をまとめたときは、最初の入力の指定を使う。真の位置は同じ本文を
+/// 一度解析して索引を登録する。ほかの位置では従来どおり `cached` を使える。
+/// 空でない指定を渡した場合、再利用用索引はプロジェクトのソース順と同じ長さで返す。
+///
+/// # Errors
+///
+/// ソースの収集、未対応言語、構文の最初の違反を返す。
+pub fn parse_circuit_project_recording_indexes<'a>(
+    inputs: &[SourceSnapshot<'a>], cached: &[Option<&CachedCircuitRecovery>], requested: &[bool],
+) -> (result: Result<(CircuitProject<'a>, Vec<Option<CachedCircuitRecovery>>), CircuitProjectError<'a>>)
+    ensures
+        result.is_ok() <==> circuit_project_accepts(inputs@),
+        match result {
+            Ok((project, records)) => project.matches(inputs@)
+                && records@.len() == (if requested@.len() == 0 { 0 } else { project.sources_model().len() })
+                && (forall|i: int| 0 <= i < records@.len() ==>
+                    recorded_circuit_index_matches(project.sources_model()[i], requested@, records@[i])),
+            Err(error) => circuit_project_error(inputs@, error),
+        },
+{
+    match parse_circuit_project_internal(inputs, false, cached, requested) {
+        Ok(result) => Ok(result),
         Err(failure) => Err(failure.error),
     }
 }
@@ -403,7 +441,10 @@ pub fn parse_circuit_project_with_recovery<'a>(
             Err(failure) => circuit_project_failure(inputs@, failure),
         },
 {
-    parse_circuit_project_internal(inputs, true, &[])
+    match parse_circuit_project_internal(inputs, true, &[], &[]) {
+        Ok((project, _)) => Ok(project),
+        Err(failure) => Err(failure),
+    }
 }
 
 pub(super) fn index_project_circuit<'a>(source: &ProjectSource<'a>)
@@ -423,11 +464,15 @@ fn parse_circuit_project_internal<'a>(
     inputs: &[SourceSnapshot<'a>],
     recover: bool,
     cached: &[Option<&CachedCircuitRecovery>],
-) -> (result: Result<CircuitProject<'a>, CircuitProjectFailure<'a>>)
+    requested: &[bool],
+) -> (result: Result<(CircuitProject<'a>, Vec<Option<CachedCircuitRecovery>>), CircuitProjectFailure<'a>>)
     ensures
         result.is_ok() <==> circuit_project_accepts(inputs@),
         match result {
-            Ok(project) => project.matches(inputs@),
+            Ok((project, records)) => project.matches(inputs@)
+                && records@.len() == (if requested@.len() == 0 { 0 } else { project.sources_model().len() })
+                && (forall|i: int| 0 <= i < records@.len() ==>
+                    recorded_circuit_index_matches(project.sources_model()[i], requested@, records@[i])),
             Err(failure) => circuit_project_error(inputs@, failure.error)
                 && (if recover { circuit_project_failure(inputs@, failure) }
                     else { failure.recovery.is_none() }),
@@ -441,6 +486,7 @@ fn parse_circuit_project_internal<'a>(
         }),
     };
     let mut circuits: Vec<NamedBuildCircuit> = Vec::new();
+    let mut records: Vec<Option<CachedCircuitRecovery>> = Vec::new();
     let mut index = 0;
     while index < sources.len()
         invariant
@@ -448,6 +494,9 @@ fn parse_circuit_project_internal<'a>(
             valid_source_snapshots(inputs@),
             index == circuits@.len() <= sources@.len(),
             forall|i: int| 0 <= i < index ==> #[trigger] parsed_circuit_matches(sources@[i], circuits@[i]),
+            records@.len() == if requested@.len() == 0 { 0 } else { index as int },
+            forall|i: int| 0 <= i < records@.len() ==>
+                #[trigger] recorded_circuit_index_matches(sources@[i], requested@, records@[i]),
         decreases sources@.len() - index,
     {
         let source = &sources[index];
@@ -463,22 +512,30 @@ fn parse_circuit_project_internal<'a>(
                 recovery: None,
             });
         }
-        let candidate = if source.first_input < cached.len() {
-            match cached[source.first_input] {
-                Some(cache) => cache.reuse_build_index(source.text),
-                None => None,
+        let input = source.input_index();
+        let indexed = if input < requested.len() && requested[input] {
+            match CachedCircuitRecovery::index_and_record(source.text) {
+                Ok((parsed, record)) => Ok((parsed, Some(record))),
+                Err(error) => Err(error),
             }
         } else {
-            None
+            let candidate = if source.first_input < cached.len() {
+                match cached[source.first_input] {
+                    Some(cache) => cache.reuse_build_index(source.text),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            match candidate {
+                Some(parsed) => Ok((parsed, None)),
+                None => match index_project_circuit(source) {
+                    Ok(parsed) => Ok((parsed, None)),
+                    Err(error) => Err(error),
+                },
+            }
         };
-        let indexed = match candidate {
-            Some(parsed) => {
-                proof { assert(parsed_circuit_matches(*source, parsed)); }
-                Ok(parsed)
-            },
-            None => index_project_circuit(source),
-        };
-        let parsed = match indexed {
+        let (parsed, record) = match indexed {
             Ok(parsed) => parsed,
             Err(error) => {
                 let id = source.id.copy_for_diagnostic();
@@ -492,6 +549,13 @@ fn parse_circuit_project_internal<'a>(
             }
         };
         assert(parsed_circuit_matches(*source, parsed));
+        if !requested.is_empty() {
+            proof {
+                source.text_model_is_text();
+                assert(recorded_circuit_index_matches(*source, requested@, record));
+            }
+            records.push(record);
+        }
         circuits.push(parsed);
         index += 1;
     }
@@ -499,7 +563,7 @@ fn parse_circuit_project_internal<'a>(
         parsed_sources_cover_prefix(inputs@, sources@, circuits@, sources@.len() as int, inputs@.len() as int);
         collected_source_ids_unique(inputs@, sources@);
     }
-    Ok(CircuitProject { sources, circuits })
+    Ok((CircuitProject { sources, circuits }, records))
 }
 
 } // verus!
