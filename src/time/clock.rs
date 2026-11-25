@@ -178,8 +178,19 @@ impl SimulationClock {
         {
             return Err(ClockError::StaleChange);
         }
-        self.position = change.to;
+        self.commit_current(change);
         Ok(())
+    }
+
+    /// 呼び出し側で現在の時計との対応を保証した変更を確定する。
+    pub(crate) fn commit_current(&mut self, change: PendingClockChange)
+        requires old(self).position_model() == change.change_model().0,
+        ensures
+            final(self).position_model() == change.change_model().1,
+            clock_change_matches(old(self).position_model(), final(self).position_model()),
+    {
+        proof { use_type_invariant(&change); }
+        self.position = change.to;
     }
 }
 
