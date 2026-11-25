@@ -2,10 +2,10 @@
 
 use super::*;
 use super::super::parameters_match;
-use super::super::atom::typed_atom_yields_value;
+use super::super::atom::{a_list_has_no_scalar_atom, typed_atom_yields_value};
 use super::super::condition::{conditional_children_follow_parent, conditional_match_has_positions};
 use crate::ncg2m::expression_types::{
-    local_scalar_fragment, local_scalar_site_is_typed, scalar_atom_at, scalar_conditional_child_types,
+    conditional_positions, local_scalar_fragment, local_scalar_site_is_typed, scalar_atom_at, scalar_conditional_child_types,
 };
 
 verus! {
@@ -42,6 +42,33 @@ proof fn checked_conditional_children(
 }
 
 impl<'p, 'a> ScalarExpression<'p, 'a> {
+    pub(in crate::ncg2m::call_evaluation::scalar) proof fn declared_call_requests_lookup(
+        &self, result: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>,
+    )
+        requires self.expression_step_matches(result), {
+            let body = self.frame_model().body_model();
+            let site = self.expression_model();
+            &&& site.at < body.forms@.len() && body.forms@[site.at as int] is List
+            &&& conditional_positions(body.source.text_model(), body.forms@, site.at).is_none()
+        },
+        ensures result matches Ok(ScalarExpressionStep::NeedsForm(next)) && expression_positions_agree(*self, next),
+    {
+        reveal(ScalarExpression::expression_step_matches);
+        let frame = self.frame_model();
+        let body = frame.body_model();
+        let site = self.expression_model();
+        if let Ok(ScalarExpressionStep::Continue(next)) = result {
+            if self.condition_entry_matches(next) {
+                conditional_match_has_positions(body, site, Some(next.branches_model().last()));
+                assert(false);
+            }
+        }
+        let atom = choose|atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>|
+            #[trigger] scalar_atom_matches(&frame, site.at, site.expected, atom)
+                && self.atom_transition_matches(atom, result);
+        a_list_has_no_scalar_atom(&frame, site.at, site.expected, atom);
+    }
+
     /// 評価中の式と保留中の条件式が、同じ仮引数環境で型検査を通った局所スカラー式であることを表す。
     pub closed spec fn is_locally_checked(&self) -> bool {
         let frame = self.frame_model();

@@ -130,6 +130,11 @@ fn scalar_invocation_uses_argument_order_and_the_callee_frame() {
     let rank = |item| plan.rank_of(DefnPosition { file: 0, item }).unwrap();
     let value = ScalarValue::Integer(IntegerValue::Int(25));
 
+    let one = NonZeroUsize::new(1).unwrap();
+    let execution = ScalarExecution::start(&plan, rank(0), vec![value]).unwrap();
+    let ScalarExecutionSlice::Suspended(lookup) = execution.run_slice(one).unwrap() else { panic!() };
+    assert!(matches!(lookup.run_slice(one).unwrap(), ScalarExecutionSlice::Suspended(_)));
+
     let call = prepare_scalar_invocation(&plan, rank(0), 0, vec![value]).unwrap().unwrap();
     let ScalarInvocationSlice::Suspended(call) = call.run_slice(NonZeroUsize::new(1).unwrap()).unwrap()
     else { panic!() };

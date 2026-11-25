@@ -168,6 +168,15 @@ pub(super) closed spec fn scalar_atom_matches<'p, 'a>(
     }
 }
 
+pub(super) proof fn a_list_has_no_scalar_atom(
+    frame: &ScalarCallFrame, at: usize, expected: DataType, result: Result<Option<ScalarValue>, ScalarLiteralError>,
+)
+    requires
+        at < frame.body_model().forms@.len(), frame.body_model().forms@[at as int] is List,
+        scalar_atom_matches(frame, at, expected, result),
+    ensures result == Ok(None),
+{}
+
 /// 型検査で受理したアトムは、同じ仮引数環境で期待型の値を返す。
 pub(super) proof fn typed_atom_yields_value<'p, 'a>(
     frame: &ScalarCallFrame<'p, 'a>, at: usize, expected: DataType<'a>,

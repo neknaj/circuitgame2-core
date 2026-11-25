@@ -110,9 +110,11 @@ pub(in crate::ncg2m) proof fn call_form_origin(source: &str, forms: Seq<Form>, a
 
 proof fn declared_head_is_deferred_by_local_typing(source: &str, forms: Seq<Form>, at: usize, call: CallForm)
     requires call_form_matches(source, forms, at, Some(call)),
-    ensures shape(source, forms, at) == Err(ExpressionCheckFailure::Deferred(
-        DeferredExpression::Form(form_span(forms[at as int])),
-    )),
+    ensures
+        shape(source, forms, at) == Err(ExpressionCheckFailure::Deferred(
+            DeferredExpression::Form(form_span(forms[at as int])),
+        )),
+        conditional_positions(source, forms, at).is_none(),
 {}
 
 fn count_call_arguments(forms: &[Form], _call: usize, first: usize, end: usize) -> (count: usize)

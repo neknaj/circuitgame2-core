@@ -1,7 +1,12 @@
 //! 型検査済みの宣言呼び出しを探す遷移に、元の本体と署名の証拠を使う。
 
 use super::*;
-use crate::project::{MixedUseAliases, defn_call_plan_matches, defn_call_plan_root_scalar_call};
+use super::slice::scalar_execution_slice_matches;
+use crate::project::{
+    MixedUseAliases, defn_call_plan_matches, defn_call_plan_root_scalar_call, defn_call_plan_site_at_rank,
+};
+
+mod example;
 
 verus! {
 
@@ -24,6 +29,57 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             &&& (ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
             &&& self.plan.calls_model_at_rank(self.rank) matches Some(row)
                 && exists|found: int| site <= found < row.len() && (#[trigger] row[found]).at == body.at
+        }
+    }
+
+    /// 開始時の本体がスカラーを返す宣言呼び出しなら、最初の遷移で対応する辺の探索を始める。
+    #[verifier::spinoff_prover]
+    pub proof fn first_slice_dispatches_scalar_root_call(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, plan: &'plan DefnCallPlan<'p, 'a>, rank: usize,
+        frame: ScalarCallFrame<'p, 'a>, site: usize,
+        result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires
+            self.starts_with(plan, rank, frame),
+            defn_call_plan_matches(aliases, plan),
+            plan.body_matches_at_rank(rank, frame.body_model()),
+            {
+                let body = frame.body_model();
+                let ty = body.signature.result_type.ty;
+                &&& ty.list_depth == 0
+                &&& (ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
+                &&& plan.calls_model_at_rank(rank) matches Some(row) && site < row.len()
+                    && row[site as int].at == body.at
+            },
+            scalar_execution_slice_matches(*self, 1, result),
+        ensures result matches Ok(ScalarExecutionSlice::Suspended(after))
+            && after.searches_scalar_root_call() && after.plan_model() == plan,
+    {
+        self.one_step_slice_matches(result);
+        let at = defn_call_plan_site_at_rank(aliases, plan, rank, site);
+        reveal(ScalarExecution::starts_with);
+        reveal(ScalarExecution::step_matches);
+        let expr = self.active->Expression_0;
+        let body = frame.body_model();
+        let row = plan.calls_model_at_rank(rank)->Some_0;
+        assert(row[site as int].from == plan.order_model()[rank as int]);
+        assert(expr.frame_model() == frame && expr.expression_model().at == body.at && body.at == at);
+        assert(body.forms@[at as int] is List);
+        assert(*body.source == *row[site as int].call.source);
+        assert(crate::ncg2m::expression_types::conditional_positions(body.source.text_model(), body.forms@, at).is_none());
+        match result {
+            Ok(ScalarExecutionSlice::Suspended(after)) => {
+                let inner = choose|inner: ScalarExpressionStep<'p, 'a>| #[trigger] expr.expression_step_matches(Ok(inner))
+                    && next_expression_at(after.active, expr.result_type_model(), inner);
+                expr.declared_call_requests_lookup(Ok(inner));
+                assert(after.active is Lookup);
+                assert(exists|found: int| 0 <= found < row.len() && (#[trigger] row[found]).at == frame.body_model().at);
+            },
+            Err(ScalarExecutionError::Literal(error)) => {
+                expr.declared_call_requests_lookup(Err(error));
+                assert(false);
+            },
+            _ => { assert(false); },
         }
     }
 

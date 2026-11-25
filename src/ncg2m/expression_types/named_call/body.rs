@@ -648,6 +648,7 @@ pub open spec fn defn_call_edge_matches(aliases: &MixedUseAliases, edge: DefnCal
         &&& forms[at as int] is List && forms[at + 1] is Atom
         &&& edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
         &&& defn_call_arguments(forms, at, edge.arguments@)
+        &&& conditional_positions(edge.call.source.text_model(), forms, at).is_none()
     }
     &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(header)
         && header.parameters@.len() == edge.arguments@.len()
@@ -690,6 +691,7 @@ proof fn finish_edge_evidence(
         at == edge.at,
         at + 1 < forms.len(), forms[at as int] is List, forms[at + 1] is Atom,
         defn_call_arguments(forms, at, edge.arguments@),
+        conditional_positions(edge.call.source.text_model(), forms, at).is_none(),
         edge.call.span == form_span(forms[at as int]),
         edge.call.head == form_span(forms[at + 1]),
         defn_name_resolution(aliases, edge.from.file, edge.from.item, name,
@@ -777,6 +779,7 @@ proof fn recorded_edge_has_origin<'p, 'a>(
     let (form, declaration, signature) = trace_entry_resolution(aliases, caller, forms, body, outcomes, calls, issues, index);
     resolved_defn_name_origin(aliases, caller.file, caller.item, form.word, declaration);
     call_form_origin(src, forms, at, form);
+    super::named_call::declared_head_is_deferred_by_local_typing(src, forms, at, form);
     meta_ast_body_origin(src, forms, entries, caller.item as int);
     assert(body <= at < subtree_limit(forms, body) <= forms.len());
     span_within_subtree(forms, body, at);

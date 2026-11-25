@@ -38,6 +38,27 @@ pub closed spec fn scalar_execution_slice_matches<'plan, 'p, 'a>(
     exists|path: Seq<ScalarExecution<'plan, 'p, 'a>>| #[trigger] execution_path_result(start, fuel, path, result)
 }
 
+impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
+    /// 予算が一つの実行枠の結果から、実装が行った一遷移を取り出す。
+    pub proof fn one_step_slice_matches(
+        &self, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires scalar_execution_slice_matches(*self, 1, result),
+        ensures self.step_matches(result),
+    {
+        let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+            #[trigger] execution_path_result(*self, 1, path, result);
+        reveal(execution_path);
+        if let Ok(ScalarExecutionSlice::Suspended(next)) = result {
+            assert(path.len() == 2);
+            assert(path[0] == *self && path[1] == next);
+            assert(path[0].step_matches(Ok(ScalarExecutionSlice::Suspended(path[1]))));
+        } else {
+            assert(path.len() == 1 && path.last() == *self);
+        }
+    }
+}
+
 proof fn append_execution_step(
     start: ScalarExecution, path: Seq<ScalarExecution>, next: ScalarExecution,
 )

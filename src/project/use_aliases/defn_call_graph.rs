@@ -726,6 +726,7 @@ pub proof fn defn_call_plan_site_at_rank(
         let edge = sites[site as int];
         let order = plan.order_model();
         let project = aliases.targets_model().project_model();
+        &&& plan.project_model() == project
         &&& at == edge.at
         &&& edge.from == order[rank as int]
         &&& order.contains(edge.to)
@@ -741,6 +742,7 @@ pub proof fn defn_call_plan_site_at_rank(
             &&& edge.call.span == form_span(forms[at as int])
             &&& edge.call.head == form_span(forms[at + 1])
             &&& defn_call_arguments(forms, at, edge.arguments@)
+            &&& crate::ncg2m::expression_types::conditional_positions(edge.call.source.text_model(), forms, at).is_none()
         }
     },
 {
