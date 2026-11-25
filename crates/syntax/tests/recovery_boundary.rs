@@ -81,7 +81,7 @@ fn shifted_join_matches_fresh_recovery_of_the_same_tail() {
     let old_middle = "(abc)";
     let current_middle = "(abc (deeply nested) \"broken\\q\")";
     let tail = concat!(
-        ") (intact) (partial \"invalid\\q\" (head foo\"text\"))",
+        "; ) と猫\r\n) (intact) (partial \"invalid\\猫\" (head foo\"text\"))",
         " (broken \"line\r\n (nested)) (unfinished",
     );
     let old = format!("{prefix}{old_middle}{tail}");
@@ -98,6 +98,22 @@ fn shifted_join_matches_fresh_recovery_of_the_same_tail() {
     assert_eq!(edited.repairs.len(), prior.repairs.len() + 1);
     assert_eq!(relative_to_tail(prior, old_end), fresh);
     assert_eq!(relative_to_tail(edited, current_end), fresh);
+    let empty = recovery_window(
+        &old[..old_end],
+        &current[..current_end],
+        start,
+        old_end,
+        current_end,
+    );
+    assert!(empty.is_some());
+    assert_eq!(
+        relative_to_tail(parse_recovering(&old[..old_end]), old_end),
+        parse_recovering("")
+    );
+    assert_eq!(
+        relative_to_tail(parse_recovering(&current[..current_end]), current_end),
+        parse_recovering("")
+    );
     assert!(recovery_window(&old, &current, start, old_end, current_end - 1).is_none());
     assert!(recovery_window(&old, &format!("{current}x"), start, old_end, current_end).is_none());
     assert!(

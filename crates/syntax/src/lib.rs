@@ -17,7 +17,9 @@ mod recovery_boundary;
 #[cfg(verus_only)]
 mod recovery_replay;
 #[cfg(verus_only)]
-pub use recovery_replay::{recovered_replay_matches, recovered_replays_agree};
+pub use recovery_replay::{
+    recovered_replay_matches, recovered_replays_agree, recovered_suffix_agrees, recovery_suffix_projection,
+};
 #[cfg(verus_only)]
 use recovery_replay::{
     RecoveryState, ReplayFrame, apply_recovery_segment, close_recovery_at_eof,

@@ -245,6 +245,7 @@ pub(super) proof fn settled_boundary_in_replay(
         replay_position(frames, frames.len() as int) == source.spec_bytes().len(),
     ensures
         0 <= index <= frames.len(),
+        offset <= source.spec_bytes().len(),
         replay_position(frames, index) == offset,
         !replay_separator(frames, index),
         replay_at(frames, index).open.len() == 0,

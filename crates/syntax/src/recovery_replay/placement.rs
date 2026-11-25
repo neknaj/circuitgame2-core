@@ -2,19 +2,20 @@
 
 use super::{
     RecoveryState, ReplayFrame, apply_recovery_segment, close_recovery_at_eof, close_recovery_list,
-    finish_recovery, initial_recovery, replay_at, replay_valid,
+    finish_recovery, initial_recovery, replay_at, replay_position, replay_separator, replay_valid,
 };
+use super::lexical_shift::suffix_segments_align;
 use crate::{Error, ErrorKind, Form, Repair, Segment, SegmentKind};
 use core::ops::Range;
-use vstd::prelude::*;
+use vstd::{prelude::*, utf8::valid_utf8};
 
 verus! {
 
-pub(super) open spec fn place_range(span: Range<usize>, byte: int) -> Range<usize> {
+pub(crate) open spec fn place_range(span: Range<usize>, byte: int) -> Range<usize> {
     (byte + span.start) as usize..(byte + span.end) as usize
 }
 
-pub(super) open spec fn place_error(error: Error, byte: int) -> Error {
+pub(crate) open spec fn place_error(error: Error, byte: int) -> Error {
     let kind = match error.kind {
         ErrorKind::InvalidEscape { opening } => ErrorKind::InvalidEscape { opening: (byte + opening) as usize },
         ErrorKind::NewlineInString { opening } => ErrorKind::NewlineInString { opening: (byte + opening) as usize },
@@ -259,6 +260,40 @@ pub(super) proof fn project_recovery_eof(prefix: RecoveryState, part: RecoverySt
         };
         project_recovery_eof(prefix, after, eof, byte);
     }
+}
+
+/// 共通の接尾部と、未終了のリストを持たない合流点から、末尾補完までの出力の一致を導く。
+pub(super) proof fn project_completed_suffix(
+    full: Seq<u8>, tail: Seq<u8>, all: Seq<ReplayFrame>, part: Seq<ReplayFrame>, split: int, base: int,
+)
+    requires
+        0 <= base <= full.len() <= usize::MAX,
+        tail == full[base..],
+        valid_utf8(full), valid_utf8(tail),
+        replay_valid(full, all), replay_valid(tail, part),
+        0 <= split <= all.len(),
+        replay_position(all, split) == base,
+        !replay_separator(all, split),
+        replay_at(all, split).open.len() == 0,
+        replay_at(all, split).root is None,
+        replay_position(all, all.len() as int) == full.len(),
+        replay_position(part, part.len() as int) == tail.len(),
+        forall|i: int| 0 <= i < part.len() ==> {
+            let prefix = replay_at(all, split);
+            let before = replay_at(part, i);
+            let segment = (#[trigger] part[i]).segment;
+            &&& can_place(prefix, before)
+            &&& (segment.missing_separator ==> prefix.repairs.len() + before.repairs.len() + 1 < usize::MAX)
+        },
+        eof_can_place(replay_at(all, split), replay_at(part, part.len() as int)),
+    ensures
+        finish_recovery(replay_at(all, all.len() as int), full.len() as int)
+            == after_prefix(replay_at(all, split),
+                finish_recovery(replay_at(part, part.len() as int), tail.len() as int), base),
+{
+    suffix_segments_align(full, tail, all, part, split, base);
+    project_recovery_frames(full, tail, all, part, split, part.len() as int, base);
+    project_recovery_eof(replay_at(all, split), replay_at(part, part.len() as int), tail.len() as usize, base);
 }
 
 } // verus!

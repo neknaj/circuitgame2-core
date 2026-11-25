@@ -1,10 +1,13 @@
 //! 元の字句と回復規則から、構文木と診断の列を定める。
 
 use crate::{Error, ErrorKind, Form, Repair, Segment, SegmentKind, form_span, recovery_segment_at, recovery_segments_agree};
+use crate::recovery_boundary::{settled_boundary_in_replay, settled_recovery_boundary};
 use core::ops::Range;
-use vstd::{prelude::*, string::StringSliceAdditionalSpecFns};
+use vstd::{prelude::*, string::StringSliceAdditionalSpecFns, utf8::encode_utf8_valid_utf8};
 
-mod placement;
+mod lexical_shift;
+pub(super) mod placement;
+use placement::{after_prefix, place_form, place_range, place_repair, project_completed_suffix};
 
 verus! {
 
@@ -254,25 +257,135 @@ pub proof fn recovered_replays_agree(
         left.repairs@ == right.repairs@,
         left.original_lists@ == right.original_lists@,
 {
-    let bytes = old.spec_bytes();
+    let a = recovered_history(old, left);
+    let b = recovered_history(new, right);
+    finished_frames_agree(old.spec_bytes(), a, b);
+}
+
+proof fn recovered_history(source: &str, recovered: &crate::Recovered) -> (frames: Seq<ReplayFrame>)
+    requires recovered_replay_matches(source, recovered.forms@, recovered.repairs@, recovered.original_lists@),
+    ensures
+        replay_valid(source.spec_bytes(), frames),
+        replay_position(frames, frames.len() as int) == source.spec_bytes().len(),
+        ({
+            let result = finish_recovery(replay_at(frames, frames.len() as int), source.spec_bytes().len() as int);
+            result.forms == recovered.forms@ && result.repairs == recovered.repairs@ && result.original == recovered.original_lists@
+        }),
+{
+    let bytes = source.spec_bytes();
     let eof = bytes.len() as int;
-    let a = choose|frames: Seq<ReplayFrame>| {
+    choose|frames: Seq<ReplayFrame>| {
         let result = finish_recovery(replay_at(frames, frames.len() as int), eof);
         &&& #[trigger] replay_valid(bytes, frames)
         &&& replay_position(frames, frames.len() as int) == eof
-        &&& result.forms == left.forms@
-        &&& result.repairs == left.repairs@
-        &&& result.original == left.original_lists@
+        &&& result.forms == recovered.forms@
+        &&& result.repairs == recovered.repairs@
+        &&& result.original == recovered.original_lists@
+    }
+}
+
+spec fn prefix_budget(state: RecoveryState, consumed: int) -> bool {
+    &&& state.forms.len() <= consumed
+    &&& state.repairs.len() <= 2 * consumed
+    &&& state.open.len() <= state.forms.len()
+    &&& forall|i: int| 0 <= i < state.open.len() ==> (#[trigger] state.open[i]) < state.forms.len()
+    &&& state.root matches Some((_, before)) ==> before <= state.repairs.len()
+}
+
+proof fn replay_prefix_budget(bytes: Seq<u8>, frames: Seq<ReplayFrame>, count: int)
+    requires
+        3 * bytes.len() + 1 < usize::MAX,
+        replay_valid(bytes, frames),
+        0 <= count <= frames.len(),
+    ensures
+        0 <= replay_position(frames, count) <= bytes.len(),
+        prefix_budget(replay_at(frames, count), replay_position(frames, count)),
+    decreases count,
+{
+    if count > 0 {
+        let i = count - 1;
+        replay_prefix_budget(bytes, frames, i);
+        let before = replay_at(frames, i);
+        let from = replay_position(frames, i);
+        let frame = frames[i];
+        let segment = frame.segment;
+        assert(recovery_segment_at(bytes, from, replay_separator(frames, i), segment)
+            && frame.after == apply_recovery_segment(before, segment)) by { reveal(replay_valid); };
+        reveal(recovery_segment_at);
+        reveal(apply_recovery_segment);
+        let after = frame.after;
+        assert(after.forms.len() <= before.forms.len() + 1);
+        assert(after.repairs.len() <= before.repairs.len() + 2);
+        assert(after.repairs.len() >= before.repairs.len());
+        assert(after.open.len() <= after.forms.len());
+        assert forall|j: int| 0 <= j < after.open.len() implies (#[trigger] after.open[j]) < after.forms.len() by {
+            if j < before.open.len() {
+                assert(after.open[j] == before.open[j]);
+            } else {
+                assert(segment.kind is Open && j == before.open.len());
+                assert(after.open[j] == before.forms.len());
+            }
+        };
+    }
+}
+
+/// 全文の結果に含まれる接尾部と、接尾部を単独で読んだ結果との位置の対応を表す。
+pub closed spec fn recovery_suffix_projection(
+    whole: &crate::Recovered, tail: &crate::Recovered, base: usize, counts: (nat, nat, nat),
+) -> bool {
+    let (forms, repairs, original) = counts;
+    &&& forms <= whole.forms@.len()
+    &&& repairs <= whole.repairs@.len()
+    &&& original <= whole.original_lists@.len()
+    &&& whole.forms@ == whole.forms@.take(forms as int)
+        + tail.forms@.map_values(|form: Form| place_form(form, forms as int, base as int))
+    &&& whole.repairs@ == whole.repairs@.take(repairs as int)
+        + tail.repairs@.map_values(|repair: Repair| place_repair(repair, forms as int, base as int))
+    &&& whole.original_lists@ == whole.original_lists@.take(original as int)
+        + tail.original_lists@.map_values(|span: Range<usize>| place_range(span, base as int))
+}
+
+/// 確認済みの境界から末尾までを単独で回復した結果は、位置を移せば全文解析の同じ部分と一致する。
+///
+/// 戻り値は境界より前に確定した構文、修復、元リストの件数。本文長の条件は位置と件数の加算を保証する。
+pub proof fn recovered_suffix_agrees(
+    source: &str, suffix: &str, offset: usize, whole: &crate::Recovered, tail: &crate::Recovered,
+) -> (counts: (nat, nat, nat))
+    requires
+        settled_recovery_boundary(source, offset),
+        suffix.spec_bytes() == source.spec_bytes()[offset as int..],
+        3 * source.spec_bytes().len() + 1 < usize::MAX,
+        recovered_replay_matches(source, whole.forms@, whole.repairs@, whole.original_lists@),
+        recovered_replay_matches(suffix, tail.forms@, tail.repairs@, tail.original_lists@),
+    ensures recovery_suffix_projection(whole, tail, offset, counts),
+{
+    let full_bytes = source.spec_bytes();
+    let tail_bytes = suffix.spec_bytes();
+    encode_utf8_valid_utf8(source@);
+    encode_utf8_valid_utf8(suffix@);
+    let all = recovered_history(source, whole);
+    let part = recovered_history(suffix, tail);
+    let split = settled_boundary_in_replay(source, offset, all);
+    let prefix = replay_at(all, split);
+    replay_prefix_budget(full_bytes, all, split);
+    assert forall|i: int| 0 <= i < part.len() implies {
+        let before = replay_at(part, i);
+        let segment = (#[trigger] part[i]).segment;
+        &&& placement::can_place(prefix, before)
+        &&& (segment.missing_separator ==> prefix.repairs.len() + before.repairs.len() + 1 < usize::MAX)
+    } by {
+        replay_prefix_budget(tail_bytes, part, i);
     };
-    let b = choose|frames: Seq<ReplayFrame>| {
-        let result = finish_recovery(replay_at(frames, frames.len() as int), eof);
-        &&& #[trigger] replay_valid(bytes, frames)
-        &&& replay_position(frames, frames.len() as int) == eof
-        &&& result.forms == right.forms@
-        &&& result.repairs == right.repairs@
-        &&& result.original == right.original_lists@
-    };
-    finished_frames_agree(bytes, a, b);
+    replay_prefix_budget(tail_bytes, part, part.len() as int);
+    project_completed_suffix(full_bytes, tail_bytes, all, part, split, offset as int);
+    let forms = prefix.forms.len();
+    let repairs = prefix.repairs.len();
+    let original = prefix.original.len();
+    let moved = after_prefix(prefix, finish_recovery(replay_at(part, part.len() as int), tail_bytes.len() as int), offset as int);
+    assert(whole.forms@.take(forms as int) =~= prefix.forms);
+    assert(whole.repairs@.take(repairs as int) =~= prefix.repairs);
+    assert(whole.original_lists@.take(original as int) =~= prefix.original);
+    (forms, repairs, original)
 }
 
 } // verus!
