@@ -6,9 +6,9 @@ mod response;
 mod scheduling;
 mod session;
 
-pub use ledger::{DeliveryError, PendingDelivery, RegisterRequestError, RequestLedger, ResponseKey};
+pub use ledger::{BatchRegistrationError, RequestKey, DeliveryError, PendingDelivery, RegisterRequestError, RequestLedger, ResponseKey};
 #[cfg(verus_only)]
-pub use ledger::{busy_at, delivery_matches, response_update};
+pub use ledger::{first_batch_request_error, busy_at, delivery_matches, issued_rows_match, response_update, valid_request_batch};
 pub use request_ids::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds};
 
 pub use response::{HostResponseError, ResponseSlot, ResponseStatus};
@@ -17,4 +17,4 @@ pub use scheduling::{ResponseTickError, ScheduleResponseError, ScheduledResponse
 #[cfg(verus_only)]
 pub use scheduling::response_keys;
 
-pub use session::{DeviceResponseSession, PendingDeviceReset, PendingDeviceTick, RequestIssueError};
+pub use session::{DeviceResponseSession, PendingDeviceReset, PendingDeviceTick, RequestBatchTickError, RequestIssueError};

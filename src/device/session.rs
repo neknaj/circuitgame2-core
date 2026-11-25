@@ -5,10 +5,10 @@ use vstd::prelude::*;
 
 use crate::netlist::{ClockedSession, ClockedVm, PendingIoReset, PendingIoTick};
 use crate::time::{ClockError, ScheduledEvent, ScheduledEvents, TickPosition};
-use super::{HostRequestId, RegisterRequestError, RequestIdError, RequestIds, RequestLedger,
+use super::{BatchRegistrationError, HostRequestId, IssuedRequestIds, RegisterRequestError, RequestIdError, RequestIds, RequestKey, RequestLedger,
     ResponseTickError, ScheduleResponseError, ScheduledResponse};
 #[cfg(verus_only)]
-use super::{ResponseStatus, delivery_matches, response_keys, response_update};
+use super::{ResponseStatus, first_batch_request_error, delivery_matches, issued_rows_match, response_keys, response_update, valid_request_batch};
 #[cfg(verus_only)]
 use crate::time::{events_at_tick, events_by_reset_generation, next_event_matches};
 
@@ -31,6 +31,7 @@ pub struct DeviceResponseSession<T> {
 pub struct PendingDeviceTick<'a, T> {
     tick: PendingIoTick<'a, ScheduledResponse<T>>,
     ledger: &'a mut RequestLedger,
+    ids: &'a mut RequestIds,
 }
 
 /// 次の世代をデバイスへ通知し、回路と要求の状態を後で初期化するための準備。
@@ -49,6 +50,17 @@ pub enum RequestIssueError {
     Number(RequestIdError),
     /// 台帳に要求を追加できない。
     Registration(RegisterRequestError),
+}
+
+/// 新規要求を伴う tick を確定できなかった理由。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestBatchTickError {
+    /// 発行順に割り当てる通し番号が不足した。
+    Number(RequestIdError),
+    /// 発行予定の要求を検査できなかった。
+    Registration(BatchRegistrationError),
+    /// 回路入力または受信予定の応答に問題があった。
+    Tick(ResponseTickError),
 }
 
 impl<T> DeviceResponseSession<T> {
@@ -149,7 +161,7 @@ impl<T> DeviceResponseSession<T> {
             Ok(pending) => pending,
             Err(error) => return Err(RequestIssueError::Number(error)),
         };
-        let id = pending.first_id(instance);
+        let id = pending.proposed_id(0, instance);
         if let Err(error) = self.ledger.register(id, tag, current.tick) {
             pending.cancel();
             return Err(RequestIssueError::Registration(error));
@@ -215,11 +227,13 @@ impl<T> DeviceResponseSession<T> {
     pub fn prepare_tick(&mut self) -> (result: Result<PendingDeviceTick<'_, T>, ClockError>)
         requires old(self).valid(),
         ensures
-            final(self).ids_model() == old(self).ids_model(),
+            result.is_err() ==> final(self).ids_model() == old(self).ids_model(),
             result.is_ok() <==> old(self).model().0.position_model().tick < u64::MAX,
             result matches Ok(pending) ==> {
                 &&& pending.before_model() == old(self).model()
                 &&& pending.after_model() == final(self).model()
+                &&& pending.before_ids() == old(self).ids_model()
+                &&& pending.after_ids() == final(self).ids_model()
                 &&& pending.target_model().tick as int == old(self).model().0.position_model().tick as int + 1
                 &&& pending.target_model().generation == old(self).model().0.position_model().generation
             },
@@ -227,7 +241,7 @@ impl<T> DeviceResponseSession<T> {
                 && final(self).model() == old(self).model(),
     {
         let tick = self.circuit.prepare_io_tick(&mut self.events)?;
-        Ok(PendingDeviceTick { tick, ledger: &mut self.ledger })
+        Ok(PendingDeviceTick { tick, ledger: &mut self.ledger, ids: &mut self.ids })
     }
 
     /// 次の世代を準備し、各デバイスを初期化する間は現在の状態を保持する。
@@ -266,6 +280,13 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         (self.tick.after_circuit(), *final(self.ledger), self.tick.after_events())
     }
 
+    /// 確定前の採番状態。
+    pub closed spec fn before_ids(&self) -> RequestIds { *self.ids }
+
+    /// 確定または取り消し後の採番状態。
+    #[verifier::prophetic]
+    pub closed spec fn after_ids(&self) -> RequestIds { *final(self.ids) }
+
     /// 確定予定の論理時刻。
     pub closed spec fn target_model(&self) -> TickPosition { self.tick.target_model() }
 
@@ -298,6 +319,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
     pub fn commit(self, input: &[bool]) -> (result: Result<Vec<ResponseEvent<T>>, ResponseTickError>)
         ensures
             self.before_model().0.valid() ==> self.after_model().0.valid(),
+            self.after_ids() == self.before_ids(),
             self.after_model().1.generation_model() == self.before_model().1.generation_model(),
             result.is_ok() <==>
                 self.before_model().1.valid_delivery(response_keys(self.before_model().2, self.target_model()), self.target_model())
@@ -320,13 +342,118 @@ impl<'a, T> PendingDeviceTick<'a, T> {
                 &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests(), response_keys(events, target), target)
             },
     {
-        let Self { tick, ledger } = self;
+        let Self { tick, ledger, ids: _ } = self;
         tick.commit_responses(ledger, input)
+    }
+
+    /// 応答と新規要求を、同じ回路更新で確定する。
+    ///
+    /// 新規要求は実行設定のインスタンス順、各デバイスの要求リスト順に渡す。
+    /// 同じ tick で消費する応答のタグも、次の tick まで再利用できない。
+    /// 成功時は実際に消費した応答と、発行に使う番号を返す。
+    ///
+    /// # Errors
+    ///
+    /// 採番、要求の登録検査、配送と回路入力の順で診断する。失敗時は確定済みの状態を保持する。
+    pub fn commit_with_requests(self, input: &[bool], requests: &[RequestKey])
+        -> (result: Result<(Vec<ResponseEvent<T>>, IssuedRequestIds), RequestBatchTickError>)
+        ensures
+            result.is_err() ==> {
+                &&& self.after_model().0 == self.before_model().0
+                &&& self.after_model().1.generation_model() == self.before_model().1.generation_model()
+                &&& self.after_model().1.requests() == self.before_model().1.requests()
+                &&& self.after_model().2 == self.before_model().2
+                &&& self.after_ids() == self.before_ids()
+            },
+            result matches Err(RequestBatchTickError::Number(error)) ==>
+                error == RequestIdError::SerialOutOfRange && !self.before_ids().fits(requests@.len() as u64),
+            result matches Err(RequestBatchTickError::Registration(error)) ==>
+                self.before_ids().fits(requests@.len() as u64)
+                && (error == BatchRegistrationError::Allocation || first_batch_request_error(
+                    &self.before_model().1, requests@, self.before_ids().generation_model(),
+                    self.before_ids().next_model(), self.target_model().tick, error,
+                )),
+            result matches Err(RequestBatchTickError::Tick(error)) ==> {
+                let (before, ledger, events) = self.before_model();
+                let target = self.target_model();
+                let keys = response_keys(events, target);
+                &&& self.before_ids().fits(requests@.len() as u64)
+                &&& valid_request_batch(&ledger, requests@, self.before_ids().generation_model(),
+                    self.before_ids().next_model(), target.tick)
+                &&& match error {
+                    ResponseTickError::Delivery(reason) => ledger.first_delivery_error(keys, target, reason),
+                    ResponseTickError::Input(reason) => ledger.valid_delivery(keys, target)
+                        && input@.len() != before.vm_model().external_count()
+                        && reason == crate::netlist::TickInputError::InputCount,
+                }
+            },
+            result matches Ok((consumed, issued)) ==> {
+                let (before, prior_ledger, events) = self.before_model();
+                let (after, updated_ledger, remaining) = self.after_model();
+                let target = self.target_model();
+                let count = prior_ledger.requests().len() as int;
+                &&& (before.valid() ==> after.valid())
+                &&& after.position_model() == target
+                &&& after.vm_model().tick_matches(&before.vm_model(), input@, after.output_model())
+                &&& remaining == events_at_tick(events, target, false)
+                &&& consumed@ == events_at_tick(events, target, true)
+                &&& updated_ledger.generation_model() == prior_ledger.generation_model()
+                &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests().take(count),
+                    response_keys(events, target), target)
+                &&& issued.generation_model() == self.before_ids().generation_model()
+                &&& issued.first_model() == self.before_ids().next_model()
+                &&& issued.count_model() as nat == requests@.len()
+                &&& valid_request_batch(&prior_ledger, requests@, issued.generation_model(), issued.first_model(), target.tick)
+                &&& self.after_ids().generation_model() == self.before_ids().generation_model()
+                &&& self.after_ids().next_model() == issued.first_model() + requests@.len() as int
+                &&& issued_rows_match(updated_ledger.requests().skip(count), requests@,
+                    issued.generation_model(), issued.first_model(), target.tick)
+            },
+    {
+        let ghost (_, original_ledger, _) = self.before_model();
+        let ghost original_ids = self.before_ids();
+        let Self { tick, ledger, ids } = self;
+        let target = tick.target();
+        let count = requests.len() as u64;
+        let pending_ids = match ids.prepare(count) {
+            Ok(pending) => pending,
+            Err(error) => {
+                tick.cancel();
+                return Err(RequestBatchTickError::Number(error));
+            },
+        };
+        let prepared = match ledger.prepare_issuance(&pending_ids, requests, target.tick) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                pending_ids.cancel();
+                tick.cancel();
+                return Err(RequestBatchTickError::Registration(error));
+            },
+        };
+        let ghost delivery_ledger = *ledger;
+        assert(delivery_ledger.requests() == original_ledger.requests());
+        assert(original_ids.fits(count));
+        assert(valid_request_batch(&original_ledger, requests@, original_ids.generation_model(),
+            original_ids.next_model(), target.tick));
+        match tick.commit_responses(ledger, input) {
+            Ok(events) => {
+                let ghost prior = ledger.requests();
+                let ghost added = prepared.model();
+                ledger.append_issued(prepared);
+                assert(ledger.requests().take(prior.len() as int) =~= prior);
+                assert(ledger.requests().skip(prior.len() as int) =~= added);
+                Ok((events, pending_ids.commit()))
+            },
+            Err(error) => {
+                pending_ids.cancel();
+                Err(RequestBatchTickError::Tick(error))
+            },
+        }
     }
 
     /// 更新を取り消し、回路、時刻、台帳、応答列を保持する。
     pub fn cancel(self)
-        ensures self.after_model() == self.before_model(),
+        ensures self.after_model() == self.before_model(), self.after_ids() == self.before_ids(),
     {
         self.tick.cancel();
     }

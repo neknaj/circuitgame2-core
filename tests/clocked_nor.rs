@@ -195,7 +195,6 @@ fn scheduled_host_response_is_visible_at_its_delivery_tick() {
     session.schedule_response(&mut ledger, &mut events, later, later_delivery, "later").unwrap();
     session.schedule_response(&mut ledger, &mut events, second, delivery, "second").unwrap();
     let key = ResponseKey { id, tag: 9 };
-    let second_key = ResponseKey { id: second, tag: 10 };
     let wrong_tag = ResponseKey { id: second, tag: 9 };
     assert!(matches!(ledger.prepare_delivery(&[key, wrong_tag], delivery), Err(DeliveryError::WrongTag(1))));
     assert!(matches!(ledger.prepare_delivery(&[key, key], delivery), Err(DeliveryError::Duplicate(1))));
@@ -274,6 +273,49 @@ fn owned_device_session_resets_request_identity_together_with_responses() {
     let consumed = session.prepare_tick().unwrap().commit(&[true]).unwrap();
     assert_eq!(consumed.len(), 1);
     assert_eq!(consumed[0].payload.payload(), &"new");
+}
+
+#[test]
+fn one_device_tick_commits_requests_only_after_the_circuit_succeeds() {
+    use circuitgame2_core::device::{
+        BatchRegistrationError, DeviceResponseSession, RegisterRequestError, RequestBatchTickError,
+        RequestKey, ResponseTickError,
+    };
+    use circuitgame2_core::netlist::{ClockedVm, TickInputError};
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceResponseSession::new(vm);
+    let first = RequestKey { instance: 0, tag: 7 };
+    let second = RequestKey { instance: 1, tag: 7 };
+    let keys = [first, second];
+    assert!(matches!(session.prepare_tick().unwrap().commit_with_requests(&[], &[first, second, first]),
+        Err(RequestBatchTickError::Registration(BatchRegistrationError::DuplicateTag { first: 0, later: 2 }))));
+    assert!(matches!(session.prepare_tick().unwrap().commit_with_requests(&[], &keys),
+        Err(RequestBatchTickError::Tick(ResponseTickError::Input(TickInputError::InputCount)))));
+    assert_eq!(session.position().tick, 0);
+
+    let (consumed, issued) = session.prepare_tick().unwrap().commit_with_requests(&[false], &keys).unwrap();
+    assert!(consumed.is_empty());
+    let first_id = issued.id_at(0, 0).unwrap();
+    assert_eq!(first_id.serial, 0);
+    assert_eq!(issued.id_at(1, 1).unwrap().serial, 1);
+    session.schedule_response(first_id, TickPosition { generation: 0, tick: 2 }, "answer").unwrap();
+    assert!(matches!(session.prepare_tick().unwrap().commit_with_requests(&[true], &[first]),
+        Err(RequestBatchTickError::Registration(
+            BatchRegistrationError::Registration(0, RegisterRequestError::TagInUse)))));
+    assert_eq!(session.position().tick, 1);
+
+    let consumed = session.prepare_tick().unwrap().commit(&[true]).unwrap();
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].payload.payload(), &"answer");
+    let (_, issued) = session.prepare_tick().unwrap().commit_with_requests(&[true], &[first]).unwrap();
+    assert_eq!(issued.id_at(0, 0).unwrap().serial, 2);
 }
 
 #[test]

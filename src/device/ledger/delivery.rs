@@ -3,7 +3,9 @@
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-use super::{HostRequestId, RequestEntry, RequestLedger, ResponseSlot, ResponseStatus, TickPosition};
+use super::{HostRequestId, RequestEntry, RequestLedger, ResponseSlot, TickPosition};
+#[cfg(verus_only)]
+use super::request_row_matches;
 
 verus! {
 
@@ -52,8 +54,8 @@ spec fn updates_match(entries: Seq<RequestEntry>, updates: Seq<Update>, target: 
         &&& update.entry.tag == entries[j].tag
         &&& update.entry.response.id_model() == entries[j].response.id_model()
         &&& update.entry.response.issued_model() == entries[j].response.issued_model()
-        &&& entries[j].response.status_model() == ResponseStatus::Held(target)
-        &&& update.entry.response.status_model() == ResponseStatus::Consumed(target)
+        &&& entries[j].response.status_model() == super::ResponseStatus::Held(target)
+        &&& update.entry.response.status_model() == super::ResponseStatus::Consumed(target)
     }
     &&& forall|i: int, j: int| 0 <= i < j < updates.len() ==>
         (#[trigger] updates[i]).index != (#[trigger] updates[j]).index
@@ -72,8 +74,8 @@ pub open spec fn delivery_matches(
             &&& after[i].1 == row.1
             &&& after[i].2.id_model() == row.2.id_model()
             &&& after[i].2.issued_model() == row.2.issued_model()
-            &&& row.2.status_model() == ResponseStatus::Held(target)
-            &&& after[i].2.status_model() == ResponseStatus::Consumed(target)
+            &&& row.2.status_model() == super::ResponseStatus::Held(target)
+            &&& after[i].2.status_model() == super::ResponseStatus::Consumed(target)
         } else {
             after[i] == row
         }
@@ -110,40 +112,59 @@ fn has_index(updates: &[Update], index: usize) -> (found: bool)
     false
 }
 
+/// 入力列の指定位置について、確定済みの要求行から最初のエラーを選ぶ。
+pub open spec fn issue_at_row(
+    rows: Seq<Row>, keys: Seq<ResponseKey>, target: TickPosition, index: usize,
+) -> Option<DeliveryError> {
+    let key = keys[index as int];
+    if exists|row: int| #[trigger] request_row_matches(rows, key.id, row) {
+        let row = choose|row: int| #[trigger] request_row_matches(rows, key.id, row);
+        if exists|earlier: int| 0 <= earlier < index && (#[trigger] keys[earlier]).id == key.id {
+            Some(DeliveryError::Duplicate(index))
+        } else if rows[row].1 != key.tag {
+            Some(DeliveryError::WrongTag(index))
+        } else if rows[row].2.status_model() != super::ResponseStatus::Held(target) {
+            Some(DeliveryError::NotHeld(index))
+        } else {
+            None
+        }
+    } else {
+        Some(DeliveryError::Unknown(index))
+    }
+}
+
+/// 入力列のすべての応答を確定済みの要求行から配送できることを表す。
+pub open spec fn delivery_rows_valid(rows: Seq<Row>, keys: Seq<ResponseKey>, target: TickPosition) -> bool {
+    !(exists|i: usize| i < keys.len() && #[trigger] issue_at_row(rows, keys, target, i).is_some())
+}
+
+/// 確定済みの要求行に対して、入力順で最初の配送エラーを表す。
+pub open spec fn delivery_rows_first_error(
+    rows: Seq<Row>, keys: Seq<ResponseKey>, target: TickPosition, error: DeliveryError,
+) -> bool {
+    exists|i: usize| i < keys.len()
+        && #[trigger] issue_at_row(rows, keys, target, i) == Some(error)
+        && forall|j: usize| j < i ==> #[trigger] issue_at_row(rows, keys, target, j).is_none()
+}
+
 impl RequestLedger {
     /// 入力列の指定位置について、検査順に最初のエラーを選ぶ。
     pub open spec fn delivery_issue_at(
         &self, keys: Seq<ResponseKey>, target: TickPosition, index: usize,
     ) -> Option<DeliveryError> {
-        let key = keys[index as int];
-        if exists|row: int| #[trigger] self.found_request(key.id, row) {
-            let row = choose|row: int| #[trigger] self.found_request(key.id, row);
-            if exists|earlier: int| 0 <= earlier < index && (#[trigger] keys[earlier]).id == key.id {
-                Some(DeliveryError::Duplicate(index))
-            } else if self.requests()[row].1 != key.tag {
-                Some(DeliveryError::WrongTag(index))
-            } else if self.requests()[row].2.status_model() != ResponseStatus::Held(target) {
-                Some(DeliveryError::NotHeld(index))
-            } else {
-                None
-            }
-        } else {
-            Some(DeliveryError::Unknown(index))
-        }
+        issue_at_row(self.requests(), keys, target, index)
     }
 
     /// 入力列のすべての応答を指定 tick に配送できることを表す。
     pub open spec fn valid_delivery(&self, keys: Seq<ResponseKey>, target: TickPosition) -> bool {
-        !(exists|i: usize| i < keys.len() && #[trigger] self.delivery_issue_at(keys, target, i).is_some())
+        delivery_rows_valid(self.requests(), keys, target)
     }
 
     /// エラーが入力順で最初の配送エラーであることを表す。
     pub open spec fn first_delivery_error(
         &self, keys: Seq<ResponseKey>, target: TickPosition, error: DeliveryError,
     ) -> bool {
-        exists|i: usize| i < keys.len()
-            && #[trigger] self.delivery_issue_at(keys, target, i) == Some(error)
-            && forall|j: usize| j < i ==> #[trigger] self.delivery_issue_at(keys, target, j).is_none()
+        delivery_rows_first_error(self.requests(), keys, target, error)
     }
 
     proof fn prior_keys_use_index(
@@ -210,13 +231,14 @@ impl RequestLedger {
                 updates_match(self.entries@, updates@, target),
                 key_matches_updates(self.entries@, updates@, keys@.take(i as int)),
                 *self == *old(self),
-                forall|j: usize| j < i ==> !(#[trigger] old(self).delivery_issue_at(keys@, target, j).is_some()),
+                forall|j: usize| j < i ==> !(#[trigger] issue_at_row(old(self).requests(), keys@, target, j).is_some()),
             decreases keys@.len() - i,
         {
             let key = keys[i];
             let Some(index) = self.find(key.id) else {
-                assert(old(self).delivery_issue_at(keys@, target, i) == Some(DeliveryError::Unknown(i)));
-                assert(old(self).delivery_issue_at(keys@, target, i).is_some());
+                assert(issue_at_row(old(self).requests(), keys@, target, i) == Some(DeliveryError::Unknown(i)));
+                assert(issue_at_row(old(self).requests(), keys@, target, i).is_some());
+                assert(old(self).first_delivery_error(keys@, target, DeliveryError::Unknown(i)));
                 return Err(DeliveryError::Unknown(i));
             };
             proof {
@@ -227,8 +249,9 @@ impl RequestLedger {
                 assert forall|k: int| 0 <= k < i implies (#[trigger] keys@.take(i as int)[k]) == keys@[k] by {};
             }
             if has_index(updates.as_slice(), index) {
-                assert(old(self).delivery_issue_at(keys@, target, i) == Some(DeliveryError::Duplicate(i)));
-                assert(old(self).delivery_issue_at(keys@, target, i).is_some());
+                assert(issue_at_row(old(self).requests(), keys@, target, i) == Some(DeliveryError::Duplicate(i)));
+                assert(issue_at_row(old(self).requests(), keys@, target, i).is_some());
+                assert(old(self).first_delivery_error(keys@, target, DeliveryError::Duplicate(i)));
                 return Err(DeliveryError::Duplicate(i));
             }
             proof {
@@ -239,16 +262,18 @@ impl RequestLedger {
             }
             let mut entry = self.entries[index];
             if entry.tag != key.tag {
-                assert(old(self).delivery_issue_at(keys@, target, i) == Some(DeliveryError::WrongTag(i)));
-                assert(old(self).delivery_issue_at(keys@, target, i).is_some());
+                assert(issue_at_row(old(self).requests(), keys@, target, i) == Some(DeliveryError::WrongTag(i)));
+                assert(issue_at_row(old(self).requests(), keys@, target, i).is_some());
+                assert(old(self).first_delivery_error(keys@, target, DeliveryError::WrongTag(i)));
                 return Err(DeliveryError::WrongTag(i));
             }
             if !entry.response.consume_at(target) {
-                assert(old(self).delivery_issue_at(keys@, target, i) == Some(DeliveryError::NotHeld(i)));
-                assert(old(self).delivery_issue_at(keys@, target, i).is_some());
+                assert(issue_at_row(old(self).requests(), keys@, target, i) == Some(DeliveryError::NotHeld(i)));
+                assert(issue_at_row(old(self).requests(), keys@, target, i).is_some());
+                assert(old(self).first_delivery_error(keys@, target, DeliveryError::NotHeld(i)));
                 return Err(DeliveryError::NotHeld(i));
             }
-            assert(old(self).delivery_issue_at(keys@, target, i).is_none());
+            assert(issue_at_row(old(self).requests(), keys@, target, i).is_none());
             updates.push(Update { index, entry });
             proof {
                 assert(self.requests()[index as int].0 == key.id);
@@ -338,8 +363,8 @@ impl<'a> PendingDelivery<'a> {
                     &&& new_rows[j].1 == row.1
                     &&& new_rows[j].2.id_model() == row.2.id_model()
                     &&& new_rows[j].2.issued_model() == row.2.issued_model()
-                    &&& row.2.status_model() == ResponseStatus::Held(target)
-                    &&& new_rows[j].2.status_model() == ResponseStatus::Consumed(target)
+                    &&& row.2.status_model() == super::ResponseStatus::Held(target)
+                    &&& new_rows[j].2.status_model() == super::ResponseStatus::Consumed(target)
                 } else {
                     new_rows[j] == row
                 }
