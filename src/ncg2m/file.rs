@@ -617,6 +617,7 @@ pub(super) fn indexed_meta_body(
 ) -> (body: usize)
     requires meta_ast_matches(_source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defn,
     ensures usable_forms(_source, forms@), body < forms@.len(),
+        form_span(forms@[body as int]) == entries@[item as int].kind->Defn_0.body_span,
         exists|root: usize| #[trigger] indexed_body_site(_source, forms@, root, body, entries@[item as int].kind->Defn_0),
 {
     let ghost witness = meta_ast_body_origin(_source, forms@, entries@, item as int);
@@ -631,6 +632,16 @@ pub(super) fn indexed_meta_body(
         assert(found == witness.1);
     }
     found
+}
+
+/// プロジェクトの評価で使う本体の添字を、保持した構文木から得る。
+pub(crate) fn retained_meta_body(source: &str, forms: &[Form], entries: &[MetaItem], item: usize)
+    -> (body: usize)
+    requires meta_ast_matches(source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defn,
+    ensures body < forms@.len(), form_span(forms@[body as int]) == entries@[item as int].kind->Defn_0.body_span,
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+{
+    indexed_meta_body(source, forms, entries, item)
 }
 
 /// 呼び出し形が、補助関数の本体からたどれる式の位置と一致することを表す。

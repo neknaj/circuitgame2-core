@@ -542,6 +542,53 @@ pub(crate) proof fn indexed_call_body_origin<'p, 'a>(
     }
 }
 
+/// 引数の添字が、呼び出し先の名前の直後からフォーム末尾までを左から覆うことを表す。
+pub closed spec fn defn_call_arguments(forms: Seq<Form>, at: usize, arguments: Seq<usize>) -> bool {
+    &&& at < forms.len()
+    &&& forms[at as int] is List
+    &&& at + 2 <= subtree_limit(forms, at) <= forms.len()
+    &&& if arguments.len() == 0 { at + 2 == subtree_limit(forms, at) }
+        else { arguments[0] == at + 2 }
+    &&& forall|i: int| 0 <= i < arguments.len() ==> {
+        let child = #[trigger] arguments[i];
+        &&& at < child < subtree_limit(forms, child) <= subtree_limit(forms, at)
+        &&& if i + 1 < arguments.len() { subtree_limit(forms, child) == arguments[i + 1] }
+            else { subtree_limit(forms, child) == subtree_limit(forms, at) }
+    }
+}
+
+/// 指定した引数の構文木上の位置と、隣の引数との境界を取り出す。
+pub proof fn defn_call_argument_origin(forms: Seq<Form>, at: usize, arguments: Seq<usize>, slot: usize)
+    requires defn_call_arguments(forms, at, arguments), slot < arguments.len(),
+    ensures {
+        let child = arguments[slot as int];
+        let limit = match forms[child as int] {
+            Form::Atom { .. } => (child + 1) as usize,
+            Form::List { end, .. } => end,
+        };
+        &&& forms[at as int] is List
+        &&& at < child < limit <= forms[at as int]->List_end <= forms.len()
+        &&& slot == 0 ==> child == at + 2
+        &&& if slot + 1 < arguments.len() { limit == arguments[slot + 1] }
+            else { limit == forms[at as int]->List_end }
+    },
+{}
+
+proof fn canonical_call_preserves_arguments(forms: Seq<Form>, entry: CallTypeEntry, arguments: Seq<usize>)
+    requires canonical_call(forms, entry), arguments == entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at),
+    ensures defn_call_arguments(forms, entry.at, arguments),
+{
+    assert forall|i: int| 0 <= i < arguments.len() implies {
+        let child = #[trigger] arguments[i];
+        &&& entry.at < child < subtree_limit(forms, child) <= subtree_limit(forms, entry.at)
+        &&& if i + 1 < arguments.len() { subtree_limit(forms, child) == arguments[i + 1] }
+            else { subtree_limit(forms, child) == subtree_limit(forms, entry.at) }
+    } by {
+        assert(arguments[i] == entry.arguments@[i].at);
+        if i + 1 < arguments.len() { assert(arguments[i + 1] == entry.arguments@[i + 1].at); }
+    };
+}
+
 /// 呼び出しの元の範囲と参照先が、同じプロジェクトにあることを表す。
 #[verifier::opaque]
 pub open spec fn defn_call_edge_matches(aliases: &MixedUseAliases, edge: DefnCallEdge) -> bool {
@@ -555,8 +602,11 @@ pub open spec fn defn_call_edge_matches(aliases: &MixedUseAliases, edge: DefnCal
         &&& edge.call.head.end <= edge.call.span.end
     }
     &&& project.functional_forms_model(edge.from.file) matches Some(forms) && {
-        exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List && forms[at + 1] is Atom
-            && edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
+        let at = edge.at;
+        &&& at + 1 < forms.len()
+        &&& forms[at as int] is List && forms[at + 1] is Atom
+        &&& edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
+        &&& defn_call_arguments(forms, at, edge.arguments@)
     }
     &&& project.indexed_defn(edge.to.file, edge.to.item).is_some()
     &&& exists|name: &str, declaration: ProjectDeclaration|
@@ -569,6 +619,8 @@ pub open spec fn defn_call_edge_matches(aliases: &MixedUseAliases, edge: DefnCal
 
 spec fn edge_projects(source: &ProjectSource, forms: Seq<Form>, entry: CallTypeEntry, edge: DefnCallEdge) -> bool {
     &&& edge.to == entry.target
+    &&& edge.at == entry.at
+    &&& edge.arguments@ == entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at)
     &&& *edge.call.source == *source
     &&& edge.call.span == form_span(forms[entry.at as int])
     &&& edge.call.head == form_span(forms[entry.at + 1])
@@ -592,7 +644,9 @@ proof fn finish_edge_evidence(
             &&& project.functional_forms_model(edge.from.file) == Some(forms)
             &&& project.indexed_defn(edge.to.file, edge.to.item).is_some()
         }),
+        at == edge.at,
         at + 1 < forms.len(), forms[at as int] is List, forms[at + 1] is Atom,
+        defn_call_arguments(forms, at, edge.arguments@),
         edge.call.span == form_span(forms[at as int]),
         edge.call.head == form_span(forms[at + 1]),
         defn_name_resolution(aliases, edge.from.file, edge.from.item, name,
@@ -680,7 +734,27 @@ proof fn recorded_edge_has_origin<'p, 'a>(
     let name = form.word;
     assert(defn_name_resolution(aliases, caller.file, caller.item, name, Ok(ResolvedDefnName::Declaration(declaration))));
     assert(name.spec_bytes() == src.spec_bytes()[edge.call.head.start as int..edge.call.head.end as int]);
+    assert(canonical_call(forms, entry)) by { reveal(call_inputs_match); }
+    canonical_call_preserves_arguments(forms, entry, edge.arguments@);
     finish_edge_evidence(aliases, edge, forms, at, name, declaration);
+}
+
+fn call_argument_positions(entry: &CallTypeEntry) -> (positions: Vec<usize>)
+    ensures positions@ == entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at),
+{
+    let mut positions = Vec::new();
+    let mut i = 0;
+    while i < entry.arguments.len()
+        invariant
+            i == positions@.len() <= entry.arguments@.len(),
+            forall|slot: int| 0 <= slot < i ==> (#[trigger] positions@[slot]) == entry.arguments@[slot].at,
+        decreases entry.arguments@.len() - i,
+    {
+        positions.push(entry.arguments[i].at);
+        i += 1;
+    }
+    assert(positions@ =~= entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at));
+    positions
 }
 
 fn read_call_edge<'p, 'a>(
@@ -712,7 +786,8 @@ fn read_call_edge<'p, 'a>(
     let at = entry.at;
     assert(canonical_call(forms@, *entry));
     let call = DefnCallSite { source, head: span_of(&forms[at + 1]), span: span_of(&forms[at]) };
-    let edge = DefnCallEdge { from: caller, call, to: entry.target };
+    let arguments = call_argument_positions(entry);
+    let edge = DefnCallEdge { from: caller, at, arguments, call, to: entry.target };
     proof { recorded_edge_has_origin(aliases, caller, forms@, entries, body, outcomes, calls@, issues, row, edge); }
     edge
 }
@@ -793,6 +868,7 @@ spec fn all_slots_projected(
                 exists|i: int| 0 <= i < edges.len() && {
                     let edge = #[trigger] edges[i];
                     &&& edge.from == caller
+                    &&& edge.at == at
                     &&& edge.to == (DefnPosition { file: declaration.file, item: declaration.item })
                     &&& edge.call.span == form_span(forms[at as int])
                     &&& edge.call.head == form_span(forms[at + 1])
@@ -887,6 +963,7 @@ proof fn prove_expression_slot_projection(
                 exists|i: int| 0 <= i < edges.len() && {
                     let edge = #[trigger] edges[i];
                     &&& edge.from == caller
+                    &&& edge.at == at
                     &&& edge.to == (DefnPosition { file: declaration.file, item: declaration.item })
                     &&& edge.call.span == form_span(forms[at as int])
                     &&& edge.call.head == form_span(forms[at + 1])
