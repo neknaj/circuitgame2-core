@@ -193,6 +193,11 @@ pub use use_aliases::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
 pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
+pub use use_aliases::{NamedRoutinePort, RoutinePortLookup};
+pub use use_aliases::{DeviceBindingsError, DevicePortRequest};
+pub use use_aliases::{DevicePortBinding, DevicePortBindingError, DevicePortType};
+#[cfg(verus_only)]
+pub use use_aliases::{device_port_types_match, matching_circuit_direction};
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, alias_conflicts_agree, use_alias_dispositions_agree, use_aliases_acceptable, use_aliases_match};
 pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};
