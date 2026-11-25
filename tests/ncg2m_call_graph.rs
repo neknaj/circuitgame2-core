@@ -32,7 +32,7 @@ fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     let state = ScalarExpression::start(caller_frame);
     let ScalarExpressionStep::Continue(condition) = state.advance().unwrap() else { panic!() };
     let ScalarExpressionStep::Continue(selected) = condition.advance().unwrap() else { panic!() };
-    assert!(matches!(selected.advance().unwrap(), ScalarExpressionStep::Complete(ScalarValue::Bool(true))));
+    assert!(matches!(selected.advance().unwrap(), ScalarExpressionStep::Complete { value: ScalarValue::Bool(true), .. }));
 
     let frame = bind_scalar_call(&plan, rank(2), Vec::new()).unwrap();
     assert!(frame.parameters().is_empty());
