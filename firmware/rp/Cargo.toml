@@ -13,7 +13,13 @@ name = "ncg2-rp-uart"
 path = "src/uart_demo.rs"
 required-features = ["uart"]
 
+[[bin]]
+name = "ncg2-rp-i2c"
+path = "src/i2c_demo.rs"
+required-features = ["i2c"]
+
 [features]
+i2c = ["dep:embassy-sync", "embassy-rp/unstable-pac"]
 uart = [
     "dep:embassy-futures",
     "dep:embassy-sync",
