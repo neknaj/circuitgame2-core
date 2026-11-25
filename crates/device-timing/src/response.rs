@@ -1,9 +1,11 @@
 //! 1件の応答を、発行済みの要求と配送予定の tick に対応付ける。
 
+#[cfg(not(verus_only))]
+use verus_builtin_macros::verus;
+#[cfg(verus_only)]
 use vstd::prelude::*;
 
-use super::HostRequestId;
-use crate::time::TickPosition;
+use super::{HostRequestId, TickPosition};
 
 verus! {
 
@@ -65,6 +67,16 @@ impl ResponseSlot {
         self.status
     }
 
+    /// 指定の tick の開始時点で、この要求のタグを使用中かを返す。
+    pub fn tag_busy_at(&self, tick: u64) -> (busy: bool)
+        ensures busy == busy_at(self.status_model(), tick),
+    {
+        match self.status {
+            ResponseStatus::Consumed(delivered) => tick <= delivered.tick,
+            ResponseStatus::Awaiting | ResponseStatus::Held(_) => true,
+        }
+    }
+
     /// 指定の要求を、応答待ちの状態で登録する。
     pub fn new(id: HostRequestId, issued_tick: u64) -> (slot: Self)
         ensures
@@ -103,10 +115,7 @@ impl ResponseSlot {
     /// # Examples
     ///
     /// ```
-    /// use circuitgame2_core::{
-    ///     device::{HostRequestId, HostResponseError, ResponseSlot},
-    ///     time::TickPosition,
-    /// };
+    /// use circuitgame2_device_timing::{HostRequestId, HostResponseError, ResponseSlot, TickPosition};
     ///
     /// let id = HostRequestId { instance: 2, generation: 4, serial: 7 };
     /// let mut slot = ResponseSlot::new(id, 10);
@@ -173,6 +182,14 @@ impl ResponseSlot {
         assert(expected == position);
         self.status = ResponseStatus::Consumed(position);
         true
+    }
+}
+
+/// 応答を消費した tick までタグを占有する。
+pub open spec fn busy_at(status: ResponseStatus, tick: u64) -> bool {
+    match status {
+        ResponseStatus::Consumed(delivered) => tick <= delivered.tick,
+        _ => true,
     }
 }
 
