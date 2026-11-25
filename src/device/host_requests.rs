@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::time::ScheduledEvent;
-use super::{HostRequestId, IssuedRequestIds, PendingDeviceTick, RequestBatchTickError, RequestKey, ScheduledResponse};
+use super::{HostRequestId, IssuedRequestIds, PendingDeviceEvents, QueuedResponse, RequestBatchTickError, RequestKey};
 
 verus! {
 
@@ -248,7 +248,7 @@ fn index_requests<N, R>(source: &[DeviceHostRequest<N, R>])
     Ok((ranks, keys))
 }
 
-impl<'tick, T> PendingDeviceTick<'tick, T> {
+impl<'tick, E: QueuedResponse> PendingDeviceEvents<'tick, E> {
     /// 要求と通知の順序を保ち、回路更新が成功したときにだけホストへ渡す。
     ///
     /// 同じインスタンスの項目はデバイスが返したリスト順に並べる。通知には番号を振らない。
@@ -256,10 +256,10 @@ impl<'tick, T> PendingDeviceTick<'tick, T> {
     /// # Errors
     ///
     /// インスタンス番号が降順になる箇所、索引の領域確保失敗、または tick の確定エラーを返す。
-    /// エラー時は、回路、論理時刻、応答キュー、台帳の内容、採番状態を保持する。
+    /// エラー時は、回路、論理時刻、イベント列、台帳の内容、採番状態を保持する。
     pub fn commit_host_requests<'a, N, R>(
         self, input: &[bool], source: &'a [DeviceHostRequest<N, R>],
-    ) -> (result: Result<(Vec<ScheduledEvent<ScheduledResponse<T>>>, CommittedHostRequests<'a, N, R>),
+    ) -> (result: Result<(Vec<ScheduledEvent<E>>, CommittedHostRequests<'a, N, R>),
         HostRequestCommitError>)
         ensures
             result.is_err() ==> {

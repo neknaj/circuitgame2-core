@@ -163,9 +163,12 @@ pub enum ResponseTickError {
     Input(TickInputError),
 }
 
-pub(super) trait QueuedResponse {
+/// イベントから要求 ID とタグを取り出す。
+pub trait QueuedResponse {
+    /// 入力のように台帳と無関係なイベントにはキーがない。
     spec fn key_model(&self) -> Option<ResponseKey>;
 
+    /// 台帳で照合するときに使うキーを返す。
     fn queued_key(&self) -> (key: Option<ResponseKey>)
         ensures key == self.key_model();
 }
@@ -175,16 +178,18 @@ impl<T> QueuedResponse for ScheduledResponse<T> {
         Some(ResponseKey { id: self.model().0, tag: self.model().1 })
     }
 
+    /// 台帳で照合するときに使うキーを返す。
     fn queued_key(&self) -> (key: Option<ResponseKey>) {
         Some(ResponseKey { id: self.request_id(), tag: self.tag() })
     }
 }
 
-pub(super) open spec fn response_due<E: QueuedResponse>(event: ScheduledEvent<E>, target: TickPosition) -> bool {
+pub open spec fn response_due<E: QueuedResponse>(event: ScheduledEvent<E>, target: TickPosition) -> bool {
     event.position == target && event.payload.key_model().is_some()
 }
 
-pub(super) open spec fn queued_response_keys<E: QueuedResponse>(
+/// 対象 tick に配送する応答キーの列。
+pub open spec fn queued_response_keys<E: QueuedResponse>(
     events: Seq<ScheduledEvent<E>>, target: TickPosition,
 ) -> Seq<ResponseKey> {
     events.filter(|event: ScheduledEvent<E>| response_due(event, target))
@@ -192,7 +197,7 @@ pub(super) open spec fn queued_response_keys<E: QueuedResponse>(
 }
 
 /// 対象 tick に渡す応答の要求 ID とタグを、到着順に表す。
-pub closed spec fn response_keys<T>(
+pub open spec fn response_keys<T>(
     events: Seq<ScheduledEvent<ScheduledResponse<T>>>, target: TickPosition,
 ) -> Seq<ResponseKey> {
     queued_response_keys(events, target)
