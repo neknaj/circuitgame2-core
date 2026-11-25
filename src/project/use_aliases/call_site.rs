@@ -25,7 +25,7 @@ pub struct DefnPosition {
     pub item: usize,
 }
 
-/// 型検査が補助関数の本体で訪れた、宣言先が解決済みの呼び出し。
+/// 補助関数の本体にある、宣言先を解決した呼び出し。
 #[derive(Debug)]
 pub struct DefnCallEdge<'p, 'a> {
     /// 呼び出し元の補助関数。

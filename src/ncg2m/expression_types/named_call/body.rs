@@ -3,7 +3,7 @@
 use super::*;
 use super::typing::{CallTypeEntry, check_typed_body_with_calls};
 #[cfg(verus_only)]
-use super::typing::{call_entries_fit, call_trace_fits, trace_entry_in_range, canonical_call, typed_body_with_calls};
+use super::typing::{call_entries_fit, call_trace_fits, call_trace_model, trace_entry_in_range, canonical_call, typed_body_with_calls};
 use super::named_call::{prepare_call_types, read_call_form};
 #[cfg(verus_only)]
 use super::named_call::{call_form_matches, call_form_origin, call_signature_types_match, decoded_call_has_arity};
@@ -12,7 +12,16 @@ use crate::project::{DefnCallEdge, DefnCallError, DefnCallSite, MixedUseAliases,
 use crate::project::{ProjectDeclaration, ProjectSource, ResolvedDefnName, call_arity_matches, defn_name_resolution,
     mixed_use_targets_match, prepared_call_site, resolved_defn_name_origin};
 #[cfg(verus_only)]
+use crate::ncg2m::defn::DefnHeader;
+#[cfg(verus_only)]
 use crate::syntax::{preorder_range_pair, strict_preorder_ranges};
+
+mod coverage;
+use coverage::first_unvisited_expression_entry;
+#[cfg(verus_only)]
+use coverage::call_trace_covers_slots;
+#[cfg(verus_only)]
+use super::named_call::{expression_slot, expression_slot_bounds};
 
 verus! {
 
@@ -597,6 +606,7 @@ proof fn finish_edge_evidence(
     assert(forms[at as int] is List && forms[at + 1] is Atom);
 }
 
+#[verifier::spinoff_prover]
 proof fn trace_entry_resolution<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, forms: Seq<Form>, body: usize,
     outcomes: Seq<CallOutcome<'p, 'a>>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue<'p, 'a>>, index: usize,
@@ -616,13 +626,19 @@ proof fn trace_entry_resolution<'p, 'a>(
     let entry = calls[index as int];
     let at = entry.at;
     let src = project.sources_model()[caller.file as int].text_model();
-    reveal(call_inputs_match);
-    reveal(entry_witness);
+    assert(entry_witness(entry, outcomes, body)) by { reveal(call_inputs_match); };
     let resolved = outcomes[at - body]->Some_0;
     let declaration = resolved->Ok_0->Declared_declaration;
-    reveal(outcomes_recorded);
+    assert(body <= at < body + outcomes.len() && outcomes[at - body] == Some(resolved)
+        && resolved is Ok && resolved->Ok_0 is Declared
+        && entry.target == (DefnPosition { file: declaration.file, item: declaration.item })) by {
+        reveal(entry_witness);
+    };
+    assert(form_outcome_matches(aliases, caller.file, caller.item, forms, at, Some(resolved))) by {
+        reveal(call_inputs_match);
+        reveal(outcomes_recorded);
+    };
     reveal(form_outcome_matches);
-    assert(form_outcome_matches(aliases, caller.file, caller.item, forms, at, Some(resolved)));
     let form = choose|decoded: Option<CallForm>| #[trigger] call_form_matches(src, forms, at, decoded)
         && decoded.is_some() && call_arity_matches(aliases, caller.file, caller.item, decoded->Some_0, resolved);
     (form->Some_0, declaration)
@@ -667,6 +683,40 @@ proof fn recorded_edge_has_origin<'p, 'a>(
     finish_edge_evidence(aliases, edge, forms, at, name, declaration);
 }
 
+fn read_call_edge<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, forms: &[Form], calls: &[CallTypeEntry],
+    row: usize, Ghost(entries): Ghost<Seq<MetaItem>>, Ghost(body): Ghost<usize>,
+    Ghost(outcomes): Ghost<Seq<CallOutcome<'p, 'a>>>, Ghost(issues): Ghost<Seq<CallIssue<'p, 'a>>>,
+) -> (edge: DefnCallEdge<'p, 'a>)
+    requires
+        mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        aliases.targets_model().project_model().functional_forms_model(caller.file) == Some(forms@),
+        caller.item < entries.len(), entries[caller.item as int].kind is Defn,
+        aliases.targets_model().project_model().indexed_defn(caller.file, caller.item)
+            == Some(entries[caller.item as int].kind->Defn_0),
+        meta_ast_matches(aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
+            forms@, entries),
+        form_span(forms@[body as int]) == entries[caller.item as int].kind->Defn_0.body_span,
+        outcomes.len() == subtree_limit(forms@, body) - body,
+        call_entries_fit(forms@, calls@),
+        call_inputs_match(aliases, caller.file, caller.item, forms@, body, outcomes, calls@, issues),
+        row < calls@.len(), body <= calls@[row as int].at < forms@.len(),
+    ensures edge.from == caller,
+        edge_projects(&aliases.targets_model().project_model().sources_model()[caller.file as int],
+            forms@, calls@[row as int], edge),
+        defn_call_edge_matches(aliases, edge),
+{
+    let source = &aliases.targets().project().sources()[caller.file];
+    let entry = &calls[row];
+    let at = entry.at;
+    assert(canonical_call(forms@, *entry));
+    let call = DefnCallSite { source, head: span_of(&forms[at + 1]), span: span_of(&forms[at]) };
+    let edge = DefnCallEdge { from: caller, call, to: entry.target };
+    proof { recorded_edge_has_origin(aliases, caller, forms@, entries, body, outcomes, calls@, issues, row, edge); }
+    edge
+}
+
 fn project_call_trace<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, forms: &[Form], calls: &[CallTypeEntry],
     trace: &[usize], Ghost(entries): Ghost<Seq<MetaItem>>, Ghost(body): Ghost<usize>,
@@ -695,13 +745,13 @@ fn project_call_trace<'p, 'a>(
             &&& defn_call_edge_matches(aliases, edge)
         },
 {
-    let source = &aliases.targets().project().sources()[caller.file];
+    let ghost source = aliases.targets_model().project_model().sources_model()[caller.file as int];
     let mut edges = Vec::<DefnCallEdge>::new();
     let mut i = 0;
     while i < trace.len()
         invariant
             i == edges@.len() <= trace@.len(),
-            *source == aliases.targets_model().project_model().sources_model()[caller.file as int],
+            source == aliases.targets_model().project_model().sources_model()[caller.file as int],
             mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
             caller.file < aliases.targets_model().project_model().sources_model().len(),
             aliases.targets_model().project_model().functional_forms_model(caller.file) == Some(forms@),
@@ -717,29 +767,271 @@ fn project_call_trace<'p, 'a>(
             forall|j: int| 0 <= j < edges@.len() ==> {
                 let edge = #[trigger] edges@[j];
                 &&& edge.from == caller
-                &&& edge_projects(source, forms@, calls@[trace@[j] as int], edge)
+                &&& edge_projects(&source, forms@, calls@[trace@[j] as int], edge)
                 &&& defn_call_edge_matches(aliases, edge)
             },
         decreases trace@.len() - i,
     {
         proof { trace_entry_in_range(calls@, trace@, body, forms@.len(), i as int); }
-        let row = trace[i];
-        let entry = &calls[row];
-        let at = entry.at;
-        assert(canonical_call(forms@, *entry));
-        let call = DefnCallSite { source, head: span_of(&forms[at + 1]), span: span_of(&forms[at]) };
-        let edge = DefnCallEdge { from: caller, call, to: entry.target };
-        proof { recorded_edge_has_origin(aliases, caller, forms@, entries, body, outcomes, calls@, issues, row, edge); }
+        let edge = read_call_edge(aliases, caller, forms, calls, trace[i], Ghost(entries),
+            Ghost(body), Ghost(outcomes), Ghost(issues));
         edges.push(edge);
         i += 1;
     }
     edges
 }
 
+#[verifier::opaque]
+spec fn all_slots_projected(
+    source: &str, forms: Seq<Form>, caller: DefnPosition, body: usize, outcomes: Seq<CallOutcome>,
+    edges: Seq<DefnCallEdge>,
+) -> bool {
+    forall|at: usize| body <= at < body + outcomes.len()
+        && #[trigger] expression_slot(source, forms, body, at) ==> {
+        match outcomes[at - body] {
+            Some(Ok(PreparedDefnCall::Declared { declaration, .. })) =>
+                exists|i: int| 0 <= i < edges.len() && {
+                    let edge = #[trigger] edges[i];
+                    &&& edge.from == caller
+                    &&& edge.to == (DefnPosition { file: declaration.file, item: declaration.item })
+                    &&& edge.call.span == form_span(forms[at as int])
+                    &&& edge.call.head == form_span(forms[at + 1])
+                },
+            _ => true,
+        }
+    }
+}
+
+#[verifier::opaque]
+spec fn covered_body_slots(
+    aliases: &MixedUseAliases, caller: DefnPosition, source: &str, forms: Seq<Form>, header: DefnHeader,
+    edges: Seq<DefnCallEdge>,
+) -> bool {
+    exists|root: usize, body: usize, outcomes: Seq<CallOutcome>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>|
+        #[trigger] indexed_body_site(source, forms, root, body, header)
+            && outcomes.len() == subtree_limit(forms, body) - body
+            && #[trigger] call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues)
+            && #[trigger] all_slots_projected(source, forms, caller, body, outcomes, edges)
+}
+
+/// 呼び出し列が、型検査とは独立に定義した式の位置にある解決済みの宣言呼び出しをすべて含む。
+#[verifier::opaque]
+pub closed spec fn defn_body_calls_cover_slots(
+    aliases: &MixedUseAliases, caller: DefnPosition, edges: Seq<DefnCallEdge>,
+) -> bool {
+    let project = aliases.targets_model().project_model();
+    &&& caller.file < project.sources_model().len()
+    &&& match (project.indexed_defn(caller.file, caller.item), project.functional_forms_model(caller.file)) {
+        (Some(header), Some(forms)) => {
+            let source = project.sources_model()[caller.file as int].text_model();
+            covered_body_slots(aliases, caller, source, forms, header, edges)
+        }
+        _ => false,
+    }
+}
+
+#[verifier::opaque]
+spec fn body_contains_call_slot(source: &str, forms: Seq<Form>, header: DefnHeader, span: Range<usize>) -> bool {
+    exists|root: usize, body: usize, at: usize|
+        #[trigger] indexed_body_site(source, forms, root, body, header)
+            && at < forms.len()
+            && #[trigger] expression_slot(source, forms, body, at)
+            && span == form_span(forms[at as int])
+}
+
+/// 呼び出しの範囲が、指定した補助関数の本体から式としてたどれる位置を指すことを表す。
+#[verifier::opaque]
+pub closed spec fn defn_call_is_expression_slot(aliases: &MixedUseAliases, edge: DefnCallEdge) -> bool {
+    let project = aliases.targets_model().project_model();
+    &&& defn_call_edge_matches(aliases, edge)
+    &&& edge.from.file < project.sources_model().len()
+    &&& match (project.indexed_defn(edge.from.file, edge.from.item), project.functional_forms_model(edge.from.file)) {
+        (Some(header), Some(forms)) => {
+            let source = project.sources_model()[edge.from.file as int].text_model();
+            body_contains_call_slot(source, forms, header, edge.call.span)
+        }
+        _ => false,
+    }
+}
+
+proof fn prove_expression_slot_projection(
+    aliases: &MixedUseAliases, caller: DefnPosition, forms: Seq<Form>, body: usize,
+    outcomes: Seq<CallOutcome>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>,
+    trace: Seq<usize>, edges: Seq<DefnCallEdge>,
+)
+    requires
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        calls.len() <= usize::MAX,
+        call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
+        call_trace_covers_slots(aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
+            forms, calls, trace, body),
+        edges.len() == trace.len(),
+        forall|i: int| 0 <= i < edges.len() ==> {
+            let edge = #[trigger] edges[i];
+            edge.from == caller && edge_projects(
+                &aliases.targets_model().project_model().sources_model()[caller.file as int],
+                forms, calls[trace[i] as int], edge)
+        },
+    ensures all_slots_projected(aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
+        forms, caller, body, outcomes, edges),
+{
+    let source = aliases.targets_model().project_model().sources_model()[caller.file as int].text_model();
+    reveal(call_inputs_match);
+    reveal(outcomes_recorded);
+    reveal(call_trace_covers_slots);
+    reveal(all_slots_projected);
+    assert forall|at: usize| body <= at < body + outcomes.len()
+        && #[trigger] expression_slot(source, forms, body, at) implies {
+        match outcomes[at - body] {
+            Some(Ok(PreparedDefnCall::Declared { declaration, .. })) =>
+                exists|i: int| 0 <= i < edges.len() && {
+                    let edge = #[trigger] edges[i];
+                    &&& edge.from == caller
+                    &&& edge.to == (DefnPosition { file: declaration.file, item: declaration.item })
+                    &&& edge.call.span == form_span(forms[at as int])
+                    &&& edge.call.head == form_span(forms[at + 1])
+                },
+            _ => true,
+        }
+    } by {
+        let decoded = outcomes[at - body];
+        if let Some(Ok(PreparedDefnCall::Declared { declaration, signature, .. })) = decoded {
+            assert(call_shape_at(calls, at, signature));
+            let j = choose|j: int| 0 <= j < calls.len() && (#[trigger] calls[j]).at == at
+                && call_signature_types_match(calls[j], signature);
+            assert(entry_witness(calls[j], outcomes, body));
+            assert(calls[j].target == (DefnPosition { file: declaration.file, item: declaration.item })) by {
+                reveal(entry_witness);
+            };
+            assert(trace.contains(j as usize));
+            let i = choose|i: int| 0 <= i < trace.len() && (#[trigger] trace[i]) == j as usize;
+            assert(edges[i].from == caller);
+            assert(edges[i].to == calls[j].target);
+        }
+    };
+}
+
+proof fn finish_expression_slot_coverage(
+    aliases: &MixedUseAliases, caller: DefnPosition, source: &str, forms: Seq<Form>,
+    root: usize, body: usize, header: DefnHeader, outcomes: Seq<CallOutcome>,
+    calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>, edges: Seq<DefnCallEdge>,
+)
+    requires
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        aliases.targets_model().project_model().sources_model()[caller.file as int].text_model() == source,
+        aliases.targets_model().project_model().functional_forms_model(caller.file) == Some(forms),
+        aliases.targets_model().project_model().indexed_defn(caller.file, caller.item) == Some(header),
+        indexed_body_site(source, forms, root, body, header),
+        outcomes.len() == subtree_limit(forms, body) - body,
+        call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
+        all_slots_projected(source, forms, caller, body, outcomes, edges),
+    ensures defn_body_calls_cover_slots(aliases, caller, edges),
+{
+    assert(covered_body_slots(aliases, caller, source, forms, header, edges)) by {
+        reveal(covered_body_slots);
+        assert(indexed_body_site(source, forms, root, body, header));
+        assert(all_slots_projected(source, forms, caller, body, outcomes, edges));
+        assert(call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues));
+    };
+    reveal(defn_body_calls_cover_slots);
+}
+
+proof fn finish_unvisited_expression_evidence(
+    aliases: &MixedUseAliases, caller: DefnPosition, source: &str, forms: Seq<Form>,
+    root: usize, body: usize, header: DefnHeader, at: usize, edge: DefnCallEdge,
+)
+    requires
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        aliases.targets_model().project_model().sources_model()[caller.file as int].text_model() == source,
+        aliases.targets_model().project_model().functional_forms_model(caller.file) == Some(forms),
+        aliases.targets_model().project_model().indexed_defn(caller.file, caller.item) == Some(header),
+        indexed_body_site(source, forms, root, body, header),
+        at < forms.len(), expression_slot(source, forms, body, at),
+        edge.from == caller, edge.call.span == form_span(forms[at as int]),
+        defn_call_edge_matches(aliases, edge),
+    ensures defn_call_is_expression_slot(aliases, edge),
+{
+    assert(body_contains_call_slot(source, forms, header, edge.call.span)) by {
+        reveal(body_contains_call_slot);
+        assert(indexed_body_site(source, forms, root, body, header));
+        assert(expression_slot(source, forms, body, at));
+        assert(edge.call.span == form_span(forms[at as int]));
+    };
+    reveal(defn_call_is_expression_slot);
+}
+
+fn capture_checked_call_body<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, source: &'a str, forms: &[Form],
+    body: usize, calls: &[CallTypeEntry], trace: &[usize],
+    Ghost(entries): Ghost<Seq<MetaItem>>, Ghost(root): Ghost<usize>,
+    Ghost(outcomes): Ghost<Seq<CallOutcome<'p, 'a>>>, Ghost(issues): Ghost<Seq<CallIssue<'p, 'a>>>,
+) -> (result: Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallEdge<'p, 'a>>)
+    requires
+        mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        aliases.targets_model().project_model().sources_model()[caller.file as int].text_model() == source,
+        aliases.targets_model().project_model().functional_forms_model(caller.file) == Some(forms@),
+        caller.item < entries.len(), entries[caller.item as int].kind is Defn,
+        aliases.targets_model().project_model().indexed_defn(caller.file, caller.item)
+            == Some(entries[caller.item as int].kind->Defn_0),
+        meta_ast_matches(source, forms@, entries),
+        usable_forms(source, forms@), body < forms@.len(),
+        indexed_body_site(source, forms@, root, body, entries[caller.item as int].kind->Defn_0),
+        outcomes.len() == subtree_limit(forms@, body) - body,
+        call_entries_fit(forms@, calls@),
+        call_trace_fits(calls@, trace@, body, forms@.len()),
+        call_inputs_match(aliases, caller.file, caller.item, forms@, body, outcomes, calls@, issues),
+    ensures
+        match result {
+            Ok(edges) => {
+                &&& defn_body_calls_cover_slots(aliases, caller, edges@)
+                &&& forall|i: int| 0 <= i < edges@.len() ==> {
+                    let edge = #[trigger] edges@[i];
+                    edge.from == caller && defn_call_edge_matches(aliases, edge)
+                }
+            }
+            Err(edge) => edge.from == caller && defn_call_is_expression_slot(aliases, edge),
+        },
+{
+    let _count = calls.len();
+    if let Some(index) = first_unvisited_expression_entry(source, forms, calls, trace, body) {
+        proof { expression_slot_bounds(source, forms@, body, calls@[index as int].at); }
+        let edge = read_call_edge(aliases, caller, forms, calls, index, Ghost(entries),
+            Ghost(body), Ghost(outcomes), Ghost(issues));
+        proof {
+            finish_unvisited_expression_evidence(aliases, caller, source, forms@, root, body,
+                entries[caller.item as int].kind->Defn_0, calls@[index as int].at, edge);
+        }
+        Err(edge)
+    } else {
+        let edges = project_call_trace(aliases, caller, forms, calls, trace, Ghost(entries),
+            Ghost(body), Ghost(outcomes), Ghost(issues));
+        proof {
+            assert forall|j: int| 0 <= j < edges@.len() implies {
+                let edge = #[trigger] edges@[j];
+                let source = aliases.targets_model().project_model().sources_model()[caller.file as int];
+                edge.from == caller && edge_projects(&source, forms@, calls@[trace@[j] as int], edge)
+            } by {
+                let edge = edges@[j];
+                let source = aliases.targets_model().project_model().sources_model()[caller.file as int];
+                assert(edge_projects(&source, forms@, calls@[trace@[j] as int], edge));
+            };
+            prove_expression_slot_projection(aliases, caller, forms@, body, outcomes, calls@, issues, trace@, edges@);
+            finish_expression_slot_coverage(aliases, caller, source, forms@, root, body,
+                entries[caller.item as int].kind->Defn_0, outcomes, calls@, issues, edges@);
+            assert forall|j: int| 0 <= j < edges@.len() implies {
+                let edge = #[trigger] edges@[j];
+                edge.from == caller && defn_call_edge_matches(aliases, edge)
+            } by {};
+        }
+        Ok(edges)
+    }
+}
+
 pub(crate) fn check_indexed_call_body<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, source: &'a str, forms: &[Form],
     entries: &[MetaItem], collect_edges: bool,
-) -> (result: (Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>, Vec<DefnCallEdge<'p, 'a>>))
+) -> (result: (Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>, Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallEdge<'p, 'a>>))
     requires
         meta_ast_matches(source, forms@, entries@), meta_binding_spans_valid(source, entries@),
         item < entries@.len(), entries@[item as int].kind is Defn,
@@ -751,11 +1043,17 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
         !collect_edges || aliases.targets_model().project_model().indexed_defn(file, item)
             == Some(entries@[item as int].kind->Defn_0),
     ensures indexed_call_body_matches(aliases, file, item, source, forms@, entries@, result.0),
-        (!collect_edges || result.0.is_err()) ==> result.1@.len() == 0,
-        forall|i: int| 0 <= i < result.1@.len() ==> {
-            let edge = #[trigger] result.1@[i];
-            edge.from == (DefnPosition { file, item }) && defn_call_edge_matches(aliases, edge)
+        (!collect_edges || result.0.is_err()) ==> (result.1 matches Ok(edges) && edges@.len() == 0),
+        result.1 matches Ok(edges) ==> {
+            &&& (collect_edges && result.0.is_ok()) ==>
+                defn_body_calls_cover_slots(aliases, DefnPosition { file, item }, edges@)
+            &&& forall|i: int| 0 <= i < edges@.len() ==> {
+                let edge = #[trigger] edges@[i];
+                edge.from == (DefnPosition { file, item }) && defn_call_edge_matches(aliases, edge)
+            }
         },
+        result.1 matches Err(edge) ==>
+            edge.from == (DefnPosition { file, item }) && defn_call_is_expression_slot(aliases, edge),
 {
     let MetaItemKind::Defn(header) = &entries[item].kind else { unreachable!() };
     let body = indexed_meta_body(source, forms, entries, item);
@@ -784,12 +1082,16 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
     assert(call_body_outcome(call_types@, original_issues, source, forms@, body, signature, outcome));
     assert(indexed_body_site(source, forms@, root, body, *header));
     assert(call_inputs_match(aliases, file, item, forms@, body, outcomes, call_types@, original_issues));
-    let edges = match trace {
-        Some(trace) if collect_edges && outcome.is_ok() => project_call_trace(
-            aliases, DefnPosition { file, item }, forms, &call_types, &trace, Ghost(entries@), Ghost(body),
-            Ghost(outcomes), Ghost(original_issues),
-        ),
-        _ => Vec::new(),
+    let edges = if collect_edges && outcome.is_ok() {
+        let recorded: &[usize] = match &trace {
+            Some(entries) => entries.as_slice(),
+            None => &[],
+        };
+        assert(recorded@ =~= call_trace_model(trace));
+        capture_checked_call_body(aliases, DefnPosition { file, item }, source, forms, body, &call_types,
+            recorded, Ghost(entries@), Ghost(root), Ghost(outcomes), Ghost(original_issues))
+    } else {
+        Ok(Vec::new())
     };
     (outcome, edges)
 }

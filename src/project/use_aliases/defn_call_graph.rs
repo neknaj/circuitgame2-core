@@ -19,7 +19,7 @@ use super::call_site::{named_body_matches_project, project_named_defn_body_match
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::DefnSignature;
 #[cfg(verus_only)]
-use crate::ncg2m::expression_types::named_call::defn_call_edge_matches;
+use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
 
 verus! {
 
@@ -33,6 +33,10 @@ pub enum DefnCallGraphError<'p, 'a> {
         /// 呼び出しまたは式の診断。
         error: DefnBodyCallError<'p, 'a>,
     },
+    /// 型検査の記録から漏れた、本体内の補助関数の呼び出し。
+    ///
+    /// 構文上の式の位置と型検査の記録が食い違ったことを示す。
+    UnvisitedCall(DefnCallEdge<'p, 'a>),
     /// 元の呼び出しを順につないだ閉路。最後の呼び出し先は先頭の呼び出し元に戻る。
     Cycle(Vec<DefnCallEdge<'p, 'a>>),
 }
@@ -202,6 +206,7 @@ spec fn graph_matches(
     &&& forall|i: int| 0 <= i < rows.len() ==> {
         &&& graph_row_matches(aliases, vertices, i as usize, (#[trigger] rows[i])@, graph[i]@)
         &&& checked_body(aliases, vertices[i])
+        &&& defn_body_calls_cover_slots(aliases, vertices[i], rows[i]@)
     }
 }
 
@@ -217,6 +222,7 @@ fn graph_rows<'t, 'p, 'a>(
                 && dependency_graph_valid(graph@),
             Err(DefnCallGraphError::Body { from, error }) =>
                 project_named_defn_body_matches(aliases, from.file, from.item, Some(Err(error))),
+            Err(DefnCallGraphError::UnvisitedCall(edge)) => defn_call_is_expression_slot(aliases, edge),
             Err(DefnCallGraphError::Cycle(_)) => false,
         },
 {
@@ -234,7 +240,7 @@ fn graph_rows<'t, 'p, 'a>(
         decreases vertices@.len() - node,
     {
         let from = vertices[node];
-        let Some((body, edges)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
+        let Some((body, capture)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
         match body {
             Err(error) => {
                 proof { named_body_matches_project(aliases, from.file, from.item, Some(Err(error))); }
@@ -247,6 +253,10 @@ fn graph_rows<'t, 'p, 'a>(
                 }
             }
         }
+        let edges = match capture {
+            Ok(edges) => edges,
+            Err(edge) => return Err(DefnCallGraphError::UnvisitedCall(edge)),
+        };
         let linked = link_graph_row(aliases, vertices, node, edges.as_slice());
         rows.push(edges);
         graph.push(linked);
@@ -337,6 +347,8 @@ pub closed spec fn defn_call_plan_matches(aliases: &MixedUseAliases, plan: &Defn
     &&& order.no_duplicates()
     &&& forall|pos: DefnPosition| #[trigger] plan.vertices@.contains(pos) ==> order.contains(pos)
     &&& forall|pos: DefnPosition| #[trigger] plan.vertices@.contains(pos) ==> checked_body(aliases, pos)
+    &&& forall|row: int| 0 <= row < plan.edges_model().len()
+        ==> defn_body_calls_cover_slots(aliases, plan.vertices@[row], (#[trigger] plan.edges_model()[row])@)
     &&& forall|row: int, slot: int| 0 <= row < plan.edges_model().len()
         && 0 <= slot < plan.edges_model()[row]@.len() ==> {
             let edge = #[trigger] plan.edges_model()[row]@[slot];
@@ -365,7 +377,8 @@ pub proof fn defn_call_plan_edge_order(
 )
     requires defn_call_plan_matches(aliases, plan), rank < plan.order_model().len(),
     ensures plan.calls_model_at_rank(rank) matches Some(sites) && {
-        forall|j: int| 0 <= j < sites.len() ==> {
+        &&& defn_body_calls_cover_slots(aliases, plan.order_model()[rank as int], sites)
+        &&& forall|j: int| 0 <= j < sites.len() ==> {
             let edge = #[trigger] sites[j];
             let order = plan.order_model();
             &&& defn_call_edge_matches(aliases, edge)
@@ -379,6 +392,7 @@ pub proof fn defn_call_plan_edge_order(
     let node = plan.order@[rank as int] as int;
     let sites = plan.edges@[node]@;
     assert(plan.calls_model_at_rank(rank) == Some(sites));
+    assert(defn_body_calls_cover_slots(aliases, plan.vertices@[node], plan.edges_model()[node]@));
     assert forall|j: int| 0 <= j < sites.len() implies {
         let edge = #[trigger] sites[j];
         &&& defn_call_edge_matches(aliases, edge)
@@ -448,14 +462,15 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     ///
     /// # Errors
     ///
-    /// 型検査を完了できない本体、または循環を返す。組み込みやテンプレートの検査に実行段階が必要な場合は、
-    /// その本体の保留を返す。
+    /// 型検査を完了できない本体、訪問記録に漏れた呼び出し、または循環を返す。組み込みやテンプレートの検査に
+    /// 実行段階が必要な場合は、その本体の保留を返す。
     pub fn plan_defn_calls(&self) -> (result: Result<DefnCallPlan<'p, 'a>, DefnCallGraphError<'p, 'a>>)
         requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
         ensures match result {
             Ok(plan) => defn_call_plan_matches(self, &plan),
             Err(DefnCallGraphError::Body { from, error }) =>
                 project_named_defn_body_matches(self, from.file, from.item, Some(Err(error))),
+            Err(DefnCallGraphError::UnvisitedCall(edge)) => defn_call_is_expression_slot(self, edge),
             Err(DefnCallGraphError::Cycle(sites)) => defn_call_cycle(self, sites@),
         },
     {
