@@ -3,6 +3,7 @@
 mod ledger;
 mod request_ids;
 mod response;
+mod scheduling;
 
 pub use ledger::{RegisterRequestError, RequestLedger};
 #[cfg(verus_only)]
@@ -10,3 +11,4 @@ pub use ledger::{busy_at, response_update};
 pub use request_ids::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds};
 
 pub use response::{HostResponseError, ResponseSlot, ResponseStatus};
+pub use scheduling::{ScheduleResponseError, ScheduledResponse};

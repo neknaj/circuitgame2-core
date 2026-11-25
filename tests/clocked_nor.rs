@@ -160,6 +160,46 @@ fn event_tick_retries_with_the_same_inputs_and_consumes_once() {
 }
 
 #[test]
+fn scheduled_host_response_is_visible_at_its_delivery_tick() {
+    use circuitgame2_core::device::{HostResponseError, RequestIds, RequestLedger, ScheduleResponseError};
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::{ScheduledEvents, TickPosition};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+    let mut ids = RequestIds::new(0);
+    let mut ledger = RequestLedger::new(0);
+    let mut events = ScheduledEvents::new();
+    let id = ids.prepare(1).unwrap().commit().id_at(0, 1).unwrap();
+    session.prepare_io_tick(&mut events).unwrap().commit(&[false]).unwrap();
+    ledger.register(id, 9, 1).unwrap();
+
+    assert_eq!(session.schedule_response(&mut ledger, &mut events, id, session.position(), "late"),
+        Err(ScheduleResponseError::AlreadyCommitted));
+    let delivery = TickPosition { generation: 0, tick: 2 };
+    session.schedule_response(&mut ledger, &mut events, id, delivery, "data").unwrap();
+    assert_eq!(session.schedule_response(&mut ledger, &mut events, id, delivery, "duplicate"),
+        Err(ScheduleResponseError::Response(HostResponseError::DuplicateResponse)));
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(pending.next_event(0).unwrap().1.payload.payload(), &"data");
+    assert!(matches!(pending.commit(&[]), Err(TickInputError::InputCount)));
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    let event = &pending.next_event(0).unwrap().1.payload;
+    assert_eq!(event.request_id(), id);
+    assert_eq!(event.tag(), 9);
+    let ready = pending.commit(&[true]).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ledger.consume_at(ready[0].payload.request_id(), ready[0].position), Some(9));
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,
