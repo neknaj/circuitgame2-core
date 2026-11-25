@@ -182,7 +182,7 @@ impl<E: QueuedResponse> DeviceSession<E> {
             Ok(pending) => pending,
             Err(error) => return Err(RequestIssueError::Number(error)),
         };
-        let id = pending.proposed_id(0, instance);
+        let Some(id) = pending.proposed_id(0, instance) else { unreachable!() };
         if let Err(error) = self.ledger.register(id, tag, current.tick) {
             pending.cancel();
             return Err(RequestIssueError::Registration(error));

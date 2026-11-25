@@ -6,8 +6,17 @@ version = 4
 name = "circuitgame2-core"
 version = "0.1.0"
 dependencies = [
+ "circuitgame2-device-timing",
  "circuitgame2-packed-nor",
  "circuitgame2-syntax",
+ "vstd",
+]
+
+[[package]]
+name = "circuitgame2-device-timing"
+version = "0.1.0"
+dependencies = [
+ "verus_builtin_macros",
  "vstd",
 ]
 

@@ -6,6 +6,8 @@ Neknaj Circuit Game 2 の CLI と GUI で使う Rust ライブラリ。NCG2 の�
 
 CLI で回路を試す手順をプロジェクトの README にまとめている。 [CLI 入門](https://github.com/neknaj/circuitgame2#cli-で回路を試す)
 
+Pico と Pico 2 の GPIO 実行例とビルド手順は、[RP ファームウェア](firmware/rp/README.md)を参照。
+
 ## Rust から使う
 
 以下の例は Rust 1.99.1 で実行できる。利用側の `Cargo.toml` の `[dependencies]` に次の行を追加する。

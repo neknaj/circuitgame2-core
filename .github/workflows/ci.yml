@@ -32,11 +32,11 @@ jobs:
       - name: Run native tests and doctests
         run: cargo test --workspace --locked
 
-      - name: Build the packed NOR kernel for RP2040 and RP2350
+      - name: Build the executable firmware for Pico and Pico 2
         run: |
           rustup target add thumbv6m-none-eabi thumbv8m.main-none-eabihf
-          cargo build --locked --release -p circuitgame2-packed-nor --target thumbv6m-none-eabi
-          cargo build --locked --release -p circuitgame2-packed-nor --target thumbv8m.main-none-eabihf
+          cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico
+          cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2
 
       - name: Install Verus 0.2026.11.02.8bf68ee
         working-directory: ${{ runner.temp }}

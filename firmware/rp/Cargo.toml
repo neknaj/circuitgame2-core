@@ -1,0 +1,27 @@
+[workspace]
+
+[package]
+name = "ncg2-rp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+publish = false
+
+[features]
+pico = ["embassy-rp/rp2040"]
+pico2 = ["embassy-rp/rp235xa"]
+
+[dependencies]
+circuitgame2-device-timing = { path = "../../crates/device-timing" }
+circuitgame2-packed-nor = { path = "../../crates/packed-nor" }
+embassy-executor = { version = "=0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-rp = { version = "=0.10.0", features = ["critical-section-impl", "time-driver"] }
+embassy-time = "=0.5.1"
+cortex-m-rt = "0.7"
+panic-halt = "=1.0.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

@@ -166,7 +166,7 @@ impl RequestLedger {
             decreases keys@.len() - i,
         {
             let key = keys[i];
-            let id = ids.proposed_id(i as u64, key.instance);
+            let Some(id) = ids.proposed_id(i as u64, key.instance) else { unreachable!() };
             assert(id == request_id_at(keys@, generation, start, i as int));
             if let Err(error) = self.check_registration(id, key.tag, tick) {
                 assert(batch_request_error(old(self), keys@, generation, start, tick, i) ==
