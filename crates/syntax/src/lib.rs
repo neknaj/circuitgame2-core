@@ -585,6 +585,7 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
         inserted_closes_match(source, result.forms@, result.repairs@),
         repair_input_spans_valid(source, result.repairs@, source.spec_bytes().len() as int),
         form_spans_valid(source, result.forms@, source.spec_bytes().len() as int),
+        original_list_roots(result.forms@, result.original_lists@),
         original_list_ranges(source, result.original_lists@, result.repairs@, source.spec_bytes().len() as int),
 {
     match parse_forms(source, true) {
@@ -1919,6 +1920,126 @@ proof fn initialize_parse_invariants(
     assert(list_source_delimiters(source, forms, recovering));
 }
 
+spec fn settled_form_limit(forms: Seq<Form>, open: Seq<usize>) -> int {
+    if open.len() == 0 { forms.len() as int } else { open[0] as int }
+}
+
+spec fn original_list_in_prefix(forms: Seq<Form>, range: Range<usize>, limit: int) -> bool {
+    exists|i: int| #[trigger] circuit::direct_form_in_range(forms, 0, limit, i)
+        && forms[i] is List && form_span(forms[i]) == range && i < forms[i]->List_end <= limit
+}
+
+#[verifier::opaque]
+spec fn original_lists_in_prefix(forms: Seq<Form>, ranges: Seq<Range<usize>>, limit: int) -> bool {
+    forall|r: int| 0 <= r < ranges.len()
+        ==> original_list_in_prefix(forms, #[trigger] ranges[r], limit)
+}
+
+/// 実際の括弧で閉じた各区間が、回復後の構文木でも最上位のリストを指すことを表す。
+pub closed spec fn original_list_roots(forms: Seq<Form>, ranges: Seq<Range<usize>>) -> bool {
+    original_lists_in_prefix(forms, ranges, forms.len() as int)
+}
+
+/// 回復前の元の区間に対応する最上位リストが存在する。
+pub proof fn original_list_has_root(forms: Seq<Form>, ranges: Seq<Range<usize>>, range: int)
+    requires original_list_roots(forms, ranges), 0 <= range < ranges.len(),
+    ensures exists|i: int| #[trigger] circuit::direct_form_in_range(forms, 0, forms.len() as int, i)
+        && forms[i] is List && form_span(forms[i]) == ranges[range]
+        && i < forms[i]->List_end <= forms.len(),
+{
+    reveal(original_lists_in_prefix);
+    reveal(circuit::direct_form_in_range);
+    assert(original_list_in_prefix(forms, ranges[range], forms.len() as int));
+}
+
+proof fn preserve_original_list_roots(
+    before: Seq<Form>, after: Seq<Form>, ranges: Seq<Range<usize>>, old_limit: int, new_limit: int,
+)
+    requires
+        original_lists_in_prefix(before, ranges, old_limit),
+        0 <= old_limit <= new_limit <= after.len(),
+        forall|i: int| 0 <= i < old_limit ==> #[trigger] after[i] == before[i],
+    ensures original_lists_in_prefix(after, ranges, new_limit),
+{
+    reveal(original_lists_in_prefix);
+    reveal(circuit::direct_form_in_range);
+    assert forall|r: int| 0 <= r < ranges.len()
+        implies original_list_in_prefix(after, #[trigger] ranges[r], new_limit) by {
+        let i = choose|i: int| #[trigger] circuit::direct_form_in_range(before, 0, old_limit, i)
+            && before[i] is List && form_span(before[i]) == ranges[r]
+            && i < before[i]->List_end <= old_limit;
+        assert forall|earlier: int| 0 <= earlier < i && #[trigger] after[earlier] is List
+            implies after[earlier]->List_end <= i by {
+            assert(after[earlier] == before[earlier]);
+        };
+        assert(circuit::direct_form_in_range(after, 0, new_limit, i));
+        assert(after[i] == before[i]);
+    };
+}
+
+proof fn record_original_list_root(
+    before: Seq<Form>, after: Seq<Form>, ranges: Seq<Range<usize>>, index: int, span: Range<usize>,
+)
+    requires
+        original_list_roots(after, ranges),
+        nested_list_indices(before),
+        0 <= index < before.len() == after.len(),
+        before[index] is List && before[index]->List_end == 0,
+        after[index] is List && index < after[index]->List_end <= after.len(),
+        form_span(after[index]) == span,
+        forall|i: int| 0 <= i < index ==> #[trigger] after[i] == before[i],
+    ensures original_list_roots(after, ranges.push(span)),
+{
+    reveal(circuit::direct_form_in_range);
+    reveal(original_lists_in_prefix);
+    reveal(nested_list_indices);
+    assert forall|earlier: int| 0 <= earlier < index && #[trigger] after[earlier] is List
+        implies after[earlier]->List_end <= index by {
+        assert(after[earlier] == before[earlier]);
+        if index < before[earlier]->List_end {
+            assert(0 < before[index]->List_end <= before[earlier]->List_end);
+        }
+    };
+    assert(circuit::direct_form_in_range(after, 0, after.len() as int, index));
+    assert(original_list_in_prefix(after, span, after.len() as int));
+    let extended = ranges.push(span);
+    assert forall|r: int| 0 <= r < extended.len()
+        implies original_list_in_prefix(after, #[trigger] extended[r], after.len() as int) by {
+        if r < ranges.len() {
+            assert(extended[r] == ranges[r]);
+        } else {
+            assert(extended[r] == span);
+        }
+    };
+}
+
+proof fn original_lists_after_pop(
+    before: Seq<Form>, after: Seq<Form>, ranges: Seq<Range<usize>>, previous: Seq<usize>, open: Seq<usize>,
+    index: usize,
+)
+    requires
+        original_lists_in_prefix(before, ranges, settled_form_limit(before, previous)),
+        pending_lists(before, previous),
+        open_order(previous),
+        0 < previous.len(),
+        index == previous.last(),
+        open == previous.drop_last(),
+        after.len() == before.len(),
+        forall|i: int| 0 <= i < before.len() && i != index ==> #[trigger] after[i] == before[i],
+    ensures original_lists_in_prefix(after, ranges, settled_form_limit(after, open)),
+{
+    let old_limit = settled_form_limit(before, previous);
+    let new_limit = settled_form_limit(after, open);
+    if open.len() == 0 {
+        assert(index == previous[0]);
+    } else {
+        assert(open[0] == previous[0]);
+        assert(index > previous[0]);
+    }
+    preserve_original_list_roots(before, after, ranges, old_limit, new_limit);
+}
+
+
 spec fn completed_original_list(source: &str, span: Range<usize>, consumed: int) -> bool {
     let bytes = source.spec_bytes();
     &&& span.start + 1 < span.end <= consumed <= bytes.len()
@@ -2008,6 +2129,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 && complete_list_indices(forms@) && nested_list_indices(forms@)
                 && list_source_delimiters(source, forms@, recovering)
                 && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
+                && original_list_roots(forms@, original_lists@)
                 && original_list_ranges(source, original_lists@, repairs@, source.spec_bytes().len() as int)
                 && (!recovering ==> strict_source_covered(source, forms@))
                 && (well_formed_sexpr(source) ==> repairs@.len() == 0
@@ -2035,6 +2157,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         }
 
         initialize_parse_invariants(source, forms@, spans, repairs@, recovering);
+        reveal(original_lists_in_prefix);
         reveal(original_list_ranges);
     }
 
@@ -2065,7 +2188,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, recovering),
             open_order(open@),
+            original_lists_in_prefix(forms@, original_lists@, settled_form_limit(forms@, open@)),
             original_list_ranges(source, original_lists@, repairs@, lexer.cursor.position()),
+            root matches Some((start, _)) ==> (recovering ==> 0 < open@.len()
+                && form_span(forms@[open@[0] as int]).start == start),
             root matches Some((start, checkpoint)) ==> {
                 &&& start < lexer.cursor.position()
                 &&& source.spec_bytes()[start as int] == b'('
@@ -2085,6 +2211,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             well_formed_sexpr(source) ==> open@.len() == 0 && repairs@.len() == 0
                 && sexpr_form_model(source) == Some(forms@),
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
+            original_lists_in_prefix(forms@, original_lists@, settled_form_limit(forms@, open@)),
             original_list_ranges(source, original_lists@, repairs@, length as int),
         decreases length - lexer.cursor.position(),
     {
@@ -2230,6 +2357,16 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 forms.push(form);
                 assert(forms.len() == before.len() + 1);
                 open.push(index);
+                proof {
+                    if previous.len() == 0 {
+                        assert(open@[0] == index && forms@[index as int] == added);
+                    } else {
+                        assert(open@[0] == previous[0]);
+                        assert(forms@[open@[0] as int] == before[previous[0] as int]);
+                    }
+                    preserve_original_list_roots(before, forms@, original_lists@,
+                        settled_form_limit(before, previous), settled_form_limit(forms@, open@));
+                }
                 assert(open@[open@.len() - 1] == index);
                 assert(exists|j: int| 0 <= j < open@.len() && open@[j] == index);
                 assert(open@.contains(index));
@@ -2258,11 +2395,21 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 if let Some(index) = open.pop() {
                     let ghost before = forms@;
                     finish_list(&mut forms, index, span.end);
+                    proof {
+                        original_lists_after_pop(before, forms@, original_lists@, previous, open@, index);
+                        if open@.len() > 0 {
+                            assert(open@[0] == previous[0]);
+                            assert(index > previous[0]);
+                            assert(forms@[open@[0] as int] == before[previous[0] as int]);
+                        }
+                    }
                     if recovering && open.len() == 0 {
                         if let Some((start, checkpoint)) = root {
                             if repairs.len() == checkpoint {
                                 let confirmed = start..span.end;
                                 proof {
+                                    assert(index == previous[0]);
+                                    record_original_list_root(before, forms@, original_lists@, index as int, confirmed);
                                     append_original_list(source, original_lists@, repairs@, confirmed,
                                         lexer.cursor.position());
                                 }
@@ -2314,6 +2461,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 let form = Form::Atom { kind, span };
                 let ghost added = form;
                 forms.push(form);
+                proof {
+                    preserve_original_list_roots(before, forms@, original_lists@,
+                        settled_form_limit(before, open@), settled_form_limit(forms@, open@));
+                }
                 assert(forms.len() == before.len() + 1);
                 proof {
                     delimiters_after_append(source, before, added, recovering);
@@ -2374,6 +2525,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             nested_list_indices(forms@),
             list_source_delimiters(source, forms@, recovering),
             open_order(open@),
+            original_lists_in_prefix(forms@, original_lists@, settled_form_limit(forms@, open@)),
             original_list_ranges(source, original_lists@, repairs@, length as int),
         decreases open@.len(),
     {
@@ -2399,6 +2551,7 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             proof { advance_original_lists(source, original_lists@, previous_repairs, repairs@, length as int, length as int); }
             let ghost before = forms@;
             finish_list(&mut forms, index, length);
+            proof { original_lists_after_pop(before, forms@, original_lists@, previous, open@, index); }
             proof {
                 record_inserted_close(source, before, forms@, previous_repairs, index, opening_evidence, length);
                 delimiters_after_close(source, before, forms@, index as int, recovering);

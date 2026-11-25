@@ -316,6 +316,35 @@ impl<'a> RecoveredNames<'a> {
         }
     }
 
+    /// 修復がある場合、名前の取得に使った区間が回復後の構文木の最上位リストを指すことを示す。
+    pub proof fn original_name_has_root(&self, fragment: usize, item: usize, name: RecoveredName<'a>)
+        requires
+            self.valid(),
+            self.name_matches(RecoveredNamePosition::Original { fragment, item }, Some(name)),
+        ensures
+            self.recovery_model() matches CircuitRecovery::WithSyntaxRepairs { recovered, original },
+            self.recovery_model() matches CircuitRecovery::WithSyntaxRepairs { recovered, original } ==> {
+                &&& fragment < original@.len()
+                &&& original@[fragment as int] matches Some(list)
+                &&& exists|i: int| #[trigger] direct_form_in_range(recovered.forms@, 0, recovered.forms@.len() as int, i)
+                    && recovered.forms@[i] is List && form_span(recovered.forms@[i]) == list.span_model()
+            },
+    {
+        match self.recovery {
+            CircuitRecovery::WithSyntaxRepairs { recovered, original } => {
+                assert(fragment < original@.len());
+                match original@[fragment as int] {
+                    Some(list) => {
+                        assert(one_original_circuit_list(self.source, recovered.original_lists@[fragment as int], list));
+                        crate::original_list_has_root(recovered.forms@, recovered.original_lists@, fragment as int);
+                    },
+                    None => { assert(false); },
+                }
+            },
+            _ => { assert(false); },
+        }
+    }
+
     /// 名前と所属の位置が、解析に使った本文の文字境界を指すことを示す。
     pub proof fn name_uses_source_ranges(&self, position: RecoveredNamePosition, name: RecoveredName)
         requires self.name_matches(position, Some(name)),
