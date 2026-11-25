@@ -205,6 +205,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 let source = project.sources_model()[file as int];
                 project_source_index_evidence(source, indexes@[file as int]);
                 parsed_index_evidence(source, *parsed);
+                source.text_model_is_text();
                 indexed_entry_evidence(source.text_model(), parsed.syntax.forms@, parsed.syntax.entries@, entry as int);
                 namespace_name_evidence(source.text_model(), parsed.syntax.forms@, parsed.syntax.entries@,
                     parsed.names@, owner.form as int, block);
