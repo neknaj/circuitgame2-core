@@ -14,7 +14,8 @@ mod slice;
 pub use slice::ScalarInvocationSlice;
 #[cfg(verus_only)]
 pub use slice::{
-    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_results_agree,
+    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_reaches_terminal,
+    invocation_slice_results_agree,
     invocation_terminal_slice_extends, resumed_invocation_slices_match,
 };
 
@@ -223,6 +224,14 @@ spec fn invocation_step_atom<'plan, 'p, 'a>(
         Err(ScalarInvocationError::Literal(error)) => Err(error),
         _ => Ok(None),
     }
+}
+
+proof fn continuation_consumes_argument(before: ScalarInvocation, after: ScalarInvocation)
+    requires before.advance_matches(Ok(ScalarInvocationStep::Continue(after))),
+    ensures after.edge_model() == before.edge_model(),
+        after.arguments_model().len() == before.arguments_model().len() + 1,
+        after.arguments_model().len() <= before.edge_model().arguments@.len(),
+{
 }
 
 proof fn invocation_steps_agree(

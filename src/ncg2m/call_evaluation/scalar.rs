@@ -20,7 +20,8 @@ pub use invocation::{
 };
 #[cfg(verus_only)]
 pub use invocation::{
-    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_results_agree,
+    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_reaches_terminal,
+    invocation_slice_results_agree,
     invocation_terminal_slice_extends, resumed_invocation_slices_match, scalar_invocation_applicable,
 };
 pub use atom::ScalarLiteralError;

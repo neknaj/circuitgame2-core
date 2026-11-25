@@ -2,7 +2,10 @@
 
 use core::num::NonZeroUsize;
 #[cfg(verus_only)]
-use super::{invocation_errors_agree, invocation_states_agree, invocation_steps_agree};
+use super::{
+    continuation_consumes_argument, invocation_errors_agree, invocation_states_agree,
+    invocation_steps_agree,
+};
 use super::{ScalarCallFrame, ScalarInvocation, ScalarInvocationError, ScalarInvocationStep};
 use vstd::prelude::*;
 
@@ -177,6 +180,38 @@ pub proof fn invocation_terminal_slice_extends<'plan, 'p, 'a>(
     let path = choose|path: Seq<ScalarInvocation<'plan, 'p, 'a>>|
         #[trigger] invocation_slice_path(start, fuel, path, result);
     assert(invocation_slice_path(start, fuel + extra, path, result));
+}
+
+proof fn invocation_path_progress(start: ScalarInvocation, path: Seq<ScalarInvocation>, i: int)
+    requires invocation_path(start, path), 0 <= i < path.len(),
+    ensures path[i].edge_model() == start.edge_model(),
+        path[i].arguments_model().len() == start.arguments_model().len() + i,
+        i > 0 ==> path[i].arguments_model().len() <= start.edge_model().arguments@.len(),
+    decreases i,
+{
+    reveal(invocation_path);
+    if i > 0 {
+        invocation_path_progress(start, path, i - 1);
+        assert(path[i - 1].advance_matches(Ok(ScalarInvocationStep::Continue(path[i]))));
+        continuation_consumes_argument(path[i - 1], path[i]);
+    }
+}
+
+/// 未評価の引数の数を超える実行枠では、呼び出し先への移動か診断に達する。
+pub proof fn invocation_slice_reaches_terminal<'plan, 'p, 'a>(
+    start: ScalarInvocation<'plan, 'p, 'a>, fuel: nat,
+    result: Result<ScalarInvocationSlice<'plan, 'p, 'a>, ScalarInvocationError<'p, 'a>>,
+)
+    requires invocation_slice_matches(start, fuel, result),
+        fuel > 0,
+        start.arguments_model().len() + fuel > start.edge_model().arguments@.len(),
+    ensures !(result matches Ok(ScalarInvocationSlice::Suspended(_))),
+{
+    if result matches Ok(ScalarInvocationSlice::Suspended(_)) {
+        let path = choose|path: Seq<ScalarInvocation<'plan, 'p, 'a>>|
+            #[trigger] invocation_slice_path(start, fuel, path, result);
+        invocation_path_progress(start, path, fuel as int);
+    }
 }
 
 /// 二つの枠の実行結果が、再開時の状態、進入先の環境、または最初の診断まで一致する。
