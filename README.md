@@ -1,6 +1,6 @@
 # circuitgame2-core
 
-Neknaj Circuit Game 2 の CLI と GUI で使う Rust ライブラリ。NCG2 の回路ソースを解析し、名前解決と型・ビット幅・結線の検査を行う。組み合わせ回路を評価でき、ラッチや RAM を含む順序回路は tick ごとに実行できる。
+Neknaj Circuit Game 2 の CLI と GUI で使う Rust ライブラリ。NCG2 の回路ソースを解析し、名前解決と型・ビット幅・結線の検査を行う。組み合わせ回路を評価でき、ラッチや RAM を含む順序回路は tick ごとに実行できる。外部デバイスを扱う API は、回路の更新とデバイス状態をまとめて確定する。
 
 編集用の API は構文エラーから回復し、診断を返す。NCG2M ではファイルの構文解析と整数式の評価に加え、条件式やリスト演算などを含む補助関数の本体を型検査できる。
 
@@ -47,6 +47,10 @@ fn main() {
 - [API リファレンス](https://neknaj.github.io/circuitgame2-core/)
 - [NCG2 の設計と仕様](https://neknaj.github.io/circuitgame2/docs/)
 - [不具合報告・質問](https://github.com/neknaj/circuitgame2-core/issues)
+
+### 同じ回路を64通りの入力で実行する
+
+`ClockedNor::reset_packed` で初期状態を作り、`step_packed` で同じ回路の64通りの実行を1 tick ずつ進められる。入力、ゲート状態、出力は配線ごとに `u64` で表し、ビット `k` を実行 `k` に対応させる。各実行のゲート状態と公開出力は、同じ入力を通常の tick 実行に渡した結果と一致する。使い方は `step_packed` の使用例を参照。 [ビットスライス実装と使用例](src/netlist/bit_sliced.rs)
 
 ## テストと形式検証
 

@@ -2,6 +2,7 @@
 //!
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
+mod bit_sliced;
 mod clocked;
 mod clocked_io;
 mod clocked_storage;
@@ -32,6 +33,12 @@ pub use source_vm_trace::{
     source_vm_trace_outputs_agree, source_vm_traces_agree, source_vm_wire_matches, source_vm_wiring_valid,
 };
 
+pub use bit_sliced::PackedNorFrame;
+#[cfg(verus_only)]
+pub use bit_sliced::{
+    nor_lane, nor_lane_bit, packed_nor_reset_agrees, packed_nor_reset_matches, packed_nor_step_agrees,
+    packed_nor_step_lane, packed_nor_step_matches, packed_nor_trace, packed_nor_trace_agrees_at,
+};
 pub use clocked::{ClockedNor, ClockedNorError, TickFrame, TickInputError};
 pub use clocked::{ClockedInstanceError, ClockedStatefulInstance, ClockedStatefulInstanceError};
 #[cfg(verus_only)]

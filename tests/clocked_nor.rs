@@ -3,6 +3,36 @@ use circuitgame2_core::project::{ClockedModuleError, ClockedPlanError, ClockedWi
     check_use_aliases, index_use_targets, parse_circuit_project, plan_clocked_links};
 
 #[test]
+fn packed_nor_preserves_feedback_and_tick_boundaries() {
+    use circuitgame2_core::netlist::TickInputError;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![
+            NorGate { left: Wire::Input(0), right: Wire::Gate(1) },
+            NorGate { left: Wire::Gate(0), right: Wire::Constant(false) },
+        ],
+        outputs: vec![Wire::Gate(0), Wire::Gate(1), Wire::Input(0), Wire::Constant(true)],
+    }).unwrap();
+    let mut packed = circuit.reset_packed();
+    let mut scalar = circuit.reset();
+    let input_word = 1u64 << 63;
+    assert_eq!(packed.outputs, vec![0, 0, 0, u64::MAX]);
+    assert!(matches!(circuit.step_packed(&[], &[]), Err(TickInputError::InputCount)));
+    assert!(matches!(circuit.step_packed(&[], &[input_word]), Err(TickInputError::GateCount)));
+
+    let mut scalar_high = circuit.reset();
+    for input in [input_word, input_word, 1, 0] {
+        packed = circuit.step_packed(&packed.gates, &[input]).unwrap();
+        scalar = circuit.step(&scalar.gates, &[input & 1 != 0]).unwrap();
+        scalar_high = circuit.step(&scalar_high.gates, &[input >> 63 != 0]).unwrap();
+        for (word, (low, high)) in packed.outputs.iter().zip(scalar.outputs.iter().zip(&scalar_high.outputs)) {
+            assert_eq!((word & 1 != 0, word >> 63 != 0), (*low, *high));
+        }
+    }
+}
+
+#[test]
 fn settling_bound_covers_reversed_dependencies_and_unobserved_gates() {
     use circuitgame2_core::project::clocked_nor_settling_bound;
 
