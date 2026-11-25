@@ -3,12 +3,19 @@
 use super::*;
 use super::super::{CallArgumentStep, CallArguments};
 #[cfg(verus_only)]
-use super::atom::scalar_atom_matches;
+use super::atom::{scalar_atom_matches, scalar_atom_results_agree};
 use crate::ncg2m::defn::span_of;
 #[cfg(verus_only)]
-use crate::project::{DefnCallEdge, defn_call_argument_origin};
+use crate::project::{DefnCallEdge, defn_call_argument_origin, defn_call_arguments};
+
+mod slice;
+pub use slice::ScalarInvocationSlice;
 #[cfg(verus_only)]
-use crate::ncg2m::data_types::signature_result_origin;
+pub use slice::{
+    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_reaches_terminal,
+    invocation_slice_results_agree,
+    invocation_terminal_slice_extends, resumed_invocation_slices_match,
+};
 
 verus! {
 
@@ -183,6 +190,91 @@ impl<'plan, 'p, 'a> ScalarInvocation<'plan, 'p, 'a> {
     }
 }
 
+/// 呼び出し元、呼び出し先、引数の値列が同じ再開状態を表す。
+pub open spec fn invocation_states_agree(
+    first: ScalarInvocation, second: ScalarInvocation,
+) -> bool {
+    &&& first.caller_model() == second.caller_model()
+    &&& first.callee_model() == second.callee_model()
+    &&& first.ranks_model() == second.ranks_model()
+    &&& first.edge_model() == second.edge_model()
+    &&& first.arguments_model() == second.arguments_model()
+}
+
+/// 診断が同じ元文書・範囲・理由を表す。
+pub open spec fn invocation_errors_agree(
+    first: ScalarInvocationError, second: ScalarInvocationError,
+) -> bool {
+    match (first, second) {
+        (ScalarInvocationError::Literal(a), ScalarInvocationError::Literal(b)) =>
+            *a.source == *b.source && a.span == b.span && a.error == b.error,
+        (ScalarInvocationError::Deferred { source: a, span: left },
+            ScalarInvocationError::Deferred { source: b, span: right }) => *a == *b && left == right,
+        _ => false,
+    }
+}
+
+spec fn invocation_step_atom<'plan, 'p, 'a>(
+    result: Result<ScalarInvocationStep<'plan, 'p, 'a>, ScalarInvocationError<'p, 'a>>,
+) -> Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>> {
+    match result {
+        Ok(ScalarInvocationStep::Continue(after)) => Ok(Some(after.arguments_model().last())),
+        Err(ScalarInvocationError::Literal(error)) => Err(error),
+        _ => Ok(None),
+    }
+}
+
+proof fn continuation_consumes_argument(before: ScalarInvocation, after: ScalarInvocation)
+    requires before.advance_matches(Ok(ScalarInvocationStep::Continue(after))),
+    ensures after.edge_model() == before.edge_model(),
+        after.arguments_model().len() == before.arguments_model().len() + 1,
+        after.arguments_model().len() <= before.edge_model().arguments@.len(),
+{
+}
+
+proof fn invocation_steps_agree(
+    first: ScalarInvocation, second: ScalarInvocation,
+    a: Result<ScalarInvocationStep, ScalarInvocationError>,
+    b: Result<ScalarInvocationStep, ScalarInvocationError>,
+)
+    requires invocation_states_agree(first, second), first.advance_matches(a), second.advance_matches(b),
+    ensures match (a, b) {
+        (Ok(ScalarInvocationStep::Continue(left)), Ok(ScalarInvocationStep::Continue(right))) =>
+            invocation_states_agree(left, right),
+        (Ok(ScalarInvocationStep::Enter { rank: left, frame: a }), Ok(ScalarInvocationStep::Enter { rank: right, frame: b })) =>
+            left == right && a.body_model() == b.body_model() && a.parameter_values_model() == b.parameter_values_model(),
+        (Err(left), Err(right)) => invocation_errors_agree(left, right),
+        _ => false,
+    },
+{
+    let slot = first.arguments_model().len() as int;
+    let edge = first.edge_model();
+    let callee = first.callee_model();
+    if slot != edge.arguments@.len() {
+        let argument = edge.arguments@[slot];
+        let expected = callee.signature.parameters@[slot].ty.ty;
+        scalar_atom_results_agree(&first.caller_model(), argument, expected,
+            invocation_step_atom(a), invocation_step_atom(b));
+        if let (Ok(ScalarInvocationStep::Continue(left)), Ok(ScalarInvocationStep::Continue(right))) = (a, b) {
+            let before = first.arguments_model();
+            let left_values = left.arguments_model();
+            let right_values = right.arguments_model();
+            assert(left_values.take(slot) == before && right_values.take(slot) == before);
+            assert(left_values.last() == right_values.last());
+            assert forall|i: int| 0 <= i < left_values.len()
+                implies (#[trigger] left_values[i]) == (#[trigger] right_values[i]) by {
+                if i < slot {
+                    assert(left_values[i] == left_values.take(slot)[i]);
+                    assert(right_values[i] == right_values.take(slot)[i]);
+                } else {
+                    assert(i == slot && i == left_values.len() - 1 && i == right_values.len() - 1);
+                }
+            };
+            assert(left_values =~= right_values);
+        }
+    }
+}
+
 /// 指定した辺が本体直下にあり、順位と引数個数が呼び出し先の宣言に対応することを表す。
 pub open spec fn scalar_invocation_applicable(
     plan: &DefnCallPlan, caller_rank: usize, site: usize, caller: DefnEvaluationBody,
@@ -217,20 +309,16 @@ fn prepare_bound_invocation<'plan, 'p, 'a>(
     let edges = plan.calls_at_rank(caller_rank)?;
     let edge = edges.get(site)?;
     if edge.at != caller.body().at { return None; }
-    let callee_rank = plan.rank_of(edge.to)?;
-    if callee_rank >= caller_rank { return None; }
-    let callee = plan.body_at_rank(callee_rank)?;
-    proof {
-        let project = plan.project_model();
-        project.indexed_defn_signature_origin(edge.to.file, edge.to.item, Some(callee.signature));
-        let header = project.indexed_defn(edge.to.file, edge.to.item)->Some_0;
-        signature_result_origin(callee.source.text_model(), header, callee.signature);
-    }
-    if callee.signature.parameters.len() != edge.arguments.len() { return None; }
-    let Some(waiting) = plan.call_arguments(caller_rank, site) else { unreachable!() };
+    let Some(args) = prepare_scalar_arguments(plan, caller_rank, site) else { return None; };
+    proof { assert(args.model().0 == *edge); }
+    let (callee_rank, callee, waiting) = args.into_parts();
+    #[cfg(verus_only)]
+    let _argument_count = edge.arguments.len();
     proof {
         let forms = caller.body_model().forms@;
+        assert(defn_call_arguments(forms, edge.at, edge.arguments@));
         assert forall|i: int| 0 <= i < edge.arguments@.len() implies (#[trigger] edge.arguments@[i]) < forms.len() by {
+            assert(i < _argument_count);
             defn_call_argument_origin(forms, edge.at, edge.arguments@, i as usize);
         };
     }

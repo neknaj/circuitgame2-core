@@ -142,10 +142,28 @@ spec fn anchored_arguments(project: &ParsedProjectSources, vertices: Seq<DefnPos
     }
 }
 
+#[verifier::opaque]
+spec fn ordered_edges(
+    project: &ParsedProjectSources, vertices: Seq<DefnPosition>, edges: Seq<Vec<DefnCallEdge>>,
+    order: Seq<usize>, ranks: Seq<usize>,
+) -> bool {
+    &&& forall|row: int| 0 <= row < vertices.len() ==> {
+        let pos = #[trigger] vertices[row];
+        project.indexed_defn(pos.file, pos.item).is_some()
+    }
+    &&& forall|row: int, site: int| 0 <= row < edges.len() && 0 <= site < edges[row]@.len() ==> {
+        let edge = #[trigger] edges[row]@[site];
+        let ranked = order.map_values(|node: usize| vertices[node as int]);
+        &&& ranked.contains(edge.to)
+        &&& ranked.index_of(edge.to) < ranks[row]
+    }
+}
+
 impl<'p, 'a> DefnCallPlan<'p, 'a> {
     #[verifier::type_invariant]
     spec fn indexes_are_valid(&self) -> bool {
         &&& anchored_arguments(self.project, self.vertices@, self.edges@)
+        &&& ordered_edges(self.project, self.vertices@, self.edges@, self.order@, self.ranks@)
         &&& self.ranks@.len() == self.vertices@.len()
         &&& reverse_order_matches(self.order@, self.ranks@)
         &&& forall|a: int, b: int| 0 <= a < b < self.vertices@.len()
@@ -214,14 +232,16 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
     /// 指定した順位の本体を、計画に対応する元の文書版から返す。
     pub fn body_at_rank(&self, rank: usize) -> (body: Option<DefnEvaluationBody<'p, 'a>>)
         ensures self.order_nodes_valid(),
-            match body {
-                Some(body) => self.body_matches_at_rank(rank, body),
-                None => rank >= self.order_model().len() || self.project_model().indexed_defn(
-                    self.order_model()[rank as int].file, self.order_model()[rank as int].item).is_none(),
-            },
+            body.is_some() == (rank < self.order_model().len()),
+            body matches Some(body) ==> self.body_matches_at_rank(rank, body),
     {
         proof { use_type_invariant(self); }
         let defn = self.at_rank(rank)?;
+        proof {
+            reveal(ordered_edges);
+            let node = self.order@[rank as int];
+            assert(self.vertices@[node as int] == defn);
+        }
         self.project.defn_evaluation_body(defn.file, defn.item)
     }
 
@@ -287,6 +307,8 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
                 let project = self.project_model();
                 &&& edge == edges[site as int]
                 &&& args.model().1 == Seq::<Value>::empty()
+                &&& self.order_model().contains(edge.to)
+                &&& self.order_model().index_of(edge.to) < rank
                 &&& rank < self.order_model().len() && edge.from == self.order_model()[rank as int]
                 &&& edge.from.file < project.sources_model().len()
                 &&& *edge.call.source == project.sources_model()[edge.from.file as int]
@@ -298,7 +320,9 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         let edge = self.calls_at_rank(rank)?.get(site)?;
         proof {
             reveal(anchored_arguments);
+            reveal(ordered_edges);
             let node = self.order@[rank as int] as int;
+            assert(self.ranks@[node] == rank);
             assert(*edge == self.edges@[node]@[site as int]);
         }
         Some(CallArguments::start(edge))
@@ -695,6 +719,39 @@ proof fn checked_rows_anchor_arguments(
     };
 }
 
+proof fn checked_edges_have_order(
+    aliases: &MixedUseAliases, project: &ParsedProjectSources, vertices: Seq<DefnPosition>,
+    edges: Seq<Vec<DefnCallEdge>>, graph: Seq<Vec<Option<usize>>>, order: Seq<usize>,
+    ranks: Seq<usize>, expected: Seq<nat>,
+)
+    requires *project == aliases.targets_model().project_model(),
+        defn_vertices_valid(project, vertices), graph.len() == vertices.len(),
+        graph_matches(aliases, vertices, edges, graph), edges.len() == vertices.len(),
+        order.len() == vertices.len(), reverse_order_matches(order, ranks),
+        dependencies_in_order(graph, expected), completion_order_matches(order, expected),
+    ensures ordered_edges(project, vertices, edges, order, ranks),
+{
+    reveal(ordered_edges);
+    let ranked = order.map_values(|node: usize| vertices[node as int]);
+    assert forall|row: int| 0 <= row < vertices.len() implies {
+        let pos = #[trigger] vertices[row];
+        project.indexed_defn(pos.file, pos.item).is_some()
+    } by {
+        let pos = vertices[row];
+        assert(vertices.contains(pos));
+    };
+    assert forall|row: int, site: int| 0 <= row < edges.len() && 0 <= site < edges[row]@.len() implies {
+        let edge = #[trigger] edges[row]@[site];
+        ranked.contains(edge.to) && ranked.index_of(edge.to) < ranks[row]
+    } by {
+        let to = graph[row]@[site]->Some_0;
+        assert(graph_row_matches(aliases, vertices, row as usize, edges[row]@, graph[row]@));
+        assert(dependency_edge(graph, DependencyEdge { from: row as usize, field: site as usize, to }));
+        assert(ranks[row] == expected[row] && ranks[to as int] == expected[to as int]);
+        assert(ranked[ranks[to as int] as int] == edges[row]@[site].to);
+    };
+}
+
 proof fn checked_dependency_order_is_call_plan(
     aliases: &MixedUseAliases, plan: &DefnCallPlan, graph: Seq<Vec<Option<usize>>>,
 )
@@ -782,7 +839,10 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     && (forall|node: int| #![trigger rank[node]] 0 <= node < graph@.len()
                         ==> rank[node] < order@.len() && order@[rank[node] as int] == node);
                 let ranks = invert_call_order(order.as_slice(), Ghost(expected));
-                proof { checked_rows_anchor_arguments(self, project, vertices@, edges@, graph@); }
+                proof {
+                    checked_rows_anchor_arguments(self, project, vertices@, edges@, graph@);
+                    checked_edges_have_order(self, project, vertices@, edges@, graph@, order@, ranks@, expected);
+                }
                 let plan = DefnCallPlan { project, vertices, edges, order, ranks };
                 proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
                 Ok(plan)

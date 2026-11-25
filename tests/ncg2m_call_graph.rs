@@ -1,6 +1,8 @@
+use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{
-    ScalarBindingError, ScalarInvocationError, ScalarInvocationStep, ScalarValue, bind_scalar_call,
-    prepare_scalar_invocation,
+    ScalarArgumentsStep, ScalarBindingError, ScalarExecution, ScalarExecutionError, ScalarExecutionSlice, ScalarExpression, ScalarExpressionStep, ScalarInvocationError,
+    ScalarInvocationSlice, ScalarValue, bind_scalar_call,
+    prepare_scalar_arguments, prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
 use circuitgame2_core::ncg2m::integers::IntegerValue;
@@ -26,6 +28,12 @@ fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     assert_eq!(order.len(), 3);
     assert!(rank(2) < rank(0));
     assert!(plan.at_rank(3).is_none());
+    let caller_frame = bind_scalar_call(&plan, rank(0), Vec::new()).unwrap();
+    let state = ScalarExpression::start(caller_frame);
+    let ScalarExpressionStep::Continue(condition) = state.advance().unwrap() else { panic!() };
+    let ScalarExpressionStep::Continue(selected) = condition.advance().unwrap() else { panic!() };
+    assert!(matches!(selected.advance().unwrap(), ScalarExpressionStep::Complete { value: ScalarValue::Bool(true), .. }));
+
     let frame = bind_scalar_call(&plan, rank(2), Vec::new()).unwrap();
     assert!(frame.parameters().is_empty());
     assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(ScalarValue::Bool(true)));
@@ -123,16 +131,82 @@ fn scalar_invocation_uses_argument_order_and_the_callee_frame() {
     let value = ScalarValue::Integer(IntegerValue::Int(25));
 
     let call = prepare_scalar_invocation(&plan, rank(0), 0, vec![value]).unwrap().unwrap();
-    let ScalarInvocationStep::Continue(call) = call.advance().unwrap() else { panic!() };
-    let ScalarInvocationStep::Continue(call) = call.advance().unwrap() else { panic!() };
-    let ScalarInvocationStep::Enter { rank: callee, frame } = call.advance().unwrap() else { panic!() };
+    let ScalarInvocationSlice::Suspended(call) = call.run_slice(NonZeroUsize::new(1).unwrap()).unwrap()
+    else { panic!() };
+    let ScalarInvocationSlice::Enter { rank: callee, frame } = call.run_slice(NonZeroUsize::new(2).unwrap()).unwrap()
+    else { panic!() };
     assert_eq!(callee, rank(1));
     assert_eq!(frame.parameters(), &[value, ScalarValue::Integer(IntegerValue::Int(-2))]);
     assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(value));
 
     let nested = prepare_scalar_invocation(&plan, rank(2), 0, vec![value]).unwrap().unwrap();
-    let Err(ScalarInvocationError::Deferred { source: error_source, span }) = nested.advance()
+    let Err(ScalarInvocationError::Deferred { source: error_source, span }) = nested.run_slice(NonZeroUsize::new(3).unwrap())
     else { panic!() };
     assert_eq!(error_source.revision, 31);
     assert_eq!(&source[span], "(forward x)");
+
+    let outer = prepare_scalar_arguments(&plan, rank(2), 0).unwrap();
+    let ScalarArgumentsStep::Argument(first) = outer.next() else { panic!() };
+    assert_eq!(first.source().revision, 31);
+    assert_eq!(first.expression().at, plan.calls_at_rank(rank(2)).unwrap()[1].at);
+    let Err(first) = first.resume(ScalarValue::Bool(true)) else { panic!() };
+    let Ok(outer) = first.resume(value) else { panic!() };
+    let ScalarArgumentsStep::Argument(second) = outer.next() else { panic!() };
+    let Ok(outer) = second.resume(ScalarValue::Integer(IntegerValue::Int(-2))) else { panic!() };
+    let ScalarArgumentsStep::Enter { rank: callee, frame } = outer.next() else { panic!() };
+    assert_eq!(callee, rank(1));
+    assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(value));
+}
+
+#[test]
+fn slices_resume_nested_arguments_in_the_original_environment() {
+    let source = "(defn entry (as-type (Fn (Bool Int) Int)
+        (fn (choose value) (pick (if choose (check value) false)
+            (if choose (identity value) (as-type Int -9))))))
+        (defn pick (as-type (Fn (Bool Int) Int) (fn (flag data) (if flag data 0))))
+        (defn check (as-type (Fn (Int) Bool) (fn (data) true)))
+        (defn identity (as-type (Fn (Int) Int) (fn (data) data)))
+        (defn blocked (as-type (Fn () Int) (fn ()
+            (pick (as-type Bool true) (as-type Int -9)))))";
+    let snapshots = [SourceSnapshot { path: "nested.ncg2m", revision: 52, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    let rank = plan.rank_of(DefnPosition { file: 0, item: 0 }).unwrap();
+    let expected = ScalarValue::Integer(IntegerValue::Int(-25));
+    let start = || ScalarExecution::start(&plan, rank, vec![ScalarValue::Bool(true), expected]).unwrap();
+    let whole = start().run_slice(NonZeroUsize::new(128).unwrap()).unwrap();
+    assert!(matches!(whole, ScalarExecutionSlice::Complete(value) if value == expected));
+
+    let mut state = start();
+    let mut sliced = None;
+    for _ in 0..128 {
+        match state.run_slice(NonZeroUsize::new(1).unwrap()).unwrap() {
+            ScalarExecutionSlice::Suspended(next) => state = next,
+            ScalarExecutionSlice::Complete(value) => {
+                sliced = Some(value);
+                break;
+            }
+        }
+    }
+    assert_eq!(sliced, Some(expected));
+
+    let blocked = plan.rank_of(DefnPosition { file: 0, item: 4 }).unwrap();
+    let mut state = ScalarExecution::start(&plan, blocked, Vec::new()).unwrap();
+    let whole = ScalarExecution::start(&plan, blocked, Vec::new()).unwrap()
+        .run_slice(NonZeroUsize::new(128).unwrap());
+    let Err(ScalarExecutionError::Deferred { source: whole_source, span: whole_span }) = whole else { panic!() };
+    assert_eq!((whole_source.revision, &source[whole_span.clone()]), (52, "(as-type Bool true)"));
+    for _ in 0..128 {
+        match state.run_slice(NonZeroUsize::new(1).unwrap()) {
+            Ok(ScalarExecutionSlice::Suspended(next)) => state = next,
+            Err(ScalarExecutionError::Deferred { source, span }) => {
+                assert_eq!((source.revision, span), (whole_source.revision, whole_span));
+                return;
+            }
+            _ => panic!("the first unsupported argument should stop evaluation"),
+        }
+    }
+    panic!("the small call graph should finish within the test's step limit");
 }

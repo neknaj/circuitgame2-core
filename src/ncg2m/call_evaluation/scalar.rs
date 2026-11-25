@@ -12,11 +12,32 @@ use crate::ncg2m::integers::{IntegerType, IntegerValue};
 use vstd::prelude::*;
 use super::DefnEvaluationBody;
 
+mod arguments;
 mod atom;
+mod condition;
+mod execution;
+mod expression;
 mod invocation;
-pub use invocation::{ScalarInvocation, ScalarInvocationError, ScalarInvocationStep, prepare_scalar_invocation};
+pub use arguments::{PendingScalarArgument, ScalarArguments, ScalarArgumentsStep, prepare_scalar_arguments};
 #[cfg(verus_only)]
-pub use invocation::scalar_invocation_applicable;
+pub use arguments::prepared_arguments_match;
+pub use condition::{ScalarCondition, ScalarExpressionSite};
+pub use execution::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice};
+#[cfg(verus_only)]
+pub use execution::{resumed_scalar_execution_matches, scalar_execution_slice_matches, scalar_execution_terminal_extends};
+pub use expression::{ScalarExpression, ScalarExpressionStep};
+#[cfg(verus_only)]
+pub use condition::scalar_condition_matches;
+pub use invocation::{
+    ScalarInvocation, ScalarInvocationError, ScalarInvocationSlice, ScalarInvocationStep,
+    prepare_scalar_invocation,
+};
+#[cfg(verus_only)]
+pub use invocation::{
+    invocation_slice_is_deterministic, invocation_slice_matches, invocation_slice_reaches_terminal,
+    invocation_slice_results_agree,
+    invocation_terminal_slice_extends, resumed_invocation_slices_match, scalar_invocation_applicable,
+};
 pub use atom::ScalarLiteralError;
 #[cfg(verus_only)]
 pub use atom::atomic_body_matches;
