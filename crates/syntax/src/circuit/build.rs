@@ -813,6 +813,7 @@ pub fn index_build_forms(source: &str) -> (result: Result<BuildCircuitIndex, Cir
                 && circuit_index_matches(source, index.syntax.forms@, index.syntax.entries@)
                 && complete_list_indices(index.syntax.forms@) && nested_list_indices(index.syntax.forms@)
                 && form_spans_valid(source, index.syntax.forms@, source.spec_bytes().len() as int)
+                && crate::list_source_delimiters(source, index.syntax.forms@, false)
                 && index.entry_ranges@.len() == index.syntax.entries@.len(),
             Err(error) => circuit_source_error(source, error),
         },
