@@ -1271,6 +1271,13 @@ proof fn program_agrees_with_source(
         source_event(source, forms, at, ty) == child_meaning(meaning_prefix(rows, rows.len()), rows.len(), at, ty),
     decreases forms.len() - at,
 {
+    // 構文解析と評価表の構築には補題を使い、ここでは式の一段分の型と値を比較する。
+    hide(direct_node_model);
+    hide(prepared_row_sound);
+    hide(planned_suffix);
+    hide(meaning_prefix);
+    hide(checked_literal);
+    hide(arithmetic_value);
     let slot = forms.len() - 1 - at;
     let prior = rows.take(slot);
     let node = prepared[slot]->Supported_node;
@@ -1278,25 +1285,47 @@ proof fn program_agrees_with_source(
     children_are_supported(source, forms, prepared, at, node);
     planned_row_is_model(source, forms, prepared, 0, at as nat, rows, ty);
     math_row_is_model(rows, slot, ty);
+    let events = meaning_prefix(rows, rows.len());
+    let prior_events = meaning_prefix(rows, slot as nat);
+    let planned = planned_for(rows[slot], ty);
+    let span = form_span(forms[at as int]);
     match node {
-        Node::Literal(_) => {},
-        Node::Arithmetic(_, left, right) => {
+        Node::Literal(leaf) => {
+            assert(leaf.index == at);
+            assert(checked_literal(source, forms[at as int], ty).is_ok());
+            assert(source_typeable(source, forms, at, ty));
+            assert(source_event(source, forms, at, ty) == eval_plan_model(planned, span, rows.len(), prior_events));
+        },
+        Node::Arithmetic(op, left, right) => {
             let a = forms.len() - 1 - left;
             let b = forms.len() - 1 - right;
             assert(prior[a] == rows[a] && prior[b] == rows[b]);
+            assert(planned == Ok(PlannedOperation::Arithmetic(ty, op, left, right)));
             program_agrees_with_source(source, forms, prepared, rows, left, ty);
             program_agrees_with_source(source, forms, prepared, rows, right, ty);
             meaning_prefix_agrees(rows, slot as nat, rows.len(), a);
             meaning_prefix_agrees(rows, slot as nat, rows.len(), b);
+            assert(source_event(source, forms, left, ty) == child_meaning(prior_events, rows.len(), left, ty));
+            assert(source_event(source, forms, right, ty) == child_meaning(prior_events, rows.len(), right, ty));
+            assert(source_typeable(source, forms, at, ty));
+            assert(source_event(source, forms, at, ty) == eval_plan_model(planned, span, rows.len(), prior_events));
         }
         Node::Convert(target, child) | Node::Annotate(target, child) => {
             let index = forms.len() - 1 - child;
             let input_ty = if node is Convert { opposite(target) } else { target };
+            assert(target == ty);
             assert(prior[index] == rows[index]);
             program_agrees_with_source(source, forms, prepared, rows, child, input_ty);
             meaning_prefix_agrees(rows, slot as nat, rows.len(), index);
+            assert(
+                source_event(source, forms, child, input_ty)
+                    == child_meaning(prior_events, rows.len(), child, input_ty)
+            );
+            assert(source_typeable(source, forms, at, ty));
+            assert(source_event(source, forms, at, ty) == eval_plan_model(planned, span, rows.len(), prior_events));
         }
     }
+    assert(child_meaning(events, rows.len(), at, ty) == eval_plan_model(planned, span, rows.len(), prior_events));
 }
 
 /// ソース上の結果の型、数学上の値、半開バイト範囲をこの順に返す。
