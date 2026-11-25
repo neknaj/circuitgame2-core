@@ -73,11 +73,11 @@ pub struct DeclarationTable<'p, 'a> {
     lookup: Option<LookupIndex>,
 }
 
-spec fn named_binding(head: Head) -> bool {
+pub(super) open spec fn named_binding(head: Head) -> bool {
     head is Namespace || head is Func || head is Module || head is Struct || head is Latch || head is Memory
 }
 
-fn defines_binding(head: Head) -> (binding: bool)
+pub(super) fn defines_binding(head: Head) -> (binding: bool)
     ensures binding == named_binding(head),
 {
     matches!(head, Head::Namespace | Head::Func | Head::Module | Head::Struct | Head::Latch | Head::Memory)

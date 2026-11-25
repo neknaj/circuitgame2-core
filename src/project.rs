@@ -6,6 +6,7 @@ mod bit_selection;
 mod circuits;
 mod concatenation;
 mod declarations;
+mod editor_recovery;
 mod exports;
 mod literal_width;
 mod module_parts;
@@ -75,7 +76,10 @@ pub use declarations::{
     mixed_project_names_conflict, name_conflict_evidence, project_declares,
     project_names_conflict,
 };
+pub use editor_recovery::{CircuitEditorFile, ObservedCircuitBinding, ObservedCircuitBindingKind, inspect_circuit_file};
 pub use exports::{ExportError, ExportTable, index_exports};
+#[cfg(verus_only)]
+pub use editor_recovery::circuit_editor_source;
 #[cfg(verus_only)]
 pub use exports::{export_error_evidence, export_table_matches, project_exports_valid};
 pub use name_keys::NameKey;
