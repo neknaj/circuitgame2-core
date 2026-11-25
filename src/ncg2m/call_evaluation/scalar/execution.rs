@@ -22,6 +22,8 @@ use vstd::prelude::*;
 pub(super) mod observation;
 #[cfg(verus_only)]
 pub use observation::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
+#[cfg(any(test, verus_only))]
+mod two_helper_example;
 mod slice;
 #[cfg(verus_only)]
 mod progress;
@@ -295,6 +297,9 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         self.active.valid(self.plan, self.rank) && stack_fits(self.plan, self.waiting@, self.result_type@, self.active.context(self.rank))
     }
 
+    /// この評価が参照する補助関数の型検査済み計画を表す。
+    pub closed spec fn plan_model(&self) -> &'plan DefnCallPlan<'p, 'a> { self.plan }
+
     /// 評価を開始した補助関数の戻り値型を表す。
     pub closed spec fn result_type_model(&self) -> DataType<'a> { self.result_type@ }
 
@@ -320,9 +325,12 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     pub fn start(plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, values: Vec<ScalarValue>)
         -> (result: Result<Self, ScalarBindingError<'p, 'a>>)
         ensures match result {
-            Ok(state) => exists|frame: ScalarCallFrame<'p, 'a>|
-                #[trigger] binding_at_rank_matches(plan, rank, values@, Ok(frame))
-                    && state.starts_with(plan, rank, frame),
+            Ok(state) => {
+                &&& state.plan_model() == plan
+                &&& exists|frame: ScalarCallFrame<'p, 'a>|
+                    #[trigger] binding_at_rank_matches(plan, rank, values@, Ok(frame))
+                        && state.starts_with(plan, rank, frame)
+            },
             Err(error) => binding_at_rank_matches(plan, rank, values@, Err(error)),
         },
     {

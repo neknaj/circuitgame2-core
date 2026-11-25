@@ -5,7 +5,7 @@ use crate::ncg2m::call_evaluation::scalar::ScalarExpressionSite;
 use crate::ncg2m::data_types::{BuiltinDataType, DataType, DataTypeAtom};
 use crate::ncg2m::expression_types::{conditional_positions, expression_slot, local_scalar_site_is_typed, scalar_atom_at, scalar_call_syntax_at, scalar_evaluator_syntax};
 use crate::ncg2m::expression_types::named_call::{
-    checked_atom_uses_only_parameters, checked_body_scalar_position, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
+    checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
 };
 
 mod scalar_closure;
@@ -90,6 +90,22 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         let row = self.calls_model_at_rank(rank)->Some_0;
         defn_checked_if_child_sites(aliases, self.order_model()[rank as int], row, body, site.at,
             site.expected, condition, yes, no);
+    }
+
+    /// 呼び出し計画の辺は、元の本体にある宣言呼び出しの構文に対応する。
+    pub proof fn recorded_call_at_rank_has_syntax(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize,
+        body: DefnEvaluationBody<'p, 'a>, site: usize,
+    )
+        requires
+            defn_call_plan_matches(aliases, self), self.body_matches_at_rank(rank, body),
+            self.calls_model_at_rank(rank) matches Some(row) && site < row.len(),
+        ensures scalar_call_syntax_at(body.source.text_model(), body.forms@,
+            self.calls_model_at_rank(rank)->Some_0[site as int].at),
+    {
+        defn_call_plan_edge_order(aliases, self, rank);
+        let row = self.calls_model_at_rank(rank)->Some_0;
+        recorded_edge_has_call_syntax(aliases, self.order_model()[rank as int], row, body, site);
     }
 
     /// 型検査済みの宣言呼び出しの、元の構文位置と呼び出し先の順位を計画から得る。

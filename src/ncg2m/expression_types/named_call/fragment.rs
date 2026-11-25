@@ -32,6 +32,58 @@ pub closed spec fn scalar_evaluator_syntax(source: &str, forms: Seq<Form>, at: u
     }
 }
 
+/// アトムの字句種別から、スカラー評価器の構文に属することを示す。
+pub proof fn scalar_syntax_atom_from_kind(source: &str, forms: Seq<Form>, at: usize)
+    requires super::super::scalar_atom_at(forms, at),
+    ensures scalar_evaluator_syntax(source, forms, at),
+{
+    reveal(scalar_evaluator_syntax);
+}
+
+/// 条件と両方の分岐が対応する構文なら、条件式も対応する構文に属する。
+pub proof fn scalar_syntax_if_from_children(
+    source: &str, forms: Seq<Form>, at: usize, condition: usize, yes: usize, no: usize,
+)
+    requires
+        conditional_positions(source, forms, at) == Some((condition, yes, no)),
+        scalar_evaluator_syntax(source, forms, condition),
+        scalar_evaluator_syntax(source, forms, yes),
+        scalar_evaluator_syntax(source, forms, no),
+    ensures scalar_evaluator_syntax(source, forms, at),
+{
+    reveal(conditional_positions);
+    assert(children3(forms, at) == Some((condition, yes, no)));
+    assert(at < condition < yes < no < forms.len());
+    reveal(scalar_evaluator_syntax);
+}
+
+/// 呼び出しの直下の実引数がすべて対応する構文なら、呼び出しも対応する構文に属する。
+pub proof fn scalar_syntax_call_from_arguments(source: &str, forms: Seq<Form>, at: usize, arguments: Seq<usize>)
+    requires
+        scalar_call_syntax_at(source, forms, at), defn_call_arguments(forms, at, arguments),
+        forall|i: int| 0 <= i < arguments.len() ==> scalar_evaluator_syntax(source, forms, #[trigger] arguments[i]),
+    ensures scalar_evaluator_syntax(source, forms, at),
+{
+    declared_call_syntax_uses_signature(source, forms, at);
+    assert forall|i: int| 0 <= i < arguments.len() implies {
+        let arg = #[trigger] arguments[i];
+        at < arg < forms.len() && scalar_evaluator_syntax(source, forms, arg)
+    } by {
+        super::body::call_argument_intervals(forms, at, arguments, i);
+    };
+    assert(exists|args: Seq<usize>| #[trigger] defn_call_arguments(forms, at, args)
+        && forall|i: int| 0 <= i < args.len() ==> {
+            let arg = #[trigger] args[i];
+            at < arg < forms.len() && scalar_evaluator_syntax(source, forms, arg)
+        });
+    reveal(scalar_evaluator_syntax);
+}
+
+pub(super) proof fn scalar_call_syntax_from_decoded(source: &str, forms: Seq<Form>, at: usize, call: CallForm)
+    requires call_form_matches(source, forms, at, Some(call)),
+    ensures scalar_call_syntax_at(source, forms, at),
+{}
+
 /// 対応する条件式では、条件と両方の分岐も対応する構文である。
 pub proof fn scalar_syntax_if_children(
     source: &str, forms: Seq<Form>, at: usize, condition: usize, yes: usize, no: usize,

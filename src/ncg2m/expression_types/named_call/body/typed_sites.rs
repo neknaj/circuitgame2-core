@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ncg2m::call_evaluation::DefnEvaluationBody;
-use super::super::fragment::declared_call_syntax_uses_signature;
+use super::super::fragment::{declared_call_syntax_uses_signature, scalar_call_syntax_from_decoded};
 use super::super::super::typing::scalar::{
     accepted_call_has_entry, checked_if_keeps_child_types, checked_scalar_atom_has_local_type,
 };
@@ -92,6 +92,29 @@ pub(crate) proof fn defn_checked_if_child_sites<'p, 'a>(
     assert(at < condition < yes < no < subtree_limit(forms, at));
     checked_if_keeps_child_types(calls, body.source.text_model(), forms, body.signature.parameters@,
         at, expected, condition, yes, no);
+}
+
+pub(crate) proof fn recorded_edge_has_call_syntax<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>,
+    body: DefnEvaluationBody<'p, 'a>, site: usize,
+)
+    requires
+        defn_body_calls_cover_slots(aliases, caller, row), site < row.len(),
+        ({
+            let project = aliases.targets_model().project_model();
+            &&& caller.file < project.sources_model().len()
+            &&& *body.source == project.sources_model()[caller.file as int]
+            &&& project.functional_forms_model(caller.file) == Some(body.forms@)
+        }),
+    ensures scalar_call_syntax_at(body.source.text_model(), body.forms@, row[site as int].at),
+{
+    recorded_call_typing_matches(aliases, caller, row);
+    let (_, root, _, outcomes, calls, issues, trace) = recorded_call_typing(aliases, caller, row);
+    let index = trace[site as int];
+    trace_entry_in_range(calls, trace, root, body.forms@.len(), site as int);
+    let (form, _, _) = trace_entry_resolution(aliases, caller, body.forms@, root, outcomes, calls, issues, index);
+    assert(edge_projects(body.source, body.forms@, calls[index as int], row[site as int]));
+    scalar_call_syntax_from_decoded(body.source.text_model(), body.forms@, row[site as int].at, form);
 }
 
 pub(crate) proof fn checked_body_scalar_position<'p, 'a>(
