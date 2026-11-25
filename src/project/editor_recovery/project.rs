@@ -1,9 +1,10 @@
 //! 正規化済みのソースを検査し、回復した宣言をファイル順に検索する。
 
-use super::{CircuitEditorFile, PositionedBinding, RecoveredDeclarationQuery, inspect_circuit_file};
+use super::{CircuitEditorFile, PositionedBinding, RecoveredDeclarationQuery, inspect_file};
 #[cfg(verus_only)]
 use super::circuit_editor_source;
 use crate::project::{NameKey, ProjectSource};
+use crate::syntax::circuit::CachedCircuitRecovery;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -204,6 +205,19 @@ pub fn inspect_circuit_project<'p, 'a>(sources: &'p [ProjectSource<'a>])
     -> (project: CircuitEditorProject<'p, 'a>)
     ensures project.matches_sources(sources),
 {
+    inspect_circuit_project_with_cache(sources, &[])
+}
+
+/// 入力スナップショット順の解析結果から、本文が一致する回復構文を再利用する。
+///
+/// `prior` の位置には、`collect_sources` に渡したスナップショットの順番を使う。
+/// 結果が無い位置、字句や S 式の修復が必要な位置、本文が異なる位置は現在のソースを解析する。
+/// 宣言や診断の位置には、`sources` の文書識別子と版を用いる。
+pub fn inspect_circuit_project_with_cache<'p, 'a>(
+    sources: &'p [ProjectSource<'a>], prior: &[Option<&'a CachedCircuitRecovery>],
+) -> (project: CircuitEditorProject<'p, 'a>)
+    ensures project.matches_sources(sources),
+{
     let mut files = Vec::new();
     let mut i = 0usize;
     while i < sources.len()
@@ -213,7 +227,11 @@ pub fn inspect_circuit_project<'p, 'a>(sources: &'p [ProjectSource<'a>])
             forall|j: int| 0 <= j < i ==> editor_file_matches(&sources@[j], #[trigger] files@[j]),
         decreases sources@.len() - i,
     {
-        let file = inspect_circuit_file(&sources[i]);
+        let cached = match prior.get(sources[i].first_input) {
+            Some(&entry) => entry,
+            None => None,
+        };
+        let file = inspect_file(&sources[i], cached);
         assert(editor_file_matches(&sources@[i as int], file));
         files.push(file);
         i += 1;

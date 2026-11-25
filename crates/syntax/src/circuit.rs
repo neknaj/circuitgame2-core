@@ -103,9 +103,9 @@ pub use expression_forest::{expression_forest, expression_region};
 #[cfg(verus_only)]
 pub use expression_forest::{ordinary_call_at, ordinary_call_excludes_special_forms};
 pub use index::{
-    CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
+    CachedCircuitRecovery, CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     RecoveredName, RecoveredNamePosition, RecoveredNames, index_headers, recover_circuit_forms,
-    recover_circuit_names,
+    recover_circuit_names, recover_circuit_names_with_cache,
 };
 #[cfg(verus_only)]
 pub use index::{
