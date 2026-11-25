@@ -24,14 +24,177 @@ fn checks_an_unselected_if_branch_at_its_original_source_position() {
 
 #[test]
 fn distinguishes_deferred_syntax_from_a_type_error() {
-    let source = "(defn f (as-type (Fn () (List Nat)) (fn () (list 1))))";
-    let start = source.find("(list 1)").unwrap();
+    let expression = "(fold-nat 1 0 (i acc) acc)";
+    let source = "(defn f (as-type (Fn () Nat) (fn () (fold-nat 1 0 (i acc) acc))))";
+    let start = source.find(expression).unwrap();
     assert_eq!(
         check_defn_body(source).unwrap_err(),
         DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Form(
-            start..start + "(list 1)".len(),
+            start..start + expression.len(),
         ))),
     );
+}
+
+#[test]
+fn contextual_lists_check_empty_nested_and_numeric_elements() {
+    let source = "(defn f (as-type (Fn () (List (List Int))) (fn ()
+        (list (list) (list 9223372036854775807 -9223372036854775808)))))";
+    let checked = check_defn_body(source).unwrap();
+    assert_eq!(
+        checked.result_type.ty,
+        DataType { atom: DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Int)), list_depth: 2 },
+    );
+
+    let source = "; 範囲\n(defn f (as-type (Fn () (List (List Nat))) (fn ()
+        (list (list 0) (list false) (list (fn () 0))))))";
+    let start = source.find("false").unwrap();
+    let error = check_defn_body(source).unwrap_err();
+    let DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch { span, .. })) = error else {
+        panic!("expected the first element type error");
+    };
+    assert_eq!(span, start..start + "false".len());
+}
+
+#[test]
+fn diagnoses_a_list_in_a_scalar_context() {
+    let source = "(defn f (as-type (Fn () Nat) (fn () (list false))))";
+    let start = source.find("(list false)").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::ListInScalarContext(
+            start..start + "(list false)".len(),
+        ))),
+    );
+}
+
+#[test]
+fn let_resolves_every_rhs_in_the_outer_scope_then_shadows_in_the_body() {
+    let source = "(defn f (as-type (Fn (Bool) (List Bool)) (fn (x)
+        (let ((x 1) (original x))
+            (let ((shadow (as-type Nat x)))
+                (if original (list) (list original)))))))";
+    assert!(check_defn_body(source).is_ok());
+
+    let source = "(defn f (as-type (Fn () Nat) (fn ()
+        (let ((x 1) (y x)) y))))";
+    let start = source.find("x))").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Name(start..start + 1))),
+    );
+}
+
+#[test]
+fn let_reports_both_duplicate_name_spans() {
+    use circuitgame2_core::ncg2m::expression_types::LetSyntaxError;
+
+    let source = "; 束縛\n(defn f (as-type (Fn () Nat) (fn () (let ((x 1) (x 2)) x))))";
+    let first = source.find("x 1").unwrap();
+    let duplicate = source.find("x 2").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Let(
+            LetSyntaxError::Duplicate { first: first..first + 1, duplicate: duplicate..duplicate + 1 },
+        ))),
+    );
+}
+
+#[test]
+fn let_requires_a_type_annotation_for_an_empty_rhs_list() {
+    let source = "(defn f (as-type (Fn () (List Bool)) (fn () (let ((xs (list))) xs))))";
+    let start = source.find("(list)").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::ListNeedsAnnotation(
+            start..start + "(list)".len(),
+        ))),
+    );
+    let source = "(defn f (as-type (Fn () (List Bool)) (fn () (let ((xs (as-type (List Bool) (list)))) xs))))";
+    assert!(check_defn_body(source).is_ok());
+}
+
+#[test]
+fn let_infers_list_elements_and_if_branches_independently() {
+    let source = "(defn f (as-type (Fn () (List Nat)) (fn ()
+        (let ((xs (if true (list 0 1) (list 2)))) xs))))";
+    assert!(check_defn_body(source).is_ok());
+
+    for expr in ["(list 1 -2)", "(if true 1 -2)"] {
+        let source = format!("(defn f (as-type (Fn () Nat) (fn () (let ((x {expr})) 0))))");
+        let start = source.find("-2").unwrap();
+        let error = check_defn_body(&source).unwrap_err();
+        let DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch {
+            span, expected, actual,
+        })) = error else {
+            panic!("expected a mismatch between independently inferred types");
+        };
+        assert_eq!(span, start..start + 2);
+        assert_eq!(expected.atom, DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Nat)));
+        assert_eq!(actual.atom, DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Int)));
+    }
+}
+
+#[test]
+fn checks_let_inside_conditionals_and_lists_without_leaking_its_scope() {
+    let source = "(defn f (as-type (Fn (Bool) (List Bool)) (fn (x)
+        (if (let ((flag true)) flag)
+            (list (let ((x 1)) (let ((n x)) true)) x)
+            (list x)))))";
+    assert!(check_defn_body(source).is_ok());
+
+    let source = "(defn f (as-type (Fn () Bool) (fn ()
+        (if true (let ((local true)) local) local))))";
+    let outside = source.rfind("local").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Name(
+            outside..outside + "local".len(),
+        ))),
+    );
+}
+
+#[test]
+fn checks_nested_let_bindings_in_inferred_and_checked_right_hand_sides() {
+    for rhs in [
+        "(let ((n 1)) n)",
+        "(as-type Nat (let ((n 1)) n))",
+        "(if (let ((flag true)) flag) (let ((n 1)) n) 2)",
+    ] {
+        let source = format!("(defn f (as-type (Fn () Nat) (fn () (let ((value {rhs})) value))))");
+        assert!(check_defn_body(&source).is_ok(), "{source}");
+    }
+
+    let source = "; 位置\n(defn f (as-type (Fn () Bool) (fn ()
+        (let ((left (let ((local true)) local)) (right local)) right))))";
+    let outside = source.rfind("local").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Name(
+            outside..outside + "local".len(),
+        ))),
+    );
+}
+
+#[test]
+fn checks_deep_let_bindings_without_using_the_host_call_stack() {
+    let depth = 30_000;
+    let mut source = "(defn f (as-type (Fn () Nat) (fn () ".to_owned();
+    source.push_str(&"(let ((x ".repeat(depth));
+    source.push_str("0");
+    source.push_str(&")) x)".repeat(depth));
+    source.push_str(")))");
+    assert!(check_defn_body(&source).is_ok());
+}
+
+#[test]
+fn infers_deep_lists_without_using_the_host_call_stack() {
+    let depth = 30_000;
+    let mut source = "(defn f (as-type (Fn () Bool) (fn () (let ((xs ".to_owned();
+    source.push_str(&"(list ".repeat(depth));
+    source.push_str("true");
+    source.push_str(&")".repeat(depth));
+    source.push_str(")) true))))");
+    assert!(check_defn_body(&source).is_ok());
 }
 
 #[test]
@@ -128,6 +291,7 @@ fn agrees_with_the_standalone_entry_point() {
         "(defn f (as-type (Fn (Int) Int) (fn (x) (if true x -9223372036854775808))))",
         "(defn f (as-type (Fn () Nat) (fn () (if true 0 false))))",
         "(defn f (as-type (Fn () (List HostEvent)) (fn () (list))))",
+        "(defn f (as-type (Fn (Nat) Nat) (fn (x) (let ((n x)) n))))",
     ] {
         let inputs = [SourceSnapshot { path: "helper.ncg2m", revision: 0, text }];
         let project = parse_project_sources(&inputs).unwrap();

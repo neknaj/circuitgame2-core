@@ -11,7 +11,7 @@ use crate::syntax::{
 };
 use super::forms::{is_spelling, source_word, subtree_end};
 #[cfg(verus_only)]
-use super::forms::{spelling, subtree_limit};
+use super::forms::{child_stays_inside, spelling, subtree_limit};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -475,20 +475,6 @@ spec fn parameter_model(
                 }
             }
         }
-    }
-}
-
-proof fn child_stays_inside(forms: Seq<Form>, parent: usize, child: usize)
-    requires
-        complete_list_indices(forms), nested_list_indices(forms),
-        parent < child < subtree_limit(forms, parent) <= forms.len(),
-        forms[parent as int] is List,
-    ensures child < subtree_limit(forms, child) <= subtree_limit(forms, parent),
-{
-    reveal(nested_list_indices);
-    assert(forms[parent as int] is List);
-    if forms[child as int] is List {
-        assert(forms[child as int] is List);
     }
 }
 

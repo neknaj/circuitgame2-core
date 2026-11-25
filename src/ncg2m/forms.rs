@@ -3,7 +3,7 @@
 use crate::project::read_source_span;
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use crate::syntax::{form_span, form_spans_valid};
+use crate::syntax::{complete_list_indices, form_span, form_spans_valid, nested_list_indices};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -57,6 +57,20 @@ pub(super) fn subtree_end(forms: &[Form], at: usize) -> (end: usize)
     match &forms[at] {
         Form::Atom { .. } => at + 1,
         Form::List { end, .. } => *end,
+    }
+}
+
+pub(super) proof fn child_stays_inside(forms: Seq<Form>, parent: usize, child: usize)
+    requires
+        complete_list_indices(forms), nested_list_indices(forms),
+        parent < child < subtree_limit(forms, parent) <= forms.len(),
+        forms[parent as int] is List,
+    ensures child < subtree_limit(forms, child) <= subtree_limit(forms, parent),
+{
+    reveal(nested_list_indices);
+    assert(forms[parent as int] is List);
+    if forms[child as int] is List {
+        assert(forms[child as int] is List);
     }
 }
 
