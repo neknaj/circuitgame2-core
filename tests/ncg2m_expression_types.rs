@@ -24,12 +24,45 @@ fn checks_an_unselected_if_branch_at_its_original_source_position() {
 
 #[test]
 fn distinguishes_deferred_syntax_from_a_type_error() {
-    let source = "(defn f (as-type (Fn () (List Nat)) (fn () (list 1))))";
-    let start = source.find("(list 1)").unwrap();
+    let expression = "(fold-nat 1 0 (i acc) acc)";
+    let source = "(defn f (as-type (Fn () Nat) (fn () (fold-nat 1 0 (i acc) acc))))";
+    let start = source.find(expression).unwrap();
     assert_eq!(
         check_defn_body(source).unwrap_err(),
         DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Form(
-            start..start + "(list 1)".len(),
+            start..start + expression.len(),
+        ))),
+    );
+}
+
+#[test]
+fn contextual_lists_check_empty_nested_and_numeric_elements() {
+    let source = "(defn f (as-type (Fn () (List (List Int))) (fn ()
+        (list (list) (list 9223372036854775807 -9223372036854775808)))))";
+    let checked = check_defn_body(source).unwrap();
+    assert_eq!(
+        checked.result_type.ty,
+        DataType { atom: DataTypeAtom::Builtin(BuiltinDataType::Integer(IntegerType::Int)), list_depth: 2 },
+    );
+
+    let source = "; 範囲\n(defn f (as-type (Fn () (List (List Nat))) (fn ()
+        (list (list 0) (list false) (list (fn () 0))))))";
+    let start = source.find("false").unwrap();
+    let error = check_defn_body(source).unwrap_err();
+    let DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::Mismatch { span, .. })) = error else {
+        panic!("expected the first element type error");
+    };
+    assert_eq!(span, start..start + "false".len());
+}
+
+#[test]
+fn diagnoses_a_list_in_a_scalar_context() {
+    let source = "(defn f (as-type (Fn () Nat) (fn () (list false))))";
+    let start = source.find("(list false)").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Type(ExpressionTypeError::ListInScalarContext(
+            start..start + "(list false)".len(),
         ))),
     );
 }

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use crate::syntax::{AtomKind, Form};
 #[cfg(verus_only)]
-use crate::syntax::{complete_list_indices, form_span, sexpr_form_model};
+use crate::syntax::{complete_list_indices, form_span, nested_list_indices, sexpr_form_model};
 use super::data_types::{
     BuiltinDataType, DataType, DataTypeAtom, DefnSignature, SignatureParameter, read_header_signature,
     read_type_value,
@@ -43,6 +43,8 @@ pub enum ExpressionTypeError<'a> {
     },
     /// `defn` の署名注釈以外に現れた `fn` リテラル。その全体の範囲を保持する。
     FunctionLiteral(Range<usize>),
+    /// スカラー型を要求する位置にリスト式が現れた。式全体の範囲を保持する。
+    ListInScalarContext(Range<usize>),
     /// `as-type` の型として読めない。
     Annotation(DefnHeaderError),
     /// 期待型と式の型で `List` の深さが異なる。
@@ -108,6 +110,7 @@ enum FormTag {
     Annotation,
     Conditional,
     FunctionLiteral,
+    List,
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +120,7 @@ enum Expression {
     Parameter,
     Annotated { annotation: usize, value: usize },
     Conditional { condition: usize, yes: usize, no: usize },
+    List,
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +136,7 @@ type TypeBinding = (Seq<u8>, TypeShape);
 struct Request {
     at: usize,
     expected: TypeShape,
+    list: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +175,7 @@ spec fn keyword(word: Seq<u8>) -> Option<FormTag> {
     if word == "as-type".spec_bytes() { Some(FormTag::Annotation) }
     else if word == "if".spec_bytes() { Some(FormTag::Conditional) }
     else if word == "fn".spec_bytes() { Some(FormTag::FunctionLiteral) }
+    else if word == "list".spec_bytes() { Some(FormTag::List) }
     else { None }
 }
 
@@ -179,6 +185,7 @@ fn read_keyword(word: &str) -> (tag: Option<FormTag>)
     if is_spelling(word, "as-type") { Some(FormTag::Annotation) }
     else if is_spelling(word, "if") { Some(FormTag::Conditional) }
     else if is_spelling(word, "fn") { Some(FormTag::FunctionLiteral) }
+    else if is_spelling(word, "list") { Some(FormTag::List) }
     else { None }
 }
 
@@ -250,6 +257,7 @@ spec fn shape(source: &str, forms: Seq<Form>, at: usize) -> Result<Expression, E
                 },
                 Some(FormTag::FunctionLiteral) =>
                     Err(ExpressionCheckFailure::Type(ExpressionTypeError::FunctionLiteral(span))),
+                Some(FormTag::List) => Ok(Expression::List),
                 None => deferred,
             },
         _ => deferred,
@@ -291,6 +299,7 @@ fn read_shape<'a>(source: &'a str, forms: &[Form], at: usize) -> (result: Result
                     Some(FormTag::FunctionLiteral) => {
                         return Err(ExpressionCheckFailure::Type(ExpressionTypeError::FunctionLiteral(span_of(&forms[at]))));
                     }
+                    Some(FormTag::List) => return Ok(Expression::List),
                     None => {},
                 }
             }
@@ -468,6 +477,44 @@ spec fn annotation_value(syntax: super::defn::DataTypeSyntax) -> Option<TypeShap
     }
 }
 
+spec fn list_step<'a>(at: usize, end: usize, expected: TypeShape, span: Range<usize>)
+    -> Result<CheckStep, ExpressionCheckFailure<'a>>
+{
+    if expected.list_depth == 0 {
+        Err(ExpressionCheckFailure::Type(ExpressionTypeError::ListInScalarContext(span)))
+    } else if at + 2 < end {
+        Ok(CheckStep::One(Request {
+            at: (at + 2) as usize,
+            expected: TypeShape { builtin: expected.builtin, list_depth: (expected.list_depth - 1) as usize },
+            list: Some(at),
+        }))
+    } else if expected.builtin.is_none() {
+        Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(span)))
+    } else {
+        Ok(CheckStep::Done)
+    }
+}
+
+fn read_list_step<'a>(at: usize, end: usize, expected: TypeShape, span: Range<usize>)
+    -> (result: Result<CheckStep, ExpressionCheckFailure<'a>>)
+    requires at + 1 < end,
+    ensures result == list_step(at, end, expected, span),
+{
+    if expected.list_depth == 0 {
+        Err(ExpressionCheckFailure::Type(ExpressionTypeError::ListInScalarContext(span)))
+    } else if at + 2 < end {
+        Ok(CheckStep::One(Request {
+            at: at + 2,
+            expected: TypeShape { builtin: expected.builtin, list_depth: expected.list_depth - 1 },
+            list: Some(at),
+        }))
+    } else if expected.builtin.is_none() {
+        Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(span)))
+    } else {
+        Ok(CheckStep::Done)
+    }
+}
+
 spec fn step_model<'a>(
     source: &'a str, forms: Seq<Form>, parameters: Seq<TypeBinding>, request: Request,
 ) -> Result<CheckStep, ExpressionCheckFailure<'a>> {
@@ -500,6 +547,7 @@ spec fn step_model<'a>(
                 Err(error) => Err(error),
             }
         }
+        Ok(Expression::List) => list_step(at, subtree_limit(forms, at), expected, span),
         Ok(Expression::Annotated { annotation, value }) =>
             match type_at(source, forms, annotation, annotation, 0) {
                 Err(error) => Err(ExpressionCheckFailure::Type(ExpressionTypeError::Annotation(error))),
@@ -509,22 +557,71 @@ spec fn step_model<'a>(
                         None => Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(syntax.name_span))),
                         Some(actual) => match types_agree(expected, actual, span) {
                             Err(error) => Err(error),
-                            Ok(()) => Ok(CheckStep::One(Request { at: value, expected: actual })),
+                            Ok(()) => Ok(CheckStep::One(Request { at: value, expected: actual, list: None })),
                         },
                     },
                 },
             },
         Ok(Expression::Conditional { condition, yes, no }) => Ok(CheckStep::Three(
-            Request { at: condition, expected: scalar_type(BuiltinDataType::Bool) },
-            Request { at: yes, expected },
-            Request { at: no, expected },
+            Request { at: condition, expected: scalar_type(BuiltinDataType::Bool), list: None },
+            Request { at: yes, expected, list: None },
+            Request { at: no, expected, list: None },
         )),
     }
 }
 
+spec fn request_limit(forms: Seq<Form>, request: Request) -> usize {
+    match request.list {
+        Some(list) => subtree_limit(forms, list),
+        None => subtree_limit(forms, request.at),
+    }
+}
+
+spec fn request_ready(forms: Seq<Form>, request: Request) -> bool {
+    &&& request.at < forms.len()
+    &&& request.at < subtree_limit(forms, request.at) <= request_limit(forms, request) <= forms.len()
+    &&& request.list matches Some(list) ==> list < request.at && forms[list as int] is List
+}
+
 spec fn request_inside(forms: Seq<Form>, parent: usize, child: Request) -> bool {
-    parent < child.at < forms.len()
-        && child.at < subtree_limit(forms, child.at) <= subtree_limit(forms, parent)
+    parent < child.at && request_ready(forms, child)
+        && request_limit(forms, child) <= subtree_limit(forms, parent)
+}
+
+spec fn remaining_elements(forms: Seq<Form>, request: Request) -> Option<Request> {
+    match request.list {
+        Some(list) => {
+            let next = subtree_limit(forms, request.at);
+            if request.at < next < subtree_limit(forms, list) <= forms.len() {
+                Some(Request { at: next, ..request })
+            } else {
+                None
+            }
+        }
+        None => None,
+    }
+}
+
+fn read_remaining_elements(forms: &[Form], request: Request) -> (result: Option<Request>)
+    requires request_ready(forms@, request), complete_list_indices(forms@), nested_list_indices(forms@),
+    ensures
+        result == remaining_elements(forms@, request),
+        result matches Some(next) ==> request_ready(forms@, next)
+            && request.at < next.at && subtree_limit(forms@, request.at) == next.at
+            && request_limit(forms@, next) == request_limit(forms@, request),
+{
+    let list = request.list?;
+    let next = subtree_end(forms, request.at);
+    let end = subtree_end(forms, list);
+    if next < end {
+        proof {
+            reveal(nested_list_indices);
+            assert(next < subtree_limit(forms@, next) <= end);
+        }
+        Some(Request { at: next, ..request })
+    } else {
+        None
+    }
 }
 
 spec fn step_children_fit(forms: Seq<Form>, at: usize, step: CheckStep) -> bool {
@@ -533,7 +630,7 @@ spec fn step_children_fit(forms: Seq<Form>, at: usize, step: CheckStep) -> bool 
         CheckStep::One(child) => request_inside(forms, at, child),
         CheckStep::Three(cond, yes, no) => request_inside(forms, at, cond) && request_inside(forms, at, yes)
             && request_inside(forms, at, no)
-            && subtree_limit(forms, cond.at) <= yes.at && subtree_limit(forms, yes.at) <= no.at,
+            && request_limit(forms, cond) <= yes.at && request_limit(forms, yes) <= no.at,
     }
 }
 
@@ -575,6 +672,20 @@ fn read_check_step<'a>(
             conform(expected, scalar(BuiltinDataType::Integer(ty)), span_of(&forms[at]))?;
             read_integer(source_word(source, forms, at), ty, span_of(&forms[at]))
         }
+        Expression::List => {
+            let end = subtree_end(forms, at);
+            assert(at + 1 < end);
+            let result = read_list_step(at, end, expected, span_of(&forms[at]));
+            proof {
+                reveal(nested_list_indices);
+                if let Ok(CheckStep::One(element)) = result {
+                    assert(at < element.at < end);
+                    assert(forms@[at as int] is List);
+                    assert(element.at < subtree_limit(forms@, element.at) <= end);
+                }
+            }
+            result
+        }
         Expression::Annotated { annotation, value } => {
             let syntax = match read_type(source, forms, annotation) {
                 Ok(syntax) => syntax,
@@ -588,12 +699,12 @@ fn read_check_step<'a>(
             }
             let actual = shape_of_type(named.ty);
             conform(expected, actual, span)?;
-            Ok(CheckStep::One(Request { at: value, expected: actual }))
+            Ok(CheckStep::One(Request { at: value, expected: actual, list: None }))
         }
         Expression::Conditional { condition, yes, no } => Ok(CheckStep::Three(
-            Request { at: condition, expected: scalar(BuiltinDataType::Bool) },
-            Request { at: yes, expected },
-            Request { at: no, expected },
+            Request { at: condition, expected: scalar(BuiltinDataType::Bool), list: None },
+            Request { at: yes, expected, list: None },
+            Request { at: no, expected, list: None },
         )),
     }
 }
@@ -610,10 +721,10 @@ spec fn expression_check<'a>(
 ) -> BodyVerdict<'a>
     decreases forms.len() - request.at,
 {
-    if request.at >= forms.len() {
+    if !request_ready(forms, request) {
         BodyVerdict::Rejected(ExpressionCheckFailure::Deferred(DeferredExpression::Form(0..0)))
     } else {
-        match step_model(source, forms, parameters, request) {
+        let verdict = match step_model(source, forms, parameters, request) {
             Err(error) => BodyVerdict::Rejected(error),
             Ok(step) if !step_children_fit(forms, request.at, step) =>
                 BodyVerdict::Rejected(ExpressionCheckFailure::Deferred(DeferredExpression::Form(form_span(forms[request.at as int])))),
@@ -628,6 +739,13 @@ spec fn expression_check<'a>(
                     },
                 }
             }
+        };
+        match verdict {
+            BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
+            BodyVerdict::Accepted => match remaining_elements(forms, request) {
+                Some(next) => expression_check(source, forms, parameters, next),
+                None => BodyVerdict::Accepted,
+            },
         }
     }
 }
@@ -646,6 +764,45 @@ spec fn pending_check<'a>(
             BodyVerdict::Accepted => pending_check(source, forms, parameters, pending.drop_last()),
         }
     }
+}
+
+proof fn list_type_rules_have_examples() {
+    let source = "(list)";
+    let forms = seq![
+        Form::List { span: 0usize..6usize, end: 2usize },
+        Form::Atom { span: 1usize..5usize, kind: AtomKind::Name },
+    ];
+    reveal_strlit("(list)");
+    reveal_strlit("list");
+    reveal_strlit("as-type");
+    reveal_strlit("if");
+    reveal_strlit("fn");
+    vstd::string::is_ascii_spec_bytes(source);
+    vstd::string::is_ascii_spec_bytes("list");
+    vstd::utf8::encode_utf8_decode_utf8("list"@);
+    vstd::utf8::encode_utf8_decode_utf8("as-type"@);
+    vstd::utf8::encode_utf8_decode_utf8("if"@);
+    vstd::utf8::encode_utf8_decode_utf8("fn"@);
+    assert(spelling(source, forms[1]) =~= "list".spec_bytes());
+    assert("list".spec_bytes() != "as-type".spec_bytes()
+        && "list".spec_bytes() != "if".spec_bytes()
+        && "list".spec_bytes() != "fn".spec_bytes());
+    assert(keyword(spelling(source, forms[1])) == Some(FormTag::List));
+    assert(forms.len() == 2 && forms[0] is List && forms[0]->List_end == 2 && plain_name(forms[1]));
+    assert(shape(source, forms, 0) == Ok(Expression::List));
+    let env = Seq::<TypeBinding>::empty();
+    let list = Request {
+        at: 0,
+        expected: TypeShape { builtin: Some(BuiltinDataType::Bool), list_depth: 1 },
+        list: None,
+    };
+    let scalar = Request { at: 0, expected: scalar_type(BuiltinDataType::Bool), list: None };
+    let error = ExpressionCheckFailure::Type(ExpressionTypeError::ListInScalarContext(0usize..6usize));
+    assert(step_model(source, forms, env, list) == Ok(CheckStep::Done));
+    assert(step_model(source, forms, env, scalar) == Err(error));
+    reveal(expression_check);
+    assert(expression_check(source, forms, env, list) == BodyVerdict::Accepted);
+    assert(expression_check(source, forms, env, scalar) == BodyVerdict::Rejected(error));
 }
 
 spec fn next_requests<'a>(pending: Seq<Request>, step: CheckStep) -> Seq<Request> {
@@ -684,7 +841,7 @@ proof fn popped_error<'a>(
     source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>,
     request: Request, error: ExpressionCheckFailure<'a>,
 )
-    requires request.at < forms.len(), step_model(source, forms, env, request) == Err(error),
+    requires request_ready(forms, request), step_model(source, forms, env, request) == Err(error),
     ensures pending_check(source, forms, env, pending.push(request)) == BodyVerdict::Rejected(error),
 {
     reveal(expression_check);
@@ -693,15 +850,19 @@ proof fn popped_error<'a>(
 
 proof fn popped_step<'a>(
     source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>,
-    request: Request, step: CheckStep,
+    request: Request, step: CheckStep, sibling: Option<Request>,
 )
-    requires request.at < forms.len(), step_children_fit(forms, request.at, step),
-        step_model(source, forms, env, request) == Ok(step),
+    requires request_ready(forms, request), step_children_fit(forms, request.at, step),
+        step_model(source, forms, env, request) == Ok(step), sibling == remaining_elements(forms, request),
     ensures pending_check(source, forms, env, pending.push(request))
-        == pending_check(source, forms, env, next_requests(pending, step)),
+        == pending_check(source, forms, env, next_requests(with_sibling(pending, sibling), step)),
 {
     reveal(expression_check);
     pending_push(source, forms, env, pending, request);
+    if let Some(next) = sibling {
+        pending_push(source, forms, env, pending, next);
+    }
+    let pending = with_sibling(pending, sibling);
     match step {
         CheckStep::Done => {},
         CheckStep::One(child) => {
@@ -715,56 +876,71 @@ proof fn popped_step<'a>(
     }
 }
 
+spec fn with_sibling(pending: Seq<Request>, sibling: Option<Request>) -> Seq<Request> {
+    match sibling {
+        Some(next) => pending.push(next),
+        None => pending,
+    }
+}
+
 spec fn pending_first(forms: Seq<Form>, pending: Seq<Request>) -> nat {
     if pending.len() == 0 { forms.len() } else { pending.last().at as nat }
 }
 
 spec fn requests_ready(forms: Seq<Form>, pending: Seq<Request>) -> bool {
-    &&& forall|i: int| 0 <= i < pending.len() ==> {
-        let request = #[trigger] pending[i];
-        request.at < forms.len() && request.at < subtree_limit(forms, request.at) <= forms.len()
-    }
+    &&& forall|i: int| 0 <= i < pending.len() ==> request_ready(forms, #[trigger] pending[i])
     &&& forall|i: int, j: int| 0 <= i < j < pending.len() ==>
-        subtree_limit(forms, (#[trigger] pending[j]).at) <= (#[trigger] pending[i]).at
+        request_limit(forms, #[trigger] pending[j]) <= (#[trigger] pending[i]).at
 }
 
-proof fn append_ready<'a>(forms: Seq<Form>, pending: Seq<Request>, child: Request)
-    requires requests_ready(forms, pending), child.at < subtree_limit(forms, child.at) <= forms.len(),
-        forall|i: int| 0 <= i < pending.len() ==> subtree_limit(forms, child.at) <= (#[trigger] pending[i]).at,
+proof fn append_ready(forms: Seq<Form>, pending: Seq<Request>, child: Request)
+    requires requests_ready(forms, pending), request_ready(forms, child),
+        forall|i: int| 0 <= i < pending.len() ==> request_limit(forms, child) <= (#[trigger] pending[i]).at,
     ensures requests_ready(forms, pending.push(child)),
 {
     let rows = pending.push(child);
     assert forall|i: int, j: int| 0 <= i < j < rows.len() implies
-        subtree_limit(forms, (#[trigger] rows[j]).at) <= (#[trigger] rows[i]).at by {
+        request_limit(forms, #[trigger] rows[j]) <= (#[trigger] rows[i]).at by {
         if j < pending.len() {
             assert(rows[j] == pending[j]);
         }
     };
 }
 
-proof fn step_advances<'a>(forms: Seq<Form>, pending: Seq<Request>, parent: Request, step: CheckStep)
+proof fn step_advances(
+    forms: Seq<Form>, pending: Seq<Request>, parent: Request, step: CheckStep, sibling: Option<Request>,
+)
     requires requests_ready(forms, pending.push(parent)), step_children_fit(forms, parent.at, step),
+        sibling matches Some(next) ==> request_ready(forms, next)
+            && parent.at < next.at && subtree_limit(forms, parent.at) == next.at
+            && request_limit(forms, next) == request_limit(forms, parent),
     ensures
-        requests_ready(forms, next_requests(pending, step)),
-        parent.at < pending_first(forms, next_requests(pending, step)),
+        requests_ready(forms, next_requests(with_sibling(pending, sibling), step)),
+        parent.at < pending_first(forms, next_requests(with_sibling(pending, sibling), step)),
 {
     let old = pending.push(parent);
     assert forall|i: int| 0 <= i < pending.len() implies
-        subtree_limit(forms, parent.at) <= (#[trigger] pending[i]).at by {
+        request_limit(forms, parent) <= (#[trigger] pending[i]).at by {
         assert(old[i] == pending[i] && old[pending.len() as int] == parent);
     };
     assert(requests_ready(forms, pending)) by {
-        assert forall|i: int| 0 <= i < pending.len() implies {
-            let child = #[trigger] pending[i];
-            child.at < forms.len() && child.at < subtree_limit(forms, child.at) <= forms.len()
-        } by {
+        assert forall|i: int| 0 <= i < pending.len() implies request_ready(forms, #[trigger] pending[i]) by {
             assert(pending[i] == old[i]);
         };
         assert forall|i: int, j: int| 0 <= i < j < pending.len() implies
-            subtree_limit(forms, (#[trigger] pending[j]).at) <= (#[trigger] pending[i]).at by {
+            request_limit(forms, #[trigger] pending[j]) <= (#[trigger] pending[i]).at by {
             assert(pending[i] == old[i] && pending[j] == old[j]);
         };
     };
+    if let Some(next) = sibling {
+        append_ready(forms, pending, next);
+    }
+    let extended = with_sibling(pending, sibling);
+    assert forall|i: int| 0 <= i < extended.len() implies
+        subtree_limit(forms, parent.at) <= (#[trigger] extended[i]).at by {
+        if i < pending.len() { assert(extended[i] == pending[i]); }
+    };
+    let pending = extended;
     match step {
         CheckStep::Done => {},
         CheckStep::One(child) => {
@@ -774,13 +950,13 @@ proof fn step_advances<'a>(forms: Seq<Form>, pending: Seq<Request>, parent: Requ
             append_ready(forms, pending, no);
             let with_no = pending.push(no);
             assert forall|i: int| 0 <= i < with_no.len() implies
-                subtree_limit(forms, yes.at) <= (#[trigger] with_no[i]).at by {
+                request_limit(forms, yes) <= (#[trigger] with_no[i]).at by {
                 if i < pending.len() { assert(with_no[i] == pending[i]); }
             };
             append_ready(forms, with_no, yes);
             let with_yes = with_no.push(yes);
             assert forall|i: int| 0 <= i < with_yes.len() implies
-                subtree_limit(forms, condition.at) <= (#[trigger] with_yes[i]).at by {
+                request_limit(forms, condition) <= (#[trigger] with_yes[i]).at by {
                 if i < with_no.len() { assert(with_yes[i] == with_no[i]); }
             };
             append_ready(forms, with_yes, condition);
@@ -788,15 +964,15 @@ proof fn step_advances<'a>(forms: Seq<Form>, pending: Seq<Request>, parent: Requ
     }
 }
 
-// 検査する式の添字を前進させる。右の分岐から積むことで、条件、左、右の順に調べる。
+// 条件、左、右の順になるように分岐を積む。リストの次の要素を1個ずつ積み、作業領域を抑える。
 fn check_body<'a>(
     source: &'a str, forms: &[Form], signature: &DefnSignature<'a>, body: usize,
 ) -> (result: BodyVerdict<'a>)
     requires usable_forms(source, forms@), body < forms@.len(),
     ensures result == expression_check(source, forms@, environment_view(signature.parameters@),
-        Request { at: body, expected: type_shape(signature.result_type.ty) }),
+        Request { at: body, expected: type_shape(signature.result_type.ty), list: None }),
 {
-    let start = Request { at: body, expected: shape_of_type(signature.result_type.ty) };
+    let start = Request { at: body, expected: shape_of_type(signature.result_type.ty), list: None };
     let _size = forms.len();
     let _end = subtree_end(forms, body);
     let mut pending = Vec::new();
@@ -818,7 +994,7 @@ fn check_body<'a>(
         invariant
             usable_forms(source, forms@),
             env == environment_view(signature.parameters@),
-            start == (Request { at: body, expected: type_shape(signature.result_type.ty) }),
+            start == (Request { at: body, expected: type_shape(signature.result_type.ty), list: None }),
             requests_ready(forms@, pending@),
             pending_check(source, forms@, env, pending@) == expression_check(source, forms@, env, start),
         decreases forms@.len() - pending_first(forms@, pending@),
@@ -833,9 +1009,13 @@ fn check_body<'a>(
             }
             Ok(step) => step,
         };
+        let sibling = read_remaining_elements(forms, request);
         proof {
-            popped_step(source, forms@, env, pending@, request, step);
-            step_advances(forms@, pending@, request, step);
+            popped_step(source, forms@, env, pending@, request, step, sibling);
+            step_advances(forms@, pending@, request, step, sibling);
+        }
+        if let Some(next) = sibling {
+            pending.push(next);
         }
         match step {
             CheckStep::Done => {},
@@ -861,9 +1041,9 @@ spec fn body_witness<'a>(
     &&& defn_body_site(source, forms, 0, body)
     &&& match result {
         Ok(checked) => checked == signature && expression_check(source, forms, environment_view(signature.parameters@),
-            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Accepted,
+            Request { at: body, expected: type_shape(signature.result_type.ty), list: None }) == BodyVerdict::Accepted,
         Err(DefnBodyError::Body(error)) => expression_check(source, forms, environment_view(signature.parameters@),
-            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Rejected(error),
+            Request { at: body, expected: type_shape(signature.result_type.ty), list: None }) == BodyVerdict::Rejected(error),
         Err(DefnBodyError::Header(_)) => false,
     }
 }
@@ -893,13 +1073,15 @@ pub proof fn checked_body_signature_origin(source: &str, signature: DefnSignatur
 
 /// 補助関数の本体を、仮引数の型環境と署名の戻り型で検査する。
 ///
-/// 真偽値、十進整数、仮引数の参照、`as-type`、`if` を扱う。`if` は条件、左の分岐、右の分岐の
-/// 順に検査する。本体が検査を通れば、元ソースの範囲を持つ署名を返す。
+/// 真偽値、十進整数、仮引数の参照、`as-type`、`if`、`list` を扱う。
+/// `if` は条件、左の分岐、右の分岐の順に検査する。
+/// `list` は期待型の要素型で各要素を左から検査する。空のリストにも同じ期待型を使う。
+/// 本体が検査を通れば、元ソースの範囲を持つ署名を返す。
 ///
 /// # Errors
 ///
-/// 検査は最初の診断で止める。対応する式の型・範囲の違反を診断し、後段で扱うフォーム、
-/// 仮引数以外の名前、段階固有の型、真偽値と仮引数名の綴りが重なる箇所は保留として返す。
+/// 検査順で最初に見つかった違反、または保留の理由を返す。
+/// 後段で扱うフォーム、仮引数以外の名前、段階固有の型、真偽値と仮引数名の綴りが重なる箇所は保留する。
 ///
 /// # Examples
 ///
@@ -923,13 +1105,11 @@ pub fn check_defn_body(source: &str) -> (result: Result<DefnSignature<'_>, DefnB
     let checked = check_body(source, input, &signature, body);
     assert(input@ == forms@);
     assert(checked == expression_check(source, input@, environment_view(signature.parameters@), Request {
-        at: body, expected: type_shape(signature.result_type.ty),
-    }));
+        at: body, expected: type_shape(signature.result_type.ty), list: None }));
     match checked {
         BodyVerdict::Accepted => {
             assert(expression_check(source, forms@, environment_view(signature.parameters@), Request {
-                at: body, expected: type_shape(signature.result_type.ty),
-            }) == BodyVerdict::Accepted);
+                at: body, expected: type_shape(signature.result_type.ty), list: None }) == BodyVerdict::Accepted);
             assert(body_witness(source, Ok(signature), header, signature, forms@, body));
             Ok(signature)
         }
@@ -950,9 +1130,9 @@ spec fn meta_body_witness<'a>(
     &&& signature_matches_header(source, header, signature)
     &&& match result {
         Ok(checked) => checked == signature && expression_check(source, forms, environment_view(signature.parameters@),
-            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Accepted,
+            Request { at: body, expected: type_shape(signature.result_type.ty), list: None }) == BodyVerdict::Accepted,
         Err(error) => expression_check(source, forms, environment_view(signature.parameters@),
-            Request { at: body, expected: type_shape(signature.result_type.ty) }) == BodyVerdict::Rejected(error),
+            Request { at: body, expected: type_shape(signature.result_type.ty), list: None }) == BodyVerdict::Rejected(error),
     }
 }
 
