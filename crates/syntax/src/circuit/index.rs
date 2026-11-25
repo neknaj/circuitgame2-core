@@ -5,6 +5,8 @@ use super::build::{build_entry_matches, keep_build_entry};
 use super::*;
 mod recovery;
 #[cfg(verus_only)]
+pub use recovery::recovered_names_agree;
+#[cfg(verus_only)]
 use crate::{sexpr_form_model, strict_syntax_rejection, strict_token_errors_agree,
     structural_error_location, syntax_error_evidence, well_formed_sexpr};
 #[cfg(verus_only)]

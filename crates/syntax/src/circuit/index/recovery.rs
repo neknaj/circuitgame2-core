@@ -10,6 +10,8 @@ use vstd::string::StringSliceAdditionalSpecFns;
 use vstd::utf8::valid_utf8;
 
 mod names;
+#[cfg(verus_only)]
+pub use names::recovered_names_agree;
 pub use names::{RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_names};
 
 verus! {

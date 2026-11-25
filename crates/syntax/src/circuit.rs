@@ -26,6 +26,8 @@ pub use directive_diagnostics::directive_errors_agree;
 mod expression_forest;
 mod expressions;
 mod index;
+#[cfg(verus_only)]
+pub use index::recovered_names_agree;
 mod names;
 mod ports;
 mod selection_shapes;
