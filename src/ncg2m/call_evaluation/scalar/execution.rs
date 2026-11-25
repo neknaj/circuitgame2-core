@@ -11,7 +11,7 @@ use super::{
 use super::expression::ScalarCursor;
 use crate::ncg2m::defn::span_of;
 #[cfg(verus_only)]
-use super::{binding_at_rank_matches, prepared_arguments_match, scalar_fits};
+use super::{binding_at_rank_matches, parameters_match, prepared_arguments_match, scalar_fits};
 #[cfg(verus_only)]
 use crate::syntax::form_span;
 #[cfg(verus_only)]
@@ -22,6 +22,8 @@ use vstd::prelude::*;
 pub(super) mod observation;
 #[cfg(verus_only)]
 pub use observation::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
+#[cfg(any(test, verus_only))]
+mod two_helper_example;
 mod slice;
 #[cfg(verus_only)]
 mod progress;
@@ -295,6 +297,9 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         self.active.valid(self.plan, self.rank) && stack_fits(self.plan, self.waiting@, self.result_type@, self.active.context(self.rank))
     }
 
+    /// この評価が参照する補助関数の型検査済み計画を表す。
+    pub closed spec fn plan_model(&self) -> &'plan DefnCallPlan<'p, 'a> { self.plan }
+
     /// 評価を開始した補助関数の戻り値型を表す。
     pub closed spec fn result_type_model(&self) -> DataType<'a> { self.result_type@ }
 
@@ -320,9 +325,12 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     pub fn start(plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, values: Vec<ScalarValue>)
         -> (result: Result<Self, ScalarBindingError<'p, 'a>>)
         ensures match result {
-            Ok(state) => exists|frame: ScalarCallFrame<'p, 'a>|
-                #[trigger] binding_at_rank_matches(plan, rank, values@, Ok(frame))
-                    && state.starts_with(plan, rank, frame),
+            Ok(state) => {
+                &&& state.plan_model() == plan
+                &&& exists|frame: ScalarCallFrame<'p, 'a>|
+                    #[trigger] binding_at_rank_matches(plan, rank, values@, Ok(frame))
+                        && state.starts_with(plan, rank, frame)
+            },
             Err(error) => binding_at_rank_matches(plan, rank, values@, Err(error)),
         },
     {
@@ -381,15 +389,19 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         &&& (step matches Ok(ScalarExecutionSlice::Suspended(after)) ==>
             after.plan == self.plan && after.result_type@ == self.result_type@)
         &&& match self.active {
-            Active::Expression(expr) => match step {
-                Ok(ScalarExecutionSlice::Suspended(after)) => {
-                    &&& after.rank == rank && after.waiting@ == stack
-                    &&& exists|inner: ScalarExpressionStep<'p, 'a>|
-                        #[trigger] expr.expression_step_matches(Ok(inner))
-                            && next_expression_at(after.active, expr.result_type_model(), inner)
-                },
-                Err(ScalarExecutionError::Literal(error)) => expr.expression_step_matches(Err(error)),
-                _ => false,
+            Active::Expression(expr) => {
+                let frame = expr.frame_model();
+                &&& parameters_match(frame.body_model().signature, frame.parameter_values_model())
+                &&& match step {
+                    Ok(ScalarExecutionSlice::Suspended(after)) => {
+                        &&& after.rank == rank && after.waiting@ == stack
+                        &&& exists|inner: ScalarExpressionStep<'p, 'a>|
+                            #[trigger] expr.expression_step_matches(Ok(inner))
+                                && next_expression_at(after.active, expr.result_type_model(), inner)
+                    },
+                    Err(ScalarExecutionError::Literal(error)) => expr.expression_step_matches(Err(error)),
+                    _ => false,
+                }
             },
             Active::Lookup { parent, site } => {
                 let row = self.plan.calls_model_at_rank(rank);

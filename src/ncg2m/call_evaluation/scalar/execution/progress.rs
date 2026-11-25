@@ -13,9 +13,6 @@ mod nested;
 verus! {
 
 impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
-    /// この評価が参照する補助関数の型検査済み計画を表す。
-    pub closed spec fn plan_model(&self) -> &'plan DefnCallPlan<'p, 'a> { self.plan }
-
     /// 評価中の式に対応する呼び出しの辺を探していることを表す。
     pub closed spec fn is_looking_up_call(&self) -> bool { self.active is Lookup }
 

@@ -3,10 +3,12 @@
 use super::*;
 use crate::ncg2m::call_evaluation::scalar::ScalarExpressionSite;
 use crate::ncg2m::data_types::{BuiltinDataType, DataType, DataTypeAtom};
-use crate::ncg2m::expression_types::{conditional_positions, expression_slot, scalar_call_syntax_at};
+use crate::ncg2m::expression_types::{conditional_positions, expression_slot, local_scalar_site_is_typed, scalar_atom_at, scalar_call_syntax_at, scalar_evaluator_syntax};
 use crate::ncg2m::expression_types::named_call::{
-    defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
+    checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
 };
+
+mod scalar_closure;
 
 verus! {
 
@@ -28,6 +30,33 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         requires self.scalar_site_is_checked(aliases, rank, body, site),
         ensures self.body_matches_at_rank(rank, body),
     {}
+
+    pub(crate) proof fn supported_call_is_body_expression(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize,
+        body: DefnEvaluationBody<'p, 'a>, site: ScalarExpressionSite<'a>,
+    )
+        requires
+            self.scalar_site_is_checked(aliases, rank, body, site),
+            scalar_evaluator_syntax(body.source.text_model(), body.forms@, body.at),
+            scalar_call_syntax_at(body.source.text_model(), body.forms@, site.at),
+        ensures expression_slot(body.source.text_model(), body.forms@, body.at, site.at),
+    {
+        let row = self.calls_model_at_rank(rank)->Some_0;
+        checked_body_scalar_position(aliases, self.order_model()[rank as int], row, body, site.at, site.expected);
+    }
+
+    pub(crate) proof fn checked_atom_keeps_local_type(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize,
+        body: DefnEvaluationBody<'p, 'a>, site: ScalarExpressionSite<'a>,
+    )
+        requires
+            self.scalar_site_is_checked(aliases, rank, body, site), scalar_atom_at(body.forms@, site.at),
+            self.scalar_fragment_value_type(site.expected),
+        ensures local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, site.at, site.expected),
+    {
+        let row = self.calls_model_at_rank(rank)->Some_0;
+        checked_atom_uses_only_parameters(aliases, self.order_model()[rank as int], row, body, site.at, site.expected);
+    }
 
     /// 計画から得た本体を、元の署名の戻り型で検査したことを示す。
     pub proof fn scalar_body_site_is_checked(
@@ -61,6 +90,22 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         let row = self.calls_model_at_rank(rank)->Some_0;
         defn_checked_if_child_sites(aliases, self.order_model()[rank as int], row, body, site.at,
             site.expected, condition, yes, no);
+    }
+
+    /// 呼び出し計画の辺は、元の本体にある宣言呼び出しの構文に対応する。
+    pub proof fn recorded_call_at_rank_has_syntax(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize,
+        body: DefnEvaluationBody<'p, 'a>, site: usize,
+    )
+        requires
+            defn_call_plan_matches(aliases, self), self.body_matches_at_rank(rank, body),
+            self.calls_model_at_rank(rank) matches Some(row) && site < row.len(),
+        ensures scalar_call_syntax_at(body.source.text_model(), body.forms@,
+            self.calls_model_at_rank(rank)->Some_0[site as int].at),
+    {
+        defn_call_plan_edge_order(aliases, self, rank);
+        let row = self.calls_model_at_rank(rank)->Some_0;
+        recorded_edge_has_call_syntax(aliases, self.order_model()[rank as int], row, body, site);
     }
 
     /// 型検査済みの宣言呼び出しの、元の構文位置と呼び出し先の順位を計画から得る。

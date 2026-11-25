@@ -153,6 +153,22 @@ pub(in crate::ncg2m) proof fn scalar_conditional_child_types(
     checked_if_keeps_child_types(Seq::empty(), source, forms, parameters, at, expected, condition, yes, no);
 }
 
+pub(in crate::ncg2m::expression_types) proof fn checked_scalar_atom_has_local_type(
+    calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    at: usize, expected: DataType,
+)
+    requires
+        scalar_atom_at(forms, at),
+        expected.list_depth == 0,
+        expected.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)),
+        typed_body_with_calls(calls, source, forms, environment_view(parameters), at, type_shape(expected))
+            == BodyVerdict::Accepted,
+    ensures local_scalar_site_is_typed(source, forms, parameters, at, expected),
+{
+    assert(local_scalar_fragment(source, forms, at)) by { reveal(local_scalar_fragment); };
+    local_expression_needs_no_call_types(calls, source, forms, environment_view(parameters), at, type_shape(expected));
+}
+
 proof fn local_expression_needs_no_call_types(
     calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, expected: TypeShape,
 )

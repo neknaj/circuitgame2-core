@@ -39,7 +39,8 @@ pub use named_call::DefnBodyCallError;
 #[cfg(verus_only)]
 pub use named_call::{
     expression_slot, expression_slot_at_root, scalar_call_syntax_at, scalar_evaluator_syntax,
-    scalar_syntax_call_arguments, scalar_syntax_if_children,
+    scalar_syntax_call_arguments, scalar_syntax_form_kind, scalar_syntax_if_children, scalar_syntax_matches_call_arguments,
+    scalar_syntax_atom_from_kind, scalar_syntax_if_from_children, scalar_syntax_call_from_arguments,
 };
 mod local_scopes;
 mod typing;
@@ -55,7 +56,9 @@ use typing::typed_body;
 #[cfg(verus_only)]
 pub use typing::scalar::{local_scalar_fragment, local_scalar_site_is_typed};
 #[cfg(verus_only)]
-pub(super) use typing::scalar::{scalar_atom_at, scalar_atom_type_origin, scalar_conditional_child_types};
+pub use typing::scalar::scalar_atom_at;
+#[cfg(verus_only)]
+pub(super) use typing::scalar::{scalar_atom_type_origin, scalar_conditional_child_types};
 
 verus! {
 
