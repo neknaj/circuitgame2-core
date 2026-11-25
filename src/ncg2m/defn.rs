@@ -132,22 +132,22 @@ pub enum DefnHeaderError {
     },
 }
 
-spec fn usable_forms(source: &str, forms: Seq<Form>) -> bool {
+pub(super) open spec fn usable_forms(source: &str, forms: Seq<Form>) -> bool {
     complete_list_indices(forms) && nested_list_indices(forms)
         && form_spans_valid(source, forms, source.spec_bytes().len() as int)
 }
 
-spec fn plain_name(form: Form) -> bool {
+pub(super) open spec fn plain_name(form: Form) -> bool {
     form matches Form::Atom { kind: AtomKind::Name, .. }
 }
 
-fn is_name(form: &Form) -> (result: bool)
+pub(super) fn is_name(form: &Form) -> (result: bool)
     ensures result == plain_name(*form),
 {
     matches!(form, Form::Atom { kind: AtomKind::Name, .. })
 }
 
-fn span_of(form: &Form) -> (span: Range<usize>)
+pub(super) fn span_of(form: &Form) -> (span: Range<usize>)
     ensures span == form_span(*form),
 {
     match form {
@@ -293,10 +293,10 @@ fn read_type(source: &str, forms: &[Form], root: usize) -> (result: Result<DataT
 }
 
 // ヘッダー内に入れ子の子があっても、それぞれの直下だけを数える。
-spec fn sites_model(source: &str, forms: Seq<Form>) -> Result<(usize, usize, usize, usize, usize), DefnHeaderError> {
-    let declaration = tagged_arguments(source, forms, 0, "defn", true);
+spec fn sites_model(source: &str, forms: Seq<Form>, root: usize) -> Result<(usize, usize, usize, usize, usize), DefnHeaderError> {
+    let declaration = tagged_arguments(source, forms, root, "defn", true);
     if declaration.is_none() {
-        Err(expected_at(forms, 0, DefnPart::Declaration))
+        Err(expected_at(forms, root, DefnPart::Declaration))
     } else {
         let (name, annotation) = declaration->Some_0;
         if !plain_name(forms[name as int]) {
@@ -320,17 +320,17 @@ spec fn sites_model(source: &str, forms: Seq<Form>) -> Result<(usize, usize, usi
     }
 }
 
-fn header_sites(source: &str, forms: &[Form]) -> (result: Result<(usize, usize, usize, usize, usize), DefnHeaderError>)
-    requires usable_forms(source, forms@), forms@.len() > 0,
+fn header_sites(source: &str, forms: &[Form], root: usize) -> (result: Result<(usize, usize, usize, usize, usize), DefnHeaderError>)
+    requires usable_forms(source, forms@), root < forms@.len(),
     ensures
-        result == sites_model(source, forms@),
+        result == sites_model(source, forms@, root),
         result matches Ok((name, types, output, names, body))
             ==> name < forms@.len() && types < forms@.len() && output < forms@.len()
                 && names < forms@.len() && body < forms@.len()
                 && forms@[types as int] is List && forms@[names as int] is List,
 {
-    let Some((name, declaration)) = tagged(source, forms, 0, "defn", true) else {
-        return Err(expected(forms, 0, DefnPart::Declaration));
+    let Some((name, declaration)) = tagged(source, forms, root, "defn", true) else {
+        return Err(expected(forms, root, DefnPart::Declaration));
     };
     if !is_name(&forms[name]) {
         return Err(expected(forms, name, DefnPart::DeclarationName));
@@ -544,9 +544,9 @@ fn read_parameters(source: &str, forms: &[Form], lists: (usize, usize))
 }
 
 #[cfg(verus_only)]
-type HeaderContents = (Range<usize>, Range<usize>, Seq<DefnParameter>, DataTypeSyntax, Range<usize>);
+pub(super) type HeaderContents = (Range<usize>, Range<usize>, Seq<DefnParameter>, DataTypeSyntax, Range<usize>);
 
-spec fn header_contents(header: DefnHeader) -> HeaderContents {
+pub(super) open spec fn header_contents(header: DefnHeader) -> HeaderContents {
     (header.span, header.name_span, header.parameters@, header.result_type, header.body_span)
 }
 
@@ -559,19 +559,34 @@ spec fn header_model(source: &str, forms: Seq<Form>) -> Result<HeaderContents, D
         let extra = subtree_limit(forms, 0);
         Err(DefnHeaderError::ExpectedOneDeclaration(form_span(forms[extra as int])))
     } else {
-        match sites_model(source, forms) {
-            Err(error) => Err(error),
-            Ok((name, types, output, names, body)) => {
-                match parameter_model(source, forms, (types, names), (types + 1) as usize, (names + 1) as usize, Seq::empty()) {
+        declaration_model(source, forms, 0)
+    }
+}
+
+pub(super) closed spec fn declaration_model(source: &str, forms: Seq<Form>, root: usize)
+    -> Result<HeaderContents, DefnHeaderError>
+{
+    match sites_model(source, forms, root) {
+        Err(error) => Err(error),
+        Ok((name, types, output, names, body)) => {
+            match parameter_model(source, forms, (types, names), (types + 1) as usize, (names + 1) as usize, Seq::empty()) {
+                Err(error) => Err(error),
+                Ok(parameters) => match type_at(source, forms, output, output, 0) {
                     Err(error) => Err(error),
-                    Ok(parameters) => match type_at(source, forms, output, output, 0) {
-                        Err(error) => Err(error),
-                        Ok(result_type) => Ok((form_span(forms[0]), form_span(forms[name as int]),
-                            parameters, result_type, form_span(forms[body as int]))),
-                    },
-                }
+                    Ok(result_type) => Ok((form_span(forms[root as int]), form_span(forms[name as int]),
+                        parameters, result_type, form_span(forms[body as int]))),
+                },
             }
         }
+    }
+}
+
+pub(super) open spec fn defn_at_matches(
+    source: &str, forms: Seq<Form>, root: usize, result: Result<DefnHeader, DefnHeaderError>,
+) -> bool {
+    match result {
+        Ok(header) => declaration_model(source, forms, root) == Ok(header_contents(header)),
+        Err(error) => declaration_model(source, forms, root) == Err(error),
     }
 }
 
@@ -659,11 +674,19 @@ pub fn parse_defn_header(source: &str) -> (result: Result<DefnHeader, DefnHeader
         return Err(DefnHeaderError::ExpectedOneDeclaration(span_of(&forms[limit])));
     }
 
-    let (name, types, output, names, body) = header_sites(source, &forms)?;
-    let parameters = read_parameters(source, &forms, (types, names))?;
-    let result_type = read_type(source, &forms, output)?;
+    read_defn_at(source, &forms, 0)
+}
+
+pub(super) fn read_defn_at(source: &str, forms: &[Form], root: usize)
+    -> (result: Result<DefnHeader, DefnHeaderError>)
+    requires usable_forms(source, forms@), root < forms@.len(),
+    ensures defn_at_matches(source, forms@, root, result),
+{
+    let (name, types, output, names, body) = header_sites(source, forms, root)?;
+    let parameters = read_parameters(source, forms, (types, names))?;
+    let result_type = read_type(source, forms, output)?;
     Ok(DefnHeader {
-        span: span_of(&forms[0]),
+        span: span_of(&forms[root]),
         name_span: span_of(&forms[name]),
         parameters,
         result_type,

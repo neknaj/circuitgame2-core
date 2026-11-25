@@ -21,6 +21,8 @@ mod clause_diagnostics;
 mod definitions;
 #[cfg(verus_only)]
 mod directive_diagnostics;
+#[cfg(verus_only)]
+pub use directive_diagnostics::directive_errors_agree;
 mod expression_forest;
 mod expressions;
 mod index;
@@ -942,7 +944,7 @@ fn check_directive_word(
 ) -> (result: Result<(), (HeaderError, Range<usize>)>)
     requires
         index <= end <= forms@.len(),
-        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        expected is ExpectedNor ==> form_spans_valid(source, forms@, source.spec_bytes().len() as int),
         expected is ExpectedNor || expected is ExpectedNamespacePath
             || expected is ExpectedAbsolutePath || expected is ExpectedName,
     ensures
@@ -992,7 +994,7 @@ fn validate_directive(
         first <= end <= forms@.len(),
         closing < source.spec_bytes().len(),
         source.spec_bytes()[closing as int] == 41,
-        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        head is Using ==> form_spans_valid(source, forms@, source.spec_bytes().len() as int),
         head is Using || head is Namespace || head is Use || head is Export,
     ensures
         result.is_ok() == directive_arguments_match(source, forms@, first as int, end as int, head),
@@ -1021,7 +1023,6 @@ fn validate_directive(
                     head == Head::Export,
                     closing < source.spec_bytes().len(),
                     source.spec_bytes()[closing as int] == 41,
-                    form_spans_valid(source, forms@, source.spec_bytes().len() as int),
                     forall|i: int| first <= i < index ==>
                         #[trigger] directive_word_at(source, forms@, i, end as int, HeaderError::ExpectedName),
                 decreases end - index,
@@ -1047,6 +1048,33 @@ fn validate_directive(
     } else {
         Ok(())
     }
+}
+
+/// ?????????????????????????????
+///
+/// ????????????????????????????????????????????
+/// `None` ????????????????????????????
+pub fn check_named_directive(
+    source: &str, forms: &[Form], first: usize, end: usize, closing: usize, head: Head,
+) -> (checked: Option<Result<(), (HeaderError, Range<usize>)>>)
+    ensures
+        checked.is_some() == (first <= end <= forms@.len()
+            && closing < source.spec_bytes().len() && source.spec_bytes()[closing as int] == 41
+            && (head is Namespace || head is Use || head is Export)),
+        checked matches Some(result) ==> {
+            &&& result.is_ok() == directive_arguments_match(source, forms@, first as int, end as int, head)
+            &&& (result matches Err((kind, span)) ==>
+                directive_error_evidence(source, forms@, first as int, end as int, closing, head, kind, span))
+        },
+{
+    let bytes = source.as_bytes();
+    if first > end || end > forms.len() || closing >= bytes.len() || bytes[closing] != b')' {
+        return None;
+    }
+    if !matches!(head, Head::Namespace | Head::Use | Head::Export) {
+        return None;
+    }
+    Some(validate_directive(source, forms, first, end, closing, head))
 }
 
 fn recognize_head(word: &str) -> (head: Option<Head>)
