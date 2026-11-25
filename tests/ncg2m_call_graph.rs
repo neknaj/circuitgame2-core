@@ -1,4 +1,7 @@
-use circuitgame2_core::ncg2m::call_evaluation::scalar::{ScalarBindingError, ScalarValue, bind_scalar_call};
+use circuitgame2_core::ncg2m::call_evaluation::scalar::{
+    ScalarBindingError, ScalarInvocationError, ScalarInvocationStep, ScalarValue, bind_scalar_call,
+    prepare_scalar_invocation,
+};
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
 use circuitgame2_core::ncg2m::integers::IntegerValue;
 use circuitgame2_core::project::{
@@ -30,7 +33,7 @@ fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     assert_eq!(isolated.evaluate_atomic_body().unwrap(), Some(ScalarValue::Integer(IntegerValue::Int(i64::MIN))));
     assert_eq!(frame.body().source.revision, 1);
     assert_eq!(&source[frame.body().signature.body_span.clone()], "true");
-    let Err(ScalarBindingError::Arity { source: callee_source, span, expected: 0, found: 1 }) =
+    let Err(ScalarBindingError::Arity { source: callee_source, span, expected_count: 0, found_count: 1 }) =
         bind_scalar_call(&plan, rank(2), vec![ScalarValue::Bool(false)])
     else { panic!() };
     assert_eq!(callee_source.revision, 1);
@@ -104,4 +107,32 @@ fn an_unresolved_stage_does_not_get_an_acyclic_plan() {
     let aliases = check_mixed_use_aliases(&targets).unwrap();
     assert!(matches!(aliases.plan_defn_calls(),
         Err(DefnCallGraphError::Body { error: DefnBodyCallError::Expression(ExpressionCheckFailure::Deferred(_)), .. })));
+}
+
+#[test]
+fn scalar_invocation_uses_argument_order_and_the_callee_frame() {
+    let source = "(defn forward (as-type (Fn (Int) Int) (fn (x) (take-first x -2))))
+        (defn take-first (as-type (Fn (Int Int) Int) (fn (a b) a)))
+        (defn nested (as-type (Fn (Int) Int) (fn (x) (take-first (forward x) -2))))";
+    let snapshots = [SourceSnapshot { path: "invoke.ncg2m", revision: 31, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    let rank = |item| plan.rank_of(DefnPosition { file: 0, item }).unwrap();
+    let value = ScalarValue::Integer(IntegerValue::Int(25));
+
+    let call = prepare_scalar_invocation(&plan, rank(0), 0, vec![value]).unwrap().unwrap();
+    let ScalarInvocationStep::Continue(call) = call.advance().unwrap() else { panic!() };
+    let ScalarInvocationStep::Continue(call) = call.advance().unwrap() else { panic!() };
+    let ScalarInvocationStep::Enter { rank: callee, frame } = call.advance().unwrap() else { panic!() };
+    assert_eq!(callee, rank(1));
+    assert_eq!(frame.parameters(), &[value, ScalarValue::Integer(IntegerValue::Int(-2))]);
+    assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(value));
+
+    let nested = prepare_scalar_invocation(&plan, rank(2), 0, vec![value]).unwrap().unwrap();
+    let Err(ScalarInvocationError::Deferred { source: error_source, span }) = nested.advance()
+    else { panic!() };
+    assert_eq!(error_source.revision, 31);
+    assert_eq!(&source[span], "(forward x)");
 }

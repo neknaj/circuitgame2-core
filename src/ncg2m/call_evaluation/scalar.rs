@@ -13,6 +13,10 @@ use vstd::prelude::*;
 use super::DefnEvaluationBody;
 
 mod atom;
+mod invocation;
+pub use invocation::{ScalarInvocation, ScalarInvocationError, ScalarInvocationStep, prepare_scalar_invocation};
+#[cfg(verus_only)]
+pub use invocation::scalar_invocation_applicable;
 pub use atom::ScalarLiteralError;
 #[cfg(verus_only)]
 pub use atom::atomic_body_matches;
@@ -77,9 +81,9 @@ pub enum ScalarBindingError<'p, 'a> {
         /// 呼び出し先の宣言全体の UTF-8 半開バイト範囲。
         span: Range<usize>,
         /// 署名が要求する引数の個数。
-        expected: usize,
+        expected_count: usize,
         /// 渡された値の個数。
-        found: usize,
+        found_count: usize,
     },
     /// 最初に型が一致しなかった引数。
     Type {
@@ -90,9 +94,9 @@ pub enum ScalarBindingError<'p, 'a> {
         /// 署名内での仮引数の位置。
         parameter: usize,
         /// 署名が要求する型。
-        expected: DataType<'a>,
+        expected_type: DataType<'a>,
         /// 渡された値の型。
-        found: BuiltinDataType,
+        found_type: BuiltinDataType,
     },
 }
 
@@ -152,17 +156,17 @@ pub open spec fn binding_matches<'p, 'a>(
     &&& match result {
         Ok(frame) => frame.body_model() == body && frame.parameter_values_model() == values,
         Err(ScalarBindingError::Rank) => false,
-        Err(ScalarBindingError::Arity { source, span, expected, found }) => {
+        Err(ScalarBindingError::Arity { source, span, expected_count, found_count }) => {
             &&& source == body.source && span == body.signature.span
-            &&& expected == body.signature.parameters@.len() && found == values.len() && found != expected
+            &&& expected_count == body.signature.parameters@.len() && found_count == values.len() && found_count != expected_count
         }
-        Err(ScalarBindingError::Type { source, span, parameter, expected, found }) => {
+        Err(ScalarBindingError::Type { source, span, parameter, expected_type, found_type }) => {
             &&& values.len() == body.signature.parameters@.len()
             &&& parameter < values.len()
             &&& source == body.source && span == body.signature.parameters@[parameter as int].ty.span
-            &&& expected == body.signature.parameters@[parameter as int].ty.ty
-            &&& found == values[parameter as int].type_model()
-            &&& !scalar_fits(values[parameter as int], expected)
+            &&& expected_type == body.signature.parameters@[parameter as int].ty.ty
+            &&& found_type == values[parameter as int].type_model()
+            &&& !scalar_fits(values[parameter as int], expected_type)
             &&& forall|i: int| 0 <= i < parameter ==>
                 scalar_fits(#[trigger] values[i], body.signature.parameters@[i].ty.ty)
         }
@@ -179,7 +183,7 @@ fn bind<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, values: Vec<ScalarValue>)
     if values.len() != params.len() {
         let span = &body.signature.span;
         return Err(ScalarBindingError::Arity {
-            source: body.source, span: span.start..span.end, expected: params.len(), found: values.len(),
+            source: body.source, span: span.start..span.end, expected_count: params.len(), found_count: values.len(),
         });
     }
     let mut i = 0;
@@ -195,12 +199,39 @@ fn bind<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, values: Vec<ScalarValue>)
         if !scalar_matches(value, param.ty) {
             return Err(ScalarBindingError::Type {
                 source: body.source, span: param.span.start..param.span.end, parameter: i,
-                expected: param.ty, found: value.builtin_type(),
+                expected_type: param.ty, found_type: value.builtin_type(),
             });
         }
         i += 1;
     }
     Ok(ScalarCallFrame { body, values })
+}
+
+/// 指定した順位の本体に対して、仮引数束縛の結果が対応することを表す。
+pub open spec fn binding_at_rank_matches<'p, 'a>(
+    plan: &DefnCallPlan<'p, 'a>, rank: usize, values: Seq<ScalarValue>,
+    result: Result<ScalarCallFrame<'p, 'a>, ScalarBindingError<'p, 'a>>,
+) -> bool {
+    match result {
+        Ok(frame) => {
+            let body = frame.body_model();
+            &&& plan.body_matches_at_rank(rank, body)
+            &&& frame.parameter_values_model() == values
+            &&& parameters_match(body.signature, values)
+        }
+        Err(ScalarBindingError::Rank) => rank >= plan.order_model().len() || !plan.order_nodes_valid()
+            || plan.project_model().indexed_defn(plan.order_model()[rank as int].file,
+                plan.order_model()[rank as int].item).is_none(),
+        Err(error) => {
+            let defn = plan.order_model()[rank as int];
+            let project = plan.project_model();
+            &&& rank < plan.order_model().len()
+            &&& defn.file < project.sources_model().len()
+            &&& exists|body: DefnEvaluationBody<'p, 'a>| #[trigger] binding_matches(body, values, Err(error))
+                && *body.source == project.sources_model()[defn.file as int]
+                && project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
+        },
+    }
 }
 
 /// 補助関数の本体を元の構文木から取得し、指定した値だけを仮引数に束縛する。
@@ -211,34 +242,7 @@ fn bind<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, values: Vec<ScalarValue>)
 /// 引数の型が合わない場合は、最初に一致しなかった仮引数の型の範囲を返す。
 pub fn bind_scalar_call<'p, 'a>(plan: &DefnCallPlan<'p, 'a>, rank: usize, values: Vec<ScalarValue>)
     -> (result: Result<ScalarCallFrame<'p, 'a>, ScalarBindingError<'p, 'a>>)
-    ensures match result {
-        Ok(frame) => {
-            let body = frame.body_model();
-            let defn = plan.order_model()[rank as int];
-            let project = plan.project_model();
-            &&& rank < plan.order_model().len()
-            &&& defn.file < project.sources_model().len()
-            &&& *body.source == project.sources_model()[defn.file as int]
-            &&& project.functional_forms_model(defn.file) == Some(body.forms@)
-            &&& body.at < body.forms@.len()
-            &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
-            &&& project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
-            &&& frame.parameter_values_model() == values@
-            &&& parameters_match(body.signature, values@)
-        }
-        Err(ScalarBindingError::Rank) => rank >= plan.order_model().len() || !plan.order_nodes_valid()
-            || plan.project_model().indexed_defn(plan.order_model()[rank as int].file,
-                plan.order_model()[rank as int].item).is_none(),
-        Err(error) => {
-            let defn = plan.order_model()[rank as int];
-            let project = plan.project_model();
-            &&& rank < plan.order_model().len()
-            &&& defn.file < project.sources_model().len()
-            &&& exists|body: DefnEvaluationBody<'p, 'a>| #[trigger] binding_matches(body, values@, Err(error))
-                && *body.source == project.sources_model()[defn.file as int]
-                && project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
-        },
-    },
+    ensures binding_at_rank_matches(plan, rank, values@, result),
 {
     let Some(body) = plan.body_at_rank(rank) else { return Err(ScalarBindingError::Rank); };
     bind(body, values)

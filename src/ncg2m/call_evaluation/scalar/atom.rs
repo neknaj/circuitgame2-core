@@ -123,16 +123,16 @@ fn read_name_atom(
     None
 }
 
-/// 本体が真偽値、整数、または仮引数のアトムなら、その値または整数診断を定める。
-pub closed spec fn atomic_body_matches<'p, 'a>(
-    frame: &ScalarCallFrame<'p, 'a>, result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
+pub(super) closed spec fn scalar_atom_matches<'p, 'a>(
+    frame: &ScalarCallFrame<'p, 'a>, at: usize, expected: DataType<'a>,
+    result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
 ) -> bool {
     let body = frame.body_model();
-    &&& body.at < body.forms@.len()
-    &&& {
-        let form = body.forms@[body.at as int];
+    if at >= body.forms@.len() {
+        result == Ok(None)
+    } else {
+        let form = body.forms@[at as int];
         let word = spelling(body.source.text_model(), form);
-        let expected = body.signature.result_type.ty;
         match form {
             Form::Atom { kind: AtomKind::Natural | AtomKind::NegativeInteger, .. } => {
                 if expected.list_depth == 0 && expected.atom is Builtin && expected.atom->Builtin_0 is Integer {
@@ -152,6 +152,14 @@ pub closed spec fn atomic_body_matches<'p, 'a>(
     }
 }
 
+/// 本体が真偽値、整数、または仮引数のアトムなら、その値または整数診断を定める。
+pub closed spec fn atomic_body_matches<'p, 'a>(
+    frame: &ScalarCallFrame<'p, 'a>, result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
+) -> bool {
+    let body = frame.body_model();
+    scalar_atom_matches(frame, body.at, body.signature.result_type.ty, result)
+}
+
 impl<'p, 'a> ScalarCallFrame<'p, 'a> {
     /// 本体が真偽値、整数、または仮引数のアトムなら評価する。
     ///
@@ -164,12 +172,19 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
         -> (result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>)
         ensures atomic_body_matches(self, result),
     {
+        self.evaluate_atom(self.body.at, self.body.signature.result_type.ty)
+    }
+
+    pub(super) fn evaluate_atom(&self, at: usize, expected: DataType<'a>)
+        -> (result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>)
+        ensures scalar_atom_matches(self, at, expected, result),
+            result matches Ok(Some(value)) ==> scalar_fits(value, expected),
+    {
         proof { use_type_invariant(self); }
         let body = &self.body;
         let source = body.source.text();
-        let at = body.at;
-        let expected = body.signature.result_type.ty;
-        match &body.forms[at] {
+        let Some(form) = body.forms.get(at) else { return Ok(None); };
+        match form {
             Form::Atom { kind: AtomKind::Natural | AtomKind::NegativeInteger, .. } => {
                 if expected.list_depth != 0 { return Ok(None); }
                 let DataTypeAtom::Builtin(BuiltinDataType::Integer(signedness)) = expected.atom
@@ -177,7 +192,7 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
                 let word = source_word(source, body.forms, at);
                 match read_integer_literal(word, Some(signedness)) {
                     Ok(value) => Ok(Some(ScalarValue::Integer(value))),
-                    Err(error) => Err(ScalarLiteralError { source: body.source, span: span_of(&body.forms[at]), error }),
+                    Err(error) => Err(ScalarLiteralError { source: body.source, span: span_of(form), error }),
                 }
             }
             Form::Atom { kind: AtomKind::Name, .. } => Ok(read_name_atom(

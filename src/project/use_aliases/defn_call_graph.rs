@@ -129,9 +129,23 @@ fn invert_call_order(order: &[usize], Ghost(expected): Ghost<Seq<nat>>) -> (rank
     ranks
 }
 
+#[verifier::opaque]
+spec fn anchored_arguments(project: &ParsedProjectSources, vertices: Seq<DefnPosition>, rows: Seq<Vec<DefnCallEdge>>) -> bool {
+    &&& rows.len() == vertices.len()
+    &&& forall|row: int, site: int| 0 <= row < rows.len() && 0 <= site < rows[row]@.len() ==> {
+        let edge = #[trigger] rows[row]@[site];
+        &&& edge.from == vertices[row]
+        &&& edge.from.file < project.sources_model().len()
+        &&& *edge.call.source == project.sources_model()[edge.from.file as int]
+        &&& project.functional_forms_model(edge.from.file) matches Some(forms)
+            && defn_call_arguments(forms, edge.at, edge.arguments@)
+    }
+}
+
 impl<'p, 'a> DefnCallPlan<'p, 'a> {
     #[verifier::type_invariant]
-    spec fn ranks_are_valid(&self) -> bool {
+    spec fn indexes_are_valid(&self) -> bool {
+        &&& anchored_arguments(self.project, self.vertices@, self.edges@)
         &&& self.ranks@.len() == self.vertices@.len()
         &&& reverse_order_matches(self.order@, self.ranks@)
         &&& forall|a: int, b: int| 0 <= a < b < self.vertices@.len()
@@ -181,28 +195,32 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         *self.project
     }
 
+    /// 本体の構文木と署名が、計画の順位に対応する同じソースにあることを表す。
+    pub open spec fn body_matches_at_rank(&self, rank: usize, body: DefnEvaluationBody<'p, 'a>) -> bool {
+        let project = self.project_model();
+        let order = self.order_model();
+        let defn = order[rank as int];
+        &&& rank < order.len()
+        &&& defn.file < project.sources_model().len()
+        &&& *body.source == project.sources_model()[defn.file as int]
+        &&& project.functional_forms_model(defn.file) == Some(body.forms@)
+        &&& body.at < body.forms@.len()
+        &&& form_spans_valid(body.source.text_model(), body.forms@,
+            body.source.text_model().spec_bytes().len() as int)
+        &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
+        &&& project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
+    }
+
     /// 指定した順位の本体を、計画に対応する元の文書版から返す。
     pub fn body_at_rank(&self, rank: usize) -> (body: Option<DefnEvaluationBody<'p, 'a>>)
-        ensures match body {
-            Some(body) => {
-                let project = self.project_model();
-                let order = self.order_model();
-                let defn = order[rank as int];
-                &&& rank < order.len()
-                &&& defn.file < project.sources_model().len()
-                &&& *body.source == project.sources_model()[defn.file as int]
-                &&& project.functional_forms_model(defn.file) == Some(body.forms@)
-                &&& body.at < body.forms@.len()
-                &&& form_spans_valid(body.source.text_model(), body.forms@,
-                    body.source.text_model().spec_bytes().len() as int)
-                &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
-                &&& project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
-            }
-            None => rank >= self.order_model().len() || !self.order_nodes_valid()
-                || self.project_model().indexed_defn(self.order_model()[rank as int].file,
-                    self.order_model()[rank as int].item).is_none(),
-        },
+        ensures self.order_nodes_valid(),
+            match body {
+                Some(body) => self.body_matches_at_rank(rank, body),
+                None => rank >= self.order_model().len() || self.project_model().indexed_defn(
+                    self.order_model()[rank as int].file, self.order_model()[rank as int].item).is_none(),
+            },
     {
+        proof { use_type_invariant(self); }
         let defn = self.at_rank(rank)?;
         self.project.defn_evaluation_body(defn.file, defn.item)
     }
@@ -265,10 +283,24 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
             waiting.is_some() <==> (self.calls_model_at_rank(rank) matches Some(edges) && site < edges.len()),
             waiting matches Some(args) ==> {
                 let edges = self.calls_model_at_rank(rank)->Some_0;
-                *args.model().0 == edges[site as int] && args.model().1 == Seq::<Value>::empty()
+                let edge = *args.model().0;
+                let project = self.project_model();
+                &&& edge == edges[site as int]
+                &&& args.model().1 == Seq::<Value>::empty()
+                &&& rank < self.order_model().len() && edge.from == self.order_model()[rank as int]
+                &&& edge.from.file < project.sources_model().len()
+                &&& *edge.call.source == project.sources_model()[edge.from.file as int]
+                &&& project.functional_forms_model(edge.from.file) matches Some(forms)
+                    && defn_call_arguments(forms, edge.at, edge.arguments@)
             },
     {
+        proof { use_type_invariant(self); }
         let edge = self.calls_at_rank(rank)?.get(site)?;
+        proof {
+            reveal(anchored_arguments);
+            let node = self.order@[rank as int] as int;
+            assert(*edge == self.edges@[node]@[site as int]);
+        }
         Some(CallArguments::start(edge))
     }
 
@@ -638,6 +670,31 @@ pub proof fn defn_call_plan_site_at_rank(
     edge.at
 }
 
+proof fn checked_rows_anchor_arguments(
+    aliases: &MixedUseAliases, project: &ParsedProjectSources, vertices: Seq<DefnPosition>,
+    rows: Seq<Vec<DefnCallEdge>>, graph: Seq<Vec<Option<usize>>>,
+)
+    requires
+        *project == aliases.targets_model().project_model(),
+        graph_matches(aliases, vertices, rows, graph), rows.len() == vertices.len(),
+    ensures anchored_arguments(project, vertices, rows),
+{
+    reveal(anchored_arguments);
+    assert forall|row: int, site: int| 0 <= row < rows.len() && 0 <= site < rows[row]@.len() implies {
+        let edge = #[trigger] rows[row]@[site];
+        &&& edge.from == vertices[row]
+        &&& edge.from.file < project.sources_model().len()
+        &&& *edge.call.source == project.sources_model()[edge.from.file as int]
+        &&& project.functional_forms_model(edge.from.file) matches Some(forms)
+            && defn_call_arguments(forms, edge.at, edge.arguments@)
+    } by {
+        let edge = rows[row]@[site];
+        assert(graph_row_matches(aliases, vertices, row as usize, rows[row]@, graph[row]@));
+        assert(defn_call_edge_matches(aliases, edge));
+        reveal(defn_call_edge_matches);
+    };
+}
+
 proof fn checked_dependency_order_is_call_plan(
     aliases: &MixedUseAliases, plan: &DefnCallPlan, graph: Seq<Vec<Option<usize>>>,
 )
@@ -725,6 +782,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     && (forall|node: int| #![trigger rank[node]] 0 <= node < graph@.len()
                         ==> rank[node] < order@.len() && order@[rank[node] as int] == node);
                 let ranks = invert_call_order(order.as_slice(), Ghost(expected));
+                proof { checked_rows_anchor_arguments(self, project, vertices@, edges@, graph@); }
                 let plan = DefnCallPlan { project, vertices, edges, order, ranks };
                 proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
                 Ok(plan)

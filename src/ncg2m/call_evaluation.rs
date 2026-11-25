@@ -114,6 +114,12 @@ impl<'call, 'p, 'a, Value> PendingCallArgument<'call, 'p, 'a, Value> {
         self.waiting.values@.len() < self.waiting.edge.arguments@.len()
     }
 
+    fn slot(&self) -> (slot: usize)
+        ensures slot == self.model().1.len(),
+    {
+        self.waiting.values.len()
+    }
+
     /// 呼び出し元の保持構文木における、次の引数の添字を返す。
     pub fn expression(&self) -> (at: usize)
         ensures
