@@ -56,6 +56,22 @@ pub struct DefnCallSite<'p, 'a> {
     pub span: Range<usize>,
 }
 
+/// 型が決まった算術式と、その元の構文木にある左右の引数。
+#[derive(Clone, Copy)]
+pub(crate) struct TypedArithmeticSite {
+    pub(crate) at: usize,
+    pub(crate) arguments: (usize, usize),
+    pub(crate) operation: IntegerOperation,
+}
+
+pub(crate) open spec fn arithmetic_sites_fit(forms: Seq<Form>, sites: Seq<TypedArithmeticSite>) -> bool {
+    &&& forall|i: int| 0 <= i < sites.len() ==> {
+        let site = #[trigger] sites[i];
+        crate::project::defn_call_arguments(forms, site.at, seq![site.arguments.0, site.arguments.1])
+    }
+    &&& forall|i: int, j: int| 0 <= i < j < sites.len() ==> (#[trigger] sites[i]).at < (#[trigger] sites[j]).at
+}
+
 /// 引数の型検査に進める呼び出し。
 #[derive(Debug)]
 pub enum PreparedDefnCall<'p, 'a> {
@@ -343,7 +359,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         ensures project_named_defn_body_matches(self, file, item, result),
     {
         match self.targets().project().check_named_defn_body(self, file, item, false) {
-            Some((outcome, _)) => Some(outcome),
+            Some((outcome, _, _)) => Some(outcome),
             None => None,
         }
     }

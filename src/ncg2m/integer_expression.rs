@@ -411,6 +411,7 @@ spec fn supported_at(rows: Seq<PreparedNode>, len: nat, at: usize) -> bool {
     at < len && len - 1 - at < rows.len() && rows[len - 1 - at] is Supported
 }
 
+#[verifier::spinoff_prover]
 proof fn children_are_supported(source: &str, forms: Seq<Form>, rows: Seq<PreparedNode>, at: usize, node: Node)
     requires
         prepared_row_sound(source, forms, rows),
@@ -832,11 +833,7 @@ fn eval_one(
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             };
-            match (lhs, rhs) {
-                (IntegerValue::Nat(a), IntegerValue::Nat(b)) => Some(pack_nat(evaluate_nat(operation, a, b), span)),
-                (IntegerValue::Int(a), IntegerValue::Int(b)) => Some(pack_int(evaluate_int(operation, a, b), span)),
-                _ => unreachable!(),
-            }
+            Some(evaluate_checked_arithmetic(operation, lhs, rhs, span, Ghost(ty)))
         }
         PlannedOperation::Convert(target, child) => {
             let input = other_type(target);
@@ -935,10 +932,34 @@ spec fn checked_literal(
     }
 }
 
-spec fn value_has_type(value: IntegerValue, ty: IntegerType) -> bool {
+pub(crate) open spec fn value_has_type(value: IntegerValue, ty: IntegerType) -> bool {
     match (value, ty) {
         (IntegerValue::Nat(_), IntegerType::Nat) | (IntegerValue::Int(_), IntegerType::Int) => true,
         _ => false,
+    }
+}
+
+pub(crate) open spec fn integer_value_number(value: IntegerValue) -> int {
+    match value {
+        IntegerValue::Nat(n) => n as int,
+        IntegerValue::Int(n) => n as int,
+    }
+}
+
+/// 同じ整数型の左右の値を演算し、範囲外なら元の演算式の範囲を返す。
+pub(crate) fn evaluate_checked_arithmetic(
+    operation: IntegerOperation, left: IntegerValue, right: IntegerValue, span: Range<usize>,
+    Ghost(ty): Ghost<IntegerType>,
+) -> (result: Result<IntegerValue, IntegerEvaluationError>)
+    requires value_has_type(left, ty), value_has_type(right, ty),
+    ensures integer_evaluation_matches(ty,
+        arithmetic_value(operation, integer_value_number(left), integer_value_number(right)), span, result),
+        result matches Ok(value) ==> value_has_type(value, ty),
+{
+    match (left, right) {
+        (IntegerValue::Nat(a), IntegerValue::Nat(b)) => pack_nat(evaluate_nat(operation, a, b), span),
+        (IntegerValue::Int(a), IntegerValue::Int(b)) => pack_int(evaluate_int(operation, a, b), span),
+        _ => unreachable!(),
     }
 }
 

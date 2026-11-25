@@ -287,3 +287,55 @@ fn arithmetic_fallback_preserves_shadowing_and_operand_positions() {
         operation: IntegerOperation::Sub, found: 1, ..
     })));
 }
+
+#[test]
+fn declared_argument_type_selects_the_nested_arithmetic_signature() {
+    let source = "(defn take-int (as-type (Fn (Int) Nat) (fn (value) 0)))
+        (defn caller (as-type (Fn () Nat) (fn () (take-int (add -2 (mul 3 4))))))
+        (defn natural (as-type (Fn () Nat) (fn () (sub 2 1))))";
+    let snapshots = [SourceSnapshot { path: "integer-types.ncg2m", revision: 2, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    assert!(matches!(aliases.check_defn_body_with_calls(0, 1), Some(Ok(_))));
+    assert!(matches!(aliases.check_defn_body_with_calls(0, 2), Some(Ok(_))));
+}
+
+#[test]
+fn scalar_entry_evaluates_checked_arithmetic_in_operand_order() {
+    let source = "(defn natural (as-type (Fn () Nat) (fn () (mul 2 (sub 5 1)))))
+        (defn signed (as-type (Fn () Int) (fn () (add -9223372036854775808 0))))
+        (defn choose (as-type (Fn () Nat) (fn () (if true 7 (sub 0 1)))))
+        (defn first-failure (as-type (Fn () Nat)
+            (fn () (add (sub 0 1) (mul 18446744073709551615 2)))))";
+    let snapshots = [SourceSnapshot { path: "arithmetic-run.ncg2m", revision: 9, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    let run = |item, budget| {
+        let entry = prepare_scalar_entry(&plan, DefnPosition { file: 0, item }).unwrap();
+        let mut state = entry.start(Vec::new()).unwrap();
+        for _ in 0..128 {
+            match state.run_slice(NonZeroUsize::new(budget).unwrap()) {
+                Ok(ScalarExecutionSlice::Suspended(next)) => state = next,
+                Ok(ScalarExecutionSlice::Complete(value)) => return Ok(value),
+                Err(error) => return Err(error),
+            }
+        }
+        panic!()
+    };
+    for budget in [1, 128] {
+        for (item, expected) in [IntegerValue::Nat(8), IntegerValue::Int(i64::MIN), IntegerValue::Nat(7)]
+            .into_iter().enumerate()
+        {
+            assert_eq!(run(item, budget).unwrap(), ScalarValue::Integer(expected));
+        }
+        let Err(ScalarExecutionError::Arithmetic { source: origin, operation, error }) = run(3, budget) else {
+            panic!()
+        };
+        assert_eq!(operation, IntegerOperation::Sub);
+        assert_eq!(origin.revision, 9);
+        assert_eq!(&source[error.span], "(sub 0 1)");
+    }
+}

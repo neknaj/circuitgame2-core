@@ -1,6 +1,7 @@
 //! 期待型付きの検査と型合成を、式ごとの型環境で進める。
 
 use super::*;
+use crate::ncg2m::integers::IntegerOperation;
 use crate::project::DefnPosition;
 use super::super::let_syntax::LetHeader;
 use super::fold::checked_fold_item;
@@ -32,10 +33,17 @@ pub(super) struct CallArgument {
     pub(super) expected: TypeShape,
 }
 
-/// 本体を検査する前に確定した、一つの宣言呼び出しの型情報。
+/// 名前解決で区別した補助関数と組み込み算術。
+#[derive(Clone, Copy)]
+pub(super) enum CallTypeTarget {
+    Declared(DefnPosition),
+    Arithmetic(IntegerOperation),
+}
+
+/// 本体の型検査で使う呼び出し先と引数位置。
 pub(super) struct CallTypeEntry {
     pub(super) at: usize,
-    pub(super) target: DefnPosition,
+    pub(super) target: CallTypeTarget,
     pub(super) arguments: Vec<CallArgument>,
     pub(super) result: TypeShape,
 }
@@ -54,6 +62,7 @@ pub(super) open spec fn canonical_call(forms: Seq<Form>, call: CallTypeEntry) ->
     &&& call.at < forms.len()
     &&& forms[call.at as int] is List
     &&& call.at + 2 <= subtree_limit(forms, call.at) <= forms.len()
+    &&& call.target is Arithmetic ==> call.arguments@.len() == 2
     &&& if call.arguments@.len() == 0 {
         call.at + 2 == subtree_limit(forms, call.at)
     } else {
@@ -137,6 +146,58 @@ fn call_result_type<'a>(goal: Goal, actual: TypeShape, span: Range<usize>)
     }
 }
 
+spec fn selected_call_type<'a>(
+    target: CallTypeTarget, goal: Goal, signature_result: TypeShape, span: Range<usize>,
+) -> Result<TypeShape, ExpressionCheckFailure<'a>> {
+    match target {
+        CallTypeTarget::Declared(_) => declared_call_result(goal, signature_result, span),
+        CallTypeTarget::Arithmetic(_) => match goal {
+            Goal::Check(expected) if expected.list_depth == 0
+                && (expected.builtin matches Some(BuiltinDataType::Integer(_))) => Ok(expected),
+            Goal::Check(expected) if expected.list_depth != 0 || expected.builtin.is_some() =>
+                Err(ExpressionCheckFailure::Type(ExpressionTypeError::ArithmeticResult(span))),
+            _ => unknown_form(span),
+        },
+    }
+}
+
+fn select_call_type<'a>(
+    target: CallTypeTarget, goal: Goal, signature_result: TypeShape, span: Range<usize>,
+) -> (out: Result<TypeShape, ExpressionCheckFailure<'a>>)
+    ensures out == selected_call_type(target, goal, signature_result, span),
+{
+    match target {
+        CallTypeTarget::Declared(_) => call_result_type(goal, signature_result, span),
+        CallTypeTarget::Arithmetic(_) => {
+            if let Goal::Check(expected) = goal {
+                if expected.list_depth == 0 && matches!(expected.builtin, Some(BuiltinDataType::Integer(_))) {
+                    return Ok(expected);
+                }
+                if expected.list_depth != 0 || expected.builtin.is_some() {
+                    return Err(ExpressionCheckFailure::Type(ExpressionTypeError::ArithmeticResult(span)));
+                }
+            }
+            Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(span)))
+        },
+    }
+}
+
+spec fn call_operand_type(target: CallTypeTarget, declared: TypeShape, result: TypeShape) -> TypeShape {
+    match target {
+        CallTypeTarget::Declared(_) => declared,
+        CallTypeTarget::Arithmetic(_) => result,
+    }
+}
+
+fn select_operand_type(target: CallTypeTarget, declared: TypeShape, result: TypeShape) -> (ty: TypeShape)
+    ensures ty == call_operand_type(target, declared, result),
+{
+    match target {
+        CallTypeTarget::Declared(_) => declared,
+        CallTypeTarget::Arithmetic(_) => result,
+    }
+}
+
 spec fn argument_cursor(forms: Seq<Form>, call: CallTypeEntry, i: nat) -> usize {
     if i < call.arguments@.len() { call.arguments@[i as int].at }
     else { subtree_limit(forms, call.at) }
@@ -145,7 +206,7 @@ spec fn argument_cursor(forms: Seq<Form>, call: CallTypeEntry, i: nat) -> usize 
 #[verifier::opaque]
 spec fn typed_call_arguments<'a>(
     calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>,
-    call: CallTypeEntry, i: nat,
+    call: CallTypeEntry, result: TypeShape, i: nat,
 ) -> Result<(), ExpressionCheckFailure<'a>>
     decreases forms.len() - argument_cursor(forms, call, i), 3nat, 0nat,
 {
@@ -156,10 +217,11 @@ spec fn typed_call_arguments<'a>(
         if !(arg.at < argument_cursor(forms, call, i + 1) <= forms.len()) {
             Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(form_span(forms[call.at as int]))))
         } else {
-            let request = Request { at: arg.at, expected: arg.expected, list: None };
-            match typed_expression(calls, source, forms, env, request, Goal::Check(arg.expected)) {
+            let expected = call_operand_type(call.target, arg.expected, result);
+            let request = Request { at: arg.at, expected, list: None };
+            match typed_expression(calls, source, forms, env, request, Goal::Check(expected)) {
                 Err(error) => Err(error),
-                Ok(_) => typed_call_arguments(calls, source, forms, env, call, i + 1),
+                Ok(_) => typed_call_arguments(calls, source, forms, env, call, result, i + 1),
             }
         }
     }
@@ -177,8 +239,15 @@ spec fn applicable_call(calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form
     } else { None }
 }
 
+spec fn applicable_declaration(calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, at: usize) -> Option<usize> {
+    match applicable_call(calls, source, forms, at) {
+        Some(index) if calls[index as int].target is Declared => Some(index),
+        _ => None,
+    }
+}
+
 #[verifier::opaque]
-spec fn typed_declared_call<'a>(
+spec fn typed_named_call<'a>(
     calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>,
     at: usize, goal: Goal, entry: usize,
 ) -> Result<TypeShape, ExpressionCheckFailure<'a>>
@@ -186,11 +255,11 @@ spec fn typed_declared_call<'a>(
 {
     let call = calls[entry as int];
     let span = form_span(forms[at as int]);
-    match declared_call_result(goal, call.result, span) {
+    match selected_call_type(call.target, goal, call.result, span) {
         Err(error) => Err(error),
         Ok(ty) => {
             if at < argument_cursor(forms, call, 0) <= forms.len() {
-                attach_call_type(typed_call_arguments(calls, source, forms, env, call, 0), ty)
+                attach_call_type(typed_call_arguments(calls, source, forms, env, call, ty, 0), ty)
             } else { unknown_form(span) }
         }
     }
@@ -208,7 +277,7 @@ spec fn typed_expression<'a>(
     let result = if at >= forms.len() {
         unknown_form(0..0)
     } else if let Some(entry) = applicable_call(calls, source, forms, at) {
-        typed_declared_call(calls, source, forms, env, at, goal, entry)
+        typed_named_call(calls, source, forms, env, at, goal, entry)
     } else if shape(source, forms, at) == Ok(Expression::Let) {
         match let_structure(source, forms, at) {
             Err(error) => Err(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
@@ -649,10 +718,11 @@ spec fn wait_follows(calls: Seq<CallTypeEntry>, forms: Seq<Form>, waiting: Await
     &&& end <= wait_limit(calls, forms, waiting, child) <= forms.len()
     &&& match waiting {
         Await::Result(_) | Await::InferredNo { .. } => true,
-        Await::Call { entry, argument, .. } => {
-            let arg = calls[entry as int].arguments@[argument as int];
+        Await::Call { entry, argument, result, .. } => {
+            let call = calls[entry as int];
+            let arg = call.arguments@[argument as int];
             child.request.at == arg.at && child.request.list.is_none()
-                && child.goal == Goal::Check(arg.expected)
+                && child.goal == Goal::Check(call_operand_type(call.target, arg.expected, result))
         }
         Await::Peer(next) => end <= next.request.at,
         Await::CheckedCondition { yes_request: yes, no_request: no, .. } => end <= yes.at && request_limit(forms, yes) <= no.at,
@@ -712,7 +782,7 @@ spec fn resumed_type<'a>(
         Await::Result(expected) => Ok(expected),
         Await::Call { entry, argument, scope, result } => attach_call_type(
             typed_call_arguments(calls, source, forms, lexical_view(parameters, locals, scope),
-                calls[entry as int], (argument + 1) as nat), result),
+                calls[entry as int], result, (argument + 1) as nat), result),
         Await::Peer(job) => job_type(calls, source, forms, parameters, locals, job),
         Await::CheckedCondition { yes_request: yes, no_request: no, scope } => {
             let env = lexical_view(parameters, locals, scope);
@@ -817,7 +887,7 @@ proof fn named_call_equation<'a>(
 )
     requires request.at < forms.len(), applicable_call(calls, source, forms, request.at) == Some(entry),
     ensures typed_expression(calls, source, forms, env, request, goal)
-        == match (typed_declared_call(calls, source, forms, env, request.at, goal, entry), remaining_elements(forms, request)) {
+        == match (typed_named_call(calls, source, forms, env, request.at, goal, entry), remaining_elements(forms, request)) {
             (Err(error), _) => Err(error),
             (Ok(ty), None) => Ok(ty),
             (Ok(ty), Some(peer)) => match typed_expression(calls, source, forms, env, peer, goal) {
@@ -827,39 +897,41 @@ proof fn named_call_equation<'a>(
         },
 {
     reveal_with_fuel(typed_expression, 2);
-    reveal_with_fuel(typed_declared_call, 2);
+    reveal_with_fuel(typed_named_call, 2);
     assert(applicable_call(calls, source, forms, request.at)->Some_0 == entry);
 }
 
-proof fn declared_call_equation<'a>(
+proof fn selected_call_equation<'a>(
     calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>,
     at: usize, goal: Goal, entry: usize,
 )
     requires entry < calls.len(), at < argument_cursor(forms, calls[entry as int], 0) <= forms.len(),
-    ensures typed_declared_call(calls, source, forms, env, at, goal, entry)
-        == match declared_call_result(goal, calls[entry as int].result, form_span(forms[at as int])) {
+    ensures typed_named_call(calls, source, forms, env, at, goal, entry)
+        == match selected_call_type(calls[entry as int].target, goal, calls[entry as int].result, form_span(forms[at as int])) {
             Err(error) => Err(error),
-            Ok(ty) => attach_call_type(typed_call_arguments(calls, source, forms, env, calls[entry as int], 0), ty),
+            Ok(ty) => attach_call_type(typed_call_arguments(calls, source, forms, env, calls[entry as int], ty, 0), ty),
         },
 {
-    reveal_with_fuel(typed_declared_call, 2);
+    reveal_with_fuel(typed_named_call, 2);
     reveal_with_fuel(typed_call_arguments, 2);
 }
 
 proof fn call_argument_equation<'a>(
-    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, call: CallTypeEntry, at: nat,
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>,
+    call: CallTypeEntry, result: TypeShape, at: nat,
 )
     requires
         at >= call.arguments@.len()
             || argument_cursor(forms, call, at) < argument_cursor(forms, call, at + 1) <= forms.len(),
-    ensures typed_call_arguments(calls, source, forms, env, call, at) == if at >= call.arguments@.len() {
+    ensures typed_call_arguments(calls, source, forms, env, call, result, at) == if at >= call.arguments@.len() {
         Ok(())
     } else {
         let arg = call.arguments@[at as int];
-        let request = Request { at: arg.at, expected: arg.expected, list: None };
-        match typed_expression(calls, source, forms, env, request, Goal::Check(arg.expected)) {
+        let expected = call_operand_type(call.target, arg.expected, result);
+        let request = Request { at: arg.at, expected, list: None };
+        match typed_expression(calls, source, forms, env, request, Goal::Check(expected)) {
             Err(error) => Err(error),
-            Ok(_) => typed_call_arguments(calls, source, forms, env, call, at + 1),
+            Ok(_) => typed_call_arguments(calls, source, forms, env, call, result, at + 1),
         }
     },
 {
@@ -879,9 +951,9 @@ proof fn checked_answer_is_expected<'a>(
     if let Some(entry) = applicable_call(calls, source, forms, request.at) {
         assert(request.at < forms.len()) by { reveal_with_fuel(typed_expression, 2); };
         named_call_equation(calls, source, forms, env, request, Goal::Check(expected), entry);
-        reveal(typed_declared_call);
+        reveal(typed_named_call);
         let call = calls[entry as int];
-        assert(declared_call_result(Goal::Check(expected), call.result, form_span(forms[request.at as int])) == Ok(expected));
+        assert(selected_call_type(call.target, Goal::Check(expected), call.result, form_span(forms[request.at as int])) == Ok(expected));
         assert(actual == expected);
     } else {
         reveal_with_fuel(typed_expression, 2);
@@ -1081,6 +1153,7 @@ fn start_fold_action<'a>(
 fn start_call_action<'a>(
     calls: &[CallTypeEntry], _source: &'a str, forms: &[Form], _parameters: &[SignatureParameter<'a>],
     _locals: &LocalScopes<'a>, job: Job, entry: usize,
+    arithmetic: &mut Option<Vec<usize>>,
 ) -> (result: Result<Action, ExpressionCheckFailure<'a>>)
     requires
         entry < calls@.len(), canonical_call(forms@, calls@[entry as int]),
@@ -1093,6 +1166,8 @@ fn start_call_action<'a>(
             && action_limit(calls@, forms@, action) <= subtree_limit(forms@, job.request.at),
         action_type(calls@, _source, forms@, _parameters@, _locals, result)
             == job_type(calls@, _source, forms@, _parameters@, _locals, job),
+        trace_step(*old(arithmetic), *final(arithmetic),
+            arithmetic_visit(calls@[entry as int].target, job.goal, entry)),
 {
     let call = &calls[entry];
     let ghost env = lexical_view(_parameters@, _locals, job.scope);
@@ -1101,19 +1176,100 @@ fn start_call_action<'a>(
         assert(job.request.at < argument_cursor(forms@, *call, 0) <= forms@.len());
         assert(remaining_elements(forms@, job.request).is_none());
         named_call_equation(calls@, _source, forms@, env, job.request, job.goal, entry);
-        declared_call_equation(calls@, _source, forms@, env, job.request.at, job.goal, entry);
+        selected_call_equation(calls@, _source, forms@, env, job.request.at, job.goal, entry);
     }
-    let ty = call_result_type(job.goal, call.result, span_of(&forms[job.request.at]))?;
+    let ty = select_call_type(call.target, job.goal, call.result, span_of(&forms[job.request.at]))?;
+    if matches!(call.target, CallTypeTarget::Arithmetic(_)) {
+        record_call(arithmetic, entry);
+    }
     if call.arguments.len() == 0 {
-        proof { call_argument_equation(calls@, _source, forms@, env, *call, 0); }
+        proof { call_argument_equation(calls@, _source, forms@, env, *call, ty, 0); }
         return Ok(Action::Typed(ty));
     }
     let argument = &call.arguments[0];
-    let request = Request { at: argument.at, expected: argument.expected, list: None };
+    let expected = select_operand_type(call.target, argument.expected, ty);
+    let request = Request { at: argument.at, expected, list: None };
     assert(argument.at < argument_cursor(forms@, *call, 1) <= forms@.len());
-    proof { call_argument_equation(calls@, _source, forms@, env, *call, 0); }
+    proof { call_argument_equation(calls@, _source, forms@, env, *call, ty, 0); }
     let waiting = Await::Call { entry, argument: 0, scope: job.scope, result: ty };
     Ok(Action::Visit(check_job(request, job.scope), Some(waiting)))
+}
+
+spec fn arithmetic_visit(target: CallTypeTarget, goal: Goal, entry: usize) -> Option<usize> {
+    match (target, goal) {
+        (CallTypeTarget::Arithmetic(_), Goal::Check(expected)) if expected.list_depth == 0
+            && expected.builtin matches Some(BuiltinDataType::Integer(_)) => Some(entry),
+        _ => None,
+    }
+}
+
+spec fn applicable_arithmetic(
+    calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, job: Job,
+) -> Option<usize> {
+    match applicable_call(calls, source, forms, job.request.at) {
+        Some(entry) => arithmetic_visit(calls[entry as int].target, job.goal, entry),
+        None => None,
+    }
+}
+
+#[verifier::opaque]
+pub(super) open spec fn arithmetic_trace_fits(
+    calls: Seq<CallTypeEntry>, trace: Seq<usize>, root: usize, limit: nat,
+) -> bool {
+    &&& forall|i: int| 0 <= i < trace.len() ==> {
+        let visit = #[trigger] trace[i];
+        &&& visit < calls.len()
+        &&& root <= calls[visit as int].at < limit
+        &&& calls[visit as int].target is Arithmetic
+    }
+    &&& forall|i: int, j: int| 0 <= i < j < trace.len() ==>
+        calls[(#[trigger] trace[i]) as int].at < calls[(#[trigger] trace[j]) as int].at
+}
+
+pub(super) proof fn widen_arithmetic_trace(
+    calls: Seq<CallTypeEntry>, trace: Seq<usize>, root: usize, limit: nat, lower: usize, upper: nat,
+)
+    requires arithmetic_trace_fits(calls, trace, root, limit), lower <= root, limit <= upper,
+    ensures arithmetic_trace_fits(calls, trace, lower, upper),
+{
+    reveal(arithmetic_trace_fits);
+    assert forall|i: int| 0 <= i < trace.len() implies {
+        let visit = #[trigger] trace[i];
+        &&& visit < calls.len()
+        &&& lower <= calls[visit as int].at < upper
+        &&& calls[visit as int].target is Arithmetic
+    } by {};
+}
+
+proof fn extend_arithmetic_trace(
+    calls: Seq<CallTypeEntry>, before: Option<Vec<usize>>, after: Option<Vec<usize>>,
+    visit: Option<usize>, root: usize, at: usize,
+)
+    requires
+        root <= at,
+        arithmetic_trace_fits(calls, call_trace_model(before), root, at as nat),
+        trace_step(before, after, visit),
+        visit matches Some(v) ==> v < calls.len()
+            && calls[v as int].at == at && calls[v as int].target is Arithmetic,
+    ensures arithmetic_trace_fits(calls, call_trace_model(after), root, (at + 1) as nat),
+{
+    reveal(arithmetic_trace_fits);
+    let previous = call_trace_model(before);
+    let updated = call_trace_model(after);
+    assert forall|i: int| 0 <= i < updated.len() implies {
+        let item = #[trigger] updated[i];
+        &&& item < calls.len()
+        &&& root <= calls[item as int].at <= at
+        &&& calls[item as int].target is Arithmetic
+    } by {
+        if i < previous.len() { assert(updated[i] == previous[i]); }
+    };
+    assert forall|i: int, j: int| 0 <= i < j < updated.len() implies
+        calls[(#[trigger] updated[i]) as int].at < calls[(#[trigger] updated[j]) as int].at by {
+        assert(i < previous.len() && updated[i] == previous[i]);
+        if j < previous.len() { assert(updated[j] == previous[j]); }
+        else { assert(calls[updated[j] as int].at == at); }
+    };
 }
 
 pub(super) open spec fn call_trace_model(trace: Option<Vec<usize>>) -> Seq<usize> {
@@ -1148,6 +1304,7 @@ pub(super) open spec fn call_trace_fits(
     forall|i: int| 0 <= i < trace.len() ==> {
         let entry = #[trigger] trace[i];
         entry < calls.len() && root <= calls[entry as int].at < end
+            && calls[entry as int].target is Declared
     }
 }
 
@@ -1156,6 +1313,7 @@ pub(super) proof fn trace_entry_in_range(
 )
     requires call_trace_fits(calls, trace, root, end), 0 <= i < trace.len(),
     ensures trace[i] < calls.len() && root <= calls[trace[i] as int].at < end,
+        calls[trace[i] as int].target is Declared,
 {
     reveal(call_trace_fits);
 }
@@ -1168,7 +1326,8 @@ proof fn extend_call_trace(
         root <= at < end,
         call_trace_fits(calls, call_trace_model(before), root, end),
         trace_step(before, after, entry),
-        entry matches Some(index) ==> index < calls.len() && calls[index as int].at == at,
+        entry matches Some(index) ==> index < calls.len() && calls[index as int].at == at
+            && calls[index as int].target is Declared,
     ensures call_trace_fits(calls, call_trace_model(after), root, end),
 {
     reveal(call_trace_fits);
@@ -1177,6 +1336,7 @@ proof fn extend_call_trace(
     assert forall|i: int| 0 <= i < updated.len() implies {
         let index = #[trigger] updated[i];
         index < calls.len() && root <= calls[index as int].at < end
+            && calls[index as int].target is Declared
     } by {
         if i < previous.len() { assert(updated[i] == previous[i]); }
     };
@@ -1186,9 +1346,11 @@ fn start_action<'a>(
     calls: &[CallTypeEntry],
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, job: Job,
     trace: &mut Option<Vec<usize>>,
+    arithmetic: &mut Option<Vec<usize>>,
 ) -> (result: Result<Action, ExpressionCheckFailure<'a>>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), job_in_bounds(forms@, job), locals.contains(job.scope), job.request.list.is_none(),
-    ensures trace_step(*old(trace), *final(trace), applicable_call(calls@, source, forms@, job.request.at)),
+    ensures trace_step(*old(trace), *final(trace), applicable_declaration(calls@, source, forms@, job.request.at)),
+        trace_step(*old(arithmetic), *final(arithmetic), applicable_arithmetic(calls@, source, forms@, job)),
         result matches Ok(action) ==> action_valid(calls@, forms@, locals, action),
         result matches Ok(action) ==> job.request.at < usize::MAX
             && action_advances(calls@, forms@, action, (job.request.at + 1) as usize)
@@ -1202,8 +1364,10 @@ fn start_action<'a>(
     if matches!(parsed, Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(_)))) {
         if let Some(entry) = find_call_entry(calls, req.at) {
             assert(canonical_call(forms@, calls@[entry as int]));
-            record_call(trace, entry);
-            return start_call_action(calls, source, forms, parameters, locals, job, entry);
+            if matches!(calls[entry].target, CallTypeTarget::Declared(_)) {
+                record_call(trace, entry);
+            }
+            return start_call_action(calls, source, forms, parameters, locals, job, entry, arithmetic);
         }
     }
     assert(applicable_call(calls@, source, forms@, req.at).is_none());
@@ -1521,9 +1685,11 @@ proof fn continuing_call_type<'a>(
         argument_cursor(forms, calls[entry as int], (argument + 1) as nat)
             < argument_cursor(forms, calls[entry as int], (argument + 2) as nat) <= forms.len(),
         ({
-            let arg = calls[entry as int].arguments@[argument + 1];
-            job == (Job { request: Request { at: arg.at, expected: arg.expected, list: None },
-                goal: Goal::Check(arg.expected), scope })
+            let call = calls[entry as int];
+            let arg = call.arguments@[argument + 1];
+            let expected = call_operand_type(call.target, arg.expected, ty);
+            job == (Job { request: Request { at: arg.at, expected, list: None },
+                goal: Goal::Check(expected), scope })
         }),
     ensures
         action_type(calls, source, forms, parameters, locals, Ok(Action::Visit(job, Some(Await::Call {
@@ -1534,20 +1700,20 @@ proof fn continuing_call_type<'a>(
     let call = calls[entry as int];
     let next = (argument + 1) as nat;
     let env = lexical_view(parameters, locals, scope);
-    call_argument_equation(calls, source, forms, env, call, next);
+    call_argument_equation(calls, source, forms, env, call, ty, next);
     let checked = job_type(calls, source, forms, parameters, locals, job);
     let current = Await::Call { entry, argument, scope, result: ty };
     let waiting = Await::Call { entry, argument: next as usize, scope, result: ty };
     let action = Ok(Action::Visit(job, Some(waiting)));
     match checked {
         Err(error) => {
-            assert(typed_call_arguments(calls, source, forms, env, call, next) == Err(error));
+            assert(typed_call_arguments(calls, source, forms, env, call, ty, next) == Err(error));
             assert(action_type(calls, source, forms, parameters, locals, action) == Err(error));
         }
         Ok(arg_type) => {
-            let tail = typed_call_arguments(calls, source, forms, env, call, next + 1);
+            let tail = typed_call_arguments(calls, source, forms, env, call, ty, next + 1);
             let output = attach_call_type(tail, ty);
-            assert(typed_call_arguments(calls, source, forms, env, call, next) == tail);
+            assert(typed_call_arguments(calls, source, forms, env, call, ty, next) == tail);
             assert(resumed_type(calls, source, forms, parameters, locals, waiting, arg_type) == output);
             assert(action_type(calls, source, forms, parameters, locals, action) == output);
         }
@@ -1564,7 +1730,7 @@ proof fn finished_call_type<'a>(
             Await::Call { entry, argument, scope, result: ty }, ty),
 {
     let env = lexical_view(parameters, locals, scope);
-    call_argument_equation(calls, source, forms, env, calls[entry as int], (argument + 1) as nat);
+    call_argument_equation(calls, source, forms, env, calls[entry as int], ty, (argument + 1) as nat);
 }
 
 proof fn continuing_call_bounds(
@@ -1577,9 +1743,11 @@ proof fn continuing_call_bounds(
         wait_follows(calls, forms, Await::Call { entry, argument, scope, result: ty }, child),
         argument + 1 < calls[entry as int].arguments@.len() <= usize::MAX,
         ({
-            let arg = calls[entry as int].arguments@[argument + 1];
-            job == (Job { request: Request { at: arg.at, expected: arg.expected, list: None },
-                goal: Goal::Check(arg.expected), scope })
+            let call = calls[entry as int];
+            let arg = call.arguments@[argument + 1];
+            let expected = call_operand_type(call.target, arg.expected, ty);
+            job == (Job { request: Request { at: arg.at, expected, list: None },
+                goal: Goal::Check(expected), scope })
         }),
     ensures ({
         let current = Await::Call { entry, argument, scope, result: ty };
@@ -1611,8 +1779,9 @@ spec fn next_call_action_model(calls: Seq<CallTypeEntry>, entry: usize, argument
         Action::Typed(ty)
     } else {
         let arg = arguments[next];
-        let request = Request { at: arg.at, expected: arg.expected, list: None };
-        let job = Job { request, goal: Goal::Check(arg.expected), scope };
+        let expected = call_operand_type(calls[entry as int].target, arg.expected, ty);
+        let request = Request { at: arg.at, expected, list: None };
+        let job = Job { request, goal: Goal::Check(expected), scope };
         Action::Visit(job, Some(Await::Call { entry, argument: next as usize, scope, result: ty }))
     }
 }
@@ -1643,8 +1812,9 @@ proof fn next_call_action_contract<'a>(
         finished_call_type(calls, source, forms, parameters, locals, entry, argument, scope, ty);
     } else {
         let arg = arguments[next];
-        let request = Request { at: arg.at, expected: arg.expected, list: None };
-        let job = Job { request, goal: Goal::Check(arg.expected), scope };
+        let expected = call_operand_type(calls[entry as int].target, arg.expected, ty);
+        let request = Request { at: arg.at, expected, list: None };
+        let job = Job { request, goal: Goal::Check(expected), scope };
         continuing_call_bounds(calls, forms, locals, entry, argument, scope, ty, child, job);
         continuing_call_type(calls, source, forms, parameters, locals, entry, argument, scope, ty, job);
     }
@@ -1664,7 +1834,8 @@ fn next_call_argument(calls: &[CallTypeEntry], entry: usize, argument: usize, sc
         Action::Typed(ty)
     } else {
         let arg = &call.arguments[next];
-        let request = Request { at: arg.at, expected: arg.expected, list: None };
+        let expected = select_operand_type(call.target, arg.expected, ty);
+        let request = Request { at: arg.at, expected, list: None };
         let job = check_job(request, scope);
         let waiting = Await::Call { entry, argument: next, scope, result: ty };
         Action::Visit(job, Some(waiting))
@@ -1982,22 +2153,28 @@ proof fn peer_preserves_typing<'a>(
     }
 }
 
+#[verifier::rlimit(12)]
 fn type_with_scopes<'a>(
     calls: &[CallTypeEntry],
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], at: usize, expected: TypeShape,
     trace: &mut Option<Vec<usize>>,
+    arithmetic: &mut Option<Vec<usize>>,
 ) -> (result: Result<TypeShape, ExpressionCheckFailure<'a>>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), at < forms@.len(),
         call_trace_model(*old(trace)).len() == 0,
+        call_trace_model(*old(arithmetic)).len() == 0,
     ensures result == typed_expression(calls@, source, forms@, environment_view(parameters@),
         Request { at, expected, list: None }, Goal::Check(expected)),
         call_trace_fits(calls@, call_trace_model(*final(trace)), at, forms@.len()),
+        arithmetic_trace_fits(calls@, call_trace_model(*final(arithmetic)), at, forms@.len()),
+        final(arithmetic).is_some() == old(arithmetic).is_some(),
 {
     let mut locals = LocalScopes::new();
     let mut job = check_job(Request { at, expected, list: None }, None);
     let mut pending = Vec::<Pending>::new();
     let _size = forms.len();
     let _end = subtree_end(forms, at);
+    let ghost captures_arithmetic = arithmetic.is_some();
     let ghost root = typed_expression(calls@, source, forms@, environment_view(parameters@),
         Request { at, expected, list: None }, Goal::Check(expected));
     proof {
@@ -2007,12 +2184,18 @@ fn type_with_scopes<'a>(
         assert(call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len())) by {
             reveal(call_trace_fits);
         };
+        assert(arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, job.request.at as nat)) by {
+            reveal(arithmetic_trace_fits);
+        };
         reveal(completed_typing);
     }
     loop
         invariant
             call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
             call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
+            arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, job.request.at as nat),
+            arithmetic.is_some() == captures_arithmetic,
+            captures_arithmetic == old(arithmetic).is_some(),
             at <= job.request.at,
             locals.contains(job.scope), pending_ranges(calls@, forms@, pending@, job), pending_scopes(&locals, pending@),
             root == typed_expression(calls@, source, forms@, environment_view(parameters@),
@@ -2032,18 +2215,28 @@ fn type_with_scopes<'a>(
         job = attach_action(calls, source, forms, parameters, &locals, &mut pending, job, single, after);
         assert(job.request.at == single.request.at && at <= job.request.at < forms@.len());
         let ghost before_trace = *trace;
-        let ghost call = applicable_call(calls@, source, forms@, job.request.at);
-        let action = start_action(calls, source, forms, parameters, &locals, job, trace);
+        let ghost before_arithmetic = *arithmetic;
+        let ghost visited = job.request.at;
+        let ghost call = applicable_declaration(calls@, source, forms@, job.request.at);
+        let ghost number = applicable_arithmetic(calls@, source, forms@, job);
+        let action = start_action(calls, source, forms, parameters, &locals, job, trace, arithmetic);
         proof {
             extend_call_trace(calls@, before_trace, *trace, call, at, job.request.at, forms@.len());
+            extend_arithmetic_trace(calls@, before_arithmetic, *arithmetic, number, at, job.request.at);
         }
         let mut ty = match action {
             Err(error) => {
-                proof { reveal(completed_typing); }
+                proof {
+                    reveal(completed_typing);
+                    widen_arithmetic_trace(calls@, call_trace_model(*arithmetic), at, (visited + 1) as nat, at, forms@.len());
+                }
                 return Err(error);
             }
             Ok(Action::Visit(child, waiting)) => {
                 job = attach_action(calls, source, forms, parameters, &locals, &mut pending, job, child, waiting);
+                proof {
+                    widen_arithmetic_trace(calls@, call_trace_model(*arithmetic), at, (visited + 1) as nat, at, job.request.at as nat);
+                }
                 continue;
             }
             Ok(Action::Typed(ty)) => ty,
@@ -2052,16 +2245,20 @@ fn type_with_scopes<'a>(
         loop
             invariant_except_break
                 before == job.request.at,
+                arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, (job.request.at + 1) as nat),
                 completed_typing(calls@, source, forms@, parameters@, &locals, pending@, Ok(ty)) == root,
             invariant
                 call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
                 call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
+                arithmetic.is_some() == captures_arithmetic,
+                captures_arithmetic == old(arithmetic).is_some(),
                 at <= job.request.at,
                 locals.contains(job.scope), pending_ranges(calls@, forms@, pending@, job), pending_scopes(&locals, pending@),
                 root == typed_expression(calls@, source, forms@, environment_view(parameters@),
                     Request { at, expected, list: None }, Goal::Check(expected)),
             ensures
                 before < job.request.at,
+                arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, job.request.at as nat),
                 completed_typing(calls@, source, forms@, parameters@, &locals, pending@,
                     job_type(calls@, source, forms@, parameters@, &locals, job)) == root,
             decreases pending@.len(),
@@ -2069,7 +2266,10 @@ fn type_with_scopes<'a>(
             let ghost previous = locals;
             let ghost before = pending@;
             let Some(work) = pending.pop() else {
-                proof { reveal(completed_typing); }
+                proof {
+                    reveal(completed_typing);
+                    widen_arithmetic_trace(calls@, call_trace_model(*arithmetic), at, (job.request.at + 1) as nat, at, forms@.len());
+                }
                 return Ok(ty);
             };
             let ghost last = work;
@@ -2086,12 +2286,19 @@ fn type_with_scopes<'a>(
             }
             match result {
                 Err(error) => {
-                    proof { reveal(completed_typing); }
+                    proof {
+                        reveal(completed_typing);
+                        widen_arithmetic_trace(calls@, call_trace_model(*arithmetic), at, (job.request.at + 1) as nat, at, forms@.len());
+                    }
                     return Err(error);
                 }
                 Ok(Action::Visit(child, waiting)) => {
                     proof { advance_after_pop(calls@, forms@, pending@, job, last, operation->Ok_0); }
+                    let ghost visited = job.request.at;
                     job = attach_action(calls, source, forms, parameters, &locals, &mut pending, job, child, waiting);
+                    proof {
+                        widen_arithmetic_trace(calls@, call_trace_model(*arithmetic), at, (visited + 1) as nat, at, job.request.at as nat);
+                    }
                     break;
                 }
                 Ok(Action::Typed(completed)) => ty = completed,
@@ -2117,7 +2324,7 @@ pub(super) fn check_typed_body<'a>(
 {
     let calls: &[CallTypeEntry] = &[];
     assert(calls@ =~= Seq::<CallTypeEntry>::empty());
-    match type_with_scopes(calls, source, forms, parameters, at, expected, &mut None) {
+    match type_with_scopes(calls, source, forms, parameters, at, expected, &mut None, &mut None) {
         Ok(_) => BodyVerdict::Accepted,
         Err(error) => BodyVerdict::Rejected(error),
     }
@@ -2137,13 +2344,17 @@ pub(super) closed spec fn typed_body_with_calls<'a>(
 pub(super) fn check_typed_body_with_calls<'a>(
     calls: &[CallTypeEntry], source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>],
     at: usize, expected: TypeShape, trace: &mut Option<Vec<usize>>,
+    arithmetic: &mut Option<Vec<usize>>,
 ) -> (verdict: BodyVerdict<'a>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), at < forms@.len(),
         call_trace_model(*old(trace)).len() == 0,
+        call_trace_model(*old(arithmetic)).len() == 0,
     ensures verdict == typed_body_with_calls(calls@, source, forms@, environment_view(parameters@), at, expected),
         call_trace_fits(calls@, call_trace_model(*final(trace)), at, forms@.len()),
+        arithmetic_trace_fits(calls@, call_trace_model(*final(arithmetic)), at, forms@.len()),
+        final(arithmetic).is_some() == old(arithmetic).is_some(),
 {
-    match type_with_scopes(calls, source, forms, parameters, at, expected, trace) {
+    match type_with_scopes(calls, source, forms, parameters, at, expected, trace, arithmetic) {
         Ok(_) => BodyVerdict::Accepted,
         Err(error) => BodyVerdict::Rejected(error),
     }

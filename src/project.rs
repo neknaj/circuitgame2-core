@@ -91,6 +91,9 @@ pub use exports::{
     mixed_export_table_matches, mixed_project_exports_valid, mixed_publication_agrees, mixed_publication_requested, project_exports_valid,
 };
 pub use name_keys::NameKey;
+pub(crate) use use_aliases::TypedArithmeticSite;
+#[cfg(verus_only)]
+pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 #[cfg(verus_only)]
@@ -223,4 +226,4 @@ pub use use_targets::{
 pub use use_targets::{indexed_mixed_use_at, mixed_use_site_at, mixed_use_target_error_matches, mixed_use_targets_match, use_target_error_evidence, use_targets_match};
 
 #[cfg(verus_only)]
-pub use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
+pub use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot, unvisited_arithmetic_at_source};

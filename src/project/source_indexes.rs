@@ -15,7 +15,9 @@ use crate::ncg2m::expression_types::{
 use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call, retained_meta_body};
 use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
 #[cfg(verus_only)]
-use crate::ncg2m::expression_types::named_call::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+use crate::ncg2m::expression_types::named_call::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin,
+    defn_body_calls_cover_slots, defn_body_sites_cover_slots, defn_call_edge_matches,
+    defn_call_is_expression_slot, unvisited_arithmetic_at_source};
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
@@ -25,9 +27,11 @@ use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
 use super::circuits::{index_project_circuit, read_source_span};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{circuit_source_error, circuit_source_errors_agree, circuit_source_matches};
-use super::{DefnCallEdge, MixedUseAliases, ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources};
+use super::{DefnCallEdge, DefnCallGraphError, MixedUseAliases, ProjectSource, SourceKind, SourceSetError, SourceSnapshot,
+    TypedArithmeticSite, VirtualPath, collect_sources};
 #[cfg(verus_only)]
-use super::{DefnPosition, mixed_use_targets_match, prepared_call_site, normalized_path, parsed_circuit_matches, project_sources_match, source_kind_of, valid_source_snapshots};
+use super::{DefnPosition, arithmetic_sites_fit, mixed_use_targets_match, prepared_call_site, normalized_path,
+    parsed_circuit_matches, project_sources_match, source_kind_of, valid_source_snapshots};
 #[cfg(verus_only)]
 use super::sources::{
     collected_source_for_input, collected_source_ids_unique, collected_source_origin,
@@ -324,25 +328,32 @@ impl<'a> ParsedProjectSources<'a> {
 
     pub(super) fn check_named_defn_body<'p>(
         &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, collect_edges: bool,
-    ) -> (result: Option<(Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>, Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallEdge<'p, 'a>>)>)
+    ) -> (result: Option<(Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>,
+        Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallGraphError<'p, 'a>>, Vec<TypedArithmeticSite>)>)
         requires *self == aliases.targets_model().project_model(),
             mixed_use_targets_match(self, aliases.targets_model()),
         ensures
             result.is_some() == self.indexed_defn(file, item).is_some(),
             match result {
-                Some((outcome, capture)) => {
+                Some((outcome, capture, arithmetic)) => {
                     &&& self.named_defn_body_matches(aliases, file, item, Some(outcome))
+                    &&& self.functional_forms_model(file) matches Some(forms)
+                        && arithmetic_sites_fit(forms, arithmetic@)
                     &&& match capture {
                         Ok(edges) => {
                             &&& (collect_edges && outcome.is_ok()) ==>
                                 defn_body_calls_cover_slots(aliases, DefnPosition { file, item }, edges@)
+                                    && defn_body_sites_cover_slots(aliases, DefnPosition { file, item }, edges@, arithmetic@)
                             &&& forall|i: int| 0 <= i < edges@.len() ==> {
                                 let edge = #[trigger] edges@[i];
                                 edge.from == (DefnPosition { file, item }) && defn_call_edge_matches(aliases, edge)
                             }
                         }
-                        Err(edge) => edge.from == (DefnPosition { file, item })
+                        Err(DefnCallGraphError::UnvisitedCall(edge)) => edge.from == (DefnPosition { file, item })
                             && defn_call_is_expression_slot(aliases, edge),
+                        Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }) =>
+                            from == (DefnPosition { file, item }) && unvisited_arithmetic_at_source(aliases, from, at, site),
+                        _ => false,
                     }
                 }
                 None => self.named_defn_body_matches(aliases, file, item, None),

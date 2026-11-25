@@ -57,6 +57,7 @@ fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
         body.signature.parameters@.len() == 1, body.signature.parameters@[0].ty.ty == int_type(),
         body.signature.result_type.ty == int_type(),
         plan.scalar_fragment_is_closed(rank),
+        plan.scalar_site_has_declared_edge(rank, body.at),
         scalar_call_syntax_at(body.source.text_model(), body.forms@, body.at),
     ensures
         !(result matches Err(ScalarExecutionError::Deferred { .. })),

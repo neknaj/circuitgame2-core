@@ -44,6 +44,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             self.starts_with(self.plan_model(), rank, frame),
             self.plan_model().body_matches_at_rank(rank, frame.body_model()),
             self.plan_model().scalar_fragment_is_closed(rank),
+            self.plan_model().scalar_site_has_declared_edge(rank, frame.body_model().at),
             scalar_call_syntax_at(frame.body_model().source.text_model(), frame.body_model().forms@, frame.body_model().at),
             scalar_execution_slice_matches(*self, 1, result),
         ensures result matches Ok(ScalarExecutionSlice::Suspended(after))
@@ -78,6 +79,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     {
         self.one_step_slice_matches(result);
         self.checked_scalar_call_lookup_progress(aliases, result);
+        self.checked_declaration_lookup_excludes_arithmetic(aliases);
         reveal(ScalarExecution::step_matches);
         reveal(ScalarExecution::searches_checked_scalar_call);
         let after = result->Ok_0->Suspended_0;
