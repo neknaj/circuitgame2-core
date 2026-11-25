@@ -126,6 +126,50 @@ fn localized_original_list_inspection_uses_current_document_positions() {
     assert!(update.inspect_original_list(2, 1).is_none());
 }
 
+#[test]
+fn owned_cache_borrows_local_views_and_reparses_the_current_text_on_fallback() {
+    use circuitgame2_syntax::{OwnedRecoveryCache, SnapshotRecovery, recover_snapshot};
+
+    let prefix = "(using nor)";
+    let old_middle = "(old)";
+    let suffix = "\r\n) (original) (unfinished";
+    let old = format!("{prefix}{old_middle}{suffix}");
+    let cache = OwnedRecoveryCache::remember(
+        old,
+        u64::MAX - 1,
+        prefix.len(),
+        prefix.len() + old_middle.len(),
+    ).unwrap();
+    assert_eq!(cache.revision(), u64::MAX - 1);
+    assert_eq!(cache.text(), format!("{prefix}{old_middle}{suffix}"));
+
+    let current = format!("{prefix}(new \"🦊\"){suffix}");
+    let local = recover_snapshot(Some(&cache), &current, u64::MAX);
+    assert_eq!(local.revision(), u64::MAX);
+    assert_eq!(local.source(), current);
+    let SnapshotRecovery::Local(local) = local.recovery() else { panic!("expected local recovery"); };
+    let original = recover_snapshot(Some(&cache), cache.text(), cache.revision());
+    let SnapshotRecovery::Local(original) = original.recovery() else { panic!("expected cached recovery"); };
+    assert!(core::ptr::eq(local.sections()[2].recovered, original.sections()[2].recovered));
+    assert_eq!(local.original_list_span(2, 0).unwrap(), {
+        let start = current.find("(original)").unwrap();
+        start..start + "(original)".len()
+    });
+    let malformed = format!("{prefix}(new {suffix}");
+    for (saved, source, revision) in [
+        (Some(&cache), current.as_str(), u64::MAX - 2),
+        (Some(&cache), current.as_str(), u64::MAX - 1),
+        (Some(&cache), malformed.as_str(), u64::MAX),
+        (None, current.as_str(), u64::MAX),
+    ] {
+        let fallback = recover_snapshot(saved, source, revision);
+        assert_eq!(fallback.revision(), revision);
+        assert_eq!(fallback.source(), source);
+        let SnapshotRecovery::Full(whole) = fallback.recovery() else { panic!("expected full recovery"); };
+        assert_eq!(*whole, parse_recovering(source));
+    }
+}
+
 fn relative_to_tail(mut whole: Recovered, offset: usize) -> Recovered {
     let relative = |span: &Range<usize>| span.start - offset..span.end - offset;
     let first_form = whole.forms.partition_point(|form| match form {
