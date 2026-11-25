@@ -1,5 +1,8 @@
 //! 回復後も確認できる宣言と名前空間を、元のソースに結び付ける。
 
+mod project;
+pub use project::{CircuitEditorProject, PartialCircuitDeclarations, inspect_circuit_project};
+
 use alloc::vec::Vec;
 use super::declarations::defines_binding;
 #[cfg(verus_only)]
@@ -287,18 +290,17 @@ spec fn candidate_group_prefix(
     }
 }
 
-proof fn item_for_candidate(rank: Seq<nat>, row: int, from: int, end: int) -> (item: int)
+proof fn interval_containing_row(rank: Seq<nat>, row: int, from: int, end: int) -> (item: int)
     requires
         0 <= from < end < rank.len(),
         rank[from] <= row < rank[end],
-        forall|i: int| from <= i < end ==> #[trigger] rank[i + 1] <= rank[i] + 1,
-    ensures from <= item < end, rank[item] == row, rank[item + 1] == row + 1,
+    ensures from <= item < end, rank[item] <= row < rank[item + 1],
     decreases end - from,
 {
     if row < rank[from + 1] {
         from
     } else {
-        item_for_candidate(rank, row, from + 1, end)
+        interval_containing_row(rank, row, from + 1, end)
     }
 }
 
@@ -369,11 +371,8 @@ impl<'p, 'a> CircuitEditorFile<'p, 'a> {
             && rank.len() == self.recovered_names_model().position_count_model(group) + 1
             && rank.first() == 0 && rank.last() == rows.len();
         reveal(candidate_group_prefix);
-        let end = rank.len() - 1;
-        assert forall|i: int| 0 <= i < end implies #[trigger] rank[i + 1] <= rank[i] + 1 by {
-            assert(rank[i] <= rank[i + 1]);
-        };
-        let item = item_for_candidate(rank, row, 0, end);
+        let item = interval_containing_row(rank, row, 0, rank.len() - 1);
+        assert(rank[item + 1] <= rank[item] + 1);
         assert(observes_candidate(self, key, group, item as usize, Some(rows[row])));
         item as usize
     }
@@ -407,39 +406,166 @@ impl<'p, 'a> CircuitEditorFile<'p, 'a> {
             self.group_candidates_match(key, group, rows@),
             group >= self.recovered_names_model().position_group_count_model() ==> rows@.len() == 0,
     {
+        let mut rows = Vec::new();
+        self.append_group_candidates(key, group, &mut rows);
+        assert(rows@.skip(0) =~= rows@);
+        rows
+    }
+
+    fn append_group_candidates(&self, key: NameKey, group: usize, rows: &mut Vec<PositionedBinding<'p, 'a>>)
+        ensures
+            final(rows)@.len() >= old(rows)@.len(),
+            final(rows)@.take(old(rows)@.len() as int) == old(rows)@,
+            self.group_candidates_match(key, group, final(rows)@.skip(old(rows)@.len() as int)),
+            group >= self.recovered_names_model().position_group_count_model() ==> final(rows)@ == old(rows)@,
+    {
         let names = self.recovered_names();
         let count = names.position_count(group);
-        let mut rows = Vec::new();
+        let ghost base = rows@;
         let mut item = 0usize;
         let ghost mut rank = seq![0nat];
-        proof { reveal(candidate_group_prefix); }
+        proof {
+            reveal(candidate_group_prefix);
+            assert(rows@.take(base.len() as int) =~= base);
+            assert(rows@.skip(base.len() as int).len() == 0);
+        }
         while item < count
             invariant
                 names == self.recovered_names_model(),
                 count == names.position_count_model(group),
                 item <= count,
+                rows@.len() >= base.len(),
+                rows@.take(base.len() as int) == base,
                 rank.len() == item + 1,
                 rank.first() == 0,
-                rank.last() == rows@.len(),
-                candidate_group_prefix(self, key, group, rows@, rank),
+                rank.last() == rows@.skip(base.len() as int).len(),
+                candidate_group_prefix(self, key, group, rows@.skip(base.len() as int), rank),
             decreases count - item,
         {
-            let ghost before = rows@;
+            let ghost previous = rows@;
+            let ghost before = previous.skip(base.len() as int);
             if let Some(candidate) = self.declaration_candidate_at(key, group, item) {
                 rows.push(candidate);
+                assert(rows@.skip(base.len() as int) =~= before.push(candidate));
             }
             proof {
-                assert(rows@.take(before.len() as int) =~= before);
-                candidate_group_extend(self, key, group, before, rows@, rank);
-                rank = rank.push(rows@.len());
-                assert(rank.last() == rows@.len());
+                assert(rows@.take(base.len() as int) =~= base);
+                let after = rows@.skip(base.len() as int);
+                assert(after.take(before.len() as int) =~= before);
+                candidate_group_extend(self, key, group, before, after, rank);
+                rank = rank.push(after.len());
+                assert(rank.last() == after.len());
             }
             item += 1;
+        }
+        proof {
+            if group >= names.position_group_count_model() {
+                assert(rows@ =~= base);
+            }
+        }
+    }
+
+    /// ファイルの各フォーム群に対応する候補列を、群の順に連結したことを表す。
+    pub closed spec fn file_candidates_match(&self, key: NameKey, rows: Seq<PositionedBinding<'p, 'a>>) -> bool {
+        &&& self.recovered_names_model().position_group_count_model() <= usize::MAX
+        &&& exists|bounds: Seq<nat>| {
+            &&& bounds.len() == self.recovered_names_model().position_group_count_model() + 1
+            &&& bounds.first() == 0 && bounds.last() == rows.len()
+            &&& forall|g: int| 0 <= g < bounds.len() - 1 ==> {
+                let first = #[trigger] bounds[g];
+                let end = bounds[g + 1];
+                &&& first <= end <= rows.len()
+                &&& self.group_candidates_match(key, g as usize, rows.subrange(first as int, end as int))
+            }
+        }
+    }
+
+    /// ファイル内の候補を元のフォーム群と検査項目に結び付ける。
+    pub proof fn file_candidate_origin(
+        &self, key: NameKey, rows: Seq<PositionedBinding<'p, 'a>>, row: int,
+    ) -> (position: (usize, usize))
+        requires self.file_candidates_match(key, rows), 0 <= row < rows.len(),
+        ensures
+            position.0 < self.recovered_names_model().position_group_count_model(),
+            position.1 < self.recovered_names_model().position_count_model(position.0),
+            self.recovered_names_model().position_model(position.0, position.1) == Some(rows[row].0),
+            self.binding_matches(rows[row].0, Some(rows[row].1)),
+            rows[row].1.has_declaration_key(key),
+    {
+        let bounds = choose|bounds: Seq<nat>| {
+            &&& bounds.len() == self.recovered_names_model().position_group_count_model() + 1
+            &&& bounds.first() == 0 && bounds.last() == rows.len()
+            &&& forall|g: int| 0 <= g < bounds.len() - 1 ==> {
+                let first = #[trigger] bounds[g];
+                let end = bounds[g + 1];
+                &&& first <= end <= rows.len()
+                &&& self.group_candidates_match(key, g as usize, rows.subrange(first as int, end as int))
+            }
+        };
+        let group = interval_containing_row(bounds, row, 0, bounds.len() - 1);
+        let first = bounds[group] as int;
+        let end = bounds[group + 1] as int;
+        let group_rows = rows.subrange(first, end);
+        let item = self.group_candidate_origin(key, group as usize, group_rows, row - first);
+        assert(group_rows[row - first] == rows[row]);
+        (group as usize, item)
+    }
+
+
+    /// 同じ完全修飾名の宣言を、確認できた元フォームからファイル内の順に集める。
+    pub fn declaration_candidates(&self, key: NameKey) -> (rows: Vec<PositionedBinding<'p, 'a>>)
+        ensures self.file_candidates_match(key, rows@),
+    {
+        let names = self.recovered_names();
+        let count = names.position_group_count();
+        let mut rows = Vec::new();
+        let mut group = 0usize;
+        let ghost mut bounds = seq![0nat];
+        while group < count
+            invariant
+                names == self.recovered_names_model(),
+                count == names.position_group_count_model(),
+                group <= count,
+                bounds.len() == group + 1,
+                bounds.first() == 0,
+                bounds.last() == rows@.len(),
+                forall|g: int| 0 <= g < group ==> {
+                    let first = #[trigger] bounds[g];
+                    let end = bounds[g + 1];
+                    &&& first <= end <= rows@.len()
+                    &&& self.group_candidates_match(key, g as usize, rows@.subrange(first as int, end as int))
+                },
+            decreases count - group,
+        {
+            let ghost before = rows@;
+            let ghost previous = bounds;
+            self.append_group_candidates(key, group, &mut rows);
+            proof {
+                bounds = previous.push(rows@.len());
+                assert(bounds.last() == rows@.len());
+                assert forall|g: int| 0 <= g < group + 1 implies {
+                    let first = #[trigger] bounds[g];
+                    let end = bounds[g + 1];
+                    &&& first <= end <= rows@.len()
+                    &&& self.group_candidates_match(key, g as usize, rows@.subrange(first as int, end as int))
+                } by {
+                    if g < group {
+                        assert(bounds[g] == previous[g]);
+                        assert(bounds[g + 1] == previous[g + 1]);
+                        let first = previous[g] as int;
+                        let end = previous[g + 1] as int;
+                        assert(rows@.subrange(first, end) =~= before.subrange(first, end));
+                    } else {
+                        assert(bounds[g] == before.len());
+                        assert(bounds[g + 1] == rows@.len());
+                    }
+                };
+            }
+            group += 1;
         }
         rows
     }
 }
-
 
 /// 元のソーススナップショットに回路フォームの回復結果を結び付ける。
 ///

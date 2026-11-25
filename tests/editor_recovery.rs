@@ -1,5 +1,5 @@
 use circuitgame2_core::project::{
-    ObservedCircuitBindingKind, SourceKind, SourceSnapshot, collect_sources, inspect_circuit_file, normalize_path,
+    ObservedCircuitBindingKind, SourceKind, SourceSnapshot, collect_sources, inspect_circuit_file, inspect_circuit_project, normalize_path,
 };
 use circuitgame2_core::syntax::circuit::{Head, RecoveredNamePosition};
 
@@ -58,4 +58,30 @@ fn finds_all_observed_declarations_in_check_order() {
     assert_eq!(hits[1].0, RecoveredNamePosition::File(4));
     assert!(hits[0].1.location.span.end < hits[1].1.location.span.start);
     assert!(file.declaration_candidates_in_group(key, 1).is_empty());
+}
+
+#[test]
+fn project_retains_candidates_from_each_file_when_a_source_is_incomplete() {
+    let repaired = concat!(
+        ") (namespace app (func target (in) (out y) (def y 0))) ",
+        ") (namespace app (func target (in) (out y) (def y 1))) ",
+        "(namespace app (func target (in) (out y) (def y 0))",
+    );
+    let sources = collect_sources(&[
+        SourceSnapshot {
+            path: "lib/valid.ncg2", revision: 8,
+            text: "(namespace app (func target (in) (out y) (def y 0)))",
+        },
+        SourceSnapshot { path: "main.ncg2", revision: 9, text: repaired },
+        SourceSnapshot { path: "macros.ncg2m", revision: 10, text: "" },
+    ]).unwrap();
+    let project = inspect_circuit_project(&sources);
+    let key = circuitgame2_core::project::NameKey { parent: Some("app"), name: "target" };
+    let rows = project.declaration_candidates(key).files;
+    assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), [1, 2, 0]);
+    assert_eq!(rows[0][0].1.location.source.revision, 8);
+    assert_eq!(rows[1][0].1.location.source.revision, 9);
+    assert_eq!(rows[1][0].0, RecoveredNamePosition::Original { fragment: 0, item: 1 });
+    assert_eq!(rows[1][1].0, RecoveredNamePosition::Original { fragment: 1, item: 1 });
+    assert!(rows[1][0].1.location.span.end < rows[1][1].1.location.span.start);
 }
