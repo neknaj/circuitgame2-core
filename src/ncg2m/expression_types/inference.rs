@@ -471,23 +471,23 @@ spec fn step_result<'a>(
 }
 
 fn start_inference<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &[LocalType<'a>], at: usize,
+    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, scope: Scope, at: usize,
 ) -> (result: Result<InferenceStep, ExpressionCheckFailure<'a>>)
-    requires usable_forms(source, forms@), at < forms@.len(),
+    requires usable_forms(source, forms@), at < forms@.len(), locals.contains(scope),
     ensures
-        step_result(source, forms@, lexical_view(parameters@, locals@), result)
-            == inferred_type(source, forms@, lexical_view(parameters@, locals@), at),
+        step_result(source, forms@, lexical_view(parameters@, locals, scope), result)
+            == inferred_type(source, forms@, lexical_view(parameters@, locals, scope), at),
         result matches Ok(InferenceStep::Descend { at: child, frame }) ==>
             frame_valid(forms@, frame) && child == frame_start(frame)
                 && at < child < frame_limit(forms@, frame) <= subtree_limit(forms@, at),
 {
     reveal_with_fuel(inferred_type, 2);
-    let ghost env = lexical_view(parameters@, locals@);
+    let ghost env = lexical_view(parameters@, locals, scope);
     match read_shape(source, forms, at)? {
         Expression::Conditional { condition, yes, no } => {
             assert(children3(forms@, at) == Some((condition, yes, no)));
             let ty = scalar(BuiltinDataType::Bool);
-            if let BodyVerdict::Rejected(error) = check_expression(source, forms, parameters, locals, condition, ty) {
+            if let BodyVerdict::Rejected(error) = check_expression(source, forms, parameters, locals, scope, condition, ty) {
                 return Err(error);
             }
             let frame = InferenceFrame::Yes { _at: yes, no };
@@ -509,8 +509,8 @@ fn start_inference<'a>(
             return Ok(InferenceStep::Descend { at: child, frame });
         }
         _ => {
-            let ty = synthesize_type(source, forms, parameters, locals, at)?;
-            if let BodyVerdict::Rejected(error) = check_expression(source, forms, parameters, locals, at, ty) {
+            let ty = synthesize_type(source, forms, parameters, locals, scope, at)?;
+            if let BodyVerdict::Rejected(error) = check_expression(source, forms, parameters, locals, scope, at, ty) {
                 Err(error)
             } else {
                 Ok(InferenceStep::Type(ty))
@@ -520,19 +520,19 @@ fn start_inference<'a>(
 }
 
 fn finish_frame<'a>(
-    _source: &'a str, forms: &[Form], _parameters: &[SignatureParameter<'a>], _locals: &[LocalType<'a>],
+    _source: &'a str, forms: &[Form], _parameters: &[SignatureParameter<'a>], _locals: &LocalScopes<'a>, _scope: Scope,
     frame: InferenceFrame, ty: TypeShape,
 ) -> (result: Result<InferenceStep, ExpressionCheckFailure<'a>>)
     requires usable_forms(_source, forms@), frame_valid(forms@, frame),
     ensures
-        step_result(_source, forms@, lexical_view(_parameters@, _locals@), result)
-            == after_frame(_source, forms@, lexical_view(_parameters@, _locals@), frame, Ok(ty)),
+        step_result(_source, forms@, lexical_view(_parameters@, _locals, _scope), result)
+            == after_frame(_source, forms@, lexical_view(_parameters@, _locals, _scope), frame, Ok(ty)),
         result matches Ok(InferenceStep::Descend { at: next, frame: continuation }) ==>
             frame_valid(forms@, continuation) && next == frame_start(continuation)
                 && subtree_limit(forms@, frame_start(frame)) <= next
                 && frame_limit(forms@, continuation) <= frame_limit(forms@, frame),
 {
-    let ghost env = lexical_view(_parameters@, _locals@);
+    let ghost env = lexical_view(_parameters@, _locals, _scope);
     match frame {
         InferenceFrame::Yes { no, .. } =>
             Ok(InferenceStep::Descend { at: no, frame: InferenceFrame::No { at: no, ty } }),
@@ -573,24 +573,24 @@ fn finish_frame<'a>(
 }
 
 pub(super) fn infer_type<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &[LocalType<'a>], root: usize,
+    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, scope: Scope, root: usize,
 ) -> (result: Result<TypeShape, ExpressionCheckFailure<'a>>)
-    requires usable_forms(source, forms@), root < forms@.len(),
-    ensures result == inferred_type(source, forms@, lexical_view(parameters@, locals@), root),
+    requires usable_forms(source, forms@), root < forms@.len(), locals.contains(scope),
+    ensures result == inferred_type(source, forms@, lexical_view(parameters@, locals, scope), root),
 {
-    let ghost env = lexical_view(parameters@, locals@);
+    let ghost env = lexical_view(parameters@, locals, scope);
     let mut at = root;
     let mut pending = Vec::<InferenceFrame>::new();
     proof { reveal(remaining_type); }
     loop
         invariant
-            usable_forms(source, forms@), env == lexical_view(parameters@, locals@),
+            usable_forms(source, forms@), locals.contains(scope), env == lexical_view(parameters@, locals, scope),
             at < forms@.len(), frames_cover(forms@, pending@, at),
             remaining_type(source, forms@, env, pending@, inferred_type(source, forms@, env, at))
                 == inferred_type(source, forms@, env, root),
         decreases forms@.len() - at,
     {
-        let mut ty = match start_inference(source, forms, parameters, locals, at) {
+        let mut ty = match start_inference(source, forms, parameters, locals, scope, at) {
             Err(error) => {
                 proof { infer_failure(source, forms@, env, pending@, error); }
                 return Err(error);
@@ -613,7 +613,7 @@ pub(super) fn infer_type<'a>(
                 before == at,
                 remaining_type(source, forms@, env, pending@, Ok(ty)) == inferred_type(source, forms@, env, root),
             invariant
-                usable_forms(source, forms@), env == lexical_view(parameters@, locals@),
+                usable_forms(source, forms@), locals.contains(scope), env == lexical_view(parameters@, locals, scope),
                 at < forms@.len(), frames_cover(forms@, pending@, at),
             ensures
                 before < at,
@@ -631,7 +631,7 @@ pub(super) fn infer_type<'a>(
                 remove_frame_cover(forms@, pending@, at, frame);
                 added_frame(source, forms@, env, pending@, frame, Ok(ty));
             }
-            match finish_frame(source, forms, parameters, locals, frame, ty) {
+            match finish_frame(source, forms, parameters, locals, scope, frame, ty) {
                 Err(error) => {
                     proof { infer_failure(source, forms@, env, pending@, error); }
                     return Err(error);

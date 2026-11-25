@@ -24,7 +24,6 @@ pub use super::let_syntax::LetSyntaxError;
 use super::let_syntax::{LocalBinding, read_let_structure};
 #[cfg(verus_only)]
 use super::let_syntax::{let_structure, valid_bindings};
-use vstd::slice::slice_subrange;
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
 use super::integers::{IntegerLiteralError, IntegerType, read_integer_literal};
@@ -35,6 +34,8 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
 mod inference;
+mod local_scopes;
+use local_scopes::{LocalScopes, Scope};
 use inference::infer_type;
 #[cfg(verus_only)]
 use inference::inferred_type;
@@ -367,51 +368,8 @@ fn find_parameter(parameters: &[SignatureParameter], word: &str) -> (ty: Option<
     None
 }
 
-spec fn lexical_view(parameters: Seq<SignatureParameter>, locals: Seq<LocalType>) -> Seq<TypeBinding> {
-    Seq::new(locals.len(), |i: int| {
-        let local = locals[locals.len() - 1 - i];
-        (local.name.spec_bytes(), local.ty)
-    }) + environment_view(parameters)
-}
-
-proof fn lookup_after_locals(parameters: Seq<SignatureParameter>, locals: Seq<LocalType>, word: Seq<u8>, at: nat)
-    requires locals.len() <= at,
-    ensures
-        parameter_type(lexical_view(parameters, locals), word, at)
-            == parameter_type(environment_view(parameters), word, (at - locals.len()) as nat),
-    decreases lexical_view(parameters, locals).len() - at,
-{
-    reveal_with_fuel(parameter_type, 2);
-    if at < lexical_view(parameters, locals).len() {
-        assert(lexical_view(parameters, locals)[at as int] == environment_view(parameters)[at - locals.len()]);
-        if lexical_view(parameters, locals)[at as int].0 != word {
-            lookup_after_locals(parameters, locals, word, at + 1);
-        }
-    }
-}
-
-fn find_binding<'a>(parameters: &[SignatureParameter<'a>], locals: &[LocalType<'a>], word: &str)
-    -> (result: Option<TypeShape>)
-    ensures result == parameter_type(lexical_view(parameters@, locals@), word.spec_bytes(), 0),
-{
-    let mut at = 0;
-    while at < locals.len()
-        invariant
-            at <= locals@.len(),
-            parameter_type(lexical_view(parameters@, locals@), word.spec_bytes(), 0)
-                == parameter_type(lexical_view(parameters@, locals@), word.spec_bytes(), at as nat),
-        decreases locals@.len() - at,
-    {
-        reveal_with_fuel(parameter_type, 2);
-        let local = locals[locals.len() - 1 - at];
-        assert(lexical_view(parameters@, locals@)[at as int] == (local.name.spec_bytes(), local.ty));
-        if is_spelling(local.name, word) {
-            return Some(local.ty);
-        }
-        at += 1;
-    }
-    proof { lookup_after_locals(parameters@, locals@, word.spec_bytes(), at as nat); }
-    find_parameter(parameters, word)
+spec fn lexical_view(parameters: Seq<SignatureParameter>, locals: &LocalScopes, scope: Scope) -> Seq<TypeBinding> {
+    locals.local_types(scope) + environment_view(parameters)
 }
 
 fn builtin_equal(a: BuiltinDataType, b: BuiltinDataType) -> (equal: bool)
@@ -712,11 +670,11 @@ spec fn step_children_fit(forms: Seq<Form>, at: usize, step: CheckStep) -> bool 
 }
 
 fn read_check_step<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &[LocalType<'a>], request: Request,
+    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, scope: Scope, request: Request,
 ) -> (result: Result<CheckStep, ExpressionCheckFailure<'a>>)
-    requires usable_forms(source, forms@), request.at < forms@.len(),
+    requires usable_forms(source, forms@), request.at < forms@.len(), locals.contains(scope),
     ensures
-        result == step_model(source, forms@, lexical_view(parameters@, locals@), request),
+        result == step_model(source, forms@, lexical_view(parameters@, locals, scope), request),
         result matches Ok(step) ==> step_children_fit(forms@, request.at, step),
 {
     let at = request.at;
@@ -725,7 +683,7 @@ fn read_check_step<'a>(
     match expression {
         Expression::Bool => {
             let word = source_word(source, forms, at);
-            if find_binding(parameters, locals, word).is_some() {
+            if locals.lookup(parameters, scope, word).is_some() {
                 return Err(ExpressionCheckFailure::Deferred(DeferredExpression::BooleanBinding(span_of(&forms[at]))));
             }
             conform(expected, scalar(BuiltinDataType::Bool), span_of(&forms[at]))?;
@@ -733,7 +691,7 @@ fn read_check_step<'a>(
         }
         Expression::Parameter => {
             let word = source_word(source, forms, at);
-            let Some(actual) = find_binding(parameters, locals, word) else {
+            let Some(actual) = locals.lookup(parameters, scope, word) else {
                 return Err(ExpressionCheckFailure::Deferred(DeferredExpression::Name(span_of(&forms[at]))));
             };
             conform(expected, actual, span_of(&forms[at]))?;
@@ -1048,10 +1006,10 @@ proof fn step_advances(
 // 条件、左、右の順になるように分岐を積む。リストの次の要素を1個ずつ積み、作業領域を抑える。
 fn check_expression<'a>(
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>],
-    locals: &[LocalType<'a>], body: usize, expected: TypeShape,
+    locals: &LocalScopes<'a>, scope: Scope, body: usize, expected: TypeShape,
 ) -> (result: BodyVerdict<'a>)
-    requires usable_forms(source, forms@), body < forms@.len(),
-    ensures result == expression_check(source, forms@, lexical_view(parameters@, locals@),
+    requires usable_forms(source, forms@), body < forms@.len(), locals.contains(scope),
+    ensures result == expression_check(source, forms@, lexical_view(parameters@, locals, scope),
         Request { at: body, expected, list: None }),
 {
     let start = Request { at: body, expected, list: None };
@@ -1059,7 +1017,7 @@ fn check_expression<'a>(
     let _end = subtree_end(forms, body);
     let mut pending = Vec::new();
     pending.push(start);
-    let ghost env = lexical_view(parameters@, locals@);
+    let ghost env = lexical_view(parameters@, locals, scope);
     proof {
         assert(complete_list_indices(forms@));
         let root = forms@[body as int];
@@ -1074,8 +1032,8 @@ fn check_expression<'a>(
     }
     while pending.len() != 0
         invariant
-            usable_forms(source, forms@),
-            env == lexical_view(parameters@, locals@),
+            usable_forms(source, forms@), locals.contains(scope),
+            env == lexical_view(parameters@, locals, scope),
             start == (Request { at: body, expected, list: None }),
             requests_ready(forms@, pending@),
             pending_check(source, forms@, env, pending@) == expression_check(source, forms@, env, start),
@@ -1084,7 +1042,7 @@ fn check_expression<'a>(
         let ghost old = pending@;
         let Some(request) = pending.pop() else { unreachable!() };
         assert(old =~= pending@.push(request));
-        let step = match read_check_step(source, forms, parameters, locals, request) {
+        let step = match read_check_step(source, forms, parameters, locals, scope, request) {
             Err(error) => {
                 proof { popped_error(source, forms@, env, pending@, request, error); }
                 return BodyVerdict::Rejected(error);
@@ -1149,14 +1107,14 @@ spec fn synthesized_type<'a>(source: &'a str, forms: Seq<Form>, env: Seq<TypeBin
 }
 
 fn synthesize_type<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &[LocalType<'a>], at: usize,
+    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, scope: Scope, at: usize,
 ) -> (result: Result<TypeShape, ExpressionCheckFailure<'a>>)
-    requires usable_forms(source, forms@), at < forms@.len(),
-    ensures result == synthesized_type(source, forms@, lexical_view(parameters@, locals@), at),
+    requires usable_forms(source, forms@), at < forms@.len(), locals.contains(scope),
+    ensures result == synthesized_type(source, forms@, lexical_view(parameters@, locals, scope), at),
 {
     match read_shape(source, forms, at)? {
         Expression::Bool => {
-            if find_binding(parameters, locals, source_word(source, forms, at)).is_some() {
+            if locals.lookup(parameters, scope, source_word(source, forms, at)).is_some() {
                 Err(ExpressionCheckFailure::Deferred(DeferredExpression::BooleanBinding(span_of(&forms[at]))))
             } else {
                 Ok(scalar(BuiltinDataType::Bool))
@@ -1165,7 +1123,7 @@ fn synthesize_type<'a>(
         Expression::Integer { negative } => Ok(scalar(BuiltinDataType::Integer(
             if negative { IntegerType::Int } else { IntegerType::Nat }
         ))),
-        Expression::Parameter => match find_binding(parameters, locals, source_word(source, forms, at)) {
+        Expression::Parameter => match locals.lookup(parameters, scope, source_word(source, forms, at)) {
             Some(ty) if ty.builtin.is_some() => Ok(ty),
             Some(_) => Err(ExpressionCheckFailure::Deferred(DeferredExpression::StageType(span_of(&forms[at])))),
             None => Err(ExpressionCheckFailure::Deferred(DeferredExpression::Name(span_of(&forms[at])))),
@@ -1209,15 +1167,6 @@ spec fn binding_types<'a>(
     }
 }
 
-proof fn pushed_local(parameters: Seq<SignatureParameter>, locals: Seq<LocalType>, local: LocalType)
-    ensures lexical_view(parameters, locals.push(local))
-        == Seq::empty().push((local.name.spec_bytes(), local.ty)) + lexical_view(parameters, locals),
-{
-    let after = lexical_view(parameters, locals.push(local));
-    let before = Seq::empty().push((local.name.spec_bytes(), local.ty)) + lexical_view(parameters, locals);
-    assert(after =~= before);
-}
-
 proof fn local_shadowing_has_an_example() {
     let name = seq![b'x'];
     let outside = scalar_type(BuiltinDataType::Bool);
@@ -1230,50 +1179,51 @@ proof fn local_shadowing_has_an_example() {
 }
 
 fn read_binding_types<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &mut Vec<LocalType<'a>>,
-    rows: &[LocalBinding], _owner: usize, _bound: usize,
-) -> (result: Result<(), ExpressionCheckFailure<'a>>)
+    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &mut LocalScopes<'a>,
+    outer_scope: Scope, rows: &[LocalBinding], _owner: usize, _bound: usize,
+) -> (result: Result<Scope, ExpressionCheckFailure<'a>>)
     requires usable_forms(source, forms@), valid_bindings(forms@, rows@, _owner, _bound),
+        old(locals).contains(outer_scope),
     ensures match result {
-        Ok(()) => binding_types(source, forms@, lexical_view(parameters@, old(locals)@), rows@,
-            0, lexical_view(parameters@, old(locals)@)) == Ok(lexical_view(parameters@, final(locals)@)),
-        Err(error) => binding_types(source, forms@, lexical_view(parameters@, old(locals)@), rows@,
-            0, lexical_view(parameters@, old(locals)@)) == Err(error),
+        Ok(scope) => final(locals).contains(scope)
+            && binding_types(source, forms@, lexical_view(parameters@, old(locals), outer_scope), rows@,
+                0, lexical_view(parameters@, old(locals), outer_scope)) == Ok(lexical_view(parameters@, final(locals), scope)),
+        Err(error) => binding_types(source, forms@, lexical_view(parameters@, old(locals), outer_scope), rows@,
+            0, lexical_view(parameters@, old(locals), outer_scope)) == Err(error),
     },
 {
-    // 右辺の名前は束縛列の手前までで解決する。本体に導入する型は同じ配列の末尾に蓄える。
-    let outer_count = locals.len();
-    let ghost original = locals@;
-    let ghost outer = lexical_view(parameters@, original);
+    // 各右辺は元の環境で検査する。本体用の環境にだけ、検査済みの束縛を追加する。
+    let ghost outer = lexical_view(parameters@, locals, outer_scope);
+    let mut body_scope = outer_scope;
     let mut at = 0;
     while at < rows.len()
         invariant
             usable_forms(source, forms@), valid_bindings(forms@, rows@, _owner, _bound),
-            original == old(locals)@,
-            outer_count == original.len() <= locals@.len(), locals@.take(outer_count as int) == original,
-            outer == lexical_view(parameters@, original),
+            locals.contains(outer_scope), locals.contains(body_scope),
+            outer == lexical_view(parameters@, locals, outer_scope),
+            outer == lexical_view(parameters@, old(locals), outer_scope),
             at <= rows@.len(),
             binding_types(source, forms@, outer, rows@, 0, outer)
-                == binding_types(source, forms@, outer, rows@, at as nat, lexical_view(parameters@, locals@)),
+                == binding_types(source, forms@, outer, rows@, at as nat, lexical_view(parameters@, locals, body_scope)),
         decreases rows@.len() - at,
     {
         reveal(binding_types);
         let row = rows[at];
         assert(row.name < forms@.len() && row.value < forms@.len());
-        let outer_locals = slice_subrange(locals.as_slice(), 0, outer_count);
-        assert(outer_locals@ =~= original);
-        let ty = infer_type(source, forms, parameters, outer_locals, row.value)?;
+        let ty = infer_type(source, forms, parameters, locals, outer_scope, row.value)?;
         let local = LocalType { name: source_word(source, forms, row.name), ty };
-        proof { pushed_local(parameters@, locals@, local); }
-        let ghost old_locals = locals@;
-        locals.push(local);
-        assert(locals@.take(outer_count as int) =~= old_locals.take(outer_count as int));
+        let ghost before = lexical_view(parameters@, locals, body_scope);
+        let ghost saved = locals.local_types(outer_scope);
+        assert(locals.contains(outer_scope));
+        body_scope = locals.extend(body_scope, local);
+        assert(locals.local_types(outer_scope) == saved);
+        assert(lexical_view(parameters@, locals, body_scope)
+            =~= Seq::empty().push((local.name.spec_bytes(), local.ty)) + before);
         at += 1;
     }
     proof { reveal(binding_types); }
-    Ok(())
+    Ok(body_scope)
 }
-
 #[verifier::opaque]
 spec fn local_body_check<'a>(source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, expected: TypeShape)
     -> BodyVerdict<'a>
@@ -1303,31 +1253,34 @@ fn check_body<'a>(
     ensures result == local_body_check(source, forms@, environment_view(signature.parameters@),
         body, type_shape(signature.result_type.ty)),
 {
-    let mut locals = Vec::<LocalType<'a>>::new();
+    let mut locals = LocalScopes::new();
+    let mut scope = None;
     let parameters = signature.parameters.as_slice();
     let expected = shape_of_type(signature.result_type.ty);
     let mut at = body;
-    assert(lexical_view(parameters@, locals@) =~= environment_view(signature.parameters@));
+    assert(lexical_view(parameters@, &locals, scope) =~= environment_view(signature.parameters@));
     loop
         invariant
             at < forms@.len(), usable_forms(source, forms@),
             parameters@ == signature.parameters@, expected == type_shape(signature.result_type.ty),
+            locals.contains(scope),
             local_body_check(source, forms@, environment_view(signature.parameters@), body, expected)
-                == local_body_check(source, forms@, lexical_view(parameters@, locals@), at, expected),
+                == local_body_check(source, forms@, lexical_view(parameters@, &locals, scope), at, expected),
         decreases forms@.len() - at,
     {
         reveal(local_body_check);
         if !matches!(read_shape(source, forms, at), Ok(Expression::Let)) {
-            return check_expression(source, forms, parameters, locals.as_slice(), at, expected);
+            return check_expression(source, forms, parameters, &locals, scope, at, expected);
         }
         let header = match read_let_structure(source, forms, at) {
             Ok(header) => header,
             Err(error) => return BodyVerdict::Rejected(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
         };
-        if let Err(error) = read_binding_types(source, forms, parameters, &mut locals,
-            header.bindings.as_slice(), at, header.body) {
-            return BodyVerdict::Rejected(error);
-        }
+        scope = match read_binding_types(source, forms, parameters, &mut locals,
+            scope, header.bindings.as_slice(), at, header.body) {
+            Ok(extended) => extended,
+            Err(error) => return BodyVerdict::Rejected(error),
+        };
         at = header.body;
     }
 }
