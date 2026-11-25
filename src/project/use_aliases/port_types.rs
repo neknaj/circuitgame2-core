@@ -42,6 +42,10 @@ use vstd::utf8::encode_utf8_decode_utf8;
 
 mod storage;
 mod lookup;
+mod device;
+pub use device::{DevicePortBinding, DevicePortBindingError, DevicePortType};
+#[cfg(verus_only)]
+pub use device::{device_port_types_match, matching_circuit_direction};
 pub use lookup::{NamedRoutinePort, RoutinePortLookup};
 pub use storage::{StorageSignature, StorageSignatureError};
 
