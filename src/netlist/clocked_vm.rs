@@ -1002,11 +1002,14 @@ impl ClockedVm {
     /// 外部入力の長さが違う場合は状態を変更せずに入力数のエラーを返す。
     pub fn step(&mut self, input: &[bool]) -> (result: Result<Vec<bool>, TickInputError>)
         requires old(self).valid(),
-        ensures final(self).valid(), final(self).same_layout(old(self)), match result {
-            Ok(output) => final(self).tick_matches(old(self), input@, output@),
-            Err(error) => error == TickInputError::InputCount && input@.len() != old(self).external_count()
-                && *final(self) == *old(self),
-        },
+        ensures
+            final(self).valid(), final(self).same_layout(old(self)),
+            result.is_ok() <==> input@.len() == old(self).external_count(),
+            match result {
+                Ok(output) => final(self).tick_matches(old(self), input@, output@),
+                Err(error) => error == TickInputError::InputCount
+                    && *final(self) == *old(self),
+            },
     {
         if input.len() != self.external { return Err(TickInputError::InputCount); }
         let netlist = self.circuit.checked_netlist();

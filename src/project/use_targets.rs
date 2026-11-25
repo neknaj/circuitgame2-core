@@ -24,6 +24,12 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+mod mixed;
+
+pub use mixed::{MixedResolvedUse, MixedUseTargets, index_mixed_use_targets};
+#[cfg(verus_only)]
+pub use mixed::{indexed_mixed_use_at, mixed_use_site_at, mixed_use_target_error_matches, mixed_use_targets_match};
+
 verus! {
 
 /// 別名を指定した場所と、その引数の字句。
@@ -31,7 +37,8 @@ verus! {
 pub struct UseSite<'p, 'a> {
     /// 別名を指定したファイル。
     pub source: &'p ProjectSource<'a>,
-    /// 所属する名前空間ブロックの構文木上の添字。ファイルの直下では `None`。
+    /// 所属する名前空間ブロックの位置。ファイルの直下では `None`。
+    /// 回路の索引では構文木上の添字、NCG2M の索引では名前空間のパスの先頭バイト位置。
     pub block: Option<usize>,
     /// 参照元の名前空間パス。可視性の判定に使う。
     pub namespace: Option<&'a str>,
