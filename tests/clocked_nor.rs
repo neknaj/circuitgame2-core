@@ -494,6 +494,7 @@ fn stateful_device_updates_share_the_circuit_commit_and_reset() {
             RequestBatchTickError::Tick(ResponseTickError::Input(TickInputError::InputCount)))))));
     assert_eq!(session.states(), &[10, 20]);
     assert_eq!(session.position().tick, 0);
+    assert_eq!(session.output(), &[false]);
 
     let pending = session.prepare_tick().unwrap();
     let bad: [DeviceHostRequest<_, ()>; 1] = [
@@ -508,6 +509,7 @@ fn stateful_device_updates_share_the_circuit_commit_and_reset() {
     assert_eq!(done.consumed.len(), 1);
     assert_eq!(done.outgoing.len(), 1);
     assert_eq!(session.states(), &[11, 21]);
+    assert_eq!(session.output(), &[true]);
 
     session.schedule_input(0, TickPosition { generation: 0, tick: 2 }, 8).unwrap();
     let reset = session.prepare_reset().unwrap();
@@ -515,9 +517,11 @@ fn stateful_device_updates_share_the_circuit_commit_and_reset() {
     assert!(matches!(reset.commit(vec![0]), Err(DeviceStateCountError { expected: 2, actual: 1 })));
     assert_eq!(session.position(), first);
     assert_eq!(session.states(), &[11, 21]);
+    assert_eq!(session.output(), &[true]);
     let removed = session.prepare_reset().unwrap().commit(vec![0, 0]).unwrap();
     assert_eq!(removed.len(), 1);
     assert_eq!(session.states(), &[0, 0]);
+    assert_eq!(session.output(), &[false]);
     assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
 }
 

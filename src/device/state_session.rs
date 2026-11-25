@@ -155,6 +155,15 @@ impl<I, R, S> DeviceStateSession<I, R, S> {
         self.execution.position()
     }
 
+    /// 最後に確定した回路の公開出力を、ポートのビット順に借りる。
+    ///
+    /// 初期化やリセットの直後は、その世代の tick 0 の出力を返す。
+    pub fn output(&self) -> (bits: &[bool])
+        ensures bits@ == self.execution_model().model().0.output_model(),
+    {
+        self.execution.output()
+    }
+
     /// 設定にあるインスタンスにだけ外部入力を予約する。
     ///
     /// # Errors

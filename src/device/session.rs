@@ -121,6 +121,13 @@ impl<E: QueuedResponse> DeviceSession<E> {
         self.circuit.position()
     }
 
+    /// 最後に確定した回路の公開出力を、ポートのビット順に借りる。
+    pub fn output(&self) -> (bits: &[bool])
+        ensures bits@ == self.model().0.output_model(),
+    {
+        self.circuit.output()
+    }
+
     /// 確定した tick で発行する要求を、同じ実行の台帳に登録する。
     ///
     /// 採番や台帳の検査に失敗した場合は、次の番号と台帳を保持する。
