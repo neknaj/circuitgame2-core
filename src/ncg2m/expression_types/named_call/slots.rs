@@ -6,6 +6,10 @@ use crate::ncg2m::let_syntax::LetHeader;
 use crate::ncg2m::let_syntax::LocalBinding;
 
 mod coverage;
+#[cfg(verus_only)]
+mod supported;
+#[cfg(verus_only)]
+pub(in crate::ncg2m::expression_types) use supported::list_in_supported_body_is_expression_slot;
 pub(in crate::ncg2m) use coverage::mark_expression_slots;
 #[cfg(verus_only)]
 pub(in crate::ncg2m) use coverage::slot_marked;

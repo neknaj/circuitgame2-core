@@ -55,7 +55,33 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
             #[trigger] execution_path_result(*self, fuel, path, result);
         reveal(execution_path);
-        checked_types_at_step(aliases, *self, path, path.len() - 1);
+        checked_types_at_step(false, aliases, *self, path, path.len() - 1);
+    }
+
+    /// 対応断片の実行枠は、値、整数の診断、または同じ断片の再開状態を返す。
+    pub proof fn supported_slice_does_not_defer(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, fuel: nat,
+        result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()), self.preserves_supported_fragment(aliases),
+            scalar_execution_slice_matches(*self, fuel, result),
+        ensures match result {
+            Ok(ScalarExecutionSlice::Suspended(after)) =>
+                after.plan_model() == self.plan_model() && after.preserves_supported_fragment(aliases),
+            Ok(ScalarExecutionSlice::Complete(_)) | Err(ScalarExecutionError::Literal(_)) => true,
+            Err(ScalarExecutionError::Deferred { .. }) => false,
+        },
+    {
+        let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+            #[trigger] execution_path_result(*self, fuel, path, result);
+        reveal(execution_path);
+        checked_types_at_step(true, aliases, *self, path, path.len() - 1);
+        let last = path.last();
+        assert(last == path[path.len() - 1]);
+        if !(result matches Ok(ScalarExecutionSlice::Suspended(_))) {
+            last.supported_step_does_not_defer(aliases, result);
+        }
     }
 
     /// 予算が一つの実行枠の結果から、実装が行った一遷移を取り出す。
@@ -79,22 +105,29 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
 }
 
 proof fn checked_types_at_step<'plan, 'p, 'a>(
-    aliases: &MixedUseAliases<'_, 'p, 'a>, start: ScalarExecution<'plan, 'p, 'a>,
+    supported: bool, aliases: &MixedUseAliases<'_, 'p, 'a>, start: ScalarExecution<'plan, 'p, 'a>,
     path: Seq<ScalarExecution<'plan, 'p, 'a>>, i: int,
 )
     requires
         execution_path(start, path), 0 <= i < path.len(),
-        defn_call_plan_matches(aliases, start.plan_model()), start.preserves_checked_types(aliases),
-    ensures path[i].plan_model() == start.plan_model(), path[i].preserves_checked_types(aliases),
+        defn_call_plan_matches(aliases, start.plan_model()),
+        if supported { start.preserves_supported_fragment(aliases) } else { start.preserves_checked_types(aliases) },
+    ensures
+        path[i].plan_model() == start.plan_model(),
+        if supported { path[i].preserves_supported_fragment(aliases) } else { path[i].preserves_checked_types(aliases) },
     decreases i,
 {
     reveal(execution_path);
     if i > 0 {
-        checked_types_at_step(aliases, start, path, i - 1);
+        checked_types_at_step(supported, aliases, start, path, i - 1);
         let previous = path[i - 1];
         let next = path[i];
         assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(next))));
-        previous.suspended_step_preserves_checked_types(aliases, next);
+        if supported {
+            previous.suspended_step_preserves_supported_fragment(aliases, next);
+        } else {
+            previous.suspended_step_preserves_checked_types(aliases, next);
+        }
     }
 }
 

@@ -11,12 +11,13 @@ mod body;
 mod fragment;
 #[cfg(verus_only)]
 pub use fragment::{scalar_call_syntax_at, scalar_evaluator_syntax, scalar_syntax_call_arguments,
-    scalar_syntax_form_kind, scalar_syntax_if_children, scalar_syntax_matches_call_arguments};
+    scalar_syntax_form_kind, scalar_syntax_if_children, scalar_syntax_matches_call_arguments,
+    scalar_syntax_atom_from_kind, scalar_syntax_if_from_children, scalar_syntax_call_from_arguments};
 pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
 pub(crate) use body::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_root_call_preserves_scalar_types,
-    defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
+    checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
 #[cfg(verus_only)]
 pub(in crate::ncg2m) use body::argument_positions_increase;
 #[cfg(verus_only)]
@@ -25,6 +26,8 @@ mod slots;
 pub(in crate::ncg2m) use slots::{is_expression_slot, mark_expression_slots};
 #[cfg(verus_only)]
 pub use slots::{expression_slot, expression_slot_at_root};
+#[cfg(verus_only)]
+pub(in crate::ncg2m::expression_types) use slots::list_in_supported_body_is_expression_slot;
 #[cfg(verus_only)]
 pub(in crate::ncg2m) use slots::{expression_slot_bounds, slot_marked};
 

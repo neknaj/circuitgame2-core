@@ -20,7 +20,7 @@ mod coverage;
 #[cfg(verus_only)]
 mod typed_sites;
 #[cfg(verus_only)]
-pub(crate) use typed_sites::{defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
+pub(crate) use typed_sites::{checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
 use coverage::first_unvisited_expression_entry;
 #[cfg(verus_only)]
 use coverage::call_trace_covers_slots;
@@ -606,6 +606,22 @@ pub proof fn defn_call_argument_origin(forms: Seq<Form>, at: usize, arguments: S
         &&& if slot + 1 < arguments.len() { limit == arguments[slot + 1] }
             else { limit == forms[at as int]->List_end }
     },
+{}
+
+pub(super) proof fn call_argument_intervals(
+    forms: Seq<Form>, owner: usize, arguments: Seq<usize>, index: int,
+)
+    requires defn_call_arguments(forms, owner, arguments),
+    ensures
+        owner + 2 <= subtree_limit(forms, owner) <= forms.len(),
+        arguments.len() == 0 ==> owner + 2 == subtree_limit(forms, owner),
+        arguments.len() > 0 ==> arguments[0] == owner + 2,
+        0 <= index < arguments.len() ==> {
+            let child = arguments[index];
+            &&& owner < child < subtree_limit(forms, child) <= subtree_limit(forms, owner)
+            &&& if index + 1 < arguments.len() { subtree_limit(forms, child) == arguments[index + 1] }
+                else { subtree_limit(forms, child) == subtree_limit(forms, owner) }
+        },
 {}
 
 proof fn argument_position_agrees(forms: Seq<Form>, at: usize, first: Seq<usize>, second: Seq<usize>, slot: int)
