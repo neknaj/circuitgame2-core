@@ -54,6 +54,7 @@ pub use module_types::{clocked_link_plan_result, clocked_regions_cover, clocked_
 mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
+mod reference_cursor;
 mod relative;
 mod selection_arguments;
 mod signature_cache;
@@ -65,7 +66,7 @@ pub use structure_types::{
     StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
     StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
 };
-pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
+pub use batch::{DefinitionBatchError, DefinitionPosition, DefinitionReferences, IndexedDefinitionBinding};
 pub use call_dependencies::{FunctionCallSite, FunctionExpansionError, FunctionExpansionOrder};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,

@@ -166,6 +166,77 @@ pub proof fn build_entry_ranges_evidence(source: &str, index: &BuildCircuitIndex
     reveal(build_entry_matches);
 }
 
+proof fn covering_range(ranges: Seq<Range<usize>>, first: int, last: int, at: usize) -> (owner: int)
+    requires
+        0 <= first <= last < ranges.len(),
+        ranges[first].start <= at < ranges[last].end,
+        forall|i: int| first < i <= last ==> (#[trigger] ranges[i]).start == ranges[i - 1].end,
+    ensures
+        first <= owner <= last,
+        ranges[owner].start <= at < ranges[owner].end,
+    decreases last - first,
+{
+    if ranges[last].start <= at {
+        last
+    } else {
+        assert(last > first);
+        covering_range(ranges, first, last - 1, at)
+    }
+}
+
+/// 平坦な索引に載る参照が、どれか一つの定義の参照区間に含まれることを示す。
+pub proof fn build_reference_has_definition(source: &str, index: &BuildCircuitIndex, reference: usize)
+    requires build_index_matches(source, *index), reference < index.references@.len(),
+    ensures exists|definition: int| 0 <= definition < index.definitions@.len() && {
+        let range = (#[trigger] index.definitions@[definition]).references;
+        range.start <= reference < range.end
+    },
+{
+    reveal(build_rows_match);
+    let entries = index.entry_ranges@;
+    assert(entries.len() > 0);
+    let ranges = entries.map_values(|entry: BuildEntryRanges| entry.references);
+    assert forall|i: int| 0 < i < ranges.len() implies
+        (#[trigger] ranges[i]).start == ranges[i - 1].end by {
+        assert(ranges[i] == entries[i].references);
+    };
+    let entry = covering_range(ranges, 0, (ranges.len() - 1) as int, reference);
+    build_entry_ranges_evidence(source, index, entry);
+    build_definition_reference_boundaries(source, index, entry);
+    let frame = entries[entry];
+    let first = frame.definitions.start as int;
+    let last = frame.definitions.end as int;
+    assert(first < last);
+    let definitions = index.definitions@;
+    let ranges = definitions.map_values(|definition: BuildDefinition| definition.references);
+    assert forall|i: int| first < i < last implies
+        (#[trigger] ranges[i]).start == ranges[i - 1].end by {
+        assert(ranges[i] == definitions[i].references);
+    };
+    let owner = covering_range(ranges, first, last - 1, reference);
+    assert(definitions[owner].references.start <= reference < definitions[owner].references.end);
+}
+
+/// 平坦な索引に載る定義が、どれか一つの索引項目の定義区間に含まれることを示す。
+pub proof fn build_definition_has_entry(source: &str, index: &BuildCircuitIndex, definition: usize)
+    requires build_index_matches(source, *index), definition < index.definitions@.len(),
+    ensures exists|entry: int| 0 <= entry < index.entry_ranges@.len() && {
+        let range = (#[trigger] index.entry_ranges@[entry]).definitions;
+        range.start <= definition < range.end
+    },
+{
+    reveal(build_rows_match);
+    let entries = index.entry_ranges@;
+    assert(entries.len() > 0);
+    let ranges = entries.map_values(|entry: BuildEntryRanges| entry.definitions);
+    assert forall|i: int| 0 < i < ranges.len() implies
+        (#[trigger] ranges[i]).start == ranges[i - 1].end by {
+        assert(ranges[i] == entries[i].definitions);
+    };
+    let owner = covering_range(ranges, 0, (ranges.len() - 1) as int, definition);
+    assert(entries[owner].definitions.start <= definition < entries[owner].definitions.end);
+}
+
 #[verifier::opaque]
 spec fn consecutive_references(rows: Seq<BuildDefinition>, first_ref: int) -> bool {
     forall|i: int| 0 <= i < rows.len() ==> (#[trigger] rows[i]).references.start

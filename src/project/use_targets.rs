@@ -375,6 +375,12 @@ impl<'p, 'a> UseTargets<'p, 'a> {
     {
     }
 
+    pub(super) proof fn matched_project(&self, project: &CircuitProject)
+        requires use_targets_match(project, *self),
+        ensures self.project_model() == *project,
+    {
+    }
+
     pub(super) proof fn declarations_cover_project(&self)
         requires self.covers_project(),
         ensures declaration_table_matches(&self.project_model(), self.exports_model().declarations_model()),
