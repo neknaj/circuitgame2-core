@@ -56,7 +56,7 @@ pub(super) proof fn directive_arguments_agree_on_bytes(
 }
 
 /// 同じ指示フォームと引数列から得られる診断の種別と範囲が一致することを示す。
-pub(super) proof fn directive_errors_agree(
+pub proof fn directive_errors_agree(
     source: &str, forms: Seq<Form>, first: int, end: int, closing: usize, head: Head,
     left: (HeaderError, Range<usize>), right: (HeaderError, Range<usize>),
 )
