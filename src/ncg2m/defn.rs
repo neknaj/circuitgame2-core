@@ -358,14 +358,14 @@ spec fn span_bytes(source: &str, span: Range<usize>) -> Seq<u8> {
     source.spec_bytes()[span.start as int..span.end as int]
 }
 
-spec fn readable_span(source: &str, span: Range<usize>) -> bool {
+pub(crate) open spec fn readable_span(source: &str, span: Range<usize>) -> bool {
     let bytes = source.spec_bytes();
     span.start < span.end <= bytes.len()
         && vstd::utf8::is_char_boundary(bytes, span.start as int)
         && vstd::utf8::is_char_boundary(bytes, span.end as int)
 }
 
-proof fn form_span_readable(source: &str, forms: Seq<Form>, at: usize)
+pub(super) proof fn form_span_readable(source: &str, forms: Seq<Form>, at: usize)
     requires usable_forms(source, forms), at < forms.len(),
     ensures readable_span(source, form_span(forms[at as int])),
 {
@@ -681,8 +681,10 @@ pub(super) fn read_defn_at(source: &str, forms: &[Form], root: usize)
     -> (result: Result<DefnHeader, DefnHeaderError>)
     requires usable_forms(source, forms@), root < forms@.len(),
     ensures defn_at_matches(source, forms@, root, result),
+        result matches Ok(header) ==> readable_span(source, header.name_span),
 {
     let (name, types, output, names, body) = header_sites(source, forms, root)?;
+    proof { form_span_readable(source, forms@, name); }
     let parameters = read_parameters(source, forms, (types, names))?;
     let result_type = read_type(source, forms, output)?;
     Ok(DefnHeader {

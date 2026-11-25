@@ -385,6 +385,19 @@ pub fn parse_circuit_project_with_recovery<'a>(
     parse_circuit_project_internal(inputs, true)
 }
 
+pub(super) fn index_project_circuit<'a>(source: &ProjectSource<'a>)
+    -> (result: Result<NamedBuildCircuit<'a>, CircuitFormError>)
+    requires source.kind is Circuit,
+    ensures
+        result.is_ok() <==> circuit_source_matches(source.text),
+        match result {
+            Ok(parsed) => parsed_circuit_matches(*source, parsed),
+            Err(error) => circuit_source_error(source.text, error),
+        },
+{
+    index_named_build_forms(source.text)
+}
+
 fn parse_circuit_project_internal<'a>(
     inputs: &[SourceSnapshot<'a>],
     recover: bool,
@@ -428,7 +441,7 @@ fn parse_circuit_project_internal<'a>(
                 recovery: None,
             });
         }
-        let parsed = match index_named_build_forms(source.text) {
+        let parsed = match index_project_circuit(source) {
             Ok(parsed) => parsed,
             Err(error) => {
                 let id = source.id.copy_for_diagnostic();

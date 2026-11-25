@@ -13,6 +13,7 @@ mod name_keys;
 mod path;
 mod resolution;
 mod signatures;
+mod source_indexes;
 mod sources;
 mod storage_declarations;
 mod structure_declarations;
@@ -64,11 +65,14 @@ pub use circuits::{
     circuit_project_accepts, circuit_project_error, circuit_project_failure, parsed_circuit_matches,
 };
 pub use declarations::{
-    DeclarationTable, LocatedName, NameConflict, NameConflictKind, index_declarations,
+    DeclarationTable, LocatedName, MixedDeclarationTable, NameConflict, NameConflictKind, ProjectDeclaration,
+    ProjectDeclarationKind, index_declarations, index_mixed_declarations,
 };
 #[cfg(verus_only)]
 pub use declarations::{
-    declaration_table_matches, location_in_source, name_conflict_evidence, project_declares,
+    declaration_table_matches, location_in_source, mixed_declaration_origin, mixed_declaration_table_matches,
+    mixed_name_conflict_evidence, mixed_name_conflicts_agree,
+    mixed_project_names_conflict, name_conflict_evidence, project_declares,
     project_names_conflict,
 };
 pub use exports::{ExportError, ExportTable, index_exports};
@@ -106,6 +110,14 @@ pub use resolution::{AbsoluteResolutionError, AbsoluteTarget};
 pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
 };
+pub use source_indexes::{
+    ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,
+};
+#[cfg(verus_only)]
+pub use source_indexes::{
+    project_file_diagnostic_origin, project_source_index_matches, project_source_parse_error,
+    project_source_parse_errors_agree, project_source_set_accepts,
+};
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
 pub use storage_declarations::{StorageDeclaration, check_storage_declaration};
 #[cfg(verus_only)]
@@ -117,7 +129,7 @@ pub use structure_declarations::{
 #[cfg(verus_only)]
 pub use structure_declarations::structure_declaration_result;
 #[cfg(verus_only)]
-pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
+pub use sources::{first_source_set_error, project_sources_match, source_set_error, source_set_errors_agree, valid_source_snapshots};
 #[cfg(verus_only)]
 pub use use_aliases::port_types_equal;
 pub use use_aliases::{

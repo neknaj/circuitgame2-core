@@ -1,7 +1,12 @@
 //! 名前空間の導入箇所と独立宣言を集め、完全修飾名の衝突を検査する。
 
 mod collision_index;
+mod mixed;
 pub(super) mod path_index;
+pub use mixed::{MixedDeclarationTable, ProjectDeclaration, ProjectDeclarationKind, index_mixed_declarations};
+#[cfg(verus_only)]
+pub use mixed::{mixed_declaration_origin, mixed_declaration_table_matches, mixed_name_conflict_evidence,
+    mixed_name_conflicts_agree, mixed_project_names_conflict};
 
 #[cfg(verus_only)]
 use super::circuits::{name_in_source, parsed_name_span};
@@ -14,8 +19,8 @@ use super::{CircuitProject, NameKey, ProjectSource};
 use crate::syntax::circuit::{Head, NamedForm};
 use alloc::vec::Vec;
 #[cfg(verus_only)]
-use collision_index::lookup_matches;
-use collision_index::{LookupIndex, first_candidate};
+use collision_index::{binding_keys_conflict, binding_lookup_matches, namespace_binding_matches};
+use collision_index::{BindingKey, CollisionItem, LookupIndex, search_conflicts};
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -230,16 +235,45 @@ spec fn portion_matches(form: NamedForm, key: NameKey, span: Range<usize>) -> bo
         && span.start == form.name.span.start + lo && span.end == form.name.span.start + hi
 }
 
+spec fn circuit_binding_key(form: NamedForm) -> BindingKey {
+    BindingKey { key: form_key(form), namespace: form.head is Namespace }
+}
+
+impl<'a> CollisionItem<'a> for Occurrence<'_, 'a> {
+    closed spec fn binding_model(&self) -> BindingKey<'a> {
+        circuit_binding_key(*self.form)
+    }
+
+    fn binding_key(&self) -> (key: BindingKey<'a>) {
+        BindingKey { key: key_of(self.form), namespace: matches!(self.form.head, Head::Namespace) }
+    }
+}
+
+spec fn lookup_matches(form: NamedForm, key: NameKey, namespace: bool) -> bool {
+    if namespace {
+        form.head is Namespace && namespace_binding_matches(form.name.word, key)
+    } else {
+        !(form.head is Namespace) && key_view(form_key(form)) == key_view(key)
+    }
+}
+
 spec fn conflicts(left: NamedForm, right: NamedForm) -> bool {
     if left.head is Namespace && right.head is Namespace {
         false
     } else if left.head is Namespace {
-        exists|lo: int, hi: int| #[trigger] namespace_component(left.name.word, form_key(right), lo, hi)
+        namespace_binding_matches(left.name.word, form_key(right))
     } else if right.head is Namespace {
-        exists|lo: int, hi: int| #[trigger] namespace_component(right.name.word, form_key(left), lo, hi)
+        namespace_binding_matches(right.name.word, form_key(left))
     } else {
         key_view(form_key(left)) == key_view(form_key(right))
     }
+}
+
+proof fn circuit_keys_share_rules(left: Occurrence, right: Occurrence)
+    ensures binding_keys_conflict(left.binding_model(), right.binding_model()) == conflicts(*left.form, *right.form),
+{
+    assert(left.binding_model() == circuit_binding_key(*left.form));
+    assert(right.binding_model() == circuit_binding_key(*right.form));
 }
 
 /// 範囲の両端が、示されたソースの UTF-8 文字境界にあることを表す。
@@ -457,14 +491,27 @@ fn namespace_location<'p, 'a>(
         location matches Some(location) ==> *location.source == *item.source
             && portion_matches(*item.form, key, location.span) && location_in_source(location),
 {
-    let (lo, hi) = match_namespace_component(item.form.name.word, key)?;
-    let start = item.form.name.span.start;
-    assert(namespace_component(item.form.name.word, key, lo as int, hi as int));
+    namespace_key_location(item.source, &item.form.name, key)
+}
+
+fn namespace_key_location<'p, 'a>(
+    source: &'p ProjectSource<'a>, name: &crate::syntax::circuit::NameSite<'a>, key: NameKey,
+) -> (location: Option<LocatedName<'p, 'a>>)
+    requires name_in_source(source.text, *name),
+    ensures
+        location.is_some() <==> (exists|lo: int, hi: int| #[trigger] namespace_component(name.word, key, lo, hi)),
+        location matches Some(location) ==> *location.source == *source && location_in_source(location)
+            && (exists|lo: int, hi: int| #[trigger] namespace_component(name.word, key, lo, hi)
+                && location.span.start == name.span.start + lo && location.span.end == name.span.start + hi),
+{
+    let (lo, hi) = match_namespace_component(name.word, key)?;
+    let start = name.span.start;
+    assert(namespace_component(name.word, key, lo as int, hi as int));
     proof {
-        component_source_boundaries(item.source.text, item.form.name.word, key,
-            start as int, item.form.name.span.end as int, lo as int, hi as int);
+        component_source_boundaries(source.text, name.word, key,
+            start as int, name.span.end as int, lo as int, hi as int);
     }
-    Some(LocatedName { source: item.source, span: start + lo..start + hi })
+    Some(LocatedName { source: source, span: start + lo..start + hi })
 }
 
 fn name_location<'p, 'a>(item: Occurrence<'p, 'a>) -> (location: LocatedName<'p, 'a>)
@@ -568,6 +615,31 @@ proof fn rule_out_conflicts(project: &CircuitProject, items: Seq<Occurrence>)
     }
 }
 
+fn circuit_candidate(lookup: &LookupIndex, items: &[Occurrence], key: NameKey, namespace: bool)
+    -> (rank: usize)
+    requires lookup.matches(items@),
+    ensures rank <= items@.len(),
+        forall|i: int| 0 <= i < rank ==> !lookup_matches(*(#[trigger] items@[i]).form, key, namespace),
+{
+    let rank = lookup.candidate(items, key, namespace);
+    assert forall|i: int| 0 <= i < rank implies !lookup_matches(*(#[trigger] items@[i]).form, key, namespace) by {
+        assert(!binding_lookup_matches(items@[i].binding_model(), key, namespace));
+        assert(items@[i].binding_model() == circuit_binding_key(*items@[i].form));
+    };
+    rank
+}
+
+proof fn no_earlier_circuit_pair(items: Seq<Occurrence>, left: int, right: int)
+    requires collision_index::no_pair_before(items, 0, left, right),
+    ensures forall|i: int, j: int| 0 <= i < j < items.len() && before(i, j, left, right)
+        ==> !conflicts(*(#[trigger] items[i]).form, *(#[trigger] items[j]).form),
+{
+    assert forall|i: int, j: int| 0 <= i < j < items.len() && before(i, j, left, right)
+        implies !conflicts(*(#[trigger] items[i]).form, *(#[trigger] items[j]).form) by {
+        circuit_keys_share_rules(items[i], items[j]);
+    };
+}
+
 impl<'p, 'a> DeclarationTable<'p, 'a> {
     #[verifier::type_invariant]
     spec fn lookup_matches_occurrences(&self) -> bool {
@@ -615,7 +687,7 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
     {
         proof { use_type_invariant(self); }
         if let Some(lookup) = &self.lookup {
-            let rank = lookup.candidate(self.occurrences.as_slice(), key, false);
+            let rank = circuit_candidate(lookup, self.occurrences.as_slice(), key, false);
             if rank == self.occurrences.len() {
                 return None;
             }
@@ -771,7 +843,7 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
     {
         proof { use_type_invariant(self); }
         if let Some(lookup) = &self.lookup {
-            let rank = lookup.candidate(self.occurrences.as_slice(), key, true);
+            let rank = circuit_candidate(lookup, self.occurrences.as_slice(), key, true);
             if rank == self.occurrences.len() {
                 return None;
             }
@@ -829,53 +901,26 @@ pub fn index_declarations<'p, 'a>(
         },
 {
     let items = read_occurrences(project);
-    match first_candidate(items.as_slice()) {
+    match search_conflicts(items.as_slice()) {
         Ok(lookup) => {
             proof {
+                no_earlier_circuit_pair(items@, items@.len() as int, items@.len() as int);
                 rule_out_conflicts(project, items@);
                 reveal(occurrences_before);
             }
-            return Ok(DeclarationTable { occurrences: items, lookup: Some(lookup) });
-        },
-        Err(Some((left, right))) => {
-            proof { reveal(occurrences_before); }
-            if let Some(error) = check_pair(items[left], items[right]) {
-                proof { record_conflict(project, items@, left as int, right as int, error); }
-                return Err(error);
+            Ok(DeclarationTable { occurrences: items, lookup })
+        }
+        Err((left, right)) => {
+            proof {
+                reveal(occurrences_before);
+                circuit_keys_share_rules(items@[left as int], items@[right as int]);
+                no_earlier_circuit_pair(items@, left as int, right as int);
             }
-        },
-        Err(None) => {},
-    }
-    // 索引で候補を確定できない場合も、出現順の全組比較で診断を返す。
-    let mut left = 0;
-    let mut right = 1;
-    while left < items.len()
-        invariant
-            occurrences_before(project, items@, project.circuits_model().len() as int, 0),
-            left <= items@.len(),
-            right <= items@.len() + 1,
-            left < items@.len() ==> left < right,
-            forall|i: int, j: int| 0 <= i < j < items@.len() && before(i, j, left as int, right as int)
-                ==> !conflicts(*(#[trigger] items@[i]).form, *(#[trigger] items@[j]).form),
-        decreases items@.len() - left, items@.len() + 1 - right,
-    {
-        if right >= items.len() {
-            left += 1;
-            right = if left < items.len() { left + 1 } else { left };
-            continue;
-        }
-        proof { reveal(occurrences_before); }
-        if let Some(error) = check_pair(items[left], items[right]) {
+            let Some(error) = check_pair(items[left], items[right]) else { unreachable!() };
             proof { record_conflict(project, items@, left as int, right as int, error); }
-            return Err(error);
+            Err(error)
         }
-        right += 1;
     }
-    proof {
-        rule_out_conflicts(project, items@);
-        reveal(occurrences_before);
-    }
-    Ok(DeclarationTable { occurrences: items, lookup: None })
 }
 
 } // verus!
