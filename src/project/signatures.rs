@@ -8,16 +8,21 @@ use super::declarations::located_name_evidence;
 #[cfg(verus_only)]
 use super::location_in_source;
 #[cfg(verus_only)]
+use super::source_indexes::project_source_index_evidence;
+#[cfg(verus_only)]
 use super::widths::{
-    checked_name_sites, checked_width_sites, routine_port_widths_agree, routine_port_widths_evidence,
+    checked_name_sites, checked_width_sites, indexed_port_widths_available, indexed_port_widths_evidence, indexed_width_sites,
+    routine_port_widths_agree, routine_port_widths_evidence,
     routine_widths_success_excludes_other,
 };
 use super::{
-    CheckedPort, CircuitProject, DeclaredPortType, LocatedName, PortWidthError, ProjectSource,
+    CheckedPort, CircuitProject, DeclaredPortType, LocatedName, ParsedProjectSources, PortWidthError,
+    ProjectSource, ProjectSourceIndex,
     RoutinePortWidths, check_routine_port_widths,
 };
+use super::widths::check_indexed_routine_port_widths;
 use crate::syntax::Form;
-use crate::syntax::circuit::{NameSite, PortTypeSite};
+use crate::syntax::circuit::{NameSite, NamedBuildCircuit, PortTypeSite};
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
 use alloc::vec::Vec;
@@ -634,10 +639,23 @@ pub fn check_routine_signature<'p, 'a>(
     proof { checked_width_sites(project, file as int, entry as int, max_width, ports); }
     let source = &project.sources()[file];
     let parsed = &circuits[file];
-    proof {
-        assert(parsed_circuit_matches(*source, *parsed));
-        parsed_index_evidence(*source, *parsed);
-    }
+    assert(parsed_circuit_matches(*source, *parsed));
+    check_signature_names(source, parsed, ports)
+}
+
+fn check_signature_names<'p, 'a>(
+    source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, ports: RoutinePortWidths,
+) -> (result: Result<Option<CheckedRoutineSignature>, RoutineSignatureError<'p, 'a>>)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        checked_name_sites(parsed.syntax.forms@, ports.inputs@),
+        checked_name_sites(parsed.syntax.forms@, ports.outputs@),
+    ensures
+        result != Ok(None), !(result matches Err(RoutineSignatureError::Width(_))),
+        exists|inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+            #[trigger] checked_signature_evidence(source, parsed.syntax.forms@, &ports, inputs, outputs, result),
+{
+    proof { parsed_index_evidence(*source, *parsed); }
     let forms = parsed.syntax.forms.as_slice();
     let inputs = read_port_names(source.text, forms, ports.inputs.as_slice());
     let outputs = read_port_names(source.text, forms, ports.outputs.as_slice());
@@ -656,6 +674,131 @@ pub fn check_routine_signature<'p, 'a>(
     };
     assert(checked_signature_evidence(source, forms@, &model, in_names@, out_names@, result));
     result
+}
+
+impl<'a> ParsedProjectSources<'a> {
+    /// 混在索引の指定位置に回路関数またはモジュールの署名があることを表す。
+    pub open spec fn has_mixed_routine_signature(&self, file: usize, entry: usize) -> bool {
+        &&& file < self.sources_model().len() && file < self.indexes_model().len()
+        &&& self.indexes_model()[file as int] matches ProjectSourceIndex::Circuit(parsed)
+        &&& entry < parsed.syntax.entries@.len()
+        &&& (parsed.syntax.entries@[entry as int].head is Func || parsed.syntax.entries@[entry as int].head is Module)
+    }
+
+    /// 混在索引の署名検査が、元の回路ソースと指定された幅上限に対応することを表す。
+    pub closed spec fn mixed_routine_signature_evidence(
+        &self, file: usize, entry: usize, max_width: u64,
+        result: Result<Option<CheckedRoutineSignature>, RoutineSignatureError>,
+    ) -> bool {
+        if file < self.sources_model().len() && file < self.indexes_model().len() {
+            match self.indexes_model()[file as int] {
+                ProjectSourceIndex::Circuit(parsed) => {
+                    let source = &self.sources_model()[file as int];
+                    match result {
+                        Ok(None) => indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Ok(None)),
+                        Err(RoutineSignatureError::Width(error)) =>
+                            indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Err(error)),
+                        _ => exists|widths: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+                            indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Ok(Some(widths)))
+                            && #[trigger] checked_signature_evidence(source, parsed.syntax.forms@, &widths, inputs, outputs, result),
+                    }
+                },
+                ProjectSourceIndex::Functional(_) => result == Ok(None),
+            }
+        } else {
+            result == Ok(None)
+        }
+    }
+
+    /// 検査済みのポートが元の回路の構文木を指し、共有配線の入力添字が使えることを示す。
+    pub proof fn mixed_routine_signature_ports(
+        &self, file: usize, entry: usize, max_width: u64, signature: CheckedRoutineSignature,
+    )
+        requires self.mixed_routine_signature_evidence(file, entry, max_width, Ok(Some(signature))),
+        ensures
+            file < self.sources_model().len(), file < self.indexes_model().len(),
+            self.indexes_model()[file as int] matches ProjectSourceIndex::Circuit(parsed) ==> {
+                let forms = parsed.syntax.forms@;
+                &&& entry < parsed.syntax.entries@.len()
+                &&& (parsed.syntax.entries@[entry as int].head is Func || parsed.syntax.entries@[entry as int].head is Module)
+                &&& forall|i: int| 0 <= i < signature.ports.inputs@.len() ==> {
+                    let port = #[trigger] signature.ports.inputs@[i];
+                    let at = port.site.name;
+                    &&& at < forms.len() && forms[at as int] is Atom
+                    &&& port.ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width
+                    &&& port.ty matches DeclaredPortType::Named { form } ==>
+                        form < forms.len() && forms[form as int] is Atom
+                }
+                &&& forall|i: int| 0 <= i < signature.ports.outputs@.len() ==> {
+                    let port = #[trigger] signature.ports.outputs@[i];
+                    let at = port.site.name;
+                    &&& at < forms.len() && forms[at as int] is Atom
+                    &&& port.ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width
+                    &&& port.ty matches DeclaredPortType::Named { form } ==>
+                        form < forms.len() && forms[form as int] is Atom
+                }
+            },
+            self.indexes_model()[file as int] is Circuit,
+            signature.output_sources@.len() == signature.ports.outputs@.len(),
+            forall|i: int| 0 <= i < signature.output_sources@.len() ==>
+                ((#[trigger] signature.output_sources@[i]) matches OutputSource::Input { port, .. }
+                    ==> port < signature.ports.inputs@.len()),
+    {
+        let source = &self.sources_model()[file as int];
+        let parsed = self.indexes_model()[file as int]->Circuit_0;
+        let (ports, inputs, outputs) = choose|ports: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+            indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Ok(Some(ports)))
+            && #[trigger] checked_signature_evidence(source, parsed.syntax.forms@, &ports, inputs, outputs, Ok(Some(signature)));
+        indexed_width_sites(source, &parsed.syntax, entry as int, max_width, ports);
+    }
+
+    /// 混在ソース集合から回路の署名を検査する。
+    ///
+    /// `file` は正規化した混在ソース列、`entry` はファイル内の厳格索引の添字。
+    /// 対象が `func` または `module` の署名でなければ `Ok(None)` を返す。名前付き型は参照を保持する。
+    ///
+    /// # Errors
+    ///
+    /// ポート幅、入力名、出力名、共有配線の幅の順に調べて最初の違反を返す。
+    /// 名前の重複には元ファイル内の初出と再出現の位置が付く。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use circuitgame2_core::project::{OutputSource, SourceSnapshot, parse_project_sources};
+    ///
+    /// let project = parse_project_sources(&[
+    ///     SourceSnapshot { path: "helpers.ncg2m", revision: 1, text: "" },
+    ///     SourceSnapshot { path: "demo.ncg2", revision: 8, text: "(func wire (in x) (out x))" },
+    /// ]).unwrap();
+    /// let signature = project.check_mixed_routine_signature(1, 0, 64).unwrap().unwrap();
+    /// assert!(matches!(signature.output_sources.as_slice(), [OutputSource::Input { port: 0, .. }]));
+    /// assert!(project.check_mixed_routine_signature(0, 0, 64).unwrap().is_none());
+    /// ```
+    pub fn check_mixed_routine_signature(
+        &self, file: usize, entry: usize, max_width: u64,
+    ) -> (result: Result<Option<CheckedRoutineSignature>, RoutineSignatureError<'_, 'a>>)
+        ensures
+            result != Ok(None) <==> self.has_mixed_routine_signature(file, entry),
+            self.mixed_routine_signature_evidence(file, entry, max_width, result),
+    {
+        let sources = self.sources();
+        let indexes = self.indexes();
+        if file >= sources.len() { return Ok(None); }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Circuit(parsed) = index else { return Ok(None); };
+        let source = &sources[file];
+        proof { project_source_index_evidence(*source, *index); }
+        let widths = check_indexed_routine_port_widths(source, parsed, entry, max_width);
+        proof { indexed_port_widths_available(source, &parsed.syntax, entry as int, max_width, widths); }
+        let ports = match widths {
+            Ok(Some(ports)) => ports,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(RoutineSignatureError::Width(error)),
+        };
+        proof { indexed_width_sites(source, &parsed.syntax, entry as int, max_width, ports); }
+        check_signature_names(source, parsed, ports)
+    }
 }
 
 } // verus!

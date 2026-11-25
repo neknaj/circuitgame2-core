@@ -4,7 +4,7 @@ use super::circuits::read_indexed_atom;
 #[cfg(verus_only)]
 use super::circuits::{parsed_circuit_matches, parsed_index_evidence};
 use super::{CircuitProject, ProjectSource};
-use crate::syntax::circuit::{CircuitForms, PortSite, PortTypeSite, RoutinePorts, routine_ports};
+use crate::syntax::circuit::{CircuitForms, NamedBuildCircuit, PortSite, PortTypeSite, RoutinePorts, routine_ports};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
     RoutineArity, port_site_evidence, routine_arity_matches, routine_arity_port_counts,
@@ -211,26 +211,47 @@ pub closed spec fn routine_port_widths_evidence(
     let circuits = project.circuits_model();
     let sources = project.sources_model();
     if 0 <= file < circuits.len() {
-        let syntax = &circuits[file].syntax;
-        let source = &sources[file];
-        match result {
-            Ok(None) => routine_ports_match(source.text, syntax, entry, None),
-            _ => 0 <= entry < syntax.entries@.len()
-                && exists|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
-                && match result {
-                    Ok(Some(widths)) =>
-                        widths.inputs@.len() == ports.inputs@.len()
-                            && widths.outputs@.len() == ports.outputs@.len()
-                            && checked_before(source.text, syntax, ports.inputs@, widths.inputs@, max_width)
-                            && checked_before(source.text, syntax, ports.outputs@, widths.outputs@, max_width),
-                    Err(error) => error_in_ports(source, syntax, ports.inputs@, max_width, error)
-                        || (all_ports_ok(source.text, syntax, ports.inputs@, max_width)
-                            && error_in_ports(source, syntax, ports.outputs@, max_width, error)),
-                    Ok(None) => false,
-                },
-        }
+        indexed_port_widths_evidence(&sources[file], &circuits[file].syntax, entry, max_width, result)
     } else {
         result == Ok(None)
+    }
+}
+
+pub(super) closed spec fn indexed_port_widths_evidence(
+    source: &ProjectSource, syntax: &CircuitForms, entry: int, max_width: u64,
+    result: Result<Option<RoutinePortWidths>, PortWidthError>,
+) -> bool {
+    match result {
+        Ok(None) => routine_ports_match(source.text, syntax, entry, None),
+        _ => 0 <= entry < syntax.entries@.len()
+            && exists|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
+            && match result {
+                Ok(Some(widths)) =>
+                    widths.inputs@.len() == ports.inputs@.len()
+                        && widths.outputs@.len() == ports.outputs@.len()
+                        && checked_before(source.text, syntax, ports.inputs@, widths.inputs@, max_width)
+                        && checked_before(source.text, syntax, ports.outputs@, widths.outputs@, max_width),
+                Err(error) => error_in_ports(source, syntax, ports.inputs@, max_width, error)
+                    || (all_ports_ok(source.text, syntax, ports.inputs@, max_width)
+                        && error_in_ports(source, syntax, ports.outputs@, max_width, error)),
+                Ok(None) => false,
+            },
+    }
+}
+
+pub(super) proof fn indexed_port_widths_available(
+    source: &ProjectSource, syntax: &CircuitForms, entry: int, max_width: u64,
+    result: Result<Option<RoutinePortWidths>, PortWidthError>,
+)
+    requires indexed_port_widths_evidence(source, syntax, entry, max_width, result),
+    ensures result != Ok(None) <==> (0 <= entry < syntax.entries@.len()
+        && (syntax.entries@[entry].head is Func || syntax.entries@[entry].head is Module)),
+{
+    if result == Ok(None) {
+        routine_ports_availability(source.text, syntax, entry, None);
+    } else {
+        let ports = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports));
+        routine_ports_availability(source.text, syntax, entry, Some(ports));
     }
 }
 
@@ -387,9 +408,26 @@ pub(super) proof fn checked_width_sites(
         forall|i: int| 0 <= i < widths.outputs@.len() ==>
             ((#[trigger] widths.outputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
 {
-    assert(0 <= file < project.circuits_model().len());
     let source = &project.sources_model()[file];
     let syntax = &project.circuits_model()[file].syntax;
+    indexed_width_sites(source, syntax, entry, max_width, widths);
+}
+
+pub(super) proof fn indexed_width_sites(
+    source: &ProjectSource, syntax: &CircuitForms, entry: int, max_width: u64, widths: RoutinePortWidths,
+)
+    requires indexed_port_widths_evidence(source, syntax, entry, max_width, Ok(Some(widths))),
+    ensures
+        0 <= entry < syntax.entries@.len(),
+        syntax.entries@[entry].head is Func || syntax.entries@[entry].head is Module,
+        checked_name_sites(syntax.forms@, widths.inputs@),
+        checked_name_sites(syntax.forms@, widths.outputs@),
+        forall|i: int| 0 <= i < widths.inputs@.len() ==>
+            ((#[trigger] widths.inputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
+        forall|i: int| 0 <= i < widths.outputs@.len() ==>
+            ((#[trigger] widths.outputs@[i]).ty matches DeclaredPortType::Bits(width) ==> 0 < width <= max_width),
+{
+    indexed_port_widths_available(source, syntax, entry, max_width, Ok(Some(widths)));
     let ports = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
         && widths.inputs@.len() == ports.inputs@.len() && widths.outputs@.len() == ports.outputs@.len()
         && checked_before(source.text, syntax, ports.inputs@, widths.inputs@, max_width)
@@ -525,10 +563,17 @@ pub fn check_routine_port_widths<'p, 'a>(
     if file >= circuits.len() { return Ok(None); }
     let source = &project.sources()[file];
     let parsed = &circuits[file];
-    proof {
-        assert(parsed_circuit_matches(*source, *parsed));
-        parsed_index_evidence(*source, *parsed);
-    }
+    assert(parsed_circuit_matches(*source, *parsed));
+    check_indexed_routine_port_widths(source, parsed, entry, max_width)
+}
+
+pub(super) fn check_indexed_routine_port_widths<'p, 'a>(
+    source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, entry: usize, max_width: u64,
+) -> (result: Result<Option<RoutinePortWidths>, PortWidthError<'p, 'a>>)
+    requires parsed_circuit_matches(*source, *parsed),
+    ensures indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, result),
+{
+    proof { parsed_index_evidence(*source, *parsed); }
     let Some(ports) = routine_ports(source.text, &parsed.syntax, entry) else { return Ok(None); };
     let ghost sites = ports;
     let inputs = check_ports(source, &parsed.syntax, entry, &ports, true, max_width)?;
