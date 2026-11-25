@@ -4,6 +4,9 @@ use std::{collections::BTreeSet, fmt::Write, num::NonZeroU64};
 
 use circuitgame2_packed_nor::{PackedClockedNorPlan32, PackedNorGate32};
 
+mod i2c;
+use i2c::I2c;
+
 struct Output {
     port: usize,
     pin: u8,
@@ -13,6 +16,7 @@ struct Output {
 enum Input {
     Gpio(u8),
     Uart(usize),
+    I2c(usize),
 }
 
 struct Uart {
@@ -27,6 +31,7 @@ pub(crate) struct Program {
     period: NonZeroU64,
     inputs: Vec<Input>,
     uart: Option<Uart>,
+    i2c: Option<I2c>,
     gates: Vec<PackedNorGate32>,
     ports: Vec<usize>,
     outputs: Vec<Output>,
@@ -59,9 +64,10 @@ impl Program {
 
     pub(crate) fn parse(text: &str, expected_board: &str) -> Result<Self, String> {
         let mut lines = text.lines();
-        let has_uart = match lines.next() {
-            Some("ncg2-rp-gpio-v1") => false,
-            Some("ncg2-rp-uart-v1") => true,
+        let (has_uart, has_i2c) = match lines.next() {
+            Some("ncg2-rp-gpio-v1") => (false, false),
+            Some("ncg2-rp-uart-v1") => (true, false),
+            Some("ncg2-rp-i2c-v1") => (false, true),
             _ => return Err("RP 配線表の形式を識別できない。".into()),
         };
         let board = lines.next().and_then(|line| line.strip_prefix("board "));
@@ -81,12 +87,13 @@ impl Program {
             period,
             inputs: Vec::new(),
             uart: None,
+            i2c: None,
             gates: Vec::new(),
             ports: Vec::new(),
             outputs: Vec::new(),
         };
         let mut claimed = BTreeSet::new();
-        let mut uart_inputs = BTreeSet::new();
+        let mut peripheral_inputs = BTreeSet::new();
         if has_uart {
             let fields: Vec<_> = lines
                 .next()
@@ -128,6 +135,10 @@ impl Program {
                 outputs,
             });
         }
+        if has_i2c {
+            program.i2c = Some(I2c::parse(&mut lines, &mut claimed)?);
+        }
+        let first_layout_line = if has_uart || has_i2c { 6 } else { 4 };
         for (index, line) in lines.enumerate() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
             (|| -> Result<(), String> {
@@ -137,10 +148,21 @@ impl Program {
                         .push(Input::Gpio(claim_pin(gpio, &mut claimed)?)),
                     ["input-uart", words @ ..] if has_uart => {
                         let signal = uart_input(words)?;
-                        if !uart_inputs.insert(signal) {
+                        if !peripheral_inputs.insert(signal) {
                             return Err("同じ UART 信号が複数の回路入力を駆動している。".into());
                         }
                         program.inputs.push(Input::Uart(signal));
+                    }
+                    ["input-i2c", signal] if let Some(i2c) = &program.i2c => {
+                        let signal = number::<usize>(signal)?;
+                        let count = i2c.input_count();
+                        if signal >= count {
+                            return Err(format!("I²C の入力信号番号は 0 から {}。", count - 1));
+                        }
+                        if !peripheral_inputs.insert(signal) {
+                            return Err("同じ I²C 信号が複数の回路入力を駆動している。".into());
+                        }
+                        program.inputs.push(Input::I2c(signal));
                     }
                     ["gate", left, right] => program.gates.push(PackedNorGate32 {
                         left: number::<u32>(left)? as usize,
@@ -156,7 +178,7 @@ impl Program {
                 }
                 Ok(())
             })()
-            .map_err(|reason| format!("{}行目。{reason}", index + if has_uart { 6 } else { 4 }))?;
+            .map_err(|reason| format!("{}行目。{reason}", index + first_layout_line))?;
         }
         program
             .inputs
@@ -176,18 +198,30 @@ impl Program {
             }
         }
         if let Some(uart) = &program.uart {
-            if uart_inputs.len() != 14 {
+            if peripheral_inputs.len() != 14 {
                 return Err("UART の回路入力14個を一つずつ指定する必要がある。".into());
             }
             if uart.outputs.iter().any(|&port| port >= program.ports.len()) {
                 return Err("UART が参照する出力ポートが範囲外。".into());
             }
         }
+        if let Some(i2c) = &program.i2c {
+            let count = i2c.input_count();
+            if peripheral_inputs.len() != count {
+                return Err(format!("I²C の回路入力{count}個を一つずつ指定する必要がある。"));
+            }
+            i2c.validate_outputs(program.ports.len())?;
+        }
         Ok(program)
     }
 
     pub(crate) fn has_uart(&self) -> bool {
         self.uart.is_some()
+    }
+
+    /// 配線表が I²C の初期化を必要とするかを返す。
+    pub(crate) fn has_i2c(&self) -> bool {
+        self.i2c.is_some()
     }
 
     pub(crate) fn rust(&self) -> String {
@@ -239,8 +273,8 @@ impl Program {
                 .inputs
                 .iter()
                 .map(|input| match input {
-                    Input::Gpio(_) => None,
                     Input::Uart(signal) => Some(*signal),
+                    _ => None,
                 })
                 .collect();
             writeln!(
@@ -248,27 +282,39 @@ impl Program {
                 "const UART_INPUTS: [Option<usize>; INPUT_COUNT] = {signals:?};"
             )
             .unwrap();
+        }
+        if let Some(i2c) = &self.i2c {
+            i2c.write_constants(&mut result, &self.inputs).unwrap();
+        }
+
+        let has_peripheral = self.has_uart() || self.has_i2c();
+        if has_peripheral {
             writeln!(result, "fn configure_gpio(spawner: Spawner, _pins: embassy_rp::Peripherals) -> Option<([Option<Input<'static>>; INPUT_COUNT], [Output<'static>; OUTPUT_PORTS.len()])> {{").unwrap();
-            writeln!(
-                result,
-                "uart::start(spawner, _pins.UART{}, _pins.PIN_{}, _pins.PIN_{}, {}, {})?;",
-                uart.instance, uart.tx, uart.rx, uart.instance, uart.baud
-            )
-            .unwrap();
+            if let Some(uart) = &self.uart {
+                writeln!(
+                    result,
+                    "uart::start(spawner, _pins.UART{}, _pins.PIN_{}, _pins.PIN_{}, {}, {})?;",
+                    uart.instance, uart.tx, uart.rx, uart.instance, uart.baud
+                )
+                .unwrap();
+            }
+            if let Some(i2c) = &self.i2c {
+                i2c.write_start(&mut result).unwrap();
+            }
             writeln!(result, "Some(([").unwrap();
         } else {
             writeln!(result, "fn configure_gpio(_pins: embassy_rp::Peripherals) -> ([Input<'static>; INPUT_COUNT], [Output<'static>; OUTPUT_PORTS.len()]) {{").unwrap();
             writeln!(result, "([").unwrap();
         }
         for input in &self.inputs {
-            match (input, self.has_uart()) {
+            match (input, has_peripheral) {
                 (Input::Gpio(pin), false) => {
                     writeln!(result, "Input::new(_pins.PIN_{pin}, Pull::Down),").unwrap()
                 }
                 (Input::Gpio(pin), true) => {
                     writeln!(result, "Some(Input::new(_pins.PIN_{pin}, Pull::Down)),").unwrap()
                 }
-                (Input::Uart(_), _) => writeln!(result, "None,").unwrap(),
+                (Input::Uart(_) | Input::I2c(_), _) => writeln!(result, "None,").unwrap(),
             }
         }
         writeln!(result, "], [").unwrap();
@@ -281,7 +327,7 @@ impl Program {
             )
             .unwrap();
         }
-        writeln!(result, "]){}\n}}", if self.has_uart() { ")" } else { "" }).unwrap();
+        writeln!(result, "]){}\n}}", if has_peripheral { ")" } else { "" }).unwrap();
         result
     }
 }

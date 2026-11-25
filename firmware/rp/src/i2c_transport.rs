@@ -1,5 +1,7 @@
 //! Embassy の I²C コントローラーで、tick が確定した取引を処理する。
 
+#[cfg(rp_i2c_program)]
+use circuitgame2_device_timing::I2cTransferError;
 use circuitgame2_device_timing::{HostRequestId, I2cTransfer, I2cTransferKind};
 use embassy_rp::{
     i2c::{AbortReason, Async, Error, I2c, Instance},
@@ -10,6 +12,9 @@ use embassy_time::{Duration, with_timeout};
 /// I²C コントローラーが要求を完了できなかった理由。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TransferFailure {
+    /// 回路から渡された送受信長では取引を開始できない。
+    #[cfg(rp_i2c_program)]
+    InvalidRequest(I2cTransferError),
     /// 対象アドレスに応答がなかった。
     AddressNack,
     /// 送信したデータバイトに応答がなかった。

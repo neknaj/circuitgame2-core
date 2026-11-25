@@ -7,7 +7,7 @@ mod i2c_transport;
 
 use circuitgame2_device_timing::{
     FixedReceiveError, FixedRequestLedger, HostRequestId, HostResponseError, I2cTransfer,
-    RequestKey, TickPosition,
+    RequestKey, TickPosition, i2c_port_bit,
 };
 use circuitgame2_packed_nor::{PackedClockedNorPlan32, PackedNorGate32, read_lane32};
 use embassy_executor::Spawner;
@@ -76,17 +76,21 @@ async fn run(
     tick: &mut Output<'_>,
     shutdown: &mut Output<'_>,
 ) -> Option<()> {
-    // LM75B の A2〜A0 が Low のときのアドレスと、設定レジスタのポインター。
-    let transfer = I2cTransfer::new(0x48, [0x01], 1, 1).ok()?;
-    // 入力は 読み出しの周期外、通信中または異常、設定のシャットダウンビットの順。
-    // NOR の出力が新規要求、直結した設定ビットが GPIO 出力になる。
+    // 入力は読み出しの周期外、通信中または異常、設定のシャットダウンビットの順。
+    // 公開出力は要求、設定ビット、0x48 のアドレス、0x01 のポインターを並べる。
+    const LOW: usize = 4;
+    const HIGH: usize = 5;
+    const PORTS: [usize; 17] = [
+        3, 2, LOW, LOW, LOW, HIGH, LOW, LOW, HIGH, HIGH, LOW, LOW, LOW, LOW, LOW, LOW, LOW,
+    ];
     let plan =
-        PackedClockedNorPlan32::new(3, &[PackedNorGate32 { left: 0, right: 1 }], &[3, 2]).ok()?;
+        PackedClockedNorPlan32::new(3, &[PackedNorGate32 { left: 0, right: 1 }], &PORTS).ok()?;
     let mut ledger = FixedRequestLedger::<Response, 1>::new();
     let mut awaiting = None;
     let mut failed = false;
     let mut shutdown_bit = false;
-    let mut request_valid = false;
+    let reset_source = [0, 0, 0, 0, 0, u32::MAX];
+    let mut committed_ports = PORTS.map(|wire| reset_source[wire]);
     let mut deadline = Instant::now().checked_add(PERIOD)?;
     loop {
         let next_deadline = deadline.checked_add(PERIOD)?;
@@ -110,14 +114,20 @@ async fn run(
         });
         if let Some((_, response)) = delivered {
             match response {
-                Ok(read) => shutdown_bit = read.bytes().first().copied()? & 1 != 0,
+                Ok(read) => shutdown_bit = i2c_port_bit(read.bytes().first().copied()?, 0)?,
                 Err(_) => failed = true,
             }
         }
 
         let blocked = failed || awaiting.is_some() || REQUESTS.is_full();
         // デバイスは前の tick で確定した要求ポートを読む。
-        let issue = request_valid && !blocked;
+        let outgoing = if !blocked && read_lane32(committed_ports[0], 0)? {
+            let address = core::array::from_fn(|bit| committed_ports[2 + bit] & 1 != 0);
+            let pointer = core::array::from_fn(|bit| committed_ports[9 + bit] & 1 != 0);
+            Some(I2cTransfer::from_port_bits(&address, &[pointer], 1, 1).ok()?)
+        } else {
+            None
+        };
         let mut source = [
             u32::from(target.tick % REQUEST_INTERVAL != 0),
             u32::from(blocked),
@@ -126,12 +136,11 @@ async fn run(
             0,
             u32::MAX,
         ];
-        let mut observed = [0; 2];
+        let mut observed = [0; PORTS.len()];
         plan.step(&mut source, &mut [0], &mut observed).ok()?;
-        let next_valid = read_lane32(observed[0], 0)?;
         let next_shutdown = read_lane32(observed[1], 0)?;
         let delivered_ids = delivered.map(|(id, _)| id);
-        let keys = issue.then_some(REQUEST_KEY);
+        let keys = outgoing.map(|_| REQUEST_KEY);
         let pending = ledger
             .prepare_tick(delivered_ids.as_slice(), keys.as_slice())
             .ok()?;
@@ -139,11 +148,11 @@ async fn run(
             return None;
         }
         let committed = pending.commit();
-        request_valid = next_valid;
+        committed_ports = observed;
         if delivered_ids.is_some() {
             awaiting = None;
         }
-        if issue {
+        if let Some(transfer) = outgoing {
             let id = committed.id_at(0)?;
             // tick の唯一の生産側。空きを確認してからここまで通信タスクへ実行を渡さない。
             REQUESTS.try_send((id, transfer)).ok()?;
