@@ -14,7 +14,7 @@ use crate::syntax::{
 };
 use super::defn::{DefnHeader, DefnHeaderError, is_name, read_defn_at, span_of};
 #[cfg(verus_only)]
-use super::defn::{HeaderContents, declaration_model, form_span_readable, header_contents, plain_name, readable_span, usable_forms};
+use super::defn::{HeaderContents, declaration_model, form_span_readable, header_contents, plain_name, readable_span, signature_spans_valid, usable_forms};
 use super::forms::{is_spelling, source_word, subtree_end};
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
@@ -132,13 +132,13 @@ type EntryView = (Range<usize>, Option<Range<usize>>, ItemContents);
 spec fn binding_kind_span_valid(source: &str, kind: MetaItemKind) -> bool {
     match kind {
         MetaItemKind::Namespace { path } => readable_span(source, path),
-        MetaItemKind::Defn(header) => readable_span(source, header.name_span),
+        MetaItemKind::Defn(header) => readable_span(source, header.name_span) && signature_spans_valid(source, header),
         MetaItemKind::Defmacro { name, .. } => readable_span(source, name),
         _ => true,
     }
 }
 
-/// 宣言名と所属名前空間の範囲が、元ソースの UTF-8 境界にあることを表す。
+/// 宣言名、所属名前空間、補助関数の署名の範囲が、元ソースの UTF-8 境界にあることを表す。
 pub closed spec fn meta_binding_spans_valid(source: &str, items: Seq<MetaItem>) -> bool {
     forall|i: int| 0 <= i < items.len() ==> {
         let item = #[trigger] items[i];
@@ -157,6 +157,11 @@ pub(crate) proof fn meta_binding_span_evidence(source: &str, items: Seq<MetaItem
             _ => true,
         },
         items[rank].namespace matches Some(path) ==> readable_span(source, path),
+{}
+
+pub(crate) proof fn meta_defn_signature_spans(source: &str, items: Seq<MetaItem>, rank: int)
+    requires meta_binding_spans_valid(source, items), 0 <= rank < items.len(), items[rank].kind is Defn,
+    ensures signature_spans_valid(source, items[rank].kind->Defn_0),
 {}
 
 spec fn kind_view(kind: MetaItemKind) -> ItemContents {

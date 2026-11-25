@@ -1,9 +1,12 @@
 //! 正規化したプロジェクトのソースを、言語ごとの厳格な索引に結び付ける。
 
 use alloc::vec::Vec;
-use crate::ncg2m::file::{MetaFileError, MetaItem, index_meta_file};
+use crate::ncg2m::data_types::{DefnSignature, read_header_signature};
 #[cfg(verus_only)]
-use crate::ncg2m::file::{meta_binding_spans_valid, meta_file_matches, meta_file_results_agree, valid_meta_file};
+use crate::ncg2m::data_types::signature_matches_header;
+use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_file};
+#[cfg(verus_only)]
+use crate::ncg2m::file::{meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
 use super::circuits::index_project_circuit;
 #[cfg(verus_only)]
@@ -79,6 +82,70 @@ impl<'a> ParsedProjectSources<'a> {
         proof { use_type_invariant(self); }
         self.indexes.as_slice()
     }
+
+    /// 言語別索引の項目が補助関数宣言なら、本体の型検査に使う署名を返す。
+    ///
+    /// 添字が範囲外の場合と、項目が別の種類である場合は `None` を返す。
+    /// 索引にある署名から型を取り出すため、範囲の原点はファイルの先頭になる。
+    pub fn defn_signature(&self, file: usize, item: usize) -> (signature: Option<DefnSignature<'a>>)
+        ensures self.defn_signature_matches_index(file, item, signature),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() {
+            return None;
+        }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() {
+            return None;
+        }
+        let MetaItemKind::Defn(header) = &items[item].kind else { return None; };
+        let source = &self.sources()[file];
+        proof {
+            project_source_index_evidence(*source, *index);
+            meta_defn_signature_spans(source.text, items@, item as int);
+            source.text_model_is_text();
+        }
+        Some(read_header_signature(source.text(), header))
+    }
+
+    /// 指定された索引項目と、型検査で使う署名が対応することを表す。
+    pub closed spec fn defn_signature_matches_index(
+        &self, file: usize, item: usize, result: Option<DefnSignature<'a>>,
+    ) -> bool {
+        match self.indexed_defn(file, item) {
+            Some(header) => result matches Some(signature)
+                && signature_matches_header(self.sources_model()[file as int].text_model(), header, signature),
+            None => result.is_none(),
+        }
+    }
+
+    /// 指定された索引項目の補助関数ヘッダーを表す。
+    pub closed spec fn indexed_defn(&self, file: usize, item: usize) -> Option<crate::ncg2m::defn::DefnHeader> {
+        if file >= self.indexes_model().len() {
+            None
+        } else {
+            match self.indexes_model()[file as int] {
+                ProjectSourceIndex::Functional(items) if item < items@.len() => match items@[item as int].kind {
+                    MetaItemKind::Defn(header) => Some(header),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+    }
+
+    /// 索引から取り出した署名が補助関数宣言に対応することを示す。
+    pub proof fn indexed_defn_signature_origin(
+        &self, file: usize, item: usize, result: Option<DefnSignature<'a>>,
+    )
+        requires self.defn_signature_matches_index(file, item, result),
+        ensures
+            result.is_some() == self.indexed_defn(file, item).is_some(),
+            result matches Some(signature) ==> file < self.indexes_model().len()
+                && (self.indexed_defn(file, item) matches Some(header)
+                    && signature_matches_header(self.sources_model()[file as int].text_model(), header, signature)),
+    {}
 
     /// 正規化済みのソース列を表す。
     pub closed spec fn sources_model(&self) -> Seq<ProjectSource<'a>> {
