@@ -42,6 +42,19 @@ pub closed spec fn scalar_condition_matches<'p, 'a>(
     }
 }
 
+pub(super) proof fn conditional_results_agree(
+    body: DefnEvaluationBody, site: ScalarExpressionSite,
+    first: Option<ScalarCondition>, second: Option<ScalarCondition>,
+)
+    requires scalar_condition_matches(body, site, first), scalar_condition_matches(body, site, second),
+    ensures first == second,
+{
+    if let (Some(left), Some(right)) = (first, second) {
+        assert(left.positions_model() == right.positions_model());
+        assert(left.expected_model() == right.expected_model());
+    }
+}
+
 impl<'a> ScalarCondition<'a> {
     /// この継続を作った元の `if`、条件、二つの分岐の順に添字を表す。
     pub closed spec fn positions_model(&self) -> (usize, usize, usize, usize) {

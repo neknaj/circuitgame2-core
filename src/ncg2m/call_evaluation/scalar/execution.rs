@@ -18,6 +18,10 @@ use crate::syntax::form_span;
 use crate::project::{DefnCallEdge, defn_call_arguments};
 use vstd::prelude::*;
 
+#[cfg(verus_only)]
+mod observation;
+#[cfg(verus_only)]
+pub use observation::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
 mod slice;
 #[cfg(verus_only)]
 pub use slice::{

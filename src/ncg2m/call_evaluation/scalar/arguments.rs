@@ -238,6 +238,7 @@ pub open spec fn prepared_arguments_match<'plan, 'p, 'a>(
             let project = plan.project_model();
             &&& edge == calls->Some_0[site as int]
             &&& values.len() == 0
+            &&& edge.arguments@.len() == body.signature.parameters@.len()
             &&& from == rank && to < from < ranked.len()
             &&& edge.from == ranked[rank as int]
             &&& ranked.contains(edge.to) && ranked.index_of(edge.to) == to

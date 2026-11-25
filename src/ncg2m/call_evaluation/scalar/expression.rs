@@ -9,7 +9,9 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::{BuiltinDataType, DataTypeAtom, scalar_condition_matches, scalar_fits};
 #[cfg(verus_only)]
-use super::atom::scalar_atom_matches;
+use super::atom::{scalar_atom_matches, scalar_atom_results_agree};
+#[cfg(verus_only)]
+use super::condition::conditional_results_agree;
 
 verus! {
 
@@ -53,6 +55,8 @@ spec fn branch_in_bounds(branch: ScalarCondition, length: nat) -> bool {
 
 impl<'p, 'a> ScalarCursor<'p, 'a> {
     pub(super) closed spec fn position_model(&self) -> ScalarExpressionSite<'a> { self.next }
+
+    pub(super) closed spec fn branches_model(&self) -> Seq<ScalarCondition<'a>> { self.branches@ }
 
     pub(super) closed spec fn result_type_model(&self) -> DataType<'a> { self.result_type }
 
@@ -217,7 +221,10 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
                 Err(_) => true,
             },
     {
-        proof { use_type_invariant(&self); }
+        proof {
+            use_type_invariant(&self);
+            reveal(ScalarExpression::expression_step_matches);
+        }
         let ghost previous = self;
         let (frame, ScalarCursor { next, mut branches, result_type, origin }) = self.into_parts();
         if let Some(branch) = frame.condition_at(next) {
@@ -239,49 +246,133 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
         Ok(step)
     }
 
+    spec fn condition_entry_matches(&self, after: Self) -> bool {
+        let pending = after.branches_model();
+        let branches = self.branches_model();
+        &&& pending.len() == branches.len() + 1
+        &&& pending.take(branches.len() as int) == branches
+        &&& scalar_condition_matches(self.frame_model().body_model(), self.expression_model(), Some(pending.last()))
+        &&& after.frame_model() == self.frame_model()
+        &&& after.result_type_model() == self.result_type_model()
+        &&& after.expression_model().at == pending.last().positions_model().1
+        &&& after.expression_model().expected == boolean_type()
+    }
+
+    spec fn atom_transition_matches(
+        &self, atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
+        step: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>,
+    ) -> bool {
+        match atom {
+            Ok(Some(value)) => step matches Ok(next) && self.receive_matches(value, next),
+            Ok(None) => step matches Ok(ScalarExpressionStep::NeedsForm(after)) && expression_positions_agree(*self, after),
+            Err(error) => step == Err(error),
+        }
+    }
+
     /// 条件に降りる、選んだ分岐へ移る、または値・元の診断を返す遷移を表す。
+    #[verifier::opaque]
     pub closed spec fn expression_step_matches(
         &self, result: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>,
     ) -> bool {
         let frame = self.frame_model();
         let before = self.expression_model();
         let body = frame.body_model();
-        let branches = self.branches_model();
-        let condition_transition = match result {
-            Ok(ScalarExpressionStep::Continue(after)) => {
-                let pending = after.branches_model();
-                &&& pending.len() == branches.len() + 1
-                &&& pending.take(branches.len() as int) == branches
-                &&& scalar_condition_matches(body, before, Some(pending.last()))
-                &&& after.frame_model() == frame
-                &&& after.result_type_model() == self.result_type_model()
-                &&& after.expression_model().at == pending.last().positions_model().1
-                &&& after.expression_model().expected == boolean_type()
-            },
-            _ => false,
+        ||| (result matches Ok(ScalarExpressionStep::Continue(after)) && self.condition_entry_matches(after))
+        ||| (scalar_condition_matches(body, before, None)
+            && exists|atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>|
+                #[trigger] scalar_atom_matches(&frame, before.at, before.expected, atom)
+                    && self.atom_transition_matches(atom, result))
+    }
+
+    pub(super) proof fn expressions_from_parts_agree(&self, other: Self)
+        requires self.frame_model() == other.frame_model(), self.cursor_model() == other.cursor_model(),
+        ensures *self == other,
+    {}
+
+    pub(super) proof fn received_steps_agree(
+        &self, value: ScalarValue, first: ScalarExpressionStep<'p, 'a>, second: ScalarExpressionStep<'p, 'a>,
+    )
+        requires self.receive_matches(value, first), self.receive_matches(value, second),
+        ensures observed_expression_steps_agree(Ok(first), Ok(second)),
+    {}
+
+    pub(super) proof fn expression_steps_agree(
+        &self,
+        first: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>,
+        second: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>,
+    )
+        requires self.expression_step_matches(first), self.expression_step_matches(second),
+        ensures observed_expression_steps_agree(first, second),
+    {
+        reveal(ScalarExpression::expression_step_matches);
+        let frame = self.frame_model();
+        let site = self.expression_model();
+        let body = frame.body_model();
+        let left_entry = match first {
+            Ok(ScalarExpressionStep::Continue(after)) if self.condition_entry_matches(after) => Some(after),
+            _ => None,
         };
-        condition_transition || (scalar_condition_matches(body, before, None) && match result {
-            Ok(ScalarExpressionStep::Continue(after)) => {
-                let last = branches.last();
-                let at = after.expression_model().at;
-                &&& branches.len() > 0
-                &&& after.frame_model() == frame
-                &&& after.result_type_model() == self.result_type_model()
-                &&& after.branches_model() == branches.drop_last()
-                &&& after.expression_model().expected == last.expected_model()
-                &&& ((at == last.positions_model().2
-                    && scalar_atom_matches(&frame, before.at, before.expected, Ok(Some(ScalarValue::Bool(true)))))
-                    || (at == last.positions_model().3
-                    && scalar_atom_matches(&frame, before.at, before.expected, Ok(Some(ScalarValue::Bool(false))))))
-            },
-            Ok(ScalarExpressionStep::Complete { value, frame: entered }) => branches.len() == 0
-                && entered == frame && scalar_atom_matches(&frame, before.at, before.expected, Ok(Some(value))),
-            Ok(ScalarExpressionStep::NeedsForm(after)) => after.frame_model() == frame
-                && after.result_type_model() == self.result_type_model()
-                && after.expression_model() == before && after.branches_model() == branches
-                && scalar_atom_matches(&frame, before.at, before.expected, Ok(None)),
-            Err(error) => scalar_atom_matches(&frame, before.at, before.expected, Err(error)),
-        })
+        let right_entry = match second {
+            Ok(ScalarExpressionStep::Continue(after)) if self.condition_entry_matches(after) => Some(after),
+            _ => None,
+        };
+        if let Some(left) = left_entry {
+            let condition = Some(left.branches_model().last());
+            if let Some(right) = right_entry {
+                conditional_results_agree(body, site, condition, Some(right.branches_model().last()));
+                let branches = self.branches_model();
+                assert(left.branches_model() =~= right.branches_model()) by {
+                    assert forall|i: int| 0 <= i < left.branches_model().len()
+                        implies left.branches_model()[i] == right.branches_model()[i] by {
+                        if i < branches.len() {
+                            assert(left.branches_model().take(branches.len() as int)[i] == branches[i]);
+                            assert(right.branches_model().take(branches.len() as int)[i] == branches[i]);
+                        }
+                    };
+                };
+            } else {
+                conditional_results_agree(body, site, condition, None);
+            }
+        } else if let Some(right) = right_entry {
+            conditional_results_agree(body, site, Some(right.branches_model().last()), None);
+        } else {
+            let a = choose|atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>|
+                #[trigger] scalar_atom_matches(&frame, site.at, site.expected, atom)
+                    && self.atom_transition_matches(atom, first);
+            let b = choose|atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>|
+                #[trigger] scalar_atom_matches(&frame, site.at, site.expected, atom)
+                    && self.atom_transition_matches(atom, second);
+            scalar_atom_results_agree(&frame, site.at, site.expected, a, b);
+            if let Ok(Some(value)) = a {
+                self.received_steps_agree(value, first->Ok_0, second->Ok_0);
+            }
+        }
+    }
+}
+
+pub(super) open spec fn expression_positions_agree(left: ScalarExpression, right: ScalarExpression) -> bool {
+    &&& left.frame_model() == right.frame_model()
+    &&& left.expression_model() == right.expression_model()
+    &&& left.branches_model() == right.branches_model()
+    &&& left.result_type_model() == right.result_type_model()
+}
+
+pub(super) open spec fn literal_errors_agree(left: ScalarLiteralError, right: ScalarLiteralError) -> bool {
+    *left.source == *right.source && left.span == right.span && left.error == right.error
+}
+
+pub(super) open spec fn observed_expression_steps_agree(
+    first: Result<ScalarExpressionStep, ScalarLiteralError>,
+    second: Result<ScalarExpressionStep, ScalarLiteralError>,
+) -> bool {
+    match (first, second) {
+        (Ok(ScalarExpressionStep::Continue(left)), Ok(ScalarExpressionStep::Continue(right)))
+        | (Ok(ScalarExpressionStep::NeedsForm(left)), Ok(ScalarExpressionStep::NeedsForm(right))) =>
+            expression_positions_agree(left, right),
+        (Ok(ScalarExpressionStep::Complete { frame: left, value: a }),
+            Ok(ScalarExpressionStep::Complete { frame: right, value: b })) => left == right && a == b,
+        (Err(left), Err(right)) => literal_errors_agree(left, right),
+        _ => false,
     }
 }
 
