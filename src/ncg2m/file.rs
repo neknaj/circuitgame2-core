@@ -134,11 +134,13 @@ spec fn binding_kind_span_valid(source: &str, kind: MetaItemKind) -> bool {
         MetaItemKind::Namespace { path } => readable_span(source, path),
         MetaItemKind::Defn(header) => readable_span(source, header.name_span) && signature_spans_valid(source, header),
         MetaItemKind::Defmacro { name, .. } => readable_span(source, name),
+        MetaItemKind::Export { names } => forall|i: int| 0 <= i < names@.len()
+            ==> readable_span(source, #[trigger] names@[i]),
         _ => true,
     }
 }
 
-/// 宣言名、所属名前空間、補助関数の署名の範囲が、元ソースの UTF-8 境界にあることを表す。
+/// 宣言名、所属名前空間、補助関数の署名、公開名の範囲が、元ソースの UTF-8 文字境界にあることを表す。
 pub closed spec fn meta_binding_spans_valid(source: &str, items: Seq<MetaItem>) -> bool {
     forall|i: int| 0 <= i < items.len() ==> {
         let item = #[trigger] items[i];
@@ -157,6 +159,13 @@ pub(crate) proof fn meta_binding_span_evidence(source: &str, items: Seq<MetaItem
             _ => true,
         },
         items[rank].namespace matches Some(path) ==> readable_span(source, path),
+{}
+
+/// 公開名の範囲が元ソースの UTF-8 文字境界にあることを示す。
+pub(crate) proof fn meta_export_span_evidence(source: &str, items: Seq<MetaItem>, rank: int, arg: int)
+    requires meta_binding_spans_valid(source, items), 0 <= rank < items.len(),
+        items[rank].kind is Export, 0 <= arg < items[rank].kind->Export_names@.len(),
+    ensures readable_span(source, items[rank].kind->Export_names@[arg]),
 {}
 
 pub(crate) proof fn meta_defn_signature_spans(source: &str, items: Seq<MetaItem>, rank: int)
@@ -425,7 +434,16 @@ fn read_directive(source: &str, forms: &[Form], root: usize, head: Head)
                 MetaItemKind::Namespace { path: span_of(&forms[first]) }
             },
             Head::Use => MetaItemKind::Use { target: span_of(&forms[first]), alias: span_of(&forms[first + 1]) },
-            _ => MetaItemKind::Export { names: collect_spans(forms, first, end) },
+            _ => {
+                let names = collect_spans(forms, first, end);
+                proof {
+                    assert forall|i: int| 0 <= i < names@.len() implies readable_span(source, #[trigger] names@[i]) by {
+                        assert(names@[i] == form_span(forms@[first + i]));
+                        form_span_readable(source, forms@, (first + i) as usize);
+                    };
+                }
+                MetaItemKind::Export { names }
+            },
         }),
         Some(Err((kind, span))) => {
             proof { directive_issue_is_unique(source, forms@, first as int, end as int, close, head, kind, span); }

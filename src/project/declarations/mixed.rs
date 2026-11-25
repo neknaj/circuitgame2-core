@@ -476,6 +476,36 @@ proof fn collision_keeps_keys(left: BindingKey, right: BindingKey, a: BindingKey
     }
 }
 
+/// 完全修飾名の宣言が、いずれかの言語の元の索引にあることを表す。
+pub closed spec fn mixed_project_declares(project: &ParsedProjectSources, key: NameKey) -> bool {
+    exists|site: Site| #[trigger] source_site(project, site) && binding_lookup_matches(site.binding, key, false)
+}
+
+/// 混在宣言表の検索と元の言語別索引が、宣言の有無について一致することを示す。
+pub proof fn mixed_declaration_lookup_agrees(project: &ParsedProjectSources, table: &MixedDeclarationTable, key: NameKey)
+    requires mixed_declaration_table_matches(project, *table),
+    ensures table.declares(key) == mixed_project_declares(project, key),
+{
+    reveal(sites_before);
+    if table.declares(key) {
+        let i = choose|i: int| 0 <= i < table.sites@.len()
+            && binding_lookup_matches((#[trigger] table.sites@[i]).binding, key, false);
+        assert(source_site(project, table.sites@[i]));
+    }
+    if mixed_project_declares(project, key) {
+        let site = choose|site: Site| #[trigger] source_site(project, site)
+            && binding_lookup_matches(site.binding, key, false);
+        let i = find_site_rank(project, table.sites@, site);
+        key_views_agree(table.sites@[i].binding.key, site.binding.key);
+        assert(binding_lookup_matches(table.sites@[i].binding, key, false));
+    }
+}
+
+/// 完全修飾名の綴りが同じなら、元の索引で宣言の有無が一致することを示す。
+pub proof fn mixed_project_name_equivalence(project: &ParsedProjectSources, left: NameKey, right: NameKey)
+    requires key_view(left) == key_view(right),
+    ensures mixed_project_declares(project, left) == mixed_project_declares(project, right),
+{}
 proof fn ordered_site_ranks(
     project: &ParsedProjectSources, sites: Seq<Site>, a: Site, b: Site,
 ) -> (ranks: (int, int))
