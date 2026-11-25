@@ -2127,6 +2127,18 @@ pub closed spec fn original_list_ranges(
     }
 }
 
+/// 回復時に確定したリストの両端が、元入力を切り出せる UTF-8 の境界であることを示す。
+pub proof fn original_list_source_bounds(
+    source: &str, lists: Seq<Range<usize>>, repairs: Seq<Repair>, slot: int,
+)
+    requires
+        original_list_ranges(source, lists, repairs, source.spec_bytes().len() as int),
+        0 <= slot < lists.len(),
+    ensures located_span(source, lists[slot]),
+{
+    reveal(original_list_ranges);
+}
+
 proof fn advance_original_lists(
     source: &str, lists: Seq<Range<usize>>, repairs: Seq<Repair>, after: Seq<Repair>, before: int, consumed: int,
 )
