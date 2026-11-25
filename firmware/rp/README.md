@@ -91,6 +91,14 @@ cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target t
 
 通信タスクは要求を受け取った時点から 20 ms の期限を設ける。DMA を始める前と、最後のクロックを確認して CS を解除した後に期限を検査する。期限に達した場合は CS を解除してタイムアウトを返す。開始済みの DMA とバッファーはワーカーが保持し、DMA が終わるまで待つ。折り返しデータの不一致やタイムアウトの後は新しい取引を止め、ボードの reset で再開できる。 [RP2350 データシートの DMA エラッタ](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf)
 
+### SPI の配線表からビルドする
+
+SPI 配線表（`ncg2-rp-spi-v1`）を UTF-8 で保存し、`NCG2_RP_PROGRAM` にその絶対パスを指定する。任意の配線表を埋め込むバイナリは `ncg2-rp`。Pico は `pico,spi` と `thumbv6m-none-eabi`、Pico 2 は `pico2,spi` と `thumbv8m.main-none-eabihf` を指定する。折り返し例のバイナリ `ncg2-rp-spi` と同じ手順で UF2 に変換する。 [ビルド](#ビルド)
+
+配線表では SPI0 または SPI1 を選び、SCK・MOSI・MISO とアクティブ Low の GPIO CS、周波数、モード、ビット順、タイムアウト、送受信の容量（1〜255バイト）を指定する。長さが0または容量を超える要求には、バスを駆動せずエラーを返す。
+
+通信タスクは回路の tick と独立して進み、ファームウェアは回路が取り込むまで応答を保持する。タイムアウトやドライバー障害が発生すると、SPI は次の要求の受け付けを止める。tick の処理中に期限に達すると基板 LED が点灯し、最後に確定した GPIO 出力を保持する。
+
 ## I²C で LM75B の設定を読む
 
 `ncg2-rp-i2c` は I²C0 を 100 kHz で使う組み込み例。LM75B のアドレス端子 A2〜A0 を Low にすると、7ビットアドレスは `0x48` になる。LM75B を 3.3 V で動かし、SDA と SCL を 3.3 V にプルアップする。基板側の内部プルアップは無効にしている。 [LM75B データシート](https://www.nxp.com/docs/en/data-sheet/LM75B.pdf)

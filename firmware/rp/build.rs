@@ -38,6 +38,8 @@ fn main() {
     };
     println!("cargo:rustc-check-cfg=cfg(rp_uart_program)");
     println!("cargo:rustc-check-cfg=cfg(rp_i2c_program)");
+    println!("cargo:rustc-check-cfg=cfg(rp_spi_program)");
+    println!("cargo:rustc-check-cfg=cfg(rp_spi_controller, values(\"0\", \"1\"))");
     if program.has_uart() {
         assert!(
             env::var_os("CARGO_FEATURE_UART").is_some(),
@@ -51,6 +53,14 @@ fn main() {
             "I²C 配線表には i2c feature が必要。"
         );
         println!("cargo:rustc-cfg=rp_i2c_program");
+    }
+    if let Some(instance) = program.spi_instance() {
+        assert!(
+            env::var_os("CARGO_FEATURE_SPI").is_some(),
+            "SPI 配線表には spi feature が必要。"
+        );
+        println!("cargo:rustc-cfg=rp_spi_program");
+        println!("cargo:rustc-cfg=rp_spi_controller=\"{instance}\"");
     }
     fs::write(directory.join("program.rs"), program.rust()).expect("program.rs");
 }

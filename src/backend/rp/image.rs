@@ -1,17 +1,30 @@
 //! 一つのルート回路と GPIO 接続を、RP 向けの配線配置にまとめる。
 
 mod i2c;
+mod peripheral;
+mod spi;
 mod uart;
 
 pub use i2c::{I2cCircuitImage, I2cImageError, I2cInputSource, I2cPortNames, I2cSetup};
 #[cfg(verus_only)]
 pub use i2c::{i2c_assignment, i2c_image_ports_match, i2c_image_requests, i2c_port_capacity};
 
+pub use peripheral::PeripheralInputSource;
+pub use spi::{
+    SpiCircuitImage, SpiImageError, SpiPortNames, SpiSettingError, SpiSetup, spi_frequency_range,
+};
+#[cfg(verus_only)]
+pub use spi::{
+    spi_assignment, spi_frequency_supported, spi_image_ports_match, spi_image_requests,
+    spi_port_capacity, spi_setting_error,
+};
+
 pub use uart::{RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartOutputPorts, UartPortNames, UartSetup};
 #[cfg(verus_only)]
 pub use uart::{uart_assignment, uart_image_ports_match, uart_image_requests, uart_output_indices_fit};
 
 use alloc::vec::Vec;
+use circuitgame2_device_timing::SpiBitOrder;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::seq_lib::*;
@@ -19,9 +32,12 @@ use vstd::seq_lib::*;
 use super::{Assignment, AssignmentError, Board, check_assignments};
 use crate::netlist::PackedNorLayout32;
 use crate::project::{
-    ClockedModuleError, DeviceBindingsError, DevicePortBinding, DevicePortRequest, DevicePortType,
+    ClockedModuleError, DeviceBindingsError, DevicePortRequest, DevicePortType,
     ModuleBodyPosition, PortDirection, UseAliases,
 };
+
+#[cfg(verus_only)]
+use crate::project::DevicePortBinding;
 
 verus! {
 
