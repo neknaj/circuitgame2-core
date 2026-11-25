@@ -2,7 +2,10 @@
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
-use crate::ncg2m::{call_evaluation::CallArguments, expression_types::DefnBodyCallError};
+use crate::ncg2m::{
+    call_evaluation::{CallArguments, DefnEvaluationBody}, expression_types::DefnBodyCallError,
+};
+use crate::project::ParsedProjectSources;
 use super::{DefnCallEdge, DefnCallSite, DefnPosition, MixedUseAliases};
 use super::dependency_order::{DependencyEdge, check_dependency_order};
 #[cfg(verus_only)]
@@ -45,12 +48,42 @@ pub enum DefnCallGraphError<'p, 'a> {
 
 /// 検査した補助関数と、呼び出し先を先に並べた順序。
 pub struct DefnCallPlan<'p, 'a> {
+    project: &'p ParsedProjectSources<'a>,
     vertices: Vec<DefnPosition>,
     edges: Vec<Vec<DefnCallEdge<'p, 'a>>>,
     order: Vec<usize>,
 }
 
 impl<'p, 'a> DefnCallPlan<'p, 'a> {
+    /// 計画が参照する、解析済みのソース集合を表す。
+    pub closed spec fn project_model(&self) -> ParsedProjectSources<'a> {
+        *self.project
+    }
+
+    /// 指定した順位の本体を、計画に対応する元の文書版から返す。
+    pub fn body_at_rank(&self, rank: usize) -> (body: Option<DefnEvaluationBody<'p, 'a>>)
+        ensures match body {
+            Some(body) => {
+                let project = self.project_model();
+                let order = self.order_model();
+                let defn = order[rank as int];
+                &&& rank < order.len()
+                &&& defn.file < project.sources_model().len()
+                &&& *body.source == project.sources_model()[defn.file as int]
+                &&& project.functional_forms_model(defn.file) == Some(body.forms@)
+                &&& body.at < body.forms@.len()
+                &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
+                &&& project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
+            }
+            None => rank >= self.order_model().len() || !self.order_nodes_valid()
+                || self.project_model().indexed_defn(self.order_model()[rank as int].file,
+                    self.order_model()[rank as int].item).is_none(),
+        },
+    {
+        let defn = self.at_rank(rank)?;
+        self.project.defn_evaluation_body(defn.file, defn.item)
+    }
+
     /// 呼び出し先から呼び出し元の順に並べた補助関数。
     pub closed spec fn order_model(&self) -> Seq<DefnPosition> {
         self.order@.map_values(|node: usize| self.vertices@[node as int])
@@ -380,6 +413,7 @@ fn graph_cycle_sites<'p, 'a>(
 /// 成功した計画の順序が全補助関数を含み、すべての呼び出しで順位が下がることを表す。
 pub closed spec fn defn_call_plan_matches(aliases: &MixedUseAliases, plan: &DefnCallPlan) -> bool {
     let order = plan.order_model();
+    &&& plan.project_model() == aliases.targets_model().project_model()
     &&& defn_vertices_valid(&aliases.targets_model().project_model(), plan.vertices@)
     &&& plan.order_nodes_valid()
     &&& plan.edges_model().len() == plan.vertices@.len()
@@ -485,6 +519,7 @@ proof fn checked_dependency_order_is_call_plan(
     aliases: &MixedUseAliases, plan: &DefnCallPlan, graph: Seq<Vec<Option<usize>>>,
 )
     requires
+        plan.project_model() == aliases.targets_model().project_model(),
         defn_vertices_valid(&aliases.targets_model().project_model(), plan.vertices@),
         graph.len() == plan.vertices@.len(),
         graph_matches(aliases, plan.vertices@, plan.edges@, graph),
@@ -562,7 +597,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         match check_dependency_order(graph.as_slice(), true) {
             Err(cycle) => Err(DefnCallGraphError::Cycle(graph_cycle_sites(self, &vertices, &edges, &graph, &cycle))),
             Ok(order) => {
-                let plan = DefnCallPlan { vertices, edges, order };
+                let plan = DefnCallPlan { project, vertices, edges, order };
                 proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
                 Ok(plan)
             }

@@ -1,3 +1,4 @@
+use circuitgame2_core::ncg2m::call_evaluation::scalar::{ScalarBindingError, ScalarValue, bind_scalar_call};
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
 use circuitgame2_core::project::{
     DefnCallGraphError, DefnPosition, SourceSnapshot, check_mixed_use_aliases,
@@ -19,6 +20,15 @@ fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     assert_eq!(order.len(), 3);
     assert!(rank(2) < rank(0));
     assert!(plan.at_rank(3).is_none());
+    let frame = bind_scalar_call(&plan, rank(2), Vec::new()).unwrap();
+    assert!(frame.parameters().is_empty());
+    assert_eq!(frame.body().source.revision, 1);
+    assert_eq!(&source[frame.body().signature.body_span.clone()], "true");
+    let Err(ScalarBindingError::Arity { source: callee_source, span, expected: 0, found: 1 }) =
+        bind_scalar_call(&plan, rank(2), vec![ScalarValue::Bool(false)])
+    else { panic!() };
+    assert_eq!(callee_source.revision, 1);
+    assert!(source[span].starts_with("(defn callee"));
 }
 
 #[test]

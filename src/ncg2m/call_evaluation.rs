@@ -2,9 +2,25 @@
 
 use alloc::vec::Vec;
 use crate::project::{DefnCallEdge, DefnPosition, ProjectSource};
+use crate::syntax::Form;
+use super::data_types::DefnSignature;
 use vstd::prelude::*;
 
+pub mod scalar;
+
 verus! {
+
+/// 計画に含まれる補助関数の本体を、元の文書版と構文木から参照する。
+pub struct DefnEvaluationBody<'p, 'a> {
+    /// 宣言を書いたソースと文書版。
+    pub source: &'p ProjectSource<'a>,
+    /// プロジェクトの解析時に保持した、宣言を含む構文木。
+    pub forms: &'p [Form],
+    /// 本体の根の添字。
+    pub at: usize,
+    /// 仮引数の順序と、各引数および戻り値の型。
+    pub signature: DefnSignature<'a>,
+}
 
 /// 引数を元の環境で評価した結果列の先頭から、成功した値を取り出したことを表す。
 pub open spec fn evaluated_argument_prefix<Value, Error>(

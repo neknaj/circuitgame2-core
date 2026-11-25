@@ -1,6 +1,7 @@
 //! 正規化したプロジェクトのソースを、言語ごとの厳格な索引に結び付ける。
 
 use alloc::vec::Vec;
+use crate::ncg2m::call_evaluation::DefnEvaluationBody;
 use crate::ncg2m::data_types::{DefnSignature, read_header_signature};
 use crate::ncg2m::defn::DefnHeader;
 #[cfg(verus_only)]
@@ -11,7 +12,7 @@ use crate::ncg2m::expression_types::{
     DefnBodyError, defn_body_matches, indexed_meta_body_agrees_with_standalone, meta_defn_check_matches, meta_defn_check_origin,
     same_defn_body_outcome,
 };
-use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call};
+use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call, retained_meta_body};
 use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::named_call::{indexed_call_body_matches, indexed_call_body_origin, defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
@@ -334,6 +335,43 @@ impl<'a> ParsedProjectSources<'a> {
         Some(check_indexed_call_body(aliases, file, item, source.text(), forms, items, collect_edges))
     }
 
+    pub(super) fn defn_evaluation_body<'p>(&'p self, file: usize, item: usize)
+        -> (body: Option<DefnEvaluationBody<'p, 'a>>)
+        ensures
+            body.is_some() == self.indexed_defn(file, item).is_some(),
+            body matches Some(body) ==> {
+                &&& file < self.sources_model().len()
+                &&& *body.source == self.sources_model()[file as int]
+                &&& self.functional_forms_model(file) == Some(body.forms@)
+                &&& body.at < body.forms@.len()
+                &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
+                &&& self.defn_signature_matches_index(file, item, Some(body.signature))
+            },
+    {
+        let header = self.defn_header(file, item)?;
+        proof {
+            use_type_invariant(self);
+            self.indexed_defn_presence(file, item);
+        }
+        let source = &self.sources()[file];
+        let index = &self.indexes()[file];
+        let ProjectSourceIndex::Functional(items) = index else { unreachable!() };
+        proof {
+            assert(retained_ast_matches(*source, *index, self.meta_asts@[file as int]));
+            project_source_index_evidence(*source, *index);
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        let at = retained_meta_body(source.text(), forms, items, item);
+        let signature = self.defn_signature_from_header(file, item, header);
+        proof {
+            assert(self.functional_forms_model(file) == Some(forms@));
+            assert(*header == items@[item as int].kind->Defn_0);
+            assert(form_span(forms@[at as int]) == signature.body_span);
+        }
+        Some(DefnEvaluationBody { source, forms: forms.as_slice(), at, signature })
+    }
+
     pub(super) fn defn_header(&self, file: usize, item: usize) -> (result: Option<&DefnHeader>)
         ensures self.has_source_indexes(),
             match result {
@@ -352,6 +390,7 @@ impl<'a> ParsedProjectSources<'a> {
         requires self.has_source_indexes(), self.indexed_defn(file, _item) == Some(*header),
         ensures self.defn_signature_matches_index(file, _item, Some(signature)),
             signature.parameters@.len() == header.parameters@.len(),
+            signature.body_span == header.body_span,
     {
         let source = &self.sources()[file];
         proof {
