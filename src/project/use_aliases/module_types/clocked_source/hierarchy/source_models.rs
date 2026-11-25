@@ -139,6 +139,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && self.clocked_module_source(owner, width_limit, &source)
     }
 
+    pub(in crate::project::use_aliases::module_types::clocked_source)
+    proof fn root_source_layout(&self, owner: ModuleBodyPosition, limit: u64, netlist: &NorNetlist)
+        -> (result: (SourceTickCircuit, Seq<SourceGateId>, Map<SourceGateId, int>))
+        requires self.clocked_module_source_layout(owner, limit, netlist),
+        ensures self.clocked_module_source(owner, limit, &result.0),
+            source_clocked_layout(&result.0, netlist, result.1, result.2),
+    {
+        choose|source: SourceTickCircuit, order: Seq<SourceGateId>, index: Map<SourceGateId, int>|
+            #[trigger] source_clocked_layout(&source, netlist, order, index)
+            && self.clocked_module_source(owner, limit, &source)
+    }
+
     pub(super) proof fn source_model_for_root(&self, owner: ModuleBodyPosition, limit: u64,
         positions: Seq<ModuleBodyPosition>, modules: Seq<Option<ModuleCalls>>, rank: Seq<nat>,
         table: Seq<Option<ModuleSourceLayout>>, netlist: &NorNetlist)
@@ -165,9 +177,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result.1.len() == trace.len(),
             forall|i: int| 0 <= i < trace.len() ==> (#[trigger] result.1[i]).outputs == trace[i].outputs@,
     {
-        let (source, order, index) = choose|source: SourceTickCircuit, order: Seq<SourceGateId>, index: Map<SourceGateId, int>|
-            #[trigger] source_clocked_layout(&source, netlist, order, index)
-            && self.clocked_module_source(owner, width_limit, &source);
+        let (source, order, index) = self.root_source_layout(owner, width_limit, netlist);
         let frames = source_trace_from_flat(&source, netlist, order, index, inputs, trace);
         (source, frames)
     }

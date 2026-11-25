@@ -2,6 +2,8 @@
 
 use std::{env, fs, path::PathBuf};
 
+mod program;
+
 fn main() {
     let pico = env::var_os("CARGO_FEATURE_PICO").is_some();
     let pico2 = env::var_os("CARGO_FEATURE_PICO2").is_some();
@@ -22,4 +24,17 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
     }
     println!("cargo:rerun-if-changed={file}");
+    println!("cargo:rerun-if-env-changed=NCG2_RP_PROGRAM");
+    let board = if pico { "pico" } else { "pico2" };
+    let program = if let Some(path) = env::var_os("NCG2_RP_PROGRAM") {
+        let path = PathBuf::from(path);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} を読み込めない。{error}", path.display()));
+        program::Program::parse(&text, board)
+            .unwrap_or_else(|error| panic!("{}。{error}", path.display()))
+    } else {
+        program::Program::example(board).expect("組み込みの GPIO 例")
+    };
+    fs::write(directory.join("program.rs"), program.rust()).expect("program.rs");
 }

@@ -3,7 +3,6 @@
 mod events;
 mod host_requests;
 mod ledger;
-mod response;
 mod scheduling;
 mod session;
 mod state_session;
@@ -16,10 +15,12 @@ pub use host_requests::{CommittedHostRequest, CommittedHostRequests, DeviceHostR
 pub use host_requests::{host_request_keys, host_request_order, request_ranks_match};
 pub use ledger::{BatchRegistrationError, RequestKey, DeliveryError, PendingDelivery, RegisterRequestError, RequestLedger, ResponseKey};
 #[cfg(verus_only)]
-pub use ledger::{first_batch_request_error, busy_at, delivery_matches, issued_rows_match, response_update, valid_request_batch};
+pub use ledger::{first_batch_request_error, delivery_matches, issued_rows_match, response_update, valid_request_batch};
 pub use circuitgame2_device_timing::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds};
 
-pub use response::{HostResponseError, ResponseSlot, ResponseStatus};
+#[cfg(verus_only)]
+pub use circuitgame2_device_timing::busy_at;
+pub use circuitgame2_device_timing::{HostResponseError, ResponseSlot, ResponseStatus};
 pub use scheduling::{QueuedResponse, ResponseTickError, ScheduleResponseError, ScheduledResponse};
 
 #[cfg(verus_only)]

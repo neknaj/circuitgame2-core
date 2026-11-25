@@ -3,12 +3,16 @@
 use super::*;
 use crate::{Recovered, ReparsedRecovery, parse_recovering};
 #[cfg(verus_only)]
-use crate::{inserted_closes_match, original_list_ranges, original_list_roots, repair_input_spans_valid};
+use crate::{inserted_closes_match, original_list_ranges, original_list_roots, recovered_replay_matches, repair_input_spans_valid};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::valid_utf8;
 
+#[cfg(verus_only)]
+mod agreement;
+#[cfg(verus_only)]
+pub use agreement::{original_list_observations_agree, repaired_circuit_recoveries_agree};
 mod cache;
 mod names;
 pub use cache::CachedCircuitRecovery;
@@ -60,6 +64,12 @@ impl OriginalCircuitList {
     pub closed spec fn span_model(&self) -> Range<usize> {
         self.span
     }
+
+    /// 元リストの開始位置を起点とした厳格な構文木。
+    pub closed spec fn forms_model(&self) -> Seq<Form> { self.forms@ }
+
+    /// 元リストの項目について、ソース順に並べた検査結果。
+    pub closed spec fn checked_model(&self) -> Seq<RecoveredCircuitForm> { self.checked@ }
 
     /// 各フォームの診断を、解析時のファイル全体に対する UTF-8 バイト範囲で返す。
     ///
@@ -284,6 +294,7 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
             && form_spans_valid(source, forms@, source.spec_bytes().len() as int)
             && check_trace(source, forms@, checked@, (forms@.len() as int, None)),
         CircuitRecovery::WithSyntaxRepairs { recovered, original } => !well_formed_sexpr(source)
+            && recovered_replay_matches(source, recovered.forms@, recovered.repairs@, recovered.original_lists@)
             && complete_list_indices(recovered.forms@)
             && nested_list_indices(recovered.forms@)
             && list_source_delimiters(source, recovered.forms@, true)
@@ -296,6 +307,23 @@ pub closed spec fn circuit_recovery_matches(source: &str, result: CircuitRecover
             && original_circuit_lists(source, recovered.original_lists@, original@),
     }
 }
+
+/// 構文修復を要した場合の再生結果と、元入力に残る各リストの検査結果を取り出す。
+pub proof fn circuit_recovery_repair_evidence(source: &str, recovery: &CircuitRecovery)
+    requires circuit_recovery_matches(source, *recovery), recovery is WithSyntaxRepairs,
+    ensures match recovery {
+        CircuitRecovery::WithSyntaxRepairs { recovered, original } => {
+            &&& recovered_replay_matches(source, recovered.forms@, recovered.repairs@, recovered.original_lists@)
+            &&& original@.len() == recovered.original_lists@.len()
+            &&& forall|i: int| 0 <= i < original@.len() ==> {
+                let checked = #[trigger] original@[i];
+                &&& checked.is_some() == original_list_is_inspectable(source, recovered.original_lists@[i])
+                &&& checked matches Some(list) ==> one_original_circuit_list(source, recovered.original_lists@[i], list)
+            }
+        },
+        _ => false,
+    },
+{}
 
 /// 妥当なソースでは、回復解析と厳格解析の構文木と索引項目が一致する。
 ///
@@ -473,23 +501,15 @@ impl<'p, 's> ReparsedRecovery<'p, 's> {
     /// 診断の主範囲と関連範囲は、どちらも現在の文書を基準とする。
     pub fn inspect_original_list(&self, section: usize, list: usize) -> (result: Option<OriginalCircuitList>)
         ensures
-            result.is_some() <==> {
-                let source = self.source_model();
-                let part = self.section_model(section as int);
-                let local = part.recovered.original_lists@[list as int];
-                &&& section < 3
-                &&& list < part.recovered.original_lists@.len()
-                &&& original_list_is_inspectable(source,
-                    (part.byte_base + local.start) as usize..(part.byte_base + local.end) as usize)
-            },
+            result.is_some() <==> section < 3
+                && list < self.section_model(section as int).recovered.original_lists@.len()
+                && original_list_is_inspectable(self.source_model(),
+                    self.original_list_range_model(section as int, list as int)),
             result matches Some(selected) ==> {
-                let part = self.section_model(section as int);
-                let relative = part.recovered.original_lists@[list as int];
-                let span = selected.span_model();
+                let span = self.original_list_range_model(section as int, list as int);
                 &&& section < 3
-                &&& list < part.recovered.original_lists@.len()
-                &&& span.start as int == part.byte_base + relative.start
-                &&& span.end as int == part.byte_base + relative.end
+                &&& list < self.section_model(section as int).recovered.original_lists@.len()
+                &&& selected.span_model() == span
                 &&& crate::located_span(self.source_model(), span)
                 &&& one_original_circuit_list(self.source_model(), span, selected)
             },
@@ -697,9 +717,10 @@ spec fn original_circuit_lists(
     source: &str, spans: Seq<Range<usize>>, lists: Seq<Option<OriginalCircuitList>>,
 ) -> bool {
     &&& lists.len() <= spans.len()
-    &&& forall|i: int| 0 <= i < lists.len() ==> match #[trigger] lists[i] {
-        Some(list) => one_original_circuit_list(source, spans[i], list),
-        None => true,
+    &&& forall|i: int| 0 <= i < lists.len() ==> {
+        let checked = #[trigger] lists[i];
+        &&& checked.is_some() == original_list_is_inspectable(source, spans[i])
+        &&& checked matches Some(list) ==> one_original_circuit_list(source, spans[i], list)
     }
 }
 
@@ -727,9 +748,10 @@ fn inspect_original_circuit_lists(source: &str, recovered: &Recovered) -> (lists
         let ghost previous = lists@;
         let ghost picked = list;
         lists.push(list);
-        assert forall|i: int| 0 <= i < lists@.len() implies match #[trigger] lists@[i] {
-            Some(list) => one_original_circuit_list(source, recovered.original_lists@[i], list),
-            None => true,
+        assert forall|i: int| 0 <= i < lists@.len() implies {
+            let checked = #[trigger] lists@[i];
+            &&& checked.is_some() == original_list_is_inspectable(source, recovered.original_lists@[i])
+            &&& checked matches Some(list) ==> one_original_circuit_list(source, recovered.original_lists@[i], list)
         } by {
             if i < at { assert(lists@[i] == previous[i]); } else { assert(lists@[i] == picked); }
         };

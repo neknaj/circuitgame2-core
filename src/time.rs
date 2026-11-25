@@ -3,7 +3,7 @@
 mod event_queue;
 mod events;
 
-pub use circuitgame2_device_timing::{ClockError, PendingClockChange, SimulationClock, TickPosition};
+pub use circuitgame2_device_timing::{ClockError, PendingClockChange, SimulationClock, TickPosition, exact_microseconds};
 #[cfg(verus_only)]
 pub use circuitgame2_device_timing::clock_change_matches;
 pub(crate) use event_queue::PendingEvents;

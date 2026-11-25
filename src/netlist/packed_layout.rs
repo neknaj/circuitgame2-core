@@ -3,9 +3,9 @@
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-use super::{ClockedNor, PackedNorGate32, Wire};
+use super::{ClockedNor, NorNetlist, PackedNorGate32, Wire};
 #[cfg(verus_only)]
-use super::{NorNetlist, clocked_gate_updates, clocked_wiring_endpoints, clocked_wiring_valid, gate_value_matches, nor_lane_bit32, output_ports_available, output_values_match, wire_available, wire_value, wires_fit};
+use super::{clocked_gate_updates, clocked_wiring_endpoints, clocked_wiring_valid, gate_value_matches, nor_lane_bit32, output_ports_available, output_values_match, wire_available, wire_value, wires_fit};
 
 verus! {
 
@@ -80,6 +80,22 @@ impl PackedNorLayout32 {
             &&& flat < self.source_model()
             &&& flat == packed_wire_slot(netlist.outputs@[i], inputs, count)
         }
+    }
+
+    pub(crate) proof fn port_slots(&self, netlist: &NorNetlist)
+        requires self.matches(netlist),
+        ensures
+            self.input_model() == netlist.input_count,
+            self.source_model() == netlist.input_count + netlist.gates@.len() + 2,
+            self.gates_model().len() == netlist.gates@.len(),
+            self.outputs_model().len() == netlist.outputs@.len(),
+            forall|i: int| 0 <= i < self.outputs_model().len() ==> {
+                let slot = #[trigger] self.outputs_model()[i];
+                slot < self.source_model()
+                    && slot == packed_wire_slot(netlist.outputs@[i], self.input_model(), netlist.gates@.len())
+            },
+    {
+        reveal(PackedNorLayout32::matches);
     }
 
     /// 元のネットリストにある外部入力の数。
@@ -190,6 +206,74 @@ pub proof fn packed_tick32_agrees(
     };
 }
 
+// 共有バッファーの範囲を読み出してから射影しても、レーンの配線順は変わらない。
+proof fn packed_frame_lane32(words: Seq<u32>, inputs: nat, gates: nat, lane: u32)
+    requires lane < 32, words.len() == inputs + gates + 2,
+        words[(inputs + gates) as int] == 0, words[(inputs + gates + 1) as int] == u32::MAX,
+    ensures packed_lane32(words, lane) ==
+        packed_lane32(words.take(inputs as int), lane)
+        + packed_lane32(words.subrange(inputs as int, (inputs + gates) as int), lane)
+        + seq![false, true],
+{
+    let left = packed_lane32(words, lane);
+    let input = packed_lane32(words.take(inputs as int), lane);
+    let state = packed_lane32(words.subrange(inputs as int, (inputs + gates) as int), lane);
+    let right = input + state + seq![false, true];
+    assert(nor_lane_bit32(0, lane) == false) by (bit_vector);
+    assert(lane < 32 ==> (((u32::MAX >> lane) & 1u32) == 1u32)) by (bit_vector);
+    assert forall|i: int| 0 <= i < left.len() implies #[trigger] left[i] == right[i] by {
+        if i < inputs {
+            assert(words.take(inputs as int)[i] == words[i]);
+        } else if i < inputs + gates {
+            assert(words.subrange(inputs as int, (inputs + gates) as int)[i - inputs] == words[i]);
+        } else {
+            assert(i == inputs + gates || i == inputs + gates + 1);
+        }
+    };
+    assert(left =~= right);
+}
+
+/// バッファーを再利用する実行の1レーンが、元の順序回路の同じ tick と一致することを示す。
+///
+/// 入力と前後の状態は、共有バッファーの外部入力・ゲート範囲から取り出す。
+/// 公開出力は確定後の状態から得られる。
+pub proof fn packed_clocked_step32_agrees(
+    netlist: &NorNetlist, layout: &PackedNorLayout32, lane: u32,
+    before: Seq<u32>, after: Seq<u32>, outputs: Seq<u32>,
+)
+    requires lane < 32, clocked_wiring_valid(netlist), layout.matches(netlist),
+        circuitgame2_packed_nor::packed_clocked_tick_matches(
+            layout.gates_model(), layout.input_model(), layout.outputs_model(), before, after, outputs),
+        before[layout.source_model() - 2] == 0,
+        before[layout.source_model() - 1] == u32::MAX,
+    ensures ({
+        let low = layout.input_model() as int;
+        let high = low + layout.gates_model().len();
+        let input = packed_lane32(before.take(low), lane);
+        let previous = packed_lane32(before.subrange(low, high), lane);
+        let updated = packed_lane32(after.subrange(low, high), lane);
+        &&& clocked_gate_updates(netlist.gates@, input, previous, updated)
+        &&& output_values_match(input, updated, netlist.outputs@, packed_lane32(outputs, lane))
+    }),
+{
+    reveal(PackedNorLayout32::matches);
+    let n = layout.input_model();
+    let g = layout.gates_model().len();
+    let updated = after.subrange(n as int, (n + g) as int);
+    assert(before.len() == after.len() == n + g + 2);
+    assert(before.take(n as int) =~= after.take(n as int));
+    assert(after[(n + g) as int] == before[(n + g) as int] && after[(n + g + 1) as int] == before[(n + g + 1) as int]);
+    packed_frame_lane32(before, n, g, lane);
+    packed_frame_lane32(after, n, g, lane);
+    assert forall|i: int| 0 <= i < updated.len() implies
+        #[trigger] gate_value_matches(layout.gates_model()[i], before, updated[i]) by {
+        assert(updated[i] == after[n + i]);
+    };
+    packed_tick32_agrees(
+        netlist, layout, lane, packed_lane32(before.take(n as int), lane),
+        packed_lane32(before.subrange(n as int, (n + g) as int), lane), before, updated, after, outputs);
+}
+
 impl ClockedNor {
     /// GPU やマイコンが共有する配線番号に変換する。
     ///
@@ -209,6 +293,18 @@ impl ClockedNor {
                 && wires_fit(layout.gates_model(), layout.source_model() as usize),
     {
         let netlist = self.checked_netlist();
+        PackedNorLayout32::from_valid_wiring(netlist)
+    }
+}
+
+impl PackedNorLayout32 {
+    pub(super) fn from_valid_wiring(netlist: &NorNetlist) -> (result: Option<Self>)
+        requires clocked_wiring_valid(netlist),
+        ensures
+            result.is_some() <==> netlist.input_count as int + netlist.gates@.len() + 2 <= usize::MAX,
+            result matches Some(layout) ==> layout.matches(netlist)
+                && wires_fit(layout.gates_model(), layout.source_model() as usize),
+    {
         let inputs = netlist.input_count;
         let count = netlist.gates.len();
         if inputs > usize::MAX - 2 || count > usize::MAX - 2 - inputs {
@@ -263,6 +359,50 @@ impl ClockedNor {
         }
         assert(wires_fit(gates@, source_count));
         Some(PackedNorLayout32 { input_count: inputs, source_count, gates, outputs })
+    }
+}
+
+
+impl PackedNorLayout32 {
+    pub(super) proof fn gate_route(&self, netlist: &NorNetlist, i: int)
+        requires self.matches(netlist), 0 <= i < netlist.gates@.len(),
+        ensures ({
+            let gate = self.gates_model()[i];
+            let wire = netlist.gates@[i];
+            &&& gate.left == packed_wire_slot(wire.left, self.input_model(), self.gates_model().len())
+            &&& gate.right == packed_wire_slot(wire.right, self.input_model(), self.gates_model().len())
+            &&& gate.left < self.source_model() && gate.right < self.source_model()
+        }),
+    {
+        reveal(PackedNorLayout32::matches);
+    }
+
+    pub(super) proof fn combinational_read_order(&self, netlist: &NorNetlist)
+        requires self.matches(netlist), super::nor_evaluation_ready(netlist, netlist.input_count as nat),
+        ensures ({
+            let gates = self.gates_model();
+            forall|i: int| 0 <= i < gates.len() ==> {
+                let gate = #[trigger] gates[i];
+                super::packed_combinational::before_gate32(gate.left, self.input_model(), gates.len(), i)
+                    && super::packed_combinational::before_gate32(gate.right, self.input_model(), gates.len(), i)
+            }
+        }),
+    {
+        reveal(PackedNorLayout32::matches);
+        let gates = self.gates_model();
+        assert forall|i: int| 0 <= i < gates.len() implies {
+            let gate = #[trigger] gates[i];
+            super::packed_combinational::before_gate32(gate.left, self.input_model(), gates.len(), i)
+                && super::packed_combinational::before_gate32(gate.right, self.input_model(), gates.len(), i)
+        } by {
+            let wire = netlist.gates@[i];
+            let left = wire.left;
+            let right = wire.right;
+            assert(wire_available(left, self.input_model(), i as nat));
+            assert(wire_available(right, self.input_model(), i as nat));
+            match left { Wire::Input(_) | Wire::Gate(_) | Wire::Constant(_) => {} }
+            match right { Wire::Input(_) | Wire::Gate(_) | Wire::Constant(_) => {} }
+        };
     }
 }
 

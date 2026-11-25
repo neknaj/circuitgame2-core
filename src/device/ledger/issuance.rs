@@ -3,19 +3,10 @@
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-use super::{HostRequestId, RegisterRequestError, RequestEntry, RequestLedger, ResponseSlot};
+use super::{HostRequestId, RegisterRequestError, RequestEntry, RequestKey, RequestLedger, ResponseSlot};
 use crate::device::PendingRequestIds;
 
 verus! {
-
-/// 発行する要求のインスタンスと、そのデバイス内のタグ。
-#[derive(Clone, Copy, Debug)]
-pub struct RequestKey {
-    /// 実行設定におけるデバイスの識別子。
-    pub instance: usize,
-    /// デバイス内のタグ番号。
-    pub tag: u64,
-}
 
 /// 同じ tick の要求列を準備できなかった理由。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

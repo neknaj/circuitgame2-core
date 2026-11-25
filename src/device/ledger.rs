@@ -2,7 +2,8 @@
 
 mod delivery;
 mod issuance;
-pub use issuance::{BatchRegistrationError, RequestKey};
+pub use circuitgame2_device_timing::RequestKey;
+pub use issuance::BatchRegistrationError;
 #[cfg(verus_only)]
 pub use issuance::{first_batch_request_error, issued_rows_match, valid_request_batch};
 
@@ -15,6 +16,8 @@ use vstd::prelude::*;
 
 use super::{HostRequestId, HostResponseError, ResponseSlot, ResponseStatus};
 use crate::time::TickPosition;
+#[cfg(verus_only)]
+use circuitgame2_device_timing::busy_at;
 
 verus! {
 
@@ -346,11 +349,7 @@ impl RequestLedger {
             let entry = &self.entries[index];
             assert(self.requests()[index as int] == (entry.response.id_model(), entry.tag, entry.response));
             if entry.response.id().instance == instance && entry.tag == tag {
-                let occupied = match entry.response.status() {
-                    ResponseStatus::Consumed(delivered) => tick <= delivered.tick,
-                    ResponseStatus::Awaiting | ResponseStatus::Held(_) => true,
-                };
-                if occupied {
+                if entry.response.tag_busy_at(tick) {
                     assert(busy_at(self.requests()[index as int].2.status_model(), tick));
                     assert(self.tag_is_busy(instance, tag, tick));
                     return true;
@@ -375,14 +374,6 @@ pub open spec fn response_update(
     &&& before[index].2.issued_model() == after[index].2.issued_model()
     &&& before[index].2.status_model() == from
     &&& after[index].2.status_model() == to
-}
-
-/// 応答を消費した tick までタグを占有する。
-pub open spec fn busy_at(status: ResponseStatus, tick: u64) -> bool {
-    match status {
-        ResponseStatus::Consumed(delivered) => tick <= delivered.tick,
-        _ => true,
-    }
 }
 
 } // verus!

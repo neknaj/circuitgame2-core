@@ -106,6 +106,13 @@ impl SimulationClock {
         self.position
     }
 
+    // 更新候補を別に保持する間、現在の時刻を複製する。
+    pub(crate) fn snapshot(&self) -> (snapshot: Self)
+        ensures snapshot == *self,
+    {
+        Self { position: self.position }
+    }
+
     /// 同じ reset 世代の次の tick を準備する。
     ///
     /// # Errors
@@ -174,6 +181,24 @@ impl SimulationClock {
                 &&& result == Err(ClockError::StaleChange)
                 &&& final(self).position_model() == old(self).position_model()
             },
+        no_unwind
+    {
+        match self.project(change) {
+            Ok(clock) => { *self = clock; Ok(()) },
+            Err(error) => Err(error),
+        }
+    }
+
+    // 回路の状態と同時に新しい時計を選べるように、検査済みの変更だけを投影する。
+    pub(crate) fn project(&self, change: PendingClockChange) -> (result: Result<Self, ClockError>)
+        ensures
+            result.is_ok() <==> self.position_model() == change.change_model().0,
+            result matches Ok(clock) ==> {
+                &&& clock.position_model() == change.change_model().1
+                &&& clock_change_matches(self.position_model(), clock.position_model())
+            },
+            result matches Err(error) ==> error == ClockError::StaleChange,
+        no_unwind
     {
         proof { use_type_invariant(&change); }
         if self.position.tick != change.from.tick
@@ -181,8 +206,7 @@ impl SimulationClock {
         {
             return Err(ClockError::StaleChange);
         }
-        self.position = change.to;
-        Ok(())
+        Ok(Self { position: change.to })
     }
 }
 
