@@ -346,6 +346,65 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         tick.commit_responses(ledger, input)
     }
 
+    /// 要求を含む tick を確定できない場合に、入力から決まる診断を表す。
+    ///
+    /// メモリの確保に失敗する場合は、採番の検査まで成功している。
+    pub open spec fn request_batch_error(
+        &self, input: Seq<bool>, requests: Seq<RequestKey>, error: RequestBatchTickError,
+    ) -> bool {
+        let ids = self.before_ids();
+        let (before, ledger, events) = self.before_model();
+        let target = self.target_model();
+        let keys = response_keys(events, target);
+        match error {
+            RequestBatchTickError::Number(reason) =>
+                reason == RequestIdError::SerialOutOfRange && !ids.fits(requests.len() as u64),
+            RequestBatchTickError::Registration(reason) =>
+                ids.fits(requests.len() as u64)
+                && (reason == BatchRegistrationError::Allocation || first_batch_request_error(
+                    &ledger, requests, ids.generation_model(), ids.next_model(), target.tick, reason,
+                )),
+            RequestBatchTickError::Tick(reason) => {
+                &&& ids.fits(requests.len() as u64)
+                &&& valid_request_batch(&ledger, requests, ids.generation_model(), ids.next_model(), target.tick)
+                &&& match reason {
+                    ResponseTickError::Delivery(reason) => ledger.first_delivery_error(keys, target, reason),
+                    ResponseTickError::Input(reason) => ledger.valid_delivery(keys, target)
+                        && input.len() != before.vm_model().external_count()
+                        && reason == crate::netlist::TickInputError::InputCount,
+                }
+            },
+        }
+    }
+
+    /// 回路の更新、応答の消費、新規要求の登録と採番が同じ tick に確定したことを表す。
+    #[verifier::prophetic]
+    pub open spec fn request_batch_committed(
+        &self, input: Seq<bool>, requests: Seq<RequestKey>,
+        consumed: Seq<ResponseEvent<T>>, issued: IssuedRequestIds,
+    ) -> bool {
+        let (before, prior_ledger, events) = self.before_model();
+        let (after, updated_ledger, remaining) = self.after_model();
+        let target = self.target_model();
+        let count = prior_ledger.requests().len() as int;
+        &&& (before.valid() ==> after.valid())
+        &&& after.position_model() == target
+        &&& after.vm_model().tick_matches(&before.vm_model(), input, after.output_model())
+        &&& remaining == events_at_tick(events, target, false)
+        &&& consumed == events_at_tick(events, target, true)
+        &&& updated_ledger.generation_model() == prior_ledger.generation_model()
+        &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests().take(count),
+            response_keys(events, target), target)
+        &&& issued.generation_model() == self.before_ids().generation_model()
+        &&& issued.first_model() == self.before_ids().next_model()
+        &&& issued.count_model() as nat == requests.len()
+        &&& valid_request_batch(&prior_ledger, requests, issued.generation_model(), issued.first_model(), target.tick)
+        &&& self.after_ids().generation_model() == self.before_ids().generation_model()
+        &&& self.after_ids().next_model() == issued.first_model() + requests.len() as int
+        &&& issued_rows_match(updated_ledger.requests().skip(count), requests,
+            issued.generation_model(), issued.first_model(), target.tick)
+    }
+
     /// 応答と新規要求を、同じ回路更新で確定する。
     ///
     /// 新規要求は実行設定のインスタンス順、各デバイスの要求リスト順に渡す。
@@ -365,50 +424,9 @@ impl<'a, T> PendingDeviceTick<'a, T> {
                 &&& self.after_model().2 == self.before_model().2
                 &&& self.after_ids() == self.before_ids()
             },
-            result matches Err(RequestBatchTickError::Number(error)) ==>
-                error == RequestIdError::SerialOutOfRange && !self.before_ids().fits(requests@.len() as u64),
-            result matches Err(RequestBatchTickError::Registration(error)) ==>
-                self.before_ids().fits(requests@.len() as u64)
-                && (error == BatchRegistrationError::Allocation || first_batch_request_error(
-                    &self.before_model().1, requests@, self.before_ids().generation_model(),
-                    self.before_ids().next_model(), self.target_model().tick, error,
-                )),
-            result matches Err(RequestBatchTickError::Tick(error)) ==> {
-                let (before, ledger, events) = self.before_model();
-                let target = self.target_model();
-                let keys = response_keys(events, target);
-                &&& self.before_ids().fits(requests@.len() as u64)
-                &&& valid_request_batch(&ledger, requests@, self.before_ids().generation_model(),
-                    self.before_ids().next_model(), target.tick)
-                &&& match error {
-                    ResponseTickError::Delivery(reason) => ledger.first_delivery_error(keys, target, reason),
-                    ResponseTickError::Input(reason) => ledger.valid_delivery(keys, target)
-                        && input@.len() != before.vm_model().external_count()
-                        && reason == crate::netlist::TickInputError::InputCount,
-                }
-            },
-            result matches Ok((consumed, issued)) ==> {
-                let (before, prior_ledger, events) = self.before_model();
-                let (after, updated_ledger, remaining) = self.after_model();
-                let target = self.target_model();
-                let count = prior_ledger.requests().len() as int;
-                &&& (before.valid() ==> after.valid())
-                &&& after.position_model() == target
-                &&& after.vm_model().tick_matches(&before.vm_model(), input@, after.output_model())
-                &&& remaining == events_at_tick(events, target, false)
-                &&& consumed@ == events_at_tick(events, target, true)
-                &&& updated_ledger.generation_model() == prior_ledger.generation_model()
-                &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests().take(count),
-                    response_keys(events, target), target)
-                &&& issued.generation_model() == self.before_ids().generation_model()
-                &&& issued.first_model() == self.before_ids().next_model()
-                &&& issued.count_model() as nat == requests@.len()
-                &&& valid_request_batch(&prior_ledger, requests@, issued.generation_model(), issued.first_model(), target.tick)
-                &&& self.after_ids().generation_model() == self.before_ids().generation_model()
-                &&& self.after_ids().next_model() == issued.first_model() + requests@.len() as int
-                &&& issued_rows_match(updated_ledger.requests().skip(count), requests@,
-                    issued.generation_model(), issued.first_model(), target.tick)
-            },
+            result matches Err(error) ==> self.request_batch_error(input@, requests@, error),
+            result matches Ok((consumed, issued)) ==>
+                self.request_batch_committed(input@, requests@, consumed@, issued),
     {
         let ghost (_, original_ledger, _) = self.before_model();
         let ghost original_ids = self.before_ids();
