@@ -57,6 +57,10 @@ mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod reference_cursor;
+mod defn_name;
+pub use defn_name::{DefnNameError, ResolvedDefnName};
+#[cfg(verus_only)]
+pub use defn_name::{defn_name_resolution, resolved_defn_name_origin, stage_name_has_no_binding};
 mod mixed;
 pub use mixed::{MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 #[cfg(verus_only)]

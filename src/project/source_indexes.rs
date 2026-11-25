@@ -13,9 +13,9 @@ use crate::ncg2m::expression_types::{
 use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms};
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use crate::ncg2m::file::{meta_ast_matches, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
+use crate::ncg2m::file::{meta_ast_matches, meta_binding_span_evidence, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
-use super::circuits::index_project_circuit;
+use super::circuits::{index_project_circuit, read_source_span};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{circuit_source_error, circuit_source_errors_agree, circuit_source_matches};
 use super::{ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources};
@@ -28,6 +28,8 @@ use super::sources::{
     source_ids_unique, source_set_errors_agree,
 };
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -92,6 +94,13 @@ pub(super) fn count_directive_entries(index: &ProjectSourceIndex) -> (len: usize
     }
 }
 
+/// 補助関数を宣言した名前空間と、別名の有効範囲を識別する位置。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DefnScope<'a> {
+    pub namespace: Option<&'a str>,
+    pub block: Option<usize>,
+}
+
 impl<'a> ParsedProjectSources<'a> {
     /// 正規化済みのファイル識別子でまとめたソースを、初出順に返す。
     pub fn sources(&self) -> (sources: &[ProjectSource<'a>])
@@ -106,6 +115,55 @@ impl<'a> ParsedProjectSources<'a> {
     {
         proof { use_type_invariant(self); }
         self.indexes.as_slice()
+    }
+
+    pub(super) closed spec fn defn_scope_matches(
+        &self, file: usize, item: usize, scope: Option<DefnScope>,
+    ) -> bool {
+        &&& scope.is_some() == self.indexed_defn(file, item).is_some()
+        &&& scope matches Some(resolved) ==> {
+            &&& file < self.indexes_model().len()
+            &&& self.indexes_model()[file as int] matches ProjectSourceIndex::Functional(items)
+                && item < items@.len()
+                && match (items@[item as int].namespace, resolved.namespace, resolved.block) {
+                    (None, None, None) => true,
+                    (Some(span), Some(word), Some(block)) => block == span.start
+                        && word.spec_bytes() == self.sources_model()[file as int].text_model().spec_bytes()
+                            [span.start as int..span.end as int],
+                    _ => false,
+                }
+        }
+    }
+
+    pub(super) proof fn defn_scope_is_indexed(&self, file: usize, item: usize, scope: Option<DefnScope>)
+        requires self.defn_scope_matches(file, item, scope),
+        ensures scope.is_some() == self.indexed_defn(file, item).is_some(),
+    {}
+
+    /// 索引にある補助関数の宣言位置から、名前解決に使う所属を取り出す。
+    pub(super) fn defn_scope(&self, file: usize, item: usize) -> (scope: Option<DefnScope<'a>>)
+        ensures self.defn_scope_matches(file, item, scope),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() { return None; }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() { return None; }
+        let indexed = &items[item];
+        if !matches!(indexed.kind, MetaItemKind::Defn(_)) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            project_source_index_evidence(*source, *index);
+            meta_binding_span_evidence(source.text, items@, item as int);
+            source.text_model_is_text();
+        }
+        match &indexed.namespace {
+            Some(span) => {
+                let namespace = read_source_span(source.text(), span.start, span.end);
+                Some(DefnScope { namespace: Some(namespace), block: Some(span.start) })
+            }
+            None => Some(DefnScope { namespace: None, block: None }),
+        }
     }
 
     /// 言語別索引の項目が補助関数宣言なら、本体の型検査に使う署名を返す。
@@ -240,6 +298,13 @@ impl<'a> ParsedProjectSources<'a> {
             }
         }
     }
+
+    pub(super) proof fn indexed_defn_kind(&self, file: usize, item: usize)
+        requires file < self.indexes_model().len(),
+            self.indexes_model()[file as int] matches ProjectSourceIndex::Functional(items)
+                && item < items@.len() && items@[item as int].kind is Defn,
+        ensures self.indexed_defn(file, item).is_some(),
+    {}
 
     /// 索引から取り出した署名が補助関数宣言に対応することを示す。
     pub proof fn indexed_defn_signature_origin(
