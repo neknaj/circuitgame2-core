@@ -213,7 +213,12 @@ impl<'n, 'p, 'a> ClockedVramVm<'n, 'p, 'a> {
     /// [Self::into_module] で取り出した回路の記憶部を参照するために使える。
     pub fn vram_storage_index(&self, name: &str) -> (result: Option<usize>)
         requires self.valid(),
-        ensures self.vram_index_matches(name.spec_bytes(), result),
+        ensures
+            self.vram_index_matches(name.spec_bytes(), result),
+            result matches Some(index) ==> {
+                &&& index < self.vm_model().storage_model().len()
+                &&& self.vm_model().storage_model()[index as int].memory_model().is_some()
+            },
     {
         let Some(i) = self.find_binding(name) else { return None; };
         proof { self.binding_has_memory(i); }
@@ -227,9 +232,45 @@ impl<'n, 'p, 'a> ClockedVramVm<'n, 'p, 'a> {
     /// リセットや tick を行わず、現在の状態と RAM の格納順を保つ。
     pub fn into_module(self) -> (module: ClockedModuleVm)
         requires self.valid(),
-        ensures module == self.module_model(), module.vm.valid(),
+        ensures module == self.module_model(), module.vm == self.vm_model(), module.vm.valid(),
     {
         self.module
+    }
+
+    /// 同じ公開名の検索は常に同じ格納添字を選ぶ。
+    ///
+    /// 公開名が重複しても最初の設定を使うため、二つの検索結果は一致する。
+    pub proof fn vram_indices_agree(&self, name: Seq<u8>, first: Option<usize>, second: Option<usize>)
+        requires self.vram_index_matches(name, first), self.vram_index_matches(name, second),
+        ensures first == second,
+    {
+        match (first, second) {
+            (Some(first), Some(second)) => {
+                let i = choose|i: usize| {
+                    &&& #[trigger] self.first_binding(name, Some(i))
+                    &&& self.bindings@[i as int].index == first
+                    &&& first < self.vm_model().storage_model().len()
+                    &&& self.vm_model().storage_model()[first as int].memory_model().is_some()
+                };
+                let j = choose|j: usize| {
+                    &&& #[trigger] self.first_binding(name, Some(j))
+                    &&& self.bindings@[j as int].index == second
+                    &&& second < self.vm_model().storage_model().len()
+                    &&& self.vm_model().storage_model()[second as int].memory_model().is_some()
+                };
+                if i < j {
+                    assert(self.bindings@[i as int].name.spec_bytes() != name);
+                } else if j < i {
+                    assert(self.bindings@[j as int].name.spec_bytes() != name);
+                }
+                assert(i == j);
+            },
+            (Some(_), None) | (None, Some(_)) => {
+                let i = choose|i: usize| #[trigger] self.first_binding(name, Some(i));
+                assert(self.bindings@[i as int].name.spec_bytes() != name);
+            },
+            (None, None) => {},
+        }
     }
 
     /// 同じ公開名で得た格納添字と読み出し結果は、同じ記憶部を指す。

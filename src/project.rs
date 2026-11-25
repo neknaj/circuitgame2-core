@@ -121,7 +121,7 @@ pub use sources::{project_sources_match, source_set_error, valid_source_snapshot
 #[cfg(verus_only)]
 pub use use_aliases::port_types_equal;
 pub use use_aliases::{
-    AliasConflict, AliasDisposition, DefinitionBatchError, DefinitionBinding, DefinitionPosition,
+    AliasConflict, AliasDisposition, DefinitionBatchError, DefinitionBinding, DefinitionPosition, DefinitionReferences,
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,
     IndexedDefinitionBinding, OwnedUseAliasConflict, ReferenceScopeError, RelativeResolutionError,
     RelativeTarget, ResolvedDefinitionReference, UnqualifiedTarget, UseAliasConflict, UseAliases,
