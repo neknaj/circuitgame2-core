@@ -1,6 +1,10 @@
 //! 要求 ID とデバイス内タグを対応付け、応答の配送まで追跡する。
 
 mod delivery;
+mod issuance;
+pub use issuance::{BatchRegistrationError, RequestKey};
+#[cfg(verus_only)]
+pub use issuance::{first_batch_request_error, issued_rows_match, valid_request_batch};
 
 pub use delivery::{DeliveryError, PendingDelivery, ResponseKey};
 #[cfg(verus_only)]
@@ -38,6 +42,15 @@ struct RequestEntry {
 pub struct RequestLedger {
     generation: u64,
     entries: Vec<RequestEntry>,
+}
+
+/// 指定 ID が最初に現れる要求行を表す。
+pub open spec fn request_row_matches(
+    rows: Seq<(HostRequestId, u64, ResponseSlot)>, id: HostRequestId, i: int,
+) -> bool {
+    &&& 0 <= i < rows.len()
+    &&& rows[i].0 == id
+    &&& forall|j: int| 0 <= j < i ==> (#[trigger] rows[j]).0 != id
 }
 
 impl RequestLedger {
@@ -125,6 +138,18 @@ impl RequestLedger {
                 Err(error) => old(self).registration_error(id, tag, tick) == Some(error) && *final(self) == *old(self),
             },
     {
+        self.check_registration(id, tag, tick)?;
+        self.entries.push(RequestEntry { tag, response: ResponseSlot::new(id, tick) });
+        assert(self.requests().drop_last() =~= old(self).requests());
+        Ok(())
+    }
+
+    fn check_registration(&self, id: HostRequestId, tag: u64, tick: u64)
+        -> (result: Result<(), RegisterRequestError>)
+        ensures
+            result.is_ok() <==> self.registration_error(id, tag, tick).is_none(),
+            result matches Err(error) ==> self.registration_error(id, tag, tick) == Some(error),
+    {
         if id.generation != self.generation {
             return Err(RegisterRequestError::DifferentGeneration);
         }
@@ -134,16 +159,12 @@ impl RequestLedger {
         if self.has_busy_tag(id.instance, tag, tick) {
             return Err(RegisterRequestError::TagInUse);
         }
-        self.entries.push(RequestEntry { tag, response: ResponseSlot::new(id, tick) });
-        assert(self.requests().drop_last() =~= old(self).requests());
         Ok(())
     }
 
     /// 最初に登録した指定 ID の行を表す。
     pub open spec fn found_request(&self, id: HostRequestId, i: int) -> bool {
-        &&& 0 <= i < self.requests().len()
-        &&& self.requests()[i].0 == id
-        &&& forall|j: int| 0 <= j < i ==> (#[trigger] self.requests()[j]).0 != id
+        request_row_matches(self.requests(), id, i)
     }
 
     /// 配送予定の応答を受理できることを表す。
