@@ -14,7 +14,7 @@ use crate::syntax::{
 };
 use super::defn::{DefnHeader, DefnHeaderError, is_name, read_defn_at, span_of};
 #[cfg(verus_only)]
-use super::defn::{HeaderContents, declaration_model, header_contents, plain_name, usable_forms};
+use super::defn::{HeaderContents, declaration_model, form_span_readable, header_contents, plain_name, readable_span, usable_forms};
 use super::forms::{is_spelling, source_word, subtree_end};
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
@@ -128,6 +128,36 @@ enum ItemContents {
 
 #[cfg(verus_only)]
 type EntryView = (Range<usize>, Option<Range<usize>>, ItemContents);
+
+spec fn binding_kind_span_valid(source: &str, kind: MetaItemKind) -> bool {
+    match kind {
+        MetaItemKind::Namespace { path } => readable_span(source, path),
+        MetaItemKind::Defn(header) => readable_span(source, header.name_span),
+        MetaItemKind::Defmacro { name, .. } => readable_span(source, name),
+        _ => true,
+    }
+}
+
+/// 宣言名と所属名前空間の範囲が、元ソースの UTF-8 境界にあることを表す。
+pub closed spec fn meta_binding_spans_valid(source: &str, items: Seq<MetaItem>) -> bool {
+    forall|i: int| 0 <= i < items.len() ==> {
+        let item = #[trigger] items[i];
+        &&& binding_kind_span_valid(source, item.kind)
+        &&& (item.namespace matches Some(path) ==> readable_span(source, path))
+    }
+}
+
+pub(crate) proof fn meta_binding_span_evidence(source: &str, items: Seq<MetaItem>, rank: int)
+    requires meta_binding_spans_valid(source, items), 0 <= rank < items.len(),
+    ensures
+        match items[rank].kind {
+            MetaItemKind::Namespace { path } => readable_span(source, path),
+            MetaItemKind::Defn(header) => readable_span(source, header.name_span),
+            MetaItemKind::Defmacro { name, .. } => readable_span(source, name),
+            _ => true,
+        },
+        items[rank].namespace matches Some(path) ==> readable_span(source, path),
+{}
 
 spec fn kind_view(kind: MetaItemKind) -> ItemContents {
     match kind {
@@ -299,9 +329,10 @@ spec fn kind_result(result: Result<MetaItemKind, MetaFileError>) -> Result<ItemC
     match result { Ok(kind) => Ok(kind_view(kind)), Err(error) => Err(error) }
 }
 
-fn read_macro(forms: &[Form], root: usize) -> (result: Result<MetaItemKind, MetaFileError>)
-    requires complete_list_indices(forms@), root < forms@.len(), forms@[root as int] is List,
+fn read_macro(_source: &str, forms: &[Form], root: usize) -> (result: Result<MetaItemKind, MetaFileError>)
+    requires usable_forms(_source, forms@), root < forms@.len(), forms@[root as int] is List,
     ensures kind_result(result) == macro_model(forms@, root),
+        result matches Ok(kind) ==> binding_kind_span_valid(_source, kind),
 {
     let (name, names, body) = read_macro_sites(forms, root)?;
     let first = names + 1;
@@ -320,6 +351,7 @@ fn read_macro(forms: &[Form], root: usize) -> (result: Result<MetaItemKind, Meta
         at += 1;
     }
     assert(first_invalid_parameter(forms@, first, body).is_none());
+    proof { form_span_readable(_source, forms@, name); }
     Ok(MetaItemKind::Defmacro {
         name: span_of(&forms[name]), parameters: collect_spans(forms, first, body), body: span_of(&forms[body]),
     })
@@ -371,6 +403,7 @@ fn read_directive(source: &str, forms: &[Form], root: usize, head: Head)
         meta_forms(source, forms@), root < forms@.len(), forms@[root as int] is List,
         root + 2 <= subtree_limit(forms@, root), head is Namespace || head is Use || head is Export,
     ensures kind_result(result) == direct_item_model(source, forms@, root, head),
+        result matches Ok(kind) ==> binding_kind_span_valid(source, kind),
 {
     let end = subtree_end(forms, root);
     let span = span_of(&forms[root]);
@@ -382,7 +415,10 @@ fn read_directive(source: &str, forms: &[Form], root: usize, head: Head)
     let check = check_named_directive(source, forms, first, end, close, head);
     match check {
         Some(Ok(())) => Ok(match head {
-            Head::Namespace => MetaItemKind::Namespace { path: span_of(&forms[first]) },
+            Head::Namespace => {
+                proof { form_span_readable(source, forms@, first); }
+                MetaItemKind::Namespace { path: span_of(&forms[first]) }
+            },
             Head::Use => MetaItemKind::Use { target: span_of(&forms[first]), alias: span_of(&forms[first + 1]) },
             _ => MetaItemKind::Export { names: collect_spans(forms, first, end) },
         }),
@@ -419,6 +455,7 @@ fn read_item(source: &str, forms: &[Form], root: usize, in_namespace: bool)
     requires meta_forms(source, forms@), root < forms@.len(),
     ensures
         kind_result(result) == item_model(source, forms@, root, in_namespace),
+        result matches Ok(kind) ==> binding_kind_span_valid(source, kind),
         result matches Ok(MetaItemKind::Namespace { path }) ==> !in_namespace
             && root + 3 <= subtree_limit(forms@, root)
             && forms@[root as int] is List
@@ -432,7 +469,7 @@ fn read_item(source: &str, forms: &[Form], root: usize, in_namespace: bool)
             Ok(header) => Ok(MetaItemKind::Defn(header)),
             Err(error) => Err(MetaFileError::Defn(error)),
         },
-        Some(ItemTag::Defmacro) => read_macro(forms, root),
+        Some(ItemTag::Defmacro) => read_macro(source, forms, root),
         _ => Err(MetaFileError::ExpectedItem(span_of(&forms[root]))),
     }
 }
@@ -552,7 +589,9 @@ fn read_region(
     source: &str, forms: &[Form], first: usize, end: usize, parent: Option<usize>, entries: &mut Vec<MetaItem>,
 ) -> (result: Result<(), MetaFileError>)
     requires meta_forms(source, forms@), index_region(forms@, first, end, parent),
-    ensures region_model(source, forms@, first, end, parent, entry_views(old(entries)@))
+        meta_binding_spans_valid(source, old(entries)@),
+    ensures result.is_ok() ==> meta_binding_spans_valid(source, final(entries)@),
+        region_model(source, forms@, first, end, parent, entry_views(old(entries)@))
         == match result { Ok(()) => Ok(entry_views(final(entries)@)), Err(error) => Err(error) },
     decreases end - first,
 {
@@ -562,6 +601,7 @@ fn read_region(
         invariant
             meta_forms(source, forms@), first <= at, index_region(forms@, at, end, parent),
             initial == entry_views(old(entries)@),
+            meta_binding_spans_valid(source, entries@),
             region_model(source, forms@, first, end, parent, initial)
                 == region_model(source, forms@, at, end, parent, entry_views(entries@)),
         decreases end - at,
@@ -575,7 +615,10 @@ fn read_region(
         };
         let is_namespace = matches!(&kind, MetaItemKind::Namespace { .. });
         let namespace = match parent {
-            Some(root) => Some(span_of(&forms[root + 2])),
+            Some(root) => {
+                proof { form_span_readable(source, forms@, (root + 2) as usize); }
+                Some(span_of(&forms[root + 2]))
+            },
             None => None,
         };
         proof { region_child_end(forms@, at, end, parent); }
@@ -586,7 +629,19 @@ fn read_region(
         let ghost pushed = entry_view(entry);
         let ghost prior = entry_views(entries@);
         proof { region_advanced(source, forms@, at, end, parent, prior, content, next); }
+        let ghost previous = entries@;
         entries.push(entry);
+        assert(meta_binding_spans_valid(source, entries@)) by {
+            assert forall|i: int| 0 <= i < entries@.len() implies {
+                let item = #[trigger] entries@[i];
+                &&& binding_kind_span_valid(source, item.kind)
+                &&& (item.namespace matches Some(path) ==> readable_span(source, path))
+            } by {
+                if i < previous.len() {
+                    assert(entries@[i] == previous[i]);
+                }
+            };
+        };
         assert(entry_views(entries@) =~= prior.push(pushed));
         if is_namespace {
             read_region(source, forms, at + 3, next, Some(at), entries)?;
@@ -680,6 +735,7 @@ pub proof fn meta_file_results_agree(
 /// ファイル全体の字句と共通 S 式を先に検査する。続いてフォームを記述順に検査し、最初の違反を返す。
 pub fn index_meta_file(source: &str) -> (result: Result<Vec<MetaItem>, MetaFileError>)
     ensures result.is_ok() == valid_meta_file(source), meta_file_matches(source, result),
+        result matches Ok(items) ==> meta_binding_spans_valid(source, items@),
 {
     let forms = match syntax::parse(source) {
         Ok(forms) => forms,
@@ -687,6 +743,7 @@ pub fn index_meta_file(source: &str) -> (result: Result<Vec<MetaItem>, MetaFileE
     };
     let mut entries = Vec::new();
     assert(entry_views(entries@) =~= Seq::<EntryView>::empty());
+    assert(meta_binding_spans_valid(source, entries@));
     read_region(source, &forms, 0, forms.len(), None, &mut entries)?;
     Ok(entries)
 }

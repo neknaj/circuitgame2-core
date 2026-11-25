@@ -65,6 +65,13 @@ impl NameKey<'_> {
     }
 }
 
+pub(super) proof fn namespace_component_agrees_on_bytes(
+    left_path: &str, right_path: &str, left: NameKey, right: NameKey, lo: int, hi: int,
+)
+    requires left_path.spec_bytes() == right_path.spec_bytes(), key_bytes(left) == key_bytes(right),
+    ensures namespace_component(left_path, left, lo, hi) == namespace_component(right_path, right, lo, hi),
+{}
+
 spec fn bytes_at(bytes: Seq<u8>, at: int, expected: Seq<u8>) -> bool {
     0 <= at <= at + expected.len() <= bytes.len()
         && bytes[at..at + expected.len()] == expected
