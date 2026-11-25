@@ -3,6 +3,7 @@
 //! `func` の単体評価では、先行ゲートの評価値を読み、入力から出力まで値を伝える。
 
 mod bit_sliced;
+mod packed_combinational;
 mod packed_layout;
 mod clocked;
 mod clocked_io;
@@ -35,6 +36,10 @@ pub use source_vm_trace::{
 };
 
 pub use bit_sliced::PackedNorFrame;
+pub use packed_combinational::{PackedCombinationalError, PackedCombinationalLayout32};
+#[cfg(verus_only)]
+pub use packed_combinational::{before_gate32, combinational_read_order32, packed_combinational32_agrees,
+    packed_word_offset32, packed_word_offsets32_disjoint};
 pub use packed_layout::PackedNorLayout32;
 #[cfg(verus_only)]
 pub use packed_layout::{packed_clocked_step32_agrees, packed_lane32, packed_tick32_agrees, packed_wire_slot, packed_wire_slot_agrees};
