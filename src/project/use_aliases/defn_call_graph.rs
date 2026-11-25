@@ -19,6 +19,8 @@ use super::call_site::{named_body_matches_project, project_named_defn_body_match
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::DefnSignature;
 #[cfg(verus_only)]
+use crate::syntax::form_span;
+#[cfg(verus_only)]
 use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
 
 verus! {
@@ -404,6 +406,43 @@ pub proof fn defn_call_plan_edge_order(
         assert(edge.from == plan.vertices@[node] && edge.from == order[rank as int]);
         assert(order.index_of(edge.from) == rank);
     };
+}
+
+/// 順位ごとの呼び出し列から、元の構文木の位置と呼び出し先の順位を取り出す。
+pub proof fn defn_call_plan_site_at_rank(
+    aliases: &MixedUseAliases, plan: &DefnCallPlan, rank: usize, site: usize,
+) -> (at: usize)
+    requires
+        defn_call_plan_matches(aliases, plan),
+        rank < plan.order_model().len(),
+        plan.calls_model_at_rank(rank) matches Some(sites) && site < sites.len(),
+    ensures {
+        let sites = plan.calls_model_at_rank(rank)->Some_0;
+        let edge = sites[site as int];
+        let order = plan.order_model();
+        let project = aliases.targets_model().project_model();
+        &&& edge.from == order[rank as int]
+        &&& order.contains(edge.to)
+        &&& order.index_of(edge.to) < rank
+        &&& edge.from.file < project.sources_model().len()
+        &&& *edge.call.source == project.sources_model()[edge.from.file as int]
+        &&& project.functional_forms_model(edge.from.file) matches Some(forms) && {
+            &&& at + 1 < forms.len()
+            &&& forms[at as int] is List
+            &&& forms[at + 1] is Atom
+            &&& edge.call.span == form_span(forms[at as int])
+            &&& edge.call.head == form_span(forms[at + 1])
+        }
+    },
+{
+    defn_call_plan_edge_order(aliases, plan, rank);
+    let edge = plan.calls_model_at_rank(rank)->Some_0[site as int];
+    assert(defn_call_edge_matches(aliases, edge));
+    reveal(defn_call_edge_matches);
+    let project = aliases.targets_model().project_model();
+    let forms = project.functional_forms_model(edge.from.file)->Some_0;
+    choose|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List && forms[at + 1] is Atom
+        && edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
 }
 
 proof fn checked_dependency_order_is_call_plan(

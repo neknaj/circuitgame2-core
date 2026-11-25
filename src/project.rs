@@ -95,7 +95,7 @@ pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphEr
 #[cfg(verus_only)]
 pub(crate) use use_aliases::call_arity_matches;
 #[cfg(verus_only)]
-pub use use_aliases::{defn_call_cycle, defn_call_plan_matches, defn_call_plan_contains, defn_call_plan_edge_order, defn_name_resolution, prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin, resolved_defn_name_origin, stage_name_has_no_binding, mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixed_alias_dispositions_agree, mixed_use_aliases_acceptable, mixed_use_aliases_match};
+pub use use_aliases::{defn_call_cycle, defn_call_plan_matches, defn_call_plan_contains, defn_call_plan_edge_order, defn_call_plan_site_at_rank, defn_name_resolution, prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin, resolved_defn_name_origin, stage_name_has_no_binding, mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixed_alias_dispositions_agree, mixed_use_aliases_acceptable, mixed_use_aliases_match};
 pub use use_aliases::{ModuleDriverError, ModuleDrivers};
 pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
