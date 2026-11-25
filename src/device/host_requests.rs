@@ -249,6 +249,22 @@ fn index_requests<N, R>(source: &[DeviceHostRequest<N, R>])
 }
 
 impl<'tick, E: QueuedResponse> PendingDeviceEvents<'tick, E> {
+    /// ホスト要求を含む tick の診断が、渡した入力列に対応することを表す。
+    pub open spec fn host_request_commit_error<N, R>(
+        &self, input: Seq<bool>, source: Seq<DeviceHostRequest<N, R>>, error: HostRequestCommitError,
+    ) -> bool {
+        match error {
+            HostRequestCommitError::InstanceOrder(i) => {
+                &&& 0 < i < source.len()
+                &&& source[i as int - 1].instance > source[i as int].instance
+                &&& host_request_order(source.take(i as int))
+            },
+            HostRequestCommitError::Allocation => true,
+            HostRequestCommitError::Tick(reason) =>
+                host_request_order(source) && self.request_batch_error(input, host_request_keys(source), reason),
+        }
+    }
+
     /// 要求と通知の順序を保ち、回路更新が成功したときにだけホストへ渡す。
     ///
     /// 同じインスタンスの項目はデバイスが返したリスト順に並べる。通知には番号を振らない。
@@ -269,13 +285,7 @@ impl<'tick, E: QueuedResponse> PendingDeviceEvents<'tick, E> {
                 &&& self.after_model().2 == self.before_model().2
                 &&& self.after_ids() == self.before_ids()
             },
-            result matches Err(HostRequestCommitError::InstanceOrder(i)) ==> {
-                &&& 0 < i < source@.len()
-                &&& source@[i as int - 1].instance > source@[i as int].instance
-                &&& host_request_order(source@.take(i as int))
-            },
-            result matches Err(HostRequestCommitError::Tick(error)) ==>
-                host_request_order(source@) && self.request_batch_error(input@, host_request_keys(source@), error),
+            result matches Err(error) ==> self.host_request_commit_error(input@, source@, error),
             result matches Ok((consumed, committed)) ==> {
                 &&& committed.source_model() == source@
                 &&& host_request_order(source@)

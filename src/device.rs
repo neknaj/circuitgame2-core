@@ -7,6 +7,7 @@ mod request_ids;
 mod response;
 mod scheduling;
 mod session;
+mod state_session;
 
 pub use events::{DeviceEvent, ScheduleInputError};
 #[cfg(verus_only)]
@@ -26,3 +27,5 @@ pub use scheduling::{QueuedResponse, ResponseTickError, ScheduleResponseError, S
 pub use scheduling::{queued_response_keys, response_keys};
 
 pub use session::{DeviceEventSession, DeviceResponseSession, DeviceSession, PendingDeviceEvents, PendingDeviceEventsReset, PendingDeviceReset, PendingDeviceTick, RequestBatchTickError, RequestIssueError};
+
+pub use state_session::{DeviceStateSession, DeviceStateCountError, DeviceStateTickError, DeviceStateTickResult, PendingDeviceStateTick, PendingDeviceStateReset, StatefulInputError};
