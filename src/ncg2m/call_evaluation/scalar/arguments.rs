@@ -191,6 +191,7 @@ impl<'plan, 'p, 'a> PendingScalarArgument<'plan, 'p, 'a> {
         ensures {
             let (edge, before, callee) = self.model();
             let slot = before.len() as int;
+            &&& edge.arguments@.len() == callee.signature.parameters@.len()
             &&& slot < callee.signature.parameters@.len()
             &&& next.is_ok() == scalar_fits(value, callee.signature.parameters@[slot].ty.ty)
             &&& match next {

@@ -25,7 +25,7 @@ pub use condition::{ScalarCondition, ScalarExpressionSite};
 pub use execution::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice};
 #[cfg(verus_only)]
 pub use execution::{
-    resumed_scalar_execution_matches, scalar_execution_slice_matches,
+    finite_scalar_executions_agree, resumed_scalar_execution_matches, scalar_execution_slice_matches,
     scalar_execution_states_observe_same, scalar_execution_steps_observe_same,
     scalar_execution_terminal_extends,
 };
