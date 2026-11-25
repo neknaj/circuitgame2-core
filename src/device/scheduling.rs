@@ -230,13 +230,8 @@ impl<'a, T> PendingIoTick<'a, ScheduledResponse<T>> {
             result.is_ok() <==> old(ledger).valid_delivery(
                 response_keys(self.before_events(), self.target_model()), self.target_model())
                 && input@.len() == self.before_circuit().vm_model().external_count(),
-            result matches Err(ResponseTickError::Delivery(error)) ==> {
-                let keys = response_keys(self.before_events(), self.target_model());
-                exists|i: usize| i < keys.len()
-                    && #[trigger] old(ledger).delivery_issue_at(keys, self.target_model(), i) == Some(error)
-                    && forall|j: usize| j < i ==>
-                        #[trigger] old(ledger).delivery_issue_at(keys, self.target_model(), j).is_none()
-            },
+            result matches Err(ResponseTickError::Delivery(error)) ==> old(ledger).first_delivery_error(
+                response_keys(self.before_events(), self.target_model()), self.target_model(), error),
             result matches Err(ResponseTickError::Input(error)) ==>
                 old(ledger).valid_delivery(response_keys(self.before_events(), self.target_model()), self.target_model())
                 && input@.len() != self.before_circuit().vm_model().external_count()

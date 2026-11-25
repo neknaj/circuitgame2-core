@@ -137,6 +137,15 @@ impl RequestLedger {
         !(exists|i: usize| i < keys.len() && #[trigger] self.delivery_issue_at(keys, target, i).is_some())
     }
 
+    /// エラーが入力順で最初の配送エラーであることを表す。
+    pub open spec fn first_delivery_error(
+        &self, keys: Seq<ResponseKey>, target: TickPosition, error: DeliveryError,
+    ) -> bool {
+        exists|i: usize| i < keys.len()
+            && #[trigger] self.delivery_issue_at(keys, target, i) == Some(error)
+            && forall|j: usize| j < i ==> #[trigger] self.delivery_issue_at(keys, target, j).is_none()
+    }
+
     proof fn prior_keys_use_index(
         &self, updates: Seq<Update>, keys: Seq<ResponseKey>, key: ResponseKey, index: int,
     )
@@ -182,9 +191,7 @@ impl RequestLedger {
             result.is_ok() <==> old(self).valid_delivery(keys@, target),
             result matches Err(error) ==> {
                 &&& *final(self) == *old(self)
-                &&& exists|i: usize| i < keys@.len()
-                    && #[trigger] old(self).delivery_issue_at(keys@, target, i) == Some(error)
-                    && forall|j: usize| j < i ==> #[trigger] old(self).delivery_issue_at(keys@, target, j).is_none()
+                &&& old(self).first_delivery_error(keys@, target, error)
             },
             result matches Ok(pending) ==> {
                 &&& pending.before_model() == *old(self)

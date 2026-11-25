@@ -4,6 +4,7 @@ mod ledger;
 mod request_ids;
 mod response;
 mod scheduling;
+mod session;
 
 pub use ledger::{DeliveryError, PendingDelivery, RegisterRequestError, RequestLedger, ResponseKey};
 #[cfg(verus_only)]
@@ -15,3 +16,5 @@ pub use scheduling::{ResponseTickError, ScheduleResponseError, ScheduledResponse
 
 #[cfg(verus_only)]
 pub use scheduling::response_keys;
+
+pub use session::{DeviceResponseSession, PendingDeviceReset, PendingDeviceTick, RequestIssueError};

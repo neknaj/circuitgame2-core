@@ -229,6 +229,54 @@ fn scheduled_host_response_is_visible_at_its_delivery_tick() {
 }
 
 #[test]
+fn owned_device_session_resets_request_identity_together_with_responses() {
+    use circuitgame2_core::device::{
+        DeviceResponseSession, HostResponseError, RegisterRequestError, RequestIssueError, ScheduleResponseError,
+    };
+    use circuitgame2_core::netlist::ClockedVm;
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceResponseSession::new(vm);
+    assert_eq!(session.issue_request(0, 1), Err(RequestIssueError::BeforeFirstTick));
+    assert!(session.prepare_tick().unwrap().commit(&[true]).unwrap().is_empty());
+    let first = session.issue_request(0, 1).unwrap();
+    assert_eq!(first.serial, 0);
+    assert_eq!(session.issue_request(0, 1), Err(RequestIssueError::Registration(RegisterRequestError::TagInUse)));
+    let second = session.issue_request(0, 2).unwrap();
+    assert_eq!(second.serial, 1);
+    let delivery = TickPosition { generation: 0, tick: 2 };
+    session.schedule_response(first, delivery, "first").unwrap();
+    session.schedule_response(second, delivery, "second").unwrap();
+
+    let reset = session.prepare_reset().unwrap();
+    assert_eq!(reset.target(), TickPosition { generation: 1, tick: 0 });
+    reset.cancel();
+    let tick = session.prepare_tick().unwrap();
+    assert_eq!(tick.previous_output(), [true]);
+    assert_eq!(tick.next_response(0).unwrap().1.payload.payload(), &"first");
+    tick.cancel();
+    let removed = session.prepare_reset().unwrap().commit();
+    assert_eq!(removed.len(), 2);
+    assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
+    session.prepare_tick().unwrap().commit(&[false]).unwrap();
+    let replacement = session.issue_request(0, 1).unwrap();
+    assert_eq!((replacement.generation, replacement.serial), (1, 0));
+    let new_delivery = TickPosition { generation: 1, tick: 2 };
+    assert_eq!(session.schedule_response(first, new_delivery, "old"),
+        Err(ScheduleResponseError::Response(HostResponseError::DifferentGeneration)));
+    session.schedule_response(replacement, new_delivery, "new").unwrap();
+    let consumed = session.prepare_tick().unwrap().commit(&[true]).unwrap();
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].payload.payload(), &"new");
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,
