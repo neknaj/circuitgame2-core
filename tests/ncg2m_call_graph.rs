@@ -316,22 +316,36 @@ fn scalar_entry_evaluates_checked_arithmetic_in_operand_order() {
     let run = |item, budget| {
         let entry = prepare_scalar_entry(&plan, DefnPosition { file: 0, item }).unwrap();
         let mut state = entry.start(Vec::new()).unwrap();
+        let mut total = 0;
         for _ in 0..128 {
-            match state.run_slice(NonZeroUsize::new(budget).unwrap()) {
-                Ok(ScalarExecutionSlice::Suspended(next)) => state = next,
-                Ok(ScalarExecutionSlice::Complete(value)) => return Ok(value),
-                Err(error) => return Err(error),
+            let (result, steps) = state.run_slice_with_steps(NonZeroUsize::new(budget).unwrap());
+            assert!((1..=budget).contains(&steps));
+            total += steps;
+            match result {
+                Ok(ScalarExecutionSlice::Suspended(next)) => {
+                    assert_eq!(steps, budget);
+                    state = next;
+                }
+                Ok(ScalarExecutionSlice::Complete(value)) => return (Ok(value), total),
+                Err(error) => return (Err(error), total),
             }
         }
         panic!()
     };
-    for budget in [1, 128] {
-        for (item, expected) in [IntegerValue::Nat(8), IntegerValue::Int(i64::MIN), IntegerValue::Nat(7)]
-            .into_iter().enumerate()
-        {
-            assert_eq!(run(item, budget).unwrap(), ScalarValue::Integer(expected));
-        }
-        let Err(ScalarExecutionError::Arithmetic { source: origin, operation, error }) = run(3, budget) else {
+    for (item, expected) in [IntegerValue::Nat(8), IntegerValue::Int(i64::MIN), IntegerValue::Nat(7)]
+        .into_iter().enumerate()
+    {
+        let (sliced, sliced_steps) = run(item, 1);
+        let (whole, whole_steps) = run(item, 128);
+        assert_eq!(sliced.unwrap(), ScalarValue::Integer(expected));
+        assert_eq!(whole.unwrap(), ScalarValue::Integer(expected));
+        assert_eq!(sliced_steps, whole_steps);
+    }
+    let (sliced, sliced_steps) = run(3, 1);
+    let (whole, whole_steps) = run(3, 128);
+    assert_eq!(sliced_steps, whole_steps);
+    for result in [sliced, whole] {
+        let Err(ScalarExecutionError::Arithmetic { source: origin, operation, error }) = result else {
             panic!()
         };
         assert_eq!(operation, IntegerOperation::Sub);

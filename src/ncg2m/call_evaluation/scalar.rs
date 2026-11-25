@@ -30,6 +30,7 @@ pub use execution::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice}
 #[cfg(verus_only)]
 pub use execution::{
     finite_scalar_execution_from_progress, finite_scalar_executions_agree, resumed_scalar_execution_matches,
+    resumed_scalar_step_counts_match, scalar_execution_slice_steps_match, terminal_scalar_step_counts_agree,
     scalar_execution_slice_matches,
     scalar_execution_states_observe_same, scalar_execution_steps_observe_same,
     scalar_execution_terminal_extends,
