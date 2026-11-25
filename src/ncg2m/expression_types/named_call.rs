@@ -12,7 +12,7 @@ pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
 pub(crate) use body::{indexed_call_body_matches, indexed_call_body_origin};
 #[cfg(verus_only)]
-pub use body::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+pub use body::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
 mod slots;
 pub(in crate::ncg2m) use slots::{is_expression_slot, mark_expression_slots};
 #[cfg(verus_only)]

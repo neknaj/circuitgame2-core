@@ -219,4 +219,4 @@ pub use use_targets::{
 pub use use_targets::{indexed_mixed_use_at, mixed_use_site_at, mixed_use_target_error_matches, mixed_use_targets_match, use_target_error_evidence, use_targets_match};
 
 #[cfg(verus_only)]
-pub use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+pub use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};

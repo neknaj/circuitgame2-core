@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use vstd::prelude::*;
-use crate::ncg2m::expression_types::DefnBodyCallError;
+use crate::ncg2m::{call_evaluation::CallArguments, expression_types::DefnBodyCallError};
 use super::{DefnCallEdge, DefnCallSite, DefnPosition, MixedUseAliases};
 use super::dependency_order::{DependencyEdge, check_dependency_order};
 #[cfg(verus_only)]
@@ -21,7 +21,7 @@ use crate::ncg2m::data_types::DefnSignature;
 #[cfg(verus_only)]
 use crate::syntax::form_span;
 #[cfg(verus_only)]
-use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
 
 verus! {
 
@@ -98,6 +98,22 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         let node = *self.order.get(rank)?;
         let sites = self.edges.get(node)?;
         Some(sites.as_slice())
+    }
+
+    /// 計画に含まれる呼び出しの引数評価を始める。
+    ///
+    /// 呼び出し元の順位または呼び出し列の添字が範囲外なら `None` を返す。
+    pub fn call_arguments<'call, Value>(&'call self, rank: usize, site: usize)
+        -> (waiting: Option<CallArguments<'call, 'p, 'a, Value>>)
+        ensures
+            waiting.is_some() <==> (self.calls_model_at_rank(rank) matches Some(edges) && site < edges.len()),
+            waiting matches Some(args) ==> {
+                let edges = self.calls_model_at_rank(rank)->Some_0;
+                *args.model().0 == edges[site as int] && args.model().1 == Seq::<Value>::empty()
+            },
+    {
+        let edge = self.calls_at_rank(rank)?.get(site)?;
+        Some(CallArguments::start(edge))
     }
 
     /// 順序のすべての添字から補助関数の位置を取り出せることを表す。
@@ -274,11 +290,30 @@ fn graph_rows<'t, 'p, 'a>(
     Ok((rows, graph))
 }
 
-fn copy_edge<'p, 'a>(edge: &DefnCallEdge<'p, 'a>) -> (copy: DefnCallEdge<'p, 'a>)
-    ensures copy == *edge,
+fn copy_edge<'p, 'a>(
+    _aliases: &MixedUseAliases<'_, 'p, 'a>, edge: &DefnCallEdge<'p, 'a>,
+) -> (copy: DefnCallEdge<'p, 'a>)
+    requires defn_call_edge_matches(_aliases, *edge),
+    ensures copy.from == edge.from, copy.to == edge.to, copy.at == edge.at,
+        copy.call == edge.call, copy.arguments@ == edge.arguments@,
+        defn_call_edge_matches(_aliases, copy),
 {
     let site = &edge.call;
-    DefnCallEdge { from: edge.from, to: edge.to, call: DefnCallSite {
+    let mut arguments = Vec::new();
+    let mut i = 0;
+    while i < edge.arguments.len()
+        invariant
+            i <= edge.arguments@.len(),
+            arguments@ == edge.arguments@.take(i as int),
+        decreases edge.arguments@.len() - i,
+    {
+        arguments.push(edge.arguments[i]);
+        assert(arguments@ =~= edge.arguments@.take(i as int + 1));
+        i += 1;
+    }
+    assert(arguments@ =~= edge.arguments@);
+    proof { reveal(defn_call_edge_matches); }
+    DefnCallEdge { from: edge.from, to: edge.to, at: edge.at, arguments, call: DefnCallSite {
         source: site.source, span: site.span.start..site.span.end, head: site.head.start..site.head.end,
     } }
 }
@@ -310,7 +345,9 @@ fn graph_cycle_sites<'p, 'a>(
             graph_matches(_aliases, _vertices@, rows@, _graph@),
             forall|j: int| 0 <= j < sites@.len() ==> {
                 let step = #[trigger] cycle@[j];
-                &&& sites@[j] == rows@[step.from as int]@[step.field as int]
+                &&& sites@[j].at == rows@[step.from as int]@[step.field as int].at
+                &&& sites@[j].call == rows@[step.from as int]@[step.field as int].call
+                &&& sites@[j].arguments@ == rows@[step.from as int]@[step.field as int].arguments@
                 &&& sites@[j].from == _vertices@[step.from as int]
                 &&& sites@[j].to == _vertices@[step.to as int]
                 &&& defn_call_edge_matches(_aliases, sites@[j])
@@ -321,7 +358,7 @@ fn graph_cycle_sites<'p, 'a>(
         assert(dependency_edge(_graph@, *step));
         assert(graph_row_matches(_aliases, _vertices@, step.from, rows@[step.from as int]@, _graph@[step.from as int]@));
         let edge = &rows[step.from][step.field];
-        sites.push(copy_edge(edge));
+        sites.push(copy_edge(_aliases, edge));
         i += 1;
     }
     proof {
@@ -421,6 +458,7 @@ pub proof fn defn_call_plan_site_at_rank(
         let edge = sites[site as int];
         let order = plan.order_model();
         let project = aliases.targets_model().project_model();
+        &&& at == edge.at
         &&& edge.from == order[rank as int]
         &&& order.contains(edge.to)
         &&& order.index_of(edge.to) < rank
@@ -432,6 +470,7 @@ pub proof fn defn_call_plan_site_at_rank(
             &&& forms[at + 1] is Atom
             &&& edge.call.span == form_span(forms[at as int])
             &&& edge.call.head == form_span(forms[at + 1])
+            &&& defn_call_arguments(forms, at, edge.arguments@)
         }
     },
 {
@@ -439,10 +478,7 @@ pub proof fn defn_call_plan_site_at_rank(
     let edge = plan.calls_model_at_rank(rank)->Some_0[site as int];
     assert(defn_call_edge_matches(aliases, edge));
     reveal(defn_call_edge_matches);
-    let project = aliases.targets_model().project_model();
-    let forms = project.functional_forms_model(edge.from.file)->Some_0;
-    choose|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List && forms[at + 1] is Atom
-        && edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
+    edge.at
 }
 
 proof fn checked_dependency_order_is_call_plan(

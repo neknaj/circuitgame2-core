@@ -30,6 +30,10 @@ pub struct DefnPosition {
 pub struct DefnCallEdge<'p, 'a> {
     /// 呼び出し元の補助関数。
     pub from: DefnPosition,
+    /// 元の平坦な構文木における呼び出しフォームの添字。
+    pub at: usize,
+    /// 元の構文木における直下の引数の添字。左からの評価順に並ぶ。
+    pub arguments: alloc::vec::Vec<usize>,
     /// 呼び出しを記述したファイル、文書版と範囲。
     pub call: DefnCallSite<'p, 'a>,
     /// 呼び出し先の補助関数。

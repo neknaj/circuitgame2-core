@@ -1,5 +1,6 @@
 //! NCG2M のデータ型と組み込みの意味を実装する。
 
+pub mod call_evaluation;
 pub mod data_types;
 pub mod defn;
 pub mod file;
