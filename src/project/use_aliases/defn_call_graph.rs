@@ -30,6 +30,7 @@ use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, de
 
 #[cfg(verus_only)]
 mod typing;
+mod runtime_support;
 
 verus! {
 
@@ -228,6 +229,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         &&& *body.source == project.sources_model()[defn.file as int]
         &&& project.functional_forms_model(defn.file) == Some(body.forms@)
         &&& crate::ncg2m::file::retained_forms_in_source_order(body.forms@)
+        &&& crate::syntax::complete_list_indices(body.forms@) && crate::syntax::nested_list_indices(body.forms@)
         &&& body.at < body.forms@.len()
         &&& form_spans_valid(body.source.text_model(), body.forms@,
             body.source.text_model().spec_bytes().len() as int)

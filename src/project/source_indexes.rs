@@ -376,6 +376,7 @@ impl<'a> ParsedProjectSources<'a> {
                 &&& *body.source == self.sources_model()[file as int]
                 &&& self.functional_forms_model(file) == Some(body.forms@)
                 &&& crate::ncg2m::file::retained_forms_in_source_order(body.forms@)
+                &&& crate::syntax::complete_list_indices(body.forms@) && crate::syntax::nested_list_indices(body.forms@)
                 &&& body.at < body.forms@.len()
                 &&& form_spans_valid(body.source.text_model(), body.forms@,
                     body.source.text_model().spec_bytes().len() as int)
