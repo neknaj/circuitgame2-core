@@ -8,7 +8,7 @@ use super::forms::{is_spelling, source_word, subtree_end};
 use super::forms::{spelling, subtree_limit};
 use super::integers::{
     IntegerLiteralError, IntegerOperation, IntegerType, IntegerValue,
-    evaluate_int, evaluate_nat, int_to_nat, nat_to_int, read_integer_literal,
+    evaluate_int, evaluate_nat, int_to_nat, nat_to_int, read_integer_literal, read_integer_operation,
 };
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid, sexpr_form_model, strict_syntax_rejection, well_formed_sexpr};
@@ -124,9 +124,7 @@ spec fn literal_model(form: Form, index: usize) -> Option<Literal> {
 }
 
 spec fn builtin_model(word: Seq<u8>) -> Option<Builtin> {
-    if word == "add".spec_bytes() { Some(Builtin::Arithmetic(IntegerOperation::Add)) }
-    else if word == "sub".spec_bytes() { Some(Builtin::Arithmetic(IntegerOperation::Sub)) }
-    else if word == "mul".spec_bytes() { Some(Builtin::Arithmetic(IntegerOperation::Mul)) }
+    if let Some(op) = super::integers::integer_operation_spelling(word) { Some(Builtin::Arithmetic(op)) }
     else if word == "int-to-nat".spec_bytes() { Some(Builtin::Convert(IntegerType::Nat)) }
     else if word == "nat-to-int".spec_bytes() { Some(Builtin::Convert(IntegerType::Int)) }
     else if word == "as-type".spec_bytes() { Some(Builtin::Annotate) }
@@ -152,9 +150,7 @@ fn literal(form: &Form, index: usize) -> (result: Option<Literal>)
 fn builtin(word: &str) -> (head: Option<Builtin>)
     ensures head == builtin_model(word.spec_bytes()),
 {
-    if is_spelling(word, "add") { Some(Builtin::Arithmetic(IntegerOperation::Add)) }
-    else if is_spelling(word, "sub") { Some(Builtin::Arithmetic(IntegerOperation::Sub)) }
-    else if is_spelling(word, "mul") { Some(Builtin::Arithmetic(IntegerOperation::Mul)) }
+    if let Some(op) = read_integer_operation(word) { Some(Builtin::Arithmetic(op)) }
     else if is_spelling(word, "int-to-nat") { Some(Builtin::Convert(IntegerType::Nat)) }
     else if is_spelling(word, "nat-to-int") { Some(Builtin::Convert(IntegerType::Int)) }
     else if is_spelling(word, "as-type") { Some(Builtin::Annotate) }
@@ -415,6 +411,7 @@ spec fn supported_at(rows: Seq<PreparedNode>, len: nat, at: usize) -> bool {
     at < len && len - 1 - at < rows.len() && rows[len - 1 - at] is Supported
 }
 
+#[verifier::spinoff_prover]
 proof fn children_are_supported(source: &str, forms: Seq<Form>, rows: Seq<PreparedNode>, at: usize, node: Node)
     requires
         prepared_row_sound(source, forms, rows),
@@ -836,11 +833,7 @@ fn eval_one(
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             };
-            match (lhs, rhs) {
-                (IntegerValue::Nat(a), IntegerValue::Nat(b)) => Some(pack_nat(evaluate_nat(operation, a, b), span)),
-                (IntegerValue::Int(a), IntegerValue::Int(b)) => Some(pack_int(evaluate_int(operation, a, b), span)),
-                _ => unreachable!(),
-            }
+            Some(evaluate_checked_arithmetic(operation, lhs, rhs, span, Ghost(ty)))
         }
         PlannedOperation::Convert(target, child) => {
             let input = other_type(target);
@@ -939,10 +932,34 @@ spec fn checked_literal(
     }
 }
 
-spec fn value_has_type(value: IntegerValue, ty: IntegerType) -> bool {
+pub(crate) open spec fn value_has_type(value: IntegerValue, ty: IntegerType) -> bool {
     match (value, ty) {
         (IntegerValue::Nat(_), IntegerType::Nat) | (IntegerValue::Int(_), IntegerType::Int) => true,
         _ => false,
+    }
+}
+
+pub(crate) open spec fn integer_value_number(value: IntegerValue) -> int {
+    match value {
+        IntegerValue::Nat(n) => n as int,
+        IntegerValue::Int(n) => n as int,
+    }
+}
+
+/// 同じ整数型の左右の値を演算し、範囲外なら元の演算式の範囲を返す。
+pub(crate) fn evaluate_checked_arithmetic(
+    operation: IntegerOperation, left: IntegerValue, right: IntegerValue, span: Range<usize>,
+    Ghost(ty): Ghost<IntegerType>,
+) -> (result: Result<IntegerValue, IntegerEvaluationError>)
+    requires value_has_type(left, ty), value_has_type(right, ty),
+    ensures integer_evaluation_matches(ty,
+        arithmetic_value(operation, integer_value_number(left), integer_value_number(right)), span, result),
+        result matches Ok(value) ==> value_has_type(value, ty),
+{
+    match (left, right) {
+        (IntegerValue::Nat(a), IntegerValue::Nat(b)) => pack_nat(evaluate_nat(operation, a, b), span),
+        (IntegerValue::Int(a), IntegerValue::Int(b)) => pack_int(evaluate_int(operation, a, b), span),
+        _ => unreachable!(),
     }
 }
 

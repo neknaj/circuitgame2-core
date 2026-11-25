@@ -5,11 +5,12 @@ use circuitgame2_core::ncg2m::call_evaluation::scalar::{
     ScalarValue, bind_scalar_call, prepare_scalar_arguments, prepare_scalar_entry, prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
-use circuitgame2_core::ncg2m::integers::IntegerValue;
+use circuitgame2_core::ncg2m::integers::{IntegerOperation, IntegerValue};
 use circuitgame2_core::project::{
-    DefnCallGraphError, DefnPosition, SourceSnapshot, check_mixed_use_aliases,
+    DefnCallError, DefnCallGraphError, DefnPosition, PreparedDefnCall, SourceSnapshot, check_mixed_use_aliases,
     index_mixed_use_targets, parse_project_sources,
 };
+use circuitgame2_core::syntax::{Form, parse};
 
 #[test]
 fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
@@ -253,4 +254,88 @@ fn scalar_fragment_support_checks_bodies_reachable_through_either_branch() {
         Err(ScalarEntryError::UnknownDefinition)));
     assert_eq!(plan.scalar_body_support_at_rank(usize::MAX), None);
     assert_eq!(plan.scalar_fragment_support_at_rank(usize::MAX), None);
+}
+
+#[test]
+fn arithmetic_fallback_preserves_shadowing_and_operand_positions() {
+    let source = "(defn add (as-type (Fn (Nat) Nat) (fn (x) x)))
+        (use ::add mul)
+        (defn caller (as-type (Fn () Nat)
+            (fn () (if true (sub (add 1) (mul 0)) (sub 0)))))";
+    let snapshots = [SourceSnapshot { path: "arithmetic.ncg2m", revision: 14, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let forms = parse(source).unwrap();
+    let form_at = |prefix| {
+        let first_byte = source.find(prefix).unwrap();
+        forms.iter().position(|form| matches!(form, Form::List { span, .. } if span.start == first_byte)).unwrap()
+    };
+    let operation = aliases.prepare_defn_call(0, 2, form_at("(sub (add")).unwrap().unwrap();
+    let PreparedDefnCall::Arithmetic { site, operation, arguments } = operation else { panic!() };
+    assert_eq!(operation, IntegerOperation::Sub);
+    assert_eq!(arguments, (form_at("(add 1)"), form_at("(mul 0)")));
+    assert_eq!(site.source.revision, 14);
+    assert_eq!(&source[site.head], "sub");
+    assert_eq!(&source[site.span], "(sub (add 1) (mul 0))");
+    for head in ["(add 1)", "(mul 0)"] {
+        let resolved = aliases.prepare_defn_call(0, 2, form_at(head)).unwrap().unwrap();
+        assert!(matches!(resolved, PreparedDefnCall::Declared { declaration, .. } if declaration.item == 0));
+    }
+    let malformed = aliases.prepare_defn_call(0, 2, form_at("(sub 0)")).unwrap();
+    assert!(matches!(malformed, Err(DefnCallError::ArithmeticArity {
+        operation: IntegerOperation::Sub, found: 1, ..
+    })));
+}
+
+#[test]
+fn declared_argument_type_selects_the_nested_arithmetic_signature() {
+    let source = "(defn take-int (as-type (Fn (Int) Nat) (fn (value) 0)))
+        (defn caller (as-type (Fn () Nat) (fn () (take-int (add -2 (mul 3 4))))))
+        (defn natural (as-type (Fn () Nat) (fn () (sub 2 1))))";
+    let snapshots = [SourceSnapshot { path: "integer-types.ncg2m", revision: 2, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    assert!(matches!(aliases.check_defn_body_with_calls(0, 1), Some(Ok(_))));
+    assert!(matches!(aliases.check_defn_body_with_calls(0, 2), Some(Ok(_))));
+}
+
+#[test]
+fn scalar_entry_evaluates_checked_arithmetic_in_operand_order() {
+    let source = "(defn natural (as-type (Fn () Nat) (fn () (mul 2 (sub 5 1)))))
+        (defn signed (as-type (Fn () Int) (fn () (add -9223372036854775808 0))))
+        (defn choose (as-type (Fn () Nat) (fn () (if true 7 (sub 0 1)))))
+        (defn first-failure (as-type (Fn () Nat)
+            (fn () (add (sub 0 1) (mul 18446744073709551615 2)))))";
+    let snapshots = [SourceSnapshot { path: "arithmetic-run.ncg2m", revision: 9, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    let run = |item, budget| {
+        let entry = prepare_scalar_entry(&plan, DefnPosition { file: 0, item }).unwrap();
+        let mut state = entry.start(Vec::new()).unwrap();
+        for _ in 0..128 {
+            match state.run_slice(NonZeroUsize::new(budget).unwrap()) {
+                Ok(ScalarExecutionSlice::Suspended(next)) => state = next,
+                Ok(ScalarExecutionSlice::Complete(value)) => return Ok(value),
+                Err(error) => return Err(error),
+            }
+        }
+        panic!()
+    };
+    for budget in [1, 128] {
+        for (item, expected) in [IntegerValue::Nat(8), IntegerValue::Int(i64::MIN), IntegerValue::Nat(7)]
+            .into_iter().enumerate()
+        {
+            assert_eq!(run(item, budget).unwrap(), ScalarValue::Integer(expected));
+        }
+        let Err(ScalarExecutionError::Arithmetic { source: origin, operation, error }) = run(3, budget) else {
+            panic!()
+        };
+        assert_eq!(operation, IntegerOperation::Sub);
+        assert_eq!(origin.revision, 9);
+        assert_eq!(&source[error.span], "(sub 0 1)");
+    }
 }

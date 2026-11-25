@@ -5,6 +5,7 @@ use super::super::termination::{
     expression_work, expression_work_dominates, expression_work_positive, scalar_expression_order, scalar_subexpression_order,
 };
 use crate::ncg2m::expression_types::named_call::argument_positions_increase;
+use crate::project::defn_call_argument_origin;
 use vstd::arithmetic::mul::lemma_mul_inequality;
 
 verus! {
@@ -42,6 +43,8 @@ spec fn saved_call_work(frame: Waiting) -> nat {
             call_work(rank, parent, edge, values.len() + 1, pending.ranks_model().1, target.at)
         },
         Waiting::Return { parent, rank, .. } => parent.cursor_model().saved_work_model(rank) + 1,
+        Waiting::Arithmetic(wait) => wait.parent.saved_work_model(wait.rank) + 1
+            + if wait.left.is_none() { job_work(wait.rank, wait.site.arguments.1) + 1 } else { 0 },
     }
 }
 
@@ -230,6 +233,12 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 let at = parent.expression_model().at;
                 let candidate = row matches Some(edges) && site < edges.len();
                 let different = candidate && row->Some_0[site as int].at != at;
+                if site == 0 && self.plan.arithmetic_site_model(rank, at).is_some()
+                    && arithmetic::requested_arithmetic_type(parent.expression_model().expected).is_some() {
+                    assert(after.waiting@.len() == stack.len() + 1);
+                    assert(false);
+                    return;
+                }
                 if !different {
                     let expected = parent.expression_model().expected;
                     let args = choose|args: ScalarArguments<'plan, 'p, 'a>|
@@ -271,6 +280,27 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 Active::Lookup { parent, site } => {
                     let at = parent.expression_model().at;
                     let expected = parent.expression_model().expected;
+                    let operator = self.plan.arithmetic_site_model(rank, at);
+                    if site == 0 && operator.is_some() && arithmetic::requested_arithmetic_type(expected).is_some() {
+                        let operation = operator->Some_0;
+                        defn_call_argument_origin(parent.frame_model().body_model().forms@, operation.at,
+                            seq![operation.arguments.0, operation.arguments.1], 0);
+                        defn_call_argument_origin(parent.frame_model().body_model().forms@, operation.at,
+                            seq![operation.arguments.0, operation.arguments.1], 1);
+                        scalar_subexpression_order(rank, at, rank, operation.arguments.0);
+                        scalar_subexpression_order(rank, at, rank, operation.arguments.1);
+                        expression_work_dominates(scalar_expression_order(rank, at), scalar_expression_order(rank, operation.arguments.0));
+                        expression_work_dominates(scalar_expression_order(rank, at), scalar_expression_order(rank, operation.arguments.1));
+                        expression_work_positive(scalar_expression_order(rank, operation.arguments.0));
+                        expression_work_positive(scalar_expression_order(rank, operation.arguments.1));
+                        parent.expression_work_parts(rank);
+                        let operand = after.active->Expression_0;
+                        operand.expression_work_parts(rank);
+                        operand.empty_branch_stack_has_no_work(rank);
+                        assert(after.waiting@.drop_last() =~= stack);
+                        reveal(waiting_work);
+                        return;
+                    }
                     let args = choose|args: ScalarArguments<'plan, 'p, 'a>|
                         #[trigger] prepared_arguments_match(self.plan, rank, site, Some(args))
                         && args.model().0.at == at && scalar_type_agrees(expected, args.model().2.signature.result_type.ty)
@@ -304,6 +334,30 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                                     parent.receiving_a_value_resolves_expression(value, inner);
                                     assert(false);
                                 },
+                            }
+                        },
+                        Waiting::Arithmetic(pending) => {
+                            reveal(arithmetic::arithmetic_step_matches);
+                            if pending.left.is_none() {
+                                let operand = after.active->Expression_0;
+                                operand.expression_work_parts(pending.rank);
+                                operand.empty_branch_stack_has_no_work(pending.rank);
+                                assert(after.waiting@.drop_last() =~= stack.drop_last());
+                            } else {
+                                let (result, parent, inner) = choose|result: crate::ncg2m::integers::IntegerValue,
+                                    parent: ScalarExpression<'p, 'a>, inner: ScalarExpressionStep<'p, 'a>|
+                                    #[trigger] parent.receive_matches(ScalarValue::Integer(result), inner)
+                                        && parent.cursor_model() == pending.parent
+                                        && next_expression_at(after.active, parent.result_type_model(), inner);
+                                match inner {
+                                    ScalarExpressionStep::Continue(expr) =>
+                                        parent.received_expression_uses_saved_work(pending.rank, ScalarValue::Integer(result), expr),
+                                    ScalarExpressionStep::Complete { .. } => {},
+                                    ScalarExpressionStep::NeedsForm(_) => {
+                                        parent.receiving_a_value_resolves_expression(ScalarValue::Integer(result), inner);
+                                        assert(false);
+                                    },
+                                }
                             }
                         },
                     }

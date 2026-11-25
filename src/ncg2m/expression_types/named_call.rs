@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::project::DefnPosition;
-use super::typing::{CallArgument, CallTypeEntry};
+use super::typing::{CallArgument, CallTypeEntry, CallTypeTarget};
 #[cfg(verus_only)]
 use super::typing::canonical_call;
 
@@ -17,11 +17,13 @@ pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
 pub(crate) use body::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_root_call_preserves_scalar_types,
-    checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
+    CheckedNamedTarget, checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax,
+    defn_checked_call_arguments, defn_checked_call_target, defn_checked_expression_site,
+    defn_checked_if_child_sites, defn_checked_site_at_body_root, defn_body_sites_cover_slots};
 #[cfg(verus_only)]
 pub(in crate::ncg2m) use body::argument_positions_increase;
 #[cfg(verus_only)]
-pub use body::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
+pub use body::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot, unvisited_arithmetic_at_source};
 mod slots;
 pub(in crate::ncg2m) use slots::{is_expression_slot, mark_expression_slots};
 #[cfg(verus_only)]
@@ -44,6 +46,8 @@ pub(crate) struct CallForm<'a> {
     pub span: Range<usize>,
     /// 呼び出し形の直下にある引数の個数。
     pub arguments: usize,
+    /// 引数が二つあるときの、左から順に並ぶ構文木の添字。
+    pub binary_arguments: Option<(usize, usize)>,
 }
 
 spec fn is_stage_form(word: Seq<u8>) -> bool {
@@ -107,6 +111,9 @@ pub(in crate::ncg2m) closed spec fn call_form_matches(
         &&& call.head_span == form_span(head)
         &&& call.span == form_span(forms[at as int])
         &&& call.arguments == argument_count(forms, (at + 2) as usize, forms[at as int]->List_end)
+        &&& call.binary_arguments.is_some() == (call.arguments == 2)
+        &&& call.binary_arguments matches Some((left, right)) ==>
+            defn_call_arguments(forms, at, seq![left, right])
     }
 }
 
@@ -117,6 +124,9 @@ pub(in crate::ncg2m) proof fn call_form_origin(source: &str, forms: Seq<Form>, a
         forms[at as int] is List, forms[at + 1] is Atom,
         call.span == form_span(forms[at as int]), call.head_span == form_span(forms[at + 1]),
         call.word.spec_bytes() == spelling(source, forms[at + 1]),
+        call.binary_arguments.is_some() == (call.arguments == 2),
+        call.binary_arguments matches Some((left, right)) ==>
+            defn_call_arguments(forms, at, seq![left, right]),
 {}
 
 proof fn declared_head_is_deferred_by_local_typing(source: &str, forms: Seq<Form>, at: usize, call: CallForm)
@@ -182,16 +192,65 @@ fn read_named_head<'a>(source: &'a str, forms: &[Form], at: usize) -> (result: O
     Some((head, *list_end, word))
 }
 
+#[verifier::spinoff_prover]
+fn binary_call_arguments(forms: &[Form], Ghost(at): Ghost<usize>, left: usize, Ghost(end): Ghost<usize>)
+    -> (arguments: (usize, usize))
+    requires
+        complete_list_indices(forms@), nested_list_indices(forms@), at < forms@.len(),
+        forms@[at as int] is List, left == at + 2 <= end <= forms@.len(),
+        subtree_limit(forms@, at) == end, argument_count(forms@, left, end) == 2,
+    ensures defn_call_arguments(forms@, at, seq![arguments.0, arguments.1]),
+{
+    proof {
+        reveal_with_fuel(argument_count, 3);
+        assert(left < end);
+        super::super::forms::child_stays_inside(forms@, at, left);
+    }
+    let right = subtree_end(forms, left);
+    proof {
+        reveal_with_fuel(argument_count, 3);
+        assert(left < right < end);
+        super::super::forms::child_stays_inside(forms@, at, right);
+        let last = subtree_limit(forms@, right);
+        if last < end {
+            super::super::forms::child_stays_inside(forms@, at, last);
+            assert(argument_count(forms@, last, end) > 0);
+        }
+        assert(last == end);
+        let operands = seq![left, right];
+        assert forall|i: int| 0 <= i < operands.len() implies {
+            let child = #[trigger] operands[i];
+            &&& left <= child < subtree_limit(forms@, child) <= end
+            &&& if i + 1 < operands.len() { subtree_limit(forms@, child) == operands[i + 1] }
+                else { subtree_limit(forms@, child) == end }
+        } by {
+            if i == 0 { assert(operands[i] == left && operands[i + 1] == right); }
+            else { assert(operands[i] == right); }
+        };
+        body::call_arguments_from_intervals(forms@, at, operands);
+    }
+    (left, right)
+}
+
 pub(in crate::ncg2m) fn read_call_form<'a>(source: &'a str, forms: &[Form], at: usize) -> (result: Option<CallForm<'a>>)
     requires usable_forms(source, forms@), at < forms@.len(),
     ensures call_form_matches(source, forms@, at, result),
+        result matches Some(call) ==> call.binary_arguments.is_some() == (call.arguments == 2),
 {
     let (head, end, word) = read_named_head(source, forms, at)?;
+    let left = head + 1;
+    let count = count_call_arguments(forms, at, left, end);
+    let binary_arguments = if count == 2 {
+        Some(binary_call_arguments(forms, Ghost(at), left, Ghost(end)))
+    } else {
+        None
+    };
     Some(CallForm {
         word,
         head_span: span_of(&forms[head]),
         span: span_of(&forms[at]),
-        arguments: count_call_arguments(forms, at, head + 1, end),
+        arguments: count,
+        binary_arguments,
     })
 }
 
@@ -209,6 +268,7 @@ pub(in crate::ncg2m) proof fn decoded_call_has_arity(
 {}
 
 pub(super) open spec fn call_signature_types_match(entry: CallTypeEntry, signature: DefnSignature) -> bool {
+    &&& entry.target is Declared
     &&& entry.result == type_shape(signature.result_type.ty)
     &&& entry.arguments@.len() == signature.parameters@.len()
     &&& forall|i: int| 0 <= i < entry.arguments@.len() ==>
@@ -220,7 +280,7 @@ pub(super) fn prepare_call_types<'a>(
 ) -> (entry: CallTypeEntry)
     requires usable_forms(source, forms@), call_has_arity(source, forms@, call, signature.parameters@.len() as usize),
         signature.parameters@.len() <= usize::MAX,
-    ensures canonical_call(forms@, entry), entry.at == call, entry.target == target,
+    ensures canonical_call(forms@, entry), entry.at == call, entry.target == CallTypeTarget::Declared(target),
         call_signature_types_match(entry, *signature),
 {
     let Some((head, end, _)) = read_named_head(source, forms, call) else { unreachable!() };
@@ -261,6 +321,11 @@ pub(super) fn prepare_call_types<'a>(
         assert(argument_count(forms@, cursor, end) > 0);
         assert(false);
     }
-    CallTypeEntry { at: call, target, arguments, result: shape_of_type(signature.result_type.ty) }
+    CallTypeEntry {
+        at: call,
+        target: CallTypeTarget::Declared(target),
+        arguments,
+        result: shape_of_type(signature.result_type.ty),
+    }
 }
 }

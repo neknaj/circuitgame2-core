@@ -1,15 +1,18 @@
 //! 元の本体と呼び出し先の署名を結び付け、型検査スタックに渡す。
 
 use super::*;
-use super::typing::{CallTypeEntry, check_typed_body_with_calls};
+use super::typing::{CallTypeEntry, CallTypeTarget, check_typed_body_with_calls};
+use crate::ncg2m::integers::IntegerOperation;
 #[cfg(verus_only)]
-use super::typing::{call_entries_fit, call_trace_fits, call_trace_model, trace_entry_in_range, canonical_call, typed_body_with_calls};
+use super::typing::{arithmetic_trace_fits, widen_arithmetic_trace, call_entries_fit, call_trace_fits, call_trace_model,
+    trace_entry_in_range, canonical_call, typed_body_with_calls};
 use super::named_call::{prepare_call_types, read_call_form};
 #[cfg(verus_only)]
 use super::named_call::{call_form_matches, call_form_origin, call_signature_types_match, decoded_call_has_arity};
-use crate::project::{DefnCallEdge, DefnCallError, DefnCallSite, MixedUseAliases, PreparedDefnCall};
+use crate::project::{DefnCallEdge, DefnCallError, DefnCallGraphError, DefnCallSite,
+    MixedUseAliases, PreparedDefnCall, TypedArithmeticSite};
 #[cfg(verus_only)]
-use crate::project::{ProjectDeclaration, ProjectSource, ResolvedDefnName, call_arity_matches, defn_name_resolution,
+use crate::project::{ProjectDeclaration, ProjectSource, ResolvedDefnName, arithmetic_sites_fit, call_arity_matches, defn_name_resolution,
     mixed_use_targets_match, prepared_call_site, resolved_defn_name_origin};
 #[cfg(verus_only)]
 use crate::ncg2m::defn::DefnHeader;
@@ -20,7 +23,9 @@ mod coverage;
 #[cfg(verus_only)]
 mod typed_sites;
 #[cfg(verus_only)]
-pub(crate) use typed_sites::{checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
+pub(crate) use typed_sites::{CheckedNamedTarget, checked_atom_uses_only_parameters, checked_body_scalar_position,
+    recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_target,
+    defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
 use coverage::first_unvisited_expression_entry;
 #[cfg(verus_only)]
 use coverage::call_trace_covers_slots;
@@ -52,9 +57,27 @@ struct CallTypingInputs<'p, 'a> {
 
 type CallOutcome<'p, 'a> = Option<Result<PreparedDefnCall<'p, 'a>, DefnCallError<'p, 'a>>>;
 
-spec fn call_shape_at(calls: Seq<CallTypeEntry>, at: usize, signature: DefnSignature) -> bool {
+spec fn outcome_has_entry(outcome: CallOutcome) -> bool {
+    outcome matches Some(Ok(PreparedDefnCall::Declared { .. } | PreparedDefnCall::Arithmetic { .. }))
+}
+
+spec fn entry_represents(entry: CallTypeEntry, outcome: CallOutcome) -> bool {
+    match outcome {
+        Some(Ok(PreparedDefnCall::Declared { declaration, signature, .. })) =>
+            entry.target == CallTypeTarget::Declared(DefnPosition { file: declaration.file, item: declaration.item })
+                && call_signature_types_match(entry, signature),
+        Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. })) =>
+            entry.target == CallTypeTarget::Arithmetic(operation)
+                && entry.arguments@.len() == 2
+                && entry.arguments@[0].at == arguments.0
+                && entry.arguments@[1].at == arguments.1,
+        _ => false,
+    }
+}
+
+spec fn call_shape_at(calls: Seq<CallTypeEntry>, at: usize, outcome: CallOutcome) -> bool {
     exists|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).at == at
-        && call_signature_types_match(calls[i], signature)
+        && entry_represents(calls[i], outcome)
 }
 
 spec fn issue_at(issues: Seq<CallIssue>, at: usize, error: DefnCallError) -> bool {
@@ -64,9 +87,7 @@ spec fn issue_at(issues: Seq<CallIssue>, at: usize, error: DefnCallError) -> boo
 #[verifier::opaque]
 spec fn entry_witness(entry: CallTypeEntry, outcomes: Seq<CallOutcome>, body: usize) -> bool {
     body <= entry.at < body + outcomes.len()
-        && (outcomes[entry.at - body] matches Some(Ok(PreparedDefnCall::Declared { declaration, signature, .. }))
-            && entry.target == (DefnPosition { file: declaration.file, item: declaration.item })
-            && call_signature_types_match(entry, signature))
+        && entry_represents(entry, outcomes[entry.at - body])
 }
 
 spec fn issue_witness(forms: Seq<Form>, issue: CallIssue, outcomes: Seq<CallOutcome>, body: usize) -> bool {
@@ -96,11 +117,8 @@ spec fn outcomes_recorded(
     forall|i: int| 0 <= i < outcomes.len() ==> {
         let result = #[trigger] outcomes[i];
         &&& form_outcome_matches(aliases, file, item, forms, (body + i) as usize, result)
-        &&& match result {
-            Some(Ok(PreparedDefnCall::Declared { signature, .. })) => call_shape_at(calls, (body + i) as usize, signature),
-            Some(Err(error)) => issue_at(issues, (body + i) as usize, error),
-            _ => true,
-        }
+        &&& (outcome_has_entry(result) ==> call_shape_at(calls, (body + i) as usize, result))
+        &&& (result matches Some(Err(error)) ==> issue_at(issues, (body + i) as usize, error))
     }
 }
 
@@ -118,14 +136,12 @@ spec fn call_inputs_match(
 spec fn appended_call_type(
     forms: Seq<Form>, at: usize, outcome: CallOutcome, calls: Seq<CallTypeEntry>, added: Seq<CallTypeEntry>,
 ) -> bool {
-    match outcome {
-        Some(Ok(PreparedDefnCall::Declared { declaration, signature, .. })) =>
-            added.len() == calls.len() + 1 && added.take(calls.len() as int) == calls
-                && added[calls.len() as int].at == at
-                && added[calls.len() as int].target == (DefnPosition { file: declaration.file, item: declaration.item })
-                && canonical_call(forms, added[calls.len() as int])
-                && call_signature_types_match(added[calls.len() as int], signature),
-        _ => added == calls,
+    if outcome_has_entry(outcome) {
+        let next = added[calls.len() as int];
+        added.len() == calls.len() + 1 && added.take(calls.len() as int) == calls
+            && next.at == at && canonical_call(forms, next) && entry_represents(next, outcome)
+    } else {
+        added == calls
     }
 }
 
@@ -209,7 +225,7 @@ proof fn extend_call_types(
         forall|i: int| 0 <= i < added.len() ==> entry_witness(#[trigger] added[i], outcomes.push(outcome), body),
 {
     extend_type_witnesses(forms, body, outcomes, at, outcome, calls, added);
-    if let Some(Ok(PreparedDefnCall::Declared { .. })) = outcome {
+    if outcome_has_entry(outcome) {
         let next = added[calls.len() as int];
         assert(added =~= calls.push(next));
         assert forall|i: int| 0 <= i < calls.len() implies (#[trigger] calls[i]).at < next.at by {
@@ -259,41 +275,30 @@ proof fn extend_recorded_outcomes(
     assert forall|i: int| 0 <= i < prefix.len() implies {
         let result = #[trigger] prefix[i];
         &&& form_outcome_matches(aliases, file, item, forms, (body + i) as usize, result)
-        &&& match result {
-            Some(Ok(PreparedDefnCall::Declared { signature, .. })) => call_shape_at(next_calls, (body + i) as usize, signature),
-            Some(Err(error)) => issue_at(next_issues, (body + i) as usize, error),
-            _ => true,
-        }
+        &&& (outcome_has_entry(result) ==> call_shape_at(next_calls, (body + i) as usize, result))
+        &&& (result matches Some(Err(error)) ==> issue_at(next_issues, (body + i) as usize, error))
     } by {
         if i < outcomes.len() {
             assert(prefix[i] == outcomes[i]);
-            match outcomes[i] {
-                Some(Ok(PreparedDefnCall::Declared { signature, .. })) => {
-                    let j = choose|j: int| 0 <= j < calls.len() && (#[trigger] calls[j]).at == body + i
-                        && call_signature_types_match(calls[j], signature);
-                    assert(next_calls[j] == calls[j]);
-                }
-                Some(Err(error)) => {
-                    let j = choose|j: int| 0 <= j < issues.len() && (#[trigger] issues[j]).at@ == body + i && issues[j].error == error;
-                    assert(next_issues[j] == issues[j]);
-                }
-                _ => (),
+            if outcome_has_entry(outcomes[i]) {
+                let j = choose|j: int| 0 <= j < calls.len() && (#[trigger] calls[j]).at == body + i
+                    && entry_represents(calls[j], outcomes[i]);
+                assert(next_calls[j] == calls[j]);
+            }
+            if let Some(Err(error)) = outcomes[i] {
+                let j = choose|j: int| 0 <= j < issues.len() && (#[trigger] issues[j]).at@ == body + i && issues[j].error == error;
+                assert(next_issues[j] == issues[j]);
             }
         } else {
             assert(prefix[i] == outcome);
-            match outcome {
-                Some(Ok(PreparedDefnCall::Declared { signature, .. })) => {
-                    let j = calls.len() as int;
-                    assert(next_calls[j].at == body + i);
-                    assert(call_signature_types_match(next_calls[j], signature));
-                    assert(call_shape_at(next_calls, (body + i) as usize, signature));
-                }
-                Some(Err(error)) => {
-                    let j = issues.len() as int;
-                    assert(next_issues[j].at@ == body + i && next_issues[j].error == error);
-                    assert(issue_at(next_issues, (body + i) as usize, error));
-                }
-                _ => (),
+            if outcome_has_entry(outcome) {
+                let j = calls.len() as int;
+                assert(next_calls[j].at == body + i && entry_represents(next_calls[j], outcome));
+                assert(call_shape_at(next_calls, (body + i) as usize, outcome));
+            }
+            if let Some(Err(error)) = outcome {
+                let j = issues.len() as int;
+                assert(next_issues[j].at@ == body + i && next_issues[j].error == error);
             }
         }
     };
@@ -317,6 +322,30 @@ proof fn record_call_input(
     extend_call_types(forms, body, outcomes, at, outcome, calls, next_calls);
     extend_call_issues(forms, body, outcomes, at, outcome, issues, next_issues);
     extend_recorded_outcomes(aliases, file, item, forms, body, outcomes, at, outcome, calls, next_calls, issues, next_issues);
+}
+
+fn arithmetic_type_entry(
+    at: usize, operation: IntegerOperation, arguments: (usize, usize), Ghost(forms): Ghost<Seq<Form>>,
+) -> (entry: CallTypeEntry)
+    requires defn_call_arguments(forms, at, seq![arguments.0, arguments.1]),
+    ensures
+        canonical_call(forms, entry), entry.at == at,
+        entry.target == CallTypeTarget::Arithmetic(operation),
+        entry.arguments@.len() == 2,
+        entry.arguments@[0].at == arguments.0 && entry.arguments@[1].at == arguments.1,
+{
+    let left = arguments.0;
+    let right = arguments.1;
+    let _context = TypeShape { builtin: None, list_depth: 0 };
+    let mut slots = Vec::new();
+    slots.push(super::typing::CallArgument { at: left, expected: _context });
+    slots.push(super::typing::CallArgument { at: right, expected: _context });
+    proof {
+        let operands = seq![left, right];
+        call_argument_intervals(forms, at, operands, 0);
+        call_argument_intervals(forms, at, operands, 1);
+    }
+    CallTypeEntry { at, target: CallTypeTarget::Arithmetic(operation), arguments: slots, result: _context }
 }
 
 fn gather_call_types<'p, 'a>(
@@ -376,6 +405,16 @@ fn gather_call_types<'p, 'a>(
                 let _len = signature.parameters.len();
                 let target = DefnPosition { file: declaration.file, item: declaration.item };
                 let entry = prepare_call_types(source, forms, at, target, &signature);
+                calls.push(entry);
+                assert(calls@.take(before.len() as int) =~= before);
+            }
+            Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. })) => {
+                proof {
+                    let decoded = form->Some_0;
+                    call_form_origin(source, forms@, at, decoded);
+                    assert(decoded.binary_arguments == Some(arguments));
+                }
+                let entry = arithmetic_type_entry(at, operation, arguments, Ghost(forms@));
                 calls.push(entry);
                 assert(calls@.take(before.len() as int) =~= before);
             }
@@ -743,7 +782,7 @@ pub open spec fn defn_call_edge_matches(aliases: &MixedUseAliases, edge: DefnCal
 }
 
 spec fn edge_projects(source: &ProjectSource, forms: Seq<Form>, entry: CallTypeEntry, edge: DefnCallEdge) -> bool {
-    &&& edge.to == entry.target
+    &&& entry.target == CallTypeTarget::Declared(edge.to)
     &&& edge.at == entry.at
     &&& edge.arguments@ == entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at)
     &&& *edge.call.source == *source
@@ -793,7 +832,7 @@ proof fn trace_entry_resolution<'p, 'a>(
     outcomes: Seq<CallOutcome<'p, 'a>>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue<'p, 'a>>, index: usize,
 ) -> (evidence: (CallForm<'a>, ProjectDeclaration<'p, 'a>, DefnSignature<'a>))
     requires
-        index < calls.len(),
+        index < calls.len(), calls[index as int].target is Declared,
         caller.file < aliases.targets_model().project_model().sources_model().len(),
         call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
     ensures
@@ -802,7 +841,7 @@ proof fn trace_entry_resolution<'p, 'a>(
             forms, calls[index as int].at, Some(evidence.0)),
         defn_name_resolution(aliases, caller.file, caller.item, evidence.0.word,
             Ok(ResolvedDefnName::Declaration(evidence.1))),
-        calls[index as int].target == (DefnPosition { file: evidence.1.file, item: evidence.1.item }),
+        calls[index as int].target == CallTypeTarget::Declared(DefnPosition { file: evidence.1.file, item: evidence.1.item }),
         aliases.targets_model().project_model().defn_signature_matches_index(
             evidence.1.file, evidence.1.item, Some(evidence.2),
         ),
@@ -819,7 +858,7 @@ proof fn trace_entry_resolution<'p, 'a>(
     assert(body <= at < body + outcomes.len() && outcomes[at - body] == Some(resolved)
         && resolved is Ok && resolved->Ok_0 is Declared
         && call_signature_types_match(entry, signature)
-        && entry.target == (DefnPosition { file: declaration.file, item: declaration.item })) by {
+        && entry.target == CallTypeTarget::Declared(DefnPosition { file: declaration.file, item: declaration.item })) by {
         reveal(entry_witness);
     };
     assert(form_outcome_matches(aliases, caller.file, caller.item, forms, at, Some(resolved))) by {
@@ -915,7 +954,8 @@ fn read_call_edge<'p, 'a>(
         outcomes.len() == subtree_limit(forms@, body) - body,
         call_entries_fit(forms@, calls@),
         call_inputs_match(aliases, caller.file, caller.item, forms@, body, outcomes, calls@, issues),
-        row < calls@.len(), body <= calls@[row as int].at < forms@.len(),
+        row < calls@.len(), calls@[row as int].target is Declared,
+        body <= calls@[row as int].at < forms@.len(),
     ensures edge.from == caller,
         edge_projects(&aliases.targets_model().project_model().sources_model()[caller.file as int],
             forms@, calls@[row as int], edge),
@@ -927,7 +967,8 @@ fn read_call_edge<'p, 'a>(
     assert(canonical_call(forms@, *entry));
     let call = DefnCallSite { source, head: span_of(&forms[at + 1]), span: span_of(&forms[at]) };
     let arguments = call_argument_positions(entry);
-    let edge = DefnCallEdge { from: caller, at, arguments, call, to: entry.target };
+    let CallTypeTarget::Declared(to) = entry.target else { unreachable!() };
+    let edge = DefnCallEdge { from: caller, at, arguments, call, to };
     proof { recorded_edge_has_origin(aliases, caller, forms@, entries, body, outcomes, calls@, issues, row, edge); }
     edge
 }
@@ -1031,9 +1072,28 @@ type CallTypingSnapshot<'p, 'a> = (
     Seq<CallIssue<'p, 'a>>, Seq<usize>,
 );
 
+#[verifier::opaque]
+spec fn all_arithmetic_slots_projected(
+    source: &str, forms: Seq<Form>, body: usize, outcomes: Seq<CallOutcome>,
+    arithmetic: Seq<TypedArithmeticSite>,
+) -> bool {
+    &&& forall|at: usize| body <= at < body + outcomes.len()
+        && #[trigger] expression_slot(source, forms, body, at) ==> {
+        outcomes[at - body] matches Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. }))
+            ==> arithmetic.contains(TypedArithmeticSite { at, arguments, operation })
+    }
+    &&& forall|i: int| 0 <= i < arithmetic.len() ==> {
+        let site = #[trigger] arithmetic[i];
+        &&& body <= site.at < body + outcomes.len()
+        &&& outcomes[site.at - body] matches Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. }))
+            && site.operation == operation && site.arguments == arguments
+    }
+}
+
 spec fn call_typing_snapshot_matches<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, source: &'a str,
-    forms: Seq<Form>, header: DefnHeader, edges: Seq<DefnCallEdge<'p, 'a>>, snapshot: CallTypingSnapshot<'p, 'a>,
+    forms: Seq<Form>, header: DefnHeader, edges: Seq<DefnCallEdge<'p, 'a>>,
+    arithmetic: Option<Seq<TypedArithmeticSite>>, snapshot: CallTypingSnapshot<'p, 'a>,
 ) -> bool {
     let document = aliases.targets_model().project_model().sources_model()[caller.file as int];
     let (root, body, signature, outcomes, calls, issues, trace) = snapshot;
@@ -1046,42 +1106,49 @@ spec fn call_typing_snapshot_matches<'p, 'a>(
     &&& call_trace_fits(calls, trace, body, forms.len())
     &&& edges_project_trace(&document, forms, calls, trace, edges)
     &&& all_slots_projected(source, forms, caller, body, outcomes, edges)
+    &&& arithmetic matches Some(sites) ==> all_arithmetic_slots_projected(source, forms, body, outcomes, sites)
 }
 
 #[verifier::opaque]
 spec fn covered_body_slots<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, source: &'a str, forms: Seq<Form>, header: DefnHeader,
-    edges: Seq<DefnCallEdge<'p, 'a>>,
+    edges: Seq<DefnCallEdge<'p, 'a>>, arithmetic: Option<Seq<TypedArithmeticSite>>,
 ) -> bool {
     exists|snapshot: CallTypingSnapshot<'p, 'a>|
-        #[trigger] call_typing_snapshot_matches(aliases, caller, source, forms, header, edges, snapshot)
+        #[trigger] call_typing_snapshot_matches(aliases, caller, source, forms, header, edges, arithmetic, snapshot)
 }
 
 spec fn recorded_call_typing<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, edges: Seq<DefnCallEdge<'p, 'a>>,
+    arithmetic: Option<Seq<TypedArithmeticSite>>,
 ) -> CallTypingSnapshot<'p, 'a> {
     let project = aliases.targets_model().project_model();
     let source = project.sources_model()[caller.file as int].text_model();
     let forms = project.functional_forms_model(caller.file)->Some_0;
     let header = project.indexed_defn(caller.file, caller.item)->Some_0;
     choose|snapshot: CallTypingSnapshot<'p, 'a>|
-        #[trigger] call_typing_snapshot_matches(aliases, caller, source, forms, header, edges, snapshot)
+        #[trigger] call_typing_snapshot_matches(aliases, caller, source, forms, header, edges, arithmetic, snapshot)
 }
 
 proof fn recorded_call_typing_matches<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, edges: Seq<DefnCallEdge<'p, 'a>>,
+    arithmetic: Option<Seq<TypedArithmeticSite>>,
 )
-    requires defn_body_calls_cover_slots(aliases, caller, edges),
+    requires match arithmetic {
+        Some(sites) => defn_body_sites_cover_slots(aliases, caller, edges, sites),
+        None => defn_body_calls_cover_slots(aliases, caller, edges),
+    },
     ensures {
         let project = aliases.targets_model().project_model();
         &&& caller.file < project.sources_model().len()
         &&& project.functional_forms_model(caller.file) matches Some(forms)
         &&& project.indexed_defn(caller.file, caller.item) matches Some(header)
         &&& call_typing_snapshot_matches(aliases, caller, project.sources_model()[caller.file as int].text_model(),
-            forms, header, edges, recorded_call_typing(aliases, caller, edges))
+            forms, header, edges, arithmetic, recorded_call_typing(aliases, caller, edges, arithmetic))
     },
 {
     reveal(defn_body_calls_cover_slots);
+    reveal(defn_body_sites_cover_slots);
     reveal(covered_body_slots);
 }
 
@@ -1097,20 +1164,36 @@ pub closed spec fn defn_body_calls_cover_slots(
     &&& match (project.indexed_defn(caller.file, caller.item), project.functional_forms_model(caller.file)) {
         (Some(header), Some(forms)) => {
             let source = project.sources_model()[caller.file as int].text_model();
-            covered_body_slots(aliases, caller, source, forms, header, edges)
+            covered_body_slots(aliases, caller, source, forms, header, edges, None)
         }
+        _ => false,
+    }
+}
+
+/// 宣言と算術の両方が、同じ本体の型検査と元の式の位置に対応する。
+#[verifier::opaque]
+pub(crate) closed spec fn defn_body_sites_cover_slots(
+    aliases: &MixedUseAliases, caller: DefnPosition, edges: Seq<DefnCallEdge>, arithmetic: Seq<TypedArithmeticSite>,
+) -> bool {
+    let project = aliases.targets_model().project_model();
+    &&& caller.file < project.sources_model().len()
+    &&& match (project.indexed_defn(caller.file, caller.item), project.functional_forms_model(caller.file)) {
+        (Some(header), Some(forms)) => covered_body_slots(
+            aliases, caller, project.sources_model()[caller.file as int].text_model(), forms, header, edges,
+            Some(arithmetic)),
         _ => false,
     }
 }
 
 // 同じ型検査の記録から、根の呼び出しとその引数の型を取り出す。
 pub(crate) proof fn defn_root_call_preserves_scalar_types<'p, 'a>(
-    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>, site: usize,
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>,
+    arithmetic: Seq<TypedArithmeticSite>, site: usize,
     body: crate::ncg2m::call_evaluation::DefnEvaluationBody<'p, 'a>,
     callee: crate::ncg2m::call_evaluation::DefnEvaluationBody<'p, 'a>,
 )
     requires
-        defn_body_calls_cover_slots(aliases, caller, row), site < row.len(), row[site as int].at == body.at,
+        defn_body_sites_cover_slots(aliases, caller, row, arithmetic), site < row.len(), row[site as int].at == body.at,
         {
             let project = aliases.targets_model().project_model();
             let to = row[site as int].to;
@@ -1138,8 +1221,8 @@ pub(crate) proof fn defn_root_call_preserves_scalar_types<'p, 'a>(
                 ==> local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, at, ty))
         },
 {
-    defn_checked_site_at_body_root(aliases, caller, row, body);
-    typed_sites::defn_checked_call_arguments(aliases, caller, row, site, body, body.signature.result_type.ty, callee);
+    defn_checked_site_at_body_root(aliases, caller, row, arithmetic, body);
+    typed_sites::defn_checked_call_arguments(aliases, caller, row, arithmetic, site, body, body.signature.result_type.ty, callee);
 }
 
 #[verifier::opaque]
@@ -1176,7 +1259,7 @@ proof fn prove_expression_slot_projection(
         calls.len() <= usize::MAX,
         call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
         call_trace_covers_slots(aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
-            forms, calls, trace, body),
+            forms, calls, trace, body, false),
         edges.len() == trace.len(),
         forall|i: int| 0 <= i < edges.len() ==> {
             let edge = #[trigger] edges[i];
@@ -1209,17 +1292,17 @@ proof fn prove_expression_slot_projection(
     } by {
         let decoded = outcomes[at - body];
         if let Some(Ok(PreparedDefnCall::Declared { declaration, signature, .. })) = decoded {
-            assert(call_shape_at(calls, at, signature));
+            assert(call_shape_at(calls, at, decoded));
             let j = choose|j: int| 0 <= j < calls.len() && (#[trigger] calls[j]).at == at
-                && call_signature_types_match(calls[j], signature);
+                && entry_represents(calls[j], decoded);
             assert(entry_witness(calls[j], outcomes, body));
-            assert(calls[j].target == (DefnPosition { file: declaration.file, item: declaration.item })) by {
+            assert(calls[j].target == CallTypeTarget::Declared(DefnPosition { file: declaration.file, item: declaration.item })) by {
                 reveal(entry_witness);
             };
             assert(trace.contains(j as usize));
             let i = choose|i: int| 0 <= i < trace.len() && (#[trigger] trace[i]) == j as usize;
             assert(edges[i].from == caller);
-            assert(edges[i].to == calls[j].target);
+            assert(calls[j].target == CallTypeTarget::Declared(edges[i].to));
         }
     };
 }
@@ -1228,7 +1311,7 @@ proof fn finish_expression_slot_coverage(
     aliases: &MixedUseAliases, caller: DefnPosition, source: &str, forms: Seq<Form>,
     root: usize, body: usize, header: DefnHeader, outcomes: Seq<CallOutcome>,
     calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>, edges: Seq<DefnCallEdge>,
-    signature: DefnSignature, trace: Seq<usize>,
+    signature: DefnSignature, trace: Seq<usize>, arithmetic: Option<Seq<TypedArithmeticSite>>,
 )
     requires
         caller.file < aliases.targets_model().project_model().sources_model().len(),
@@ -1245,14 +1328,19 @@ proof fn finish_expression_slot_coverage(
         call_trace_fits(calls, trace, body, forms.len()),
         edges_project_trace(&aliases.targets_model().project_model().sources_model()[caller.file as int],
             forms, calls, trace, edges),
-    ensures defn_body_calls_cover_slots(aliases, caller, edges),
+        arithmetic matches Some(sites) ==> all_arithmetic_slots_projected(source, forms, body, outcomes, sites),
+    ensures match arithmetic {
+        Some(sites) => defn_body_sites_cover_slots(aliases, caller, edges, sites),
+        None => defn_body_calls_cover_slots(aliases, caller, edges),
+    },
 {
-    assert(covered_body_slots(aliases, caller, source, forms, header, edges)) by {
+    assert(covered_body_slots(aliases, caller, source, forms, header, edges, arithmetic)) by {
         reveal(covered_body_slots);
         let snapshot = (root, body, signature, outcomes, calls, issues, trace);
-        assert(call_typing_snapshot_matches(aliases, caller, source, forms, header, edges, snapshot));
+        assert(call_typing_snapshot_matches(aliases, caller, source, forms, header, edges, arithmetic, snapshot));
     };
     reveal(defn_body_calls_cover_slots);
+    reveal(defn_body_sites_cover_slots);
 }
 
 proof fn finish_unvisited_expression_evidence(
@@ -1306,6 +1394,9 @@ fn capture_checked_call_body<'p, 'a>(
         match result {
             Ok(edges) => {
                 &&& defn_body_calls_cover_slots(aliases, caller, edges@)
+                &&& all_slots_projected(source, forms@, caller, body, outcomes, edges@)
+                &&& edges_project_trace(&aliases.targets_model().project_model().sources_model()[caller.file as int],
+                    forms@, calls@, trace@, edges@)
                 &&& forall|i: int| 0 <= i < edges@.len() ==> {
                     let edge = #[trigger] edges@[i];
                     edge.from == caller && defn_call_edge_matches(aliases, edge)
@@ -1315,7 +1406,7 @@ fn capture_checked_call_body<'p, 'a>(
         },
 {
     let _count = calls.len();
-    if let Some(index) = first_unvisited_expression_entry(source, forms, calls, trace, body) {
+    if let Some(index) = first_unvisited_expression_entry(source, forms, calls, trace, body, false) {
         proof { expression_slot_bounds(source, forms@, body, calls@[index as int].at); }
         let edge = read_call_edge(aliases, caller, forms, calls, index, Ghost(entries),
             Ghost(body), Ghost(outcomes), Ghost(issues));
@@ -1341,7 +1432,7 @@ fn capture_checked_call_body<'p, 'a>(
             assert(edges_project_trace(&document, forms@, calls@, trace@, edges@));
             prove_expression_slot_projection(aliases, caller, forms@, body, outcomes, calls@, issues, trace@, edges@);
             finish_expression_slot_coverage(aliases, caller, source, forms@, root, body,
-                entries[caller.item as int].kind->Defn_0, outcomes, calls@, issues, edges@, signature, trace@);
+                entries[caller.item as int].kind->Defn_0, outcomes, calls@, issues, edges@, signature, trace@, None);
             assert forall|j: int| 0 <= j < edges@.len() implies {
                 let edge = #[trigger] edges@[j];
                 edge.from == caller && defn_call_edge_matches(aliases, edge)
@@ -1351,10 +1442,184 @@ fn capture_checked_call_body<'p, 'a>(
     }
 }
 
+spec fn arithmetic_origin(calls: Seq<CallTypeEntry>, visit: usize) -> TypedArithmeticSite {
+    let entry = calls[visit as int];
+    TypedArithmeticSite {
+        at: entry.at,
+        arguments: (entry.arguments@[0].at, entry.arguments@[1].at),
+        operation: entry.target->Arithmetic_0,
+    }
+}
+
+/// 診断に含まれる演算の範囲と文書が、呼び出し元の本体の構文位置に対応することを表す。
+pub closed spec fn unvisited_arithmetic_at_source(
+    aliases: &MixedUseAliases, caller: DefnPosition, at: usize, site: DefnCallSite,
+) -> bool {
+    let project = aliases.targets_model().project_model();
+    &&& caller.file < project.sources_model().len()
+    &&& *site.source == project.sources_model()[caller.file as int]
+    &&& project.functional_forms_model(caller.file) matches Some(forms)
+        && project.indexed_defn(caller.file, caller.item) matches Some(header) && {
+            &&& at + 1 < forms.len()
+            &&& forms[at as int] is List && forms[at + 1] is Atom
+            &&& site.span == form_span(forms[at as int]) && site.head == form_span(forms[at + 1])
+            &&& header.body_span.start <= site.span.start <= site.span.end <= header.body_span.end
+            &&& body_contains_call_slot(site.source.text_model(), forms, header, site.span)
+        }
+}
+
+#[verifier::spinoff_prover]
+fn capture_arithmetic_sites(calls: &[CallTypeEntry], trace: &[usize], Ghost(forms): Ghost<Seq<Form>>)
+    -> (sites: Vec<TypedArithmeticSite>)
+    requires call_entries_fit(forms, calls@), arithmetic_trace_fits(calls@, trace@, 0, forms.len()),
+    ensures sites@ == trace@.map_values(|visit: usize| arithmetic_origin(calls@, visit)),
+        arithmetic_sites_fit(forms, sites@),
+{
+    reveal(arithmetic_trace_fits);
+    let mut sites = Vec::<TypedArithmeticSite>::new();
+    let mut next = 0;
+    while next < trace.len()
+        invariant
+            call_entries_fit(forms, calls@),
+            arithmetic_trace_fits(calls@, trace@, 0, forms.len()),
+            next <= trace@.len(),
+            sites@ == trace@.take(next as int).map_values(|visit: usize| arithmetic_origin(calls@, visit)),
+        decreases trace@.len() - next,
+    {
+        let visit = trace[next];
+        proof {
+            reveal(arithmetic_trace_fits);
+            assert(visit < calls@.len() && calls@[visit as int].target is Arithmetic);
+        }
+        let call = &calls[visit];
+        let CallTypeTarget::Arithmetic(operation) = call.target else { unreachable!() };
+        assert(canonical_call(forms, *call));
+        sites.push(TypedArithmeticSite {
+            at: call.at,
+            arguments: (call.arguments[0].at, call.arguments[1].at),
+            operation,
+        });
+        proof {
+            let prefix = trace@.take(next as int);
+            let grown = trace@.take(next as int + 1);
+            assert(grown =~= prefix.push(visit));
+            assert(grown.map_values(|item: usize| arithmetic_origin(calls@, item)) =~= sites@);
+        }
+        next += 1;
+    }
+    assert(trace@.take(next as int) =~= trace@);
+    proof { arithmetic_sites_keep_operand_positions(forms, calls@, trace@, sites@); }
+    sites
+}
+
+proof fn arithmetic_sites_keep_operand_positions(
+    forms: Seq<Form>, calls: Seq<CallTypeEntry>, trace: Seq<usize>, sites: Seq<TypedArithmeticSite>,
+)
+    requires call_entries_fit(forms, calls), arithmetic_trace_fits(calls, trace, 0, forms.len()),
+        sites == trace.map_values(|visit: usize| arithmetic_origin(calls, visit)),
+    ensures arithmetic_sites_fit(forms, sites),
+{
+    reveal(arithmetic_trace_fits);
+    assert forall|i: int| 0 <= i < sites.len() implies {
+        let site = #[trigger] sites[i];
+        defn_call_arguments(forms, site.at, seq![site.arguments.0, site.arguments.1])
+    } by {
+        let entry = calls[trace[i] as int];
+        assert(canonical_call(forms, entry));
+        let site = arithmetic_origin(calls, trace[i]);
+        let arguments = seq![site.arguments.0, site.arguments.1];
+        assert(arguments =~= entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at));
+        canonical_call_preserves_arguments(forms, entry, arguments);
+    };
+    assert forall|i: int, j: int| 0 <= i < j < sites.len()
+        implies (#[trigger] sites[i]).at < (#[trigger] sites[j]).at by {
+        assert(sites[i].at == calls[trace[i] as int].at);
+        assert(sites[j].at == calls[trace[j] as int].at);
+    };
+}
+
+proof fn recorded_arithmetic_entry(
+    aliases: &MixedUseAliases, caller: DefnPosition, forms: Seq<Form>, body: usize,
+    outcomes: Seq<CallOutcome>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>,
+    at: usize, site: TypedArithmeticSite,
+) -> (visit: usize)
+    requires
+        calls.len() <= usize::MAX,
+        call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
+        body <= at < body + outcomes.len(),
+        outcomes[at - body] matches Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. }))
+            && site == (TypedArithmeticSite { at, arguments, operation }),
+    ensures visit < calls.len(), calls[visit as int].at == at,
+        calls[visit as int].target is Arithmetic, arithmetic_origin(calls, visit) == site,
+{
+    let outcome = outcomes[at - body];
+    assert(call_shape_at(calls, at, outcome)) by {
+        reveal(call_inputs_match);
+        reveal(outcomes_recorded);
+    };
+    let i = choose|i: int| 0 <= i < calls.len() && (#[trigger] calls[i]).at == at
+        && entry_represents(calls[i], outcome);
+    let visit = i as usize;
+    assert(visit as int == i);
+    visit
+}
+
+#[verifier::spinoff_prover]
+proof fn prove_arithmetic_slot_projection(
+    aliases: &MixedUseAliases, caller: DefnPosition, forms: Seq<Form>, body: usize,
+    outcomes: Seq<CallOutcome>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue>,
+    trace: Seq<usize>, arithmetic: Seq<TypedArithmeticSite>,
+)
+    requires
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        calls.len() <= usize::MAX,
+        call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
+        arithmetic_trace_fits(calls, trace, body, forms.len()),
+        call_trace_covers_slots(aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
+            forms, calls, trace, body, true),
+        arithmetic == trace.map_values(|row: usize| arithmetic_origin(calls, row)),
+    ensures all_arithmetic_slots_projected(
+        aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
+        forms, body, outcomes, arithmetic),
+{
+    reveal(all_arithmetic_slots_projected);
+    let source = aliases.targets_model().project_model().sources_model()[caller.file as int].text_model();
+    assert forall|at: usize| body <= at < body + outcomes.len()
+        && #[trigger] expression_slot(source, forms, body, at) implies {
+        outcomes[at - body] matches Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. }))
+            ==> arithmetic.contains(TypedArithmeticSite { at, arguments, operation })
+    } by {
+        let outcome = outcomes[at - body];
+        if let Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. })) = outcome {
+            let site = TypedArithmeticSite { at, arguments, operation };
+            let visit = recorded_arithmetic_entry(aliases, caller, forms, body, outcomes, calls, issues, at, site);
+            assert(trace.contains(visit)) by {
+                reveal(call_trace_covers_slots);
+                assert(expression_slot(source, forms, body, calls[visit as int].at));
+            };
+            let i = choose|i: int| 0 <= i < trace.len() && (#[trigger] trace[i]) == visit;
+            assert(arithmetic[i] == site);
+        }
+    };
+    assert forall|i: int| 0 <= i < arithmetic.len() implies {
+        let site = #[trigger] arithmetic[i];
+        &&& body <= site.at < body + outcomes.len()
+        &&& outcomes[site.at - body] matches Some(Ok(PreparedDefnCall::Arithmetic { operation, arguments, .. }))
+            && site.operation == operation && site.arguments == arguments
+    } by {
+        reveal(arithmetic_trace_fits);
+        let entry = calls[trace[i] as int];
+        assert(entry_witness(entry, outcomes, body)) by { reveal(call_inputs_match); };
+        reveal(entry_witness);
+        assert(arithmetic[i] == arithmetic_origin(calls, trace[i]));
+    };
+}
+
 pub(crate) fn check_indexed_call_body<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, source: &'a str, forms: &[Form],
     entries: &[MetaItem], collect_edges: bool,
-) -> (result: (Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>, Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallEdge<'p, 'a>>))
+) -> (result: (Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>,
+    Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallGraphError<'p, 'a>>, Vec<TypedArithmeticSite>))
     requires
         meta_ast_matches(source, forms@, entries@), meta_binding_spans_valid(source, entries@),
         item < entries@.len(), entries@[item as int].kind is Defn,
@@ -1367,16 +1632,25 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
             == Some(entries@[item as int].kind->Defn_0),
     ensures indexed_call_body_matches(aliases, file, item, source, forms@, entries@, result.0),
         (!collect_edges || result.0.is_err()) ==> (result.1 matches Ok(edges) && edges@.len() == 0),
+        (!collect_edges || result.0.is_err()) ==> result.2@.len() == 0,
+        arithmetic_sites_fit(forms@, result.2@),
         result.1 matches Ok(edges) ==> {
             &&& (collect_edges && result.0.is_ok()) ==>
                 defn_body_calls_cover_slots(aliases, DefnPosition { file, item }, edges@)
+                    && defn_body_sites_cover_slots(aliases, DefnPosition { file, item }, edges@, result.2@)
             &&& forall|i: int| 0 <= i < edges@.len() ==> {
                 let edge = #[trigger] edges@[i];
                 edge.from == (DefnPosition { file, item }) && defn_call_edge_matches(aliases, edge)
             }
         },
-        result.1 matches Err(edge) ==>
-            edge.from == (DefnPosition { file, item }) && defn_call_is_expression_slot(aliases, edge),
+        match result.1 {
+            Err(DefnCallGraphError::UnvisitedCall(edge)) =>
+                edge.from == (DefnPosition { file, item }) && defn_call_is_expression_slot(aliases, edge),
+            Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }) =>
+                from == (DefnPosition { file, item }) && unvisited_arithmetic_at_source(aliases, from, at, site),
+            Ok(_) => true,
+            _ => false,
+        },
 {
     let MetaItemKind::Defn(header) = &entries[item].kind else { unreachable!() };
     let body = indexed_meta_body(source, forms, entries, item);
@@ -1398,7 +1672,10 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
     let expected = shape_of_type(signature.result_type.ty);
     let ghost original_issues = call_issues@;
     let mut trace = if collect_edges { Some(Vec::new()) } else { None };
-    let outcome = match check_typed_body_with_calls(&call_types, source, forms, &signature.parameters, body, expected, &mut trace) {
+    let mut arithmetic = if collect_edges { Some(Vec::new()) } else { None };
+    let outcome = match check_typed_body_with_calls(
+        &call_types, source, forms, &signature.parameters, body, expected, &mut trace, &mut arithmetic,
+    ) {
         BodyVerdict::Accepted => Ok(signature),
         BodyVerdict::Rejected(error) => Err(match_body_error(&mut call_issues, error)),
     };
@@ -1412,12 +1689,97 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
         };
         assert(recorded@ =~= call_trace_model(trace));
         assert(outcome == Ok(signature) && forms@.len() <= usize::MAX);
-        capture_checked_call_body(aliases, DefnPosition { file, item }, source, forms, body, &call_types,
+        match capture_checked_call_body(aliases, DefnPosition { file, item }, source, forms, body, &call_types,
             recorded, Ghost(entries@), Ghost(root), Ghost(signature), Ghost(outcomes), Ghost(original_issues))
+        {
+            Ok(edges) => Ok(edges),
+            Err(edge) => Err(DefnCallGraphError::UnvisitedCall(edge)),
+        }
     } else {
         Ok(Vec::new())
     };
-    (outcome, edges)
+    let sites = if collect_edges && outcome.is_ok() {
+        match arithmetic.as_ref() {
+            Some(visits) => {
+                proof { widen_arithmetic_trace(call_types@, visits@, body, forms@.len(), 0, forms@.len()); }
+                if let Some(index) = first_unvisited_expression_entry(
+                    source, forms, &call_types, visits.as_slice(), body, true,
+                ) {
+                    let at = call_types[index].at;
+                    let from = DefnPosition { file, item };
+                    let origin = &aliases.targets().project().sources()[file];
+                    assert(canonical_call(forms@, call_types@[index as int]));
+                    let site = DefnCallSite { source: origin,
+                        head: span_of(&forms[at + 1]), span: span_of(&forms[at]) };
+                    proof {
+                        reveal(unvisited_arithmetic_at_source);
+                        expression_slot_bounds(source, forms@, body, at);
+                        crate::ncg2m::file::meta_ast_body_origin(source, forms@, entries@, item as int);
+                        assert(entry_witness(call_types@[index as int], outcomes, body)) by { reveal(call_inputs_match); };
+                        reveal(entry_witness);
+                        assert(body <= at < end == subtree_limit(forms@, body));
+                        let target = outcomes[at - body];
+                        assert(target matches Some(Ok(PreparedDefnCall::Arithmetic { .. })));
+                        let form = read_recorded_call_form(aliases, from, forms@, body, outcomes, call_types@,
+                            original_issues, at);
+                        call_form_origin(source, forms@, at, form);
+                        span_within_subtree(forms@, body, at);
+                        assert(indexed_body_site(source, forms@, root, body, *header));
+                        assert(body_contains_call_slot(source, forms@, *header, site.span)) by {
+                            reveal(body_contains_call_slot);
+                            assert(expression_slot(source, forms@, body, at));
+                            assert(site.span == form_span(forms@[at as int]));
+                        };
+                        crate::ncg2m::defn::form_span_readable(source, forms@, at);
+                        assert(unvisited_arithmetic_at_source(aliases, from, at, site));
+                    }
+                    return (outcome, Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }), Vec::new());
+                }
+                let sites = capture_arithmetic_sites(&call_types, visits.as_slice(), Ghost(forms@));
+                let _call_count = call_types.len();
+                proof {
+                    assert(call_types@.len() == _call_count);
+                    let caller = DefnPosition { file, item };
+                    prove_arithmetic_slot_projection(aliases, caller, forms@, body, outcomes, call_types@,
+                        original_issues, visits@, sites@);
+                    if let Ok(projected) = &edges {
+                        finish_expression_slot_coverage(aliases, caller, source, forms@, root, body, *header,
+                            outcomes, call_types@, original_issues, projected@, signature, call_trace_model(trace), Some(sites@));
+                    }
+                }
+                sites
+            }
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    (outcome, edges, sites)
+}
+
+proof fn read_recorded_call_form<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, forms: Seq<Form>, body: usize,
+    outcomes: Seq<CallOutcome<'p, 'a>>, calls: Seq<CallTypeEntry>, issues: Seq<CallIssue<'p, 'a>>, at: usize,
+) -> (form: CallForm<'a>)
+    requires
+        caller.file < aliases.targets_model().project_model().sources_model().len(),
+        call_inputs_match(aliases, caller.file, caller.item, forms, body, outcomes, calls, issues),
+        body <= at < body + outcomes.len(), outcomes[at - body].is_some(),
+    ensures
+        call_form_matches(aliases.targets_model().project_model().sources_model()[caller.file as int].text_model(),
+            forms, at, Some(form)),
+        call_arity_matches(aliases, caller.file, caller.item, form, outcomes[at - body]->Some_0),
+{
+    let source = aliases.targets_model().project_model().sources_model()[caller.file as int].text_model();
+    let outcome = outcomes[at - body];
+    assert(form_outcome_matches(aliases, caller.file, caller.item, forms, at, outcome)) by {
+        reveal(call_inputs_match);
+        reveal(outcomes_recorded);
+    };
+    reveal(form_outcome_matches);
+    let form = choose|form: Option<CallForm>| #[trigger] call_form_matches(source, forms, at, form)
+        && form.is_some() && call_arity_matches(aliases, caller.file, caller.item, form->Some_0, outcome->Some_0);
+    form->Some_0
 }
 
 }

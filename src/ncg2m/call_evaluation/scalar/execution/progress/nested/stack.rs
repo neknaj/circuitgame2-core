@@ -8,6 +8,7 @@ use crate::ncg2m::expression_types::{
     scalar_atom_at, scalar_evaluator_syntax, scalar_syntax_form_kind, scalar_syntax_if_children,
     scalar_syntax_matches_call_arguments,
 };
+use crate::ncg2m::expression_types::named_call::CheckedNamedTarget;
 
 verus! {
 
@@ -53,6 +54,19 @@ spec fn checked_wait(
             &&& exists|site: usize| #[trigger] checked_argument_edge(aliases, plan, wait, site)
         },
         Waiting::Return { parent, rank, .. } => checked_expression(supported, aliases, plan, rank, parent),
+        Waiting::Arithmetic(wait) => {
+            let body = wait.caller@.body_model();
+            let expected = arithmetic::arithmetic_type(wait.ty);
+            let left = ScalarExpressionSite { at: wait.site.arguments.0, expected };
+            let right = ScalarExpressionSite { at: wait.site.arguments.1, expected };
+            &&& checked_branches(supported, aliases, plan, wait.rank, wait.caller@, wait.parent.branches_model())
+            &&& plan.scalar_site_is_checked(aliases, wait.rank, body, wait.parent.position_model())
+            &&& plan.scalar_site_is_checked(aliases, wait.rank, body, left)
+            &&& plan.scalar_site_is_checked(aliases, wait.rank, body, right)
+            &&& (supported ==> supported_position(plan, wait.rank, wait.caller@, wait.parent.position_model())
+                && supported_position(plan, wait.rank, wait.caller@, left)
+                && supported_position(plan, wait.rank, wait.caller@, right))
+        },
     }
 }
 
@@ -245,9 +259,18 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         self.state_has_checked_positions(aliases, true)
     }
 
+    spec fn has_recorded_arithmetic_lookup(&self) -> bool {
+        self.active matches Active::Lookup { parent, site: 0 } && {
+            let position = parent.expression_model();
+            &&& self.plan.arithmetic_site_model(self.rank, position.at).is_some()
+            &&& arithmetic::requested_arithmetic_type(position.expected).is_some()
+        }
+    }
+
     spec fn state_has_checked_positions(&self, aliases: &MixedUseAliases<'_, 'p, 'a>, supported: bool) -> bool {
         &&& checked_waits(supported, aliases, self.plan, self.waiting@)
-        &&& (supported && self.active is Lookup ==> self.searches_checked_scalar_call(aliases))
+        &&& (supported && self.active is Lookup ==>
+            self.searches_checked_scalar_call(aliases) || self.has_recorded_arithmetic_lookup())
         &&& match self.active {
             Active::Expression(expr) | Active::Lookup { parent: expr, .. } =>
                 checked_expression(supported, aliases, self.plan, self.rank, expr),
@@ -328,6 +351,10 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         ensures after.state_has_checked_positions(aliases, supported),
     {
         reveal(ScalarExecution::step_matches);
+        if self.has_recorded_arithmetic_lookup() {
+            self.suspended_arithmetic_lookup_keeps_checked_types(aliases, supported, parent, after);
+            return;
+        }
         if supported {
             self.checked_scalar_call_lookup_progress(aliases, Ok(ScalarExecutionSlice::Suspended(after)));
         }
@@ -344,6 +371,40 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         let (edge, values, callee) = args.model();
         enters_with_checked_frame(supported, aliases, self.plan, self.rank, site, parent, edge, values, callee,
             args.ranks_model().1, self.waiting@, after);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn suspended_arithmetic_lookup_keeps_checked_types(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, supported: bool, parent: ScalarExpression<'p, 'a>, after: Self,
+    )
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()),
+            self.state_has_checked_positions(aliases, supported),
+            self.has_recorded_arithmetic_lookup(), self.active == (Active::Lookup { parent, site: 0 }),
+            self.step_matches(Ok(ScalarExecutionSlice::Suspended(after))),
+        ensures after.state_has_checked_positions(aliases, supported),
+    {
+        reveal(ScalarExecution::step_matches);
+        let frame = parent.frame_model();
+        let body = frame.body_model();
+        let position = parent.expression_model();
+        let selected = self.plan.checked_named_target_at_rank(aliases, self.rank, body, position);
+        let (site, ty) = match selected {
+            CheckedNamedTarget::Arithmetic(site, ty) => (site, ty),
+            _ => { assert(false); return; },
+        };
+        assert(arithmetic::entering_arithmetic(self.rank, parent, site, ty, self.waiting@, after));
+        if supported {
+            scalar_syntax_matches_call_arguments(body.source.text_model(), body.forms@, position.at,
+                seq![site.arguments.0, site.arguments.1]);
+        }
+        parent.restored_cursor_positions_agree();
+        let old = self.waiting@;
+        let waits = after.waiting@;
+        assert(checked_wait(supported, aliases, self.plan, waits.last()));
+        assert(waits.take(old.len() as int) =~= old);
+        assert(old.take(old.len() as int) =~= old);
+        preserve_wait_prefix(supported, aliases, self.plan, old, waits, old.len() as int);
     }
 
     #[verifier::spinoff_prover]
@@ -385,6 +446,26 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 enters_with_checked_frame(supported, aliases, self.plan, rank, site, parent, edge, values.push(value),
                     callee, to, kept, after);
             },
+            Waiting::Arithmetic(pending) => {
+                reveal(arithmetic::arithmetic_step_matches);
+                if pending.left.is_none() {
+                    assert(checked_wait(supported, aliases, self.plan, after.waiting@.last()));
+                    assert(after.waiting@.take(kept.len() as int) =~= kept);
+                    preserve_wait_prefix(supported, aliases, self.plan, kept, after.waiting@, kept.len() as int);
+                } else {
+                    let (result, parent, inner) = choose|result: crate::ncg2m::integers::IntegerValue,
+                        parent: ScalarExpression<'p, 'a>, inner: ScalarExpressionStep<'p, 'a>|
+                        #[trigger] parent.receive_matches(ScalarValue::Integer(result), inner)
+                            && parent.frame_model() == pending.caller@ && parent.cursor_model() == pending.parent
+                            && next_expression_at(after.active, parent.result_type_model(), inner);
+                    parent.restored_cursor_positions_agree();
+                    parent.received_value_resumes_branch(ScalarValue::Integer(result), inner);
+                    if let ScalarExpressionStep::Continue(child) = inner {
+                        select_checked_if_branch(supported, aliases, self.plan, pending.rank,
+                            parent, child);
+                    }
+                }
+            },
         }
     }
 
@@ -399,7 +480,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             inner is NeedsForm, expr.expression_step_matches(Ok(inner)),
             next_expression_at(after.active, expr.result_type_model(), inner),
             self.step_matches(Ok(ScalarExecutionSlice::Suspended(after))),
-        ensures after.searches_checked_scalar_call(aliases),
+        ensures after.searches_checked_scalar_call(aliases) || after.has_recorded_arithmetic_lookup(),
     {
         reveal(ScalarExecution::step_matches);
         let frame = expr.frame_model();
@@ -419,9 +500,22 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         self.plan.checked_site_has_the_rank_body(aliases, self.rank, body, position);
         self.plan.closed_scalar_fragment_matches_body(self.rank, body);
         self.plan.supported_call_is_body_expression(aliases, self.rank, body, position);
-        let site = self.plan.checked_call_site_at_rank(aliases, self.rank, body, position);
-        assert(self.evaluates_indexed_scalar_call(aliases, site));
-        self.checked_call_expression_starts_lookup(aliases, site, Ok(ScalarExecutionSlice::Suspended(after)));
+        let target = self.plan.checked_named_target_at_rank(aliases, self.rank, body, position);
+        match target {
+            CheckedNamedTarget::Declaration(_) => {
+                assert(self.plan.scalar_site_has_declared_edge(self.rank, position.at));
+                let candidate = self.plan.checked_call_site_at_rank(aliases, self.rank, body, position);
+                assert(self.evaluates_indexed_scalar_call(aliases, candidate));
+                self.checked_call_expression_starts_lookup(aliases, candidate, Ok(ScalarExecutionSlice::Suspended(after)));
+            },
+            CheckedNamedTarget::Arithmetic(_, _) => {
+                expr.expression_step_tracks_saved_conditions(inner);
+                let lookup = inner->NeedsForm_0;
+                assert(expr.expression_model() == lookup.expression_model());
+                assert(after.active == (Active::Lookup { parent: lookup, site: 0 }));
+                assert(after.has_recorded_arithmetic_lookup());
+            },
+        }
     }
 
     /// 対応する順位から実際に開始した状態では、全継続について断片の条件が成り立つ。
@@ -453,8 +547,10 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         ensures !(result matches Err(ScalarExecutionError::Deferred { .. })),
     {
         reveal(ScalarExecution::step_matches);
-        if self.active is Lookup {
+        if self.active is Lookup && !self.has_recorded_arithmetic_lookup() {
             self.checked_scalar_call_lookup_progress(aliases, result);
+        } else if self.active is Value && self.waiting@.len() > 0 && self.waiting@.last() is Arithmetic {
+            reveal(arithmetic::arithmetic_step_matches);
         }
     }
 

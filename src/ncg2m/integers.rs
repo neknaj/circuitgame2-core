@@ -1,6 +1,7 @@
 //! NCG2M の十進リテラルと整数の組み込みを評価する。
 
 use crate::syntax::{NaturalRangeError, read_natural_u64};
+use super::forms::is_spelling;
 #[cfg(verus_only)]
 use crate::syntax::decimal_natural_value;
 use vstd::prelude::*;
@@ -51,6 +52,23 @@ pub enum IntegerOperation {
     Sub,
     /// `mul`。二つの引数の積。
     Mul,
+}
+
+/// 組み込みの加減乗の綴りと演算の対応を表す。
+pub open spec fn integer_operation_spelling(word: Seq<u8>) -> Option<IntegerOperation> {
+    if word == "add".spec_bytes() { Some(IntegerOperation::Add) }
+    else if word == "sub".spec_bytes() { Some(IntegerOperation::Sub) }
+    else if word == "mul".spec_bytes() { Some(IntegerOperation::Mul) }
+    else { None }
+}
+
+pub(crate) fn read_integer_operation(word: &str) -> (operation: Option<IntegerOperation>)
+    ensures operation == integer_operation_spelling(word.spec_bytes()),
+{
+    if is_spelling(word, "add") { Some(IntegerOperation::Add) }
+    else if is_spelling(word, "sub") { Some(IntegerOperation::Sub) }
+    else if is_spelling(word, "mul") { Some(IntegerOperation::Mul) }
+    else { None }
 }
 
 /// 組み込みの結果が戻り値の型の範囲を越えたことを表す。

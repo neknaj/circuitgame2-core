@@ -10,6 +10,8 @@ use super::{
 };
 use super::expression::ScalarCursor;
 use crate::ncg2m::defn::span_of;
+use crate::ncg2m::integer_expression::IntegerEvaluationError;
+use crate::ncg2m::integers::IntegerOperation;
 #[cfg(verus_only)]
 use super::{binding_at_rank_matches, parameters_match, prepared_arguments_match, scalar_fits};
 #[cfg(verus_only)]
@@ -25,6 +27,7 @@ pub use observation::{scalar_execution_states_observe_same, scalar_execution_ste
 #[cfg(any(test, verus_only))]
 mod two_helper_example;
 mod slice;
+mod arithmetic;
 #[cfg(verus_only)]
 mod progress;
 #[cfg(verus_only)]
@@ -78,6 +81,7 @@ enum Waiting<'plan, 'p, 'a> {
         rank: usize,
         child: Ghost<Context<'p, 'a>>,
     },
+    Arithmetic(arithmetic::ArithmeticWait<'p, 'a>),
 }
 
 impl<'plan, 'p, 'a> Waiting<'plan, 'p, 'a> {
@@ -88,6 +92,7 @@ impl<'plan, 'p, 'a> Waiting<'plan, 'p, 'a> {
                 (*rank, caller@, body.signature.parameters@[values.len() as int].ty.ty)
             },
             Self::Return { child, .. } => child@,
+            Self::Arithmetic(wait) => wait.input(),
         }
     }
 
@@ -95,6 +100,7 @@ impl<'plan, 'p, 'a> Waiting<'plan, 'p, 'a> {
         match self {
             Self::Argument { parent, caller, rank, .. } => (*rank, caller@, parent.result_type_model()),
             Self::Return { parent, rank, .. } => (*rank, parent.frame_model(), parent.result_type_model()),
+            Self::Arithmetic(wait) => wait.output(),
         }
     }
 
@@ -114,6 +120,7 @@ impl<'plan, 'p, 'a> Waiting<'plan, 'p, 'a> {
                 &&& child@.0 < *rank
                 &&& child@.2 == parent.expression_model().expected
             },
+            Self::Arithmetic(wait) => wait.fits(plan),
         }
     }
 }
@@ -151,6 +158,15 @@ pub enum ScalarExecutionSlice<'plan, 'p, 'a> {
 pub enum ScalarExecutionError<'p, 'a> {
     /// 整数リテラルを期待型で評価できなかった。
     Literal(ScalarLiteralError<'p, 'a>),
+    /// 組み込みの算術結果が整数型の範囲を越えた。
+    Arithmetic {
+        /// 演算式を書いたファイルと文書バージョン。
+        source: &'p ProjectSource<'a>,
+        /// 評価した演算。
+        operation: IntegerOperation,
+        /// 元の演算式の範囲と結果の整数型。
+        error: IntegerEvaluationError,
+    },
     /// この評価器が扱う式や型の外にある。
     Deferred {
         /// 評価中のソースと文書バージョン。
@@ -410,7 +426,16 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 let body = parent.frame_model().body_model();
                 let candidate = row matches Some(edges) && site < edges.len();
                 let different = candidate && row->Some_0[site as int].at != at;
-                match step {
+                let operator = self.plan.arithmetic_site_model(rank, at);
+                let integer = arithmetic::requested_arithmetic_type(expected);
+                if site == 0 && operator.is_some() && integer.is_some() {
+                    let operation = operator->Some_0;
+                    let ty = integer->Some_0;
+                    step matches Ok(ScalarExecutionSlice::Suspended(after))
+                        && operation.at == at
+                        && arithmetic::arithmetic_origin(self.plan, rank, parent.frame_model(), operation)
+                        && arithmetic::entering_arithmetic(rank, parent, operation, ty, stack, after)
+                } else { match step {
                     Ok(ScalarExecutionSlice::Suspended(after)) if different =>
                         site < usize::MAX && after.rank == rank && after.waiting@ == stack
                             && after.active == (Active::Lookup { parent, site: (site + 1) as usize }),
@@ -425,14 +450,15 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                             && span == form_span(body.forms@[at as int])
                             && (!candidate || (!different && unresolved_call(self.plan, rank, site, expected))),
                     _ => false,
-                }
+                }}
             },
             Active::Value { frame, value, .. } => if stack.len() == 0 {
                 step matches Ok(ScalarExecutionSlice::Complete(out)) && out == value
             } else {
-                step matches Ok(ScalarExecutionSlice::Suspended(after)) && match stack.last() {
+                match stack.last() {
                     Waiting::Argument { parent, caller, pending, rank: from } => {
                         let (edge, values, target) = pending.model();
+                        &&& step matches Ok(ScalarExecutionSlice::Suspended(after))
                         &&& frame == caller@
                         &&& parent.fits(&frame)
                         &&& edge.arguments@.len() == target.signature.parameters@.len()
@@ -442,16 +468,75 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                                 pending.ranks_model().1, stack.drop_last(), after)
                     },
                     Waiting::Return { parent, rank: from, .. } => {
+                        &&& step matches Ok(ScalarExecutionSlice::Suspended(after))
                         &&& after.rank == from && after.waiting@ == stack.drop_last()
                         &&& (after.active is Value ==> scalar_fits(value, parent.result_type_model()))
                         &&& exists|inner: ScalarExpressionStep<'p, 'a>| #[trigger] parent.receive_matches(value, inner)
                             && next_expression_at(after.active, parent.result_type_model(), inner)
                     },
+                    Waiting::Arithmetic(pending) =>
+                        arithmetic::arithmetic_step_matches(pending, value, stack.drop_last(), step),
                 }
             },
         }
     }
 
+    #[verifier::spinoff_prover]
+    fn step_lookup(
+        plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, parent: ScalarExpression<'p, 'a>, site: usize,
+        waiting: Vec<Waiting<'plan, 'p, 'a>>, result_type: Ghost<DataType<'a>>, Ghost(previous): Ghost<Self>,
+    ) -> (step: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>)
+        requires
+            previous.ready(), previous.plan == plan, previous.rank == rank,
+            previous.active == (Active::Lookup { parent, site }),
+            previous.waiting@ == waiting@, previous.result_type@ == result_type@,
+        ensures
+            previous.step_matches(step),
+            step matches Ok(ScalarExecutionSlice::Suspended(after)) ==> after.result_type_model() == result_type@,
+            !(step matches Ok(ScalarExecutionSlice::Complete(_))),
+    {
+        let at = parent.expression().at;
+        if site == 0 {
+            if let Some(ty) = arithmetic::select_arithmetic_type(parent.expression().expected) {
+                if let Some(operation) = plan.arithmetic_site(rank, at) {
+                    proof {
+                        assert(arithmetic::arithmetic_origin(plan, rank, parent.frame_model(), operation));
+                    }
+                    let after = Self::enter_arithmetic(plan, rank, parent, operation, ty, waiting, result_type);
+                    return Ok(ScalarExecutionSlice::Suspended(after));
+                }
+            }
+        }
+        if let Some(row) = plan.calls_at_rank(rank) {
+            if site < row.len() {
+                let edge = &row[site];
+                if edge.at != at {
+                    let active = Active::Lookup { parent, site: site + 1 };
+                    return Ok(ScalarExecutionSlice::Suspended(Self { plan, rank, active, waiting, result_type }));
+                }
+                let prepared = prepare_scalar_arguments(plan, rank, site);
+                if let Some(args) = prepared {
+                    let expected = parent.expression().expected;
+                    if same_scalar_type(expected, args.result_type()) {
+                        proof {
+                            assert(args.model().0 == *edge);
+                            assert(plan.order_model()[rank as int] == edge.from);
+                            assert(call_origin(plan, rank, &parent.frame_model(), at, *edge));
+                        }
+                        let after = Self::enter_call(plan, rank, parent, args, waiting, result_type);
+                        assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
+                        return Ok(ScalarExecutionSlice::Suspended(after));
+                    }
+                }
+                assert(unresolved_call(plan, rank, site, parent.expression_model().expected));
+            }
+        }
+        let (frame, _) = parent.into_parts();
+        let body = frame.body();
+        Err(ScalarExecutionError::Deferred { source: body.source, span: span_of(&body.forms[at]) })
+    }
+
+    #[verifier::spinoff_prover]
     fn step(self) -> (step: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>)
         ensures self.step_matches(step),
         match step {
@@ -480,36 +565,8 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                         Self { plan, rank, active: Active::Lookup { parent, site: 0 }, waiting, result_type },
                 }
             },
-            Active::Lookup { parent, site } => {
-                let at = parent.expression().at;
-                if let Some(row) = plan.calls_at_rank(rank) {
-                    if site < row.len() {
-                        let edge = &row[site];
-                        if edge.at != at {
-                            let active = Active::Lookup { parent, site: site + 1 };
-                            return Ok(ScalarExecutionSlice::Suspended(Self { plan, rank, active, waiting, result_type }));
-                        }
-                        let prepared = prepare_scalar_arguments(plan, rank, site);
-                        if let Some(args) = prepared {
-                            let expected = parent.expression().expected;
-                            if same_scalar_type(expected, args.result_type()) {
-                                proof {
-                                    assert(args.model().0 == *edge);
-                                    assert(plan.order_model()[rank as int] == edge.from);
-                                    assert(call_origin(plan, rank, &parent.frame_model(), at, *edge));
-                                }
-                                let after = Self::enter_call(plan, rank, parent, args, waiting, result_type);
-                                assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
-                                return Ok(ScalarExecutionSlice::Suspended(after));
-                            }
-                        }
-                        assert(unresolved_call(plan, rank, site, parent.expression_model().expected));
-                    }
-                }
-                let (frame, _) = parent.into_parts();
-                let body = frame.body();
-                return Err(ScalarExecutionError::Deferred { source: body.source, span: span_of(&body.forms[at]) });
-            },
+            Active::Lookup { parent, site } =>
+                return Self::step_lookup(plan, rank, parent, site, waiting, result_type, Ghost(previous)),
             Active::Value { frame, value, .. } => {
                 let Some(resume) = waiting.pop() else { return Ok(ScalarExecutionSlice::Complete(value)); };
                 proof {
@@ -539,6 +596,8 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                         assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
                         after
                     },
+                    Waiting::Arithmetic(pending) =>
+                        return Self::resume_arithmetic(plan, pending, frame, value, waiting, result_type),
                 }
             },
         };

@@ -6,6 +6,8 @@ use crate::ncg2m::data_types::{
 };
 use crate::ncg2m::call_evaluation::scalar::expression::observed_expression_steps_agree;
 use crate::ncg2m::call_evaluation::scalar::ScalarCondition;
+use crate::ncg2m::integer_expression::{integer_evaluation_matches, integer_value_number};
+use crate::ncg2m::integers::{IntegerValue, arithmetic_value};
 use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
@@ -90,6 +92,9 @@ spec fn waiting_agrees(left: Waiting, right: Waiting) -> bool {
             &&& rank_a == rank_b && frames_agree(frame_a, frame_b)
             &&& type_spelling_agrees(ty_a, ty_b)
         },
+        (Waiting::Arithmetic(a), Waiting::Arithmetic(b)) =>
+            a.rank == b.rank && a.site == b.site && a.ty == b.ty && a.left == b.left
+                && frames_agree(a.caller@, b.caller@) && cursors_agree(a.parent, b.parent),
         _ => false,
     }
 }
@@ -118,6 +123,9 @@ pub open spec fn scalar_execution_steps_observe_same<'plan, 'p, 'a>(
         (Ok(ScalarExecutionSlice::Suspended(a)), Ok(ScalarExecutionSlice::Suspended(b))) => scalar_execution_states_observe_same(a, b),
         (Err(ScalarExecutionError::Literal(a)), Err(ScalarExecutionError::Literal(b))) =>
             *a.source == *b.source && a.span == b.span && a.error == b.error,
+        (Err(ScalarExecutionError::Arithmetic { source: a, operation: x, error: left }),
+            Err(ScalarExecutionError::Arithmetic { source: b, operation: y, error: right })) =>
+                *a == *b && x == y && left == right,
         (Err(ScalarExecutionError::Deferred { source: a, span: left }),
             Err(ScalarExecutionError::Deferred { source: b, span: right })) => *a == *b && left == right,
         _ => false,
@@ -149,6 +157,92 @@ proof fn remaining_waits_agree(left: Seq<Waiting>, right: Seq<Waiting>)
     assert forall|i: int| 0 <= i < a.len() implies waiting_agrees(#[trigger] a[i], #[trigger] b[i]) by {
         corresponding_waits_agree(left, right, i);
     };
+}
+
+proof fn appended_waits_agree(left: Seq<Waiting>, right: Seq<Waiting>, a: Waiting, b: Waiting)
+    requires waiting_stack_agrees(left, right), waiting_agrees(a, b),
+    ensures waiting_stack_agrees(left.push(a), right.push(b)),
+{
+    let first = left.push(a);
+    let second = right.push(b);
+    assert forall|i: int| 0 <= i < first.len()
+        implies waiting_agrees(#[trigger] first[i], #[trigger] second[i]) by {
+        if i < left.len() { corresponding_waits_agree(left, right, i); }
+    };
+}
+
+proof fn arithmetic_start_observes_same(
+    rank: usize, a: ScalarExpression, b: ScalarExpression, site: crate::project::TypedArithmeticSite, ty: IntegerType,
+    stack_a: Seq<Waiting>, stack_b: Seq<Waiting>, x: ScalarExecution, y: ScalarExecution,
+)
+    requires expressions_agree(a, b), waiting_stack_agrees(stack_a, stack_b),
+        arithmetic::entering_arithmetic(rank, a, site, ty, stack_a, x),
+        arithmetic::entering_arithmetic(rank, b, site, ty, stack_b, y),
+    ensures x.rank == y.rank, active_agrees(x.active, y.active), waiting_stack_agrees(x.waiting@, y.waiting@),
+{
+    a.restored_cursors_observe_same(b);
+    let tail_a = x.waiting@.last();
+    let tail_b = y.waiting@.last();
+    assert(waiting_agrees(tail_a, tail_b));
+    appended_waits_agree(stack_a, stack_b, tail_a, tail_b);
+    assert(x.waiting@ =~= stack_a.push(tail_a) && y.waiting@ =~= stack_b.push(tail_b));
+}
+
+#[verifier::spinoff_prover]
+proof fn arithmetic_resume_observes_same<'plan, 'p, 'a>(
+    a: arithmetic::ArithmeticWait<'p, 'a>, b: arithmetic::ArithmeticWait<'p, 'a>, value: ScalarValue,
+    stack_a: Seq<Waiting<'plan, 'p, 'a>>, stack_b: Seq<Waiting<'plan, 'p, 'a>>,
+    first: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    second: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+)
+    requires
+        waiting_agrees(Waiting::Arithmetic(a), Waiting::Arithmetic(b)), waiting_stack_agrees(stack_a, stack_b),
+        arithmetic::arithmetic_step_matches(a, value, stack_a, first),
+        arithmetic::arithmetic_step_matches(b, value, stack_b, second),
+        (first, second) matches (Ok(ScalarExecutionSlice::Suspended(x)), Ok(ScalarExecutionSlice::Suspended(y)))
+            ==> x.plan == y.plan && type_spelling_agrees(x.result_type@, y.result_type@),
+    ensures scalar_execution_steps_observe_same(first, second),
+{
+    reveal(arithmetic::arithmetic_step_matches);
+    let right = value->Integer_0;
+    if a.left.is_none() {
+        let x = first->Ok_0->Suspended_0;
+        let y = second->Ok_0->Suspended_0;
+        let tail_a = x.waiting@.last();
+        let tail_b = y.waiting@.last();
+        assert(waiting_agrees(tail_a, tail_b));
+        appended_waits_agree(stack_a, stack_b, tail_a, tail_b);
+        assert(x.waiting@ =~= stack_a.push(tail_a) && y.waiting@ =~= stack_b.push(tail_b));
+        return;
+    }
+    let left = a.left->Some_0;
+    let body = a.caller@.body_model();
+    let span = form_span(body.forms@[a.site.at as int]);
+    let number = arithmetic_value(a.site.operation, integer_value_number(left), integer_value_number(right));
+    match (first, second) {
+        (Err(_), Err(_)) => {},
+        (Ok(ScalarExecutionSlice::Suspended(x)), Ok(ScalarExecutionSlice::Suspended(y))) => {
+            let (value_a, parent_a, step_a) = choose|integer: IntegerValue,
+                parent: ScalarExpression<'p, 'a>, inner: ScalarExpressionStep<'p, 'a>|
+                #[trigger] parent.receive_matches(ScalarValue::Integer(integer), inner)
+                    && parent.frame_model() == a.caller@ && parent.cursor_model() == a.parent
+                    && parent.result_type_model() == a.parent.result_type_model()
+                    && integer_evaluation_matches(a.ty, number, span, Ok(integer))
+                    && next_expression_at(x.active, parent.result_type_model(), inner);
+            let (value_b, parent_b, step_b) = choose|integer: IntegerValue,
+                parent: ScalarExpression<'p, 'a>, inner: ScalarExpressionStep<'p, 'a>|
+                #[trigger] parent.receive_matches(ScalarValue::Integer(integer), inner)
+                    && parent.frame_model() == b.caller@ && parent.cursor_model() == b.parent
+                    && parent.result_type_model() == b.parent.result_type_model()
+                    && integer_evaluation_matches(b.ty, number, span, Ok(integer))
+                    && next_expression_at(y.active, parent.result_type_model(), inner);
+            assert(value_a == value_b);
+            parent_a.restored_expressions_observe_same(parent_b);
+            parent_a.received_steps_agree(parent_b, ScalarValue::Integer(value_a), step_a, step_b);
+            expression_outputs_agree(x.active, y.active, parent_a.result_type_model(), parent_b.result_type_model(), step_a, step_b);
+        },
+        _ => { assert(false); },
+    }
 }
 
 proof fn observe_call_entry<'plan, 'p, 'a>(
@@ -269,6 +363,16 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 let expect_a = a.expression_model().expected;
                 let expect_b = b.expression_model().expected;
                 let at = a.expression_model().at;
+                let operator = self.plan.arithmetic_site_model(rank, at);
+                let integer = arithmetic::requested_arithmetic_type(expect_a);
+                assert(integer == arithmetic::requested_arithmetic_type(expect_b));
+                if site == 0 && operator.is_some() && integer.is_some() {
+                    assert(first is Ok && first->Ok_0 is Suspended);
+                    assert(second is Ok && second->Ok_0 is Suspended);
+                    arithmetic_start_observes_same(rank, a, b, operator->Some_0, integer->Some_0,
+                        stack_a, stack_b, first->Ok_0->Suspended_0, second->Ok_0->Suspended_0);
+                    return;
+                }
                 let candidate = row matches Some(edges) && site < edges.len();
                 if candidate && row->Some_0[site as int].at == at {
                     if let Ok(ScalarExecutionSlice::Suspended(x)) = first {
@@ -301,12 +405,20 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 }
             },
             (Active::Value { frame: fa, value, .. }, Active::Value { frame: fb, .. }) if stack_a.len() != 0 => {
+                corresponding_waits_agree(stack_a, stack_b, stack_a.len() - 1);
+                remaining_waits_agree(stack_a, stack_b);
+                if let Waiting::Arithmetic(pending) = stack_a.last() {
+                    let other = match stack_b.last() {
+                        Waiting::Arithmetic(other) => other,
+                        _ => { assert(false); return; },
+                    };
+                    arithmetic_resume_observes_same(pending, other, value, stack_a.drop_last(), stack_b.drop_last(), first, second);
+                    return;
+                }
                 let (x, y) = match (first, second) {
                     (Ok(ScalarExecutionSlice::Suspended(x)), Ok(ScalarExecutionSlice::Suspended(y))) => (x, y),
                     _ => { assert(false); return; },
                 };
-                corresponding_waits_agree(stack_a, stack_b, stack_a.len() - 1);
-                remaining_waits_agree(stack_a, stack_b);
                 match (stack_a.last(), stack_b.last()) {
                     (Waiting::Argument { parent: a, pending: pa, rank: from, .. },
                         Waiting::Argument { parent: b, pending: pb, .. }) => {

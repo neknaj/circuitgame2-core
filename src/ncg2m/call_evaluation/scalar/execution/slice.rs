@@ -69,7 +69,8 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         ensures match result {
             Ok(ScalarExecutionSlice::Suspended(after)) =>
                 after.plan_model() == self.plan_model() && after.preserves_supported_fragment(aliases),
-            Ok(ScalarExecutionSlice::Complete(_)) | Err(ScalarExecutionError::Literal(_)) => true,
+            Ok(ScalarExecutionSlice::Complete(_))
+            | Err(ScalarExecutionError::Literal(_) | ScalarExecutionError::Arithmetic { .. }) => true,
             Err(ScalarExecutionError::Deferred { .. }) => false,
         },
     {
@@ -108,7 +109,8 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             defn_call_plan_matches(aliases, self.plan_model()), self.preserves_supported_fragment(aliases),
             self.remaining_continuations_bound() < fuel,
             scalar_execution_slice_matches(*self, fuel, result),
-        ensures (result matches Ok(ScalarExecutionSlice::Complete(_))) || (result matches Err(ScalarExecutionError::Literal(_))),
+        ensures (result matches Ok(ScalarExecutionSlice::Complete(_)))
+            || (result matches Err(ScalarExecutionError::Literal(_) | ScalarExecutionError::Arithmetic { .. })),
     {
         self.supported_slice_does_not_defer(aliases, fuel, result);
         if let Ok(ScalarExecutionSlice::Suspended(after)) = result {
@@ -162,7 +164,8 @@ fn run_supported_slices_until_terminal<'plan, 'p, 'a>(
 ) -> (result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>)
     requires defn_call_plan_matches(aliases, start.plan_model()), start.preserves_supported_fragment(aliases),
     ensures
-        (result matches Ok(ScalarExecutionSlice::Complete(_))) || (result matches Err(ScalarExecutionError::Literal(_))),
+        (result matches Ok(ScalarExecutionSlice::Complete(_)))
+            || (result matches Err(ScalarExecutionError::Literal(_) | ScalarExecutionError::Arithmetic { .. })),
         scalar_execution_slice_matches(start, start.remaining_continuations_bound() + 1, result),
 {
     let mut state = start;
