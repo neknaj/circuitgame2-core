@@ -6,7 +6,7 @@ use core::ops::Range;
 use crate::{Segment, is_suffix, recovery_segment_at, recovery_segments_agree};
 #[cfg(verus_only)]
 use crate::recovery_replay::{
-    ReplayFrame, apply_recovery_segment, replay_at, replay_position, replay_separator, replay_valid,
+    RecoveryState, ReplayFrame, apply_recovery_segment, replay_at, replay_frame_evidence, replay_position, replay_separator, replay_valid,
 };
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -275,6 +275,80 @@ pub(super) proof fn settled_boundary_in_replay(
         checkpoint_frame_agrees(bytes, trace, frames, n - 1);
     }
     n
+}
+
+pub(super) proof fn replay_start_is_settled(source: &str)
+    ensures settled_recovery_boundary(source, 0),
+{
+    let bytes = source.spec_bytes();
+    let trace: Seq<Step> = Seq::empty();
+    encode_utf8_valid_utf8(source@);
+    crate::is_char_boundary_start_end_of_seq(bytes);
+    reveal(recovery_prefix);
+    reveal(settled_recovery_boundary);
+    assert(recovery_prefix(bytes, trace) && ends_at_boundary(trace, 0));
+    assert(exists|candidate: Seq<Step>| #[trigger] recovery_prefix(bytes, candidate)
+        && ends_at_boundary(candidate, 0));
+}
+
+// 元のリストを閉じた再生位置から、次の字句を独立に読める。
+pub(super) proof fn replay_close_is_settled(source: &str, frames: Seq<ReplayFrame>, index: int)
+    requires
+        replay_valid(source.spec_bytes(), frames), 0 <= index < frames.len(),
+        frames[index].segment.kind is Close,
+        replay_at(frames, index).open.len() == 1,
+    ensures settled_recovery_boundary(source, frames[index].segment.span.end),
+{
+    let bytes = source.spec_bytes();
+    let trace = Seq::new((index + 1) as nat, |i: int| Step {
+        segment: frames[i].segment, depth: frames[i].after.open.len(),
+    });
+    assert forall|i: int| 0 <= i < trace.len() implies {
+        let step = #[trigger] trace[i];
+        &&& recovery_segment_at(bytes, offset_at(trace, i), needs_separator_at(trace, i), step.segment)
+        &&& step.depth == next_depth(depth_at(trace, i), step.segment.kind)
+    } by {
+        align_replay_depth(bytes, frames, trace, i);
+    };
+    assert(recovery_prefix(bytes, trace)) by { reveal(recovery_prefix); };
+    let span = frames[index].segment.span;
+    assert(ends_at_boundary(trace, span.end as int)) by {
+        align_replay_depth(bytes, frames, trace, index);
+        assert(trace.last() == trace[index]);
+    };
+    encode_utf8_valid_utf8(source@);
+    assert(span.end <= bytes.len() && is_char_boundary(bytes, span.end as int)) by {
+        replay_frame_evidence(bytes, frames, index);
+        reveal(recovery_segment_at);
+    };
+    reveal(settled_recovery_boundary);
+    assert(exists|candidate: Seq<Step>| #[trigger] recovery_prefix(bytes, candidate)
+        && ends_at_boundary(candidate, span.end as int));
+}
+
+proof fn align_replay_depth(bytes: Seq<u8>, frames: Seq<ReplayFrame>, trace: Seq<Step>, i: int)
+    requires
+        replay_valid(bytes, frames), 0 <= i < trace.len() <= frames.len(),
+        trace == Seq::new(trace.len(), |j: int| Step { segment: frames[j].segment, depth: frames[j].after.open.len() }),
+    ensures
+        recovery_segment_at(bytes, offset_at(trace, i), needs_separator_at(trace, i), trace[i].segment),
+        depth_at(trace, i) == replay_at(frames, i).open.len(),
+        trace[i].segment == frames[i].segment,
+        trace[i].depth == next_depth(depth_at(trace, i), trace[i].segment.kind),
+{
+    assert(trace[i].segment == frames[i].segment && trace[i].depth == frames[i].after.open.len());
+    if i > 0 {
+        assert(trace[i - 1].segment == frames[i - 1].segment);
+        assert(trace[i - 1].depth == frames[i - 1].after.open.len());
+    }
+    replay_frame_evidence(bytes, frames, i);
+    depth_after_segment(replay_at(frames, i), frames[i].segment);
+}
+
+proof fn depth_after_segment(state: RecoveryState, segment: Segment)
+    ensures apply_recovery_segment(state, segment).open.len() == next_depth(state.open.len(), segment.kind),
+{
+    reveal(apply_recovery_segment);
 }
 
 impl<'a> RecoveryBoundary<'a> {

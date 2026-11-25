@@ -13,6 +13,8 @@ use super::{clean_prefix, parsed_from};
 use crate::{Recovered, parse_recovering};
 #[cfg(verus_only)]
 use crate::{recovered_replay_matches, recovered_replays_agree};
+#[cfg(verus_only)]
+use crate::recovery_replay::{retained_original_lists_agree};
 
 verus! {
 
@@ -49,6 +51,11 @@ pub enum SnapshotRecovery<'cache, 'text> {
 impl OwnedRecoveryCache {
     #[verifier::type_invariant]
     spec fn valid(&self) -> bool {
+        self.stored_edges_match()
+    }
+
+    /// 保存した前後の構文が、旧本文の区間と対応することを表す。
+    pub closed spec fn stored_edges_match(&self) -> bool {
         cached_edges_match(self.text@, self.start, self.join, self.head, self.tail)
     }
 
@@ -74,6 +81,7 @@ impl OwnedRecoveryCache {
     pub open spec fn reuses_edge_bytes(&self, update: &ReparsedRecovery) -> bool {
         let old = encode_utf8(self.text_model());
         let current = update.source_model().spec_bytes();
+        &&& self.stored_edges_match()
         &&& update.valid()
         &&& self.head_end_model() <= self.tail_start_model() <= old.len()
         &&& update.section_model(1).byte_base <= update.section_model(2).byte_base <= current.len()
@@ -198,6 +206,36 @@ impl OwnedRecoveryCache {
         edge_range_boundary(old, current, old_base, old_limit, current_base, current_limit, first);
         edge_range_boundary(old, current, old_base, old_limit, current_base, current_limit, last);
         start as usize..end as usize
+    }
+
+    /// 旧全文の連続した前後の元リストが、現在の局所解析の前後の区間を過不足なく覆うことを示す。
+    ///
+    /// `head_count` 件目で接頭部が終わり、`first_tail` 件目を閉じた位置から接尾部が始まる。
+    /// 件数が0なら本文の先頭を境界とする。旧本文はこのキャッシュの解析に使ったものを渡す。
+    pub proof fn reused_original_lists_cover(
+        &self, old: &str, whole: &Recovered, update: &ReparsedRecovery, head_count: nat, first_tail: nat,
+    )
+        requires
+            old@ == self.text_model(),
+            3 * old.spec_bytes().len() + 1 < usize::MAX,
+            recovered_replay_matches(old, whole.forms@, whole.repairs@, whole.original_lists@),
+            head_count <= first_tail <= whole.original_lists@.len(),
+            self.head_end_model() == if head_count == 0 { 0 } else { whole.original_lists@[head_count - 1].end },
+            self.tail_start_model() == if first_tail == 0 { 0 } else { whole.original_lists@[first_tail - 1].end },
+            self.reuses_edge_bytes(update),
+            *update.section_model(0).recovered == self.head_model(),
+            *update.section_model(2).recovered == self.tail_model(),
+        ensures
+            update.section_model(0).recovered.original_lists@ == whole.original_lists@.take(head_count as int),
+            whole.original_lists@.skip(first_tail as int)
+                == update.section_model(2).recovered.original_lists@.map_values(
+                    |span: Range<usize>| (self.tail_start_model() + span.start) as usize..(self.tail_start_model() + span.end) as usize),
+    {
+        let bytes = old.spec_bytes();
+        let pair = choose|pair: (&str, &str)| #[trigger]
+            edges_from(bytes, self.start, self.join, pair, self.head, self.tail);
+        let (head_text, tail_text) = pair;
+        retained_original_lists_agree(old, whole, head_text, &self.head, tail_text, &self.tail, head_count, first_tail);
     }
 
     fn try_reparse<'p, 's>(&'p self, source: &'s str, revision: u64)

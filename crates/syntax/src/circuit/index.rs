@@ -13,7 +13,7 @@ use crate::{sexpr_form_model, strict_syntax_rejection, strict_token_errors_agree
 pub use recovery::{circuit_recovery_matches, circuit_recovery_repair_evidence, circuit_recovery_results_agree_on_sexpr, circuit_recovery_transfers_on_sexpr_bytes,
     complete_recovery_agrees_with_index, one_original_circuit_list, original_diagnostic_relocated, original_list_diagnostics_relocate, original_diagnostic_within, original_list_is_inspectable, original_list_observations_agree, repaired_circuit_recoveries_agree};
 pub use recovery::{
-    CachedCircuitRecovery, CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
+    CachedCircuitRecovery, CircuitRecovery, CircuitRecoveryReuseWindow, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     relocate_circuit_span,
     RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_build_index, recover_circuit_forms, recover_circuit_names,
     recover_circuit_names_with_cache,

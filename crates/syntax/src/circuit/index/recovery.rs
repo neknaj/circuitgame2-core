@@ -19,6 +19,8 @@ pub use relocation::relocate_circuit_span;
 pub use relocation::{original_diagnostic_relocated, original_list_diagnostics_relocate};
 mod cache;
 mod names;
+mod window;
+pub use window::CircuitRecoveryReuseWindow;
 pub use cache::CachedCircuitRecovery;
 #[cfg(verus_only)]
 pub use names::recovered_names_agree;

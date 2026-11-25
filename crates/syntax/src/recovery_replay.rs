@@ -5,6 +5,8 @@ use crate::recovery_boundary::{settled_boundary_in_replay, settled_recovery_boun
 use core::ops::Range;
 use vstd::{prelude::*, string::StringSliceAdditionalSpecFns, utf8::encode_utf8_valid_utf8};
 
+mod original_lists;
+pub(crate) use original_lists::retained_original_lists_agree;
 mod lexical_shift;
 mod clean_prefix;
 pub(super) mod placement;
