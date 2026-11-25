@@ -4,39 +4,53 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::netlist::{ClockedSession, ClockedVm, PendingIoReset, PendingIoTick};
+use super::scheduling::{QueuedResponse, commit_queued_events};
+use super::{DeviceEvent, ScheduleInputError};
 use crate::time::{ClockError, ScheduledEvent, ScheduledEvents, TickPosition};
 use super::{BatchRegistrationError, HostRequestId, IssuedRequestIds, RegisterRequestError, RequestIdError, RequestIds, RequestKey, RequestLedger,
     ResponseTickError, ScheduleResponseError, ScheduledResponse};
 #[cfg(verus_only)]
-use super::{ResponseStatus, first_batch_request_error, delivery_matches, issued_rows_match, response_keys, response_update, valid_request_batch};
+use super::{ResponseStatus, first_batch_request_error, delivery_matches, issued_rows_match, queued_response_keys, response_update, valid_request_batch};
 #[cfg(verus_only)]
 use crate::time::{events_at_tick, events_by_reset_generation, next_event_matches};
 
 verus! {
 
-type ResponseEvent<T> = ScheduledEvent<ScheduledResponse<T>>;
+type SessionEvent<E> = ScheduledEvent<E>;
+
+/// 照合済み応答だけを受け取る実行セッション。
+pub type DeviceResponseSession<R> = DeviceSession<ScheduledResponse<R>>;
+
+/// 外部入力と照合済み応答を同じ列で受け取る実行セッション。
+pub type DeviceEventSession<I, R> = DeviceSession<DeviceEvent<I, R>>;
+
+/// 応答専用の実行で準備した tick。
+pub type PendingDeviceTick<'a, R> = PendingDeviceEvents<'a, ScheduledResponse<R>>;
+
+/// 応答専用の実行で準備した reset。
+pub type PendingDeviceReset<'a, R> = PendingDeviceEventsReset<'a, ScheduledResponse<R>>;
 
 /// 応答を扱う一つの回路実行。
 ///
 /// 採番、要求台帳、応答キューはこの実行が所有する。tick や reset の準備中は
 /// 同じ実行に新しい要求や応答を登録できない。
-pub struct DeviceResponseSession<T> {
+pub struct DeviceSession<E> {
     circuit: ClockedSession,
     ids: RequestIds,
     ledger: RequestLedger,
-    events: ScheduledEvents<ScheduledResponse<T>>,
+    events: ScheduledEvents<E>,
 }
 
 /// 回路を更新するまで、同じ実行の台帳と応答列を保持した tick。
-pub struct PendingDeviceTick<'a, T> {
-    tick: PendingIoTick<'a, ScheduledResponse<T>>,
+pub struct PendingDeviceEvents<'a, E> {
+    tick: PendingIoTick<'a, E>,
     ledger: &'a mut RequestLedger,
     ids: &'a mut RequestIds,
 }
 
 /// 次の世代をデバイスへ通知し、回路と要求の状態を後で初期化するための準備。
-pub struct PendingDeviceReset<'a, T> {
-    reset: PendingIoReset<'a, ScheduledResponse<T>>,
+pub struct PendingDeviceEventsReset<'a, E> {
+    reset: PendingIoReset<'a, E>,
     ledger: &'a mut RequestLedger,
     ids: &'a mut RequestIds,
 }
@@ -63,9 +77,9 @@ pub enum RequestBatchTickError {
     Tick(ResponseTickError),
 }
 
-impl<T> DeviceResponseSession<T> {
+impl<E: QueuedResponse> DeviceSession<E> {
     /// 現在の回路、台帳、応答列。
-    pub closed spec fn model(&self) -> (ClockedSession, RequestLedger, Seq<ResponseEvent<T>>) {
+    pub closed spec fn model(&self) -> (ClockedSession, RequestLedger, Seq<SessionEvent<E>>) {
         (self.circuit, self.ledger, self.events.model())
     }
 
@@ -170,6 +184,56 @@ impl<T> DeviceResponseSession<T> {
         Ok(id)
     }
 
+    /// 回路と台帳を一緒に借り、次の tick のイベント列を固定する。
+    ///
+    /// # Errors
+    ///
+    /// tick 番号が上限なら、状態を保持してエラーを返す。
+    pub fn prepare_tick(&mut self) -> (result: Result<PendingDeviceEvents<'_, E>, ClockError>)
+        requires old(self).valid(),
+        ensures
+            result.is_err() ==> final(self).ids_model() == old(self).ids_model(),
+            result.is_ok() <==> old(self).model().0.position_model().tick < u64::MAX,
+            result matches Ok(pending) ==> {
+                &&& pending.before_model() == old(self).model()
+                &&& pending.after_model() == final(self).model()
+                &&& pending.before_ids() == old(self).ids_model()
+                &&& pending.after_ids() == final(self).ids_model()
+                &&& pending.target_model().tick as int == old(self).model().0.position_model().tick as int + 1
+                &&& pending.target_model().generation == old(self).model().0.position_model().generation
+            },
+            result matches Err(error) ==> error == ClockError::TickOutOfRange
+                && final(self).model() == old(self).model(),
+    {
+        let tick = self.circuit.prepare_io_tick(&mut self.events)?;
+        Ok(PendingDeviceEvents { tick, ledger: &mut self.ledger, ids: &mut self.ids })
+    }
+
+    /// 次の世代を準備し、各デバイスを初期化する間は現在の状態を保持する。
+    ///
+    /// # Errors
+    ///
+    /// 世代番号が上限なら、状態を保持してエラーを返す。
+    pub fn prepare_reset(&mut self) -> (result: Result<PendingDeviceEventsReset<'_, E>, ClockError>)
+        requires old(self).valid(),
+        ensures
+            result.is_ok() <==> old(self).model().0.position_model().generation < u64::MAX,
+            result matches Ok(pending) ==> {
+                &&& pending.before_model() == (old(self).model(), old(self).ids_model())
+                &&& pending.after_model() == (final(self).model(), final(self).ids_model())
+                &&& pending.target_model().generation as int == old(self).model().0.position_model().generation as int + 1
+                &&& pending.target_model().tick == 0
+            },
+            result matches Err(error) ==> error == ClockError::GenerationOutOfRange
+                && final(self).model() == old(self).model()
+                && final(self).ids_model() == old(self).ids_model(),
+    {
+        let reset = self.circuit.prepare_io_reset(&mut self.events)?;
+        Ok(PendingDeviceEventsReset { reset, ledger: &mut self.ledger, ids: &mut self.ids })
+    }
+}
+
+impl<T> DeviceSession<ScheduledResponse<T>> {
     /// 照合した応答を、この実行の未開始 tick に予約する。
     ///
     /// 呼び出し側は先にデバイスの記述に従って payload を検査する。
@@ -218,65 +282,100 @@ impl<T> DeviceResponseSession<T> {
     {
         self.circuit.schedule_response(&mut self.ledger, &mut self.events, id, delivery, payload)
     }
+}
 
-    /// 回路と台帳を一緒に借り、次の tick の応答列を固定する。
+impl<I, R> DeviceSession<DeviceEvent<I, R>> {
+    /// 外部入力を、この実行の未開始 tick に予約する。
+    ///
+    /// インスタンスが入力を受け付けることと、payload が種別に対応することは呼び出し側で確認する。
     ///
     /// # Errors
     ///
-    /// tick 番号が上限なら、状態を保持してエラーを返す。
-    pub fn prepare_tick(&mut self) -> (result: Result<PendingDeviceTick<'_, T>, ClockError>)
+    /// 異なる世代や確定済みの tick を指定したときは、実行状態を保持する。
+    pub fn schedule_input(&mut self, instance: usize, delivery: TickPosition, payload: I)
+        -> (result: Result<(), ScheduleInputError>)
         requires old(self).valid(),
         ensures
-            result.is_err() ==> final(self).ids_model() == old(self).ids_model(),
-            result.is_ok() <==> old(self).model().0.position_model().tick < u64::MAX,
-            result matches Ok(pending) ==> {
-                &&& pending.before_model() == old(self).model()
-                &&& pending.after_model() == final(self).model()
-                &&& pending.before_ids() == old(self).ids_model()
-                &&& pending.after_ids() == final(self).ids_model()
-                &&& pending.target_model().tick as int == old(self).model().0.position_model().tick as int + 1
-                &&& pending.target_model().generation == old(self).model().0.position_model().generation
-            },
-            result matches Err(error) ==> error == ClockError::TickOutOfRange
-                && final(self).model() == old(self).model(),
+            final(self).valid(),
+            final(self).ids_model() == old(self).ids_model(),
+            final(self).model().0 == old(self).model().0,
+            final(self).model().1 == old(self).model().1,
+            result.is_err() ==> final(self).model() == old(self).model(),
+            result == Err(ScheduleInputError::DifferentGeneration) <==>
+                delivery.generation != old(self).model().0.position_model().generation,
+            result == Err(ScheduleInputError::AlreadyCommitted) <==>
+                delivery.generation == old(self).model().0.position_model().generation
+                && delivery.tick <= old(self).model().0.position_model().tick,
+            result.is_ok() ==> final(self).model().2 == old(self).model().2.push(ScheduledEvent {
+                position: delivery, payload: DeviceEvent::Input { instance, payload },
+            }),
     {
-        let tick = self.circuit.prepare_io_tick(&mut self.events)?;
-        Ok(PendingDeviceTick { tick, ledger: &mut self.ledger, ids: &mut self.ids })
+        self.circuit.schedule_device_input(&mut self.events, instance, delivery, payload)
     }
 
-    /// 次の世代を準備し、各デバイスを初期化する間は現在の状態を保持する。
+    /// 照合した応答を、この実行の未開始 tick に予約する。
+    ///
+    /// 呼び出し側は先にデバイスの記述に従って payload を検査する。
     ///
     /// # Errors
     ///
-    /// 世代番号が上限なら、状態を保持してエラーを返す。
-    pub fn prepare_reset(&mut self) -> (result: Result<PendingDeviceReset<'_, T>, ClockError>)
+    /// [`ClockedSession::schedule_device_response`] の規則で診断する。エラー時は実行状態を保持する。
+    pub fn schedule_response(&mut self, id: HostRequestId, delivery: TickPosition, payload: R)
+        -> (result: Result<(), ScheduleResponseError>)
         requires old(self).valid(),
         ensures
-            result.is_ok() <==> old(self).model().0.position_model().generation < u64::MAX,
-            result matches Ok(pending) ==> {
-                &&& pending.before_model() == (old(self).model(), old(self).ids_model())
-                &&& pending.after_model() == (final(self).model(), final(self).ids_model())
-                &&& pending.target_model().generation as int == old(self).model().0.position_model().generation as int + 1
-                &&& pending.target_model().tick == 0
-            },
-            result matches Err(error) ==> error == ClockError::GenerationOutOfRange
-                && final(self).model() == old(self).model()
+            final(self).valid(),
+            final(self).ids_model() == old(self).ids_model(),
+            final(self).model().0 == old(self).model().0,
+            result.is_err() ==> final(self).model() == old(self).model()
                 && final(self).ids_model() == old(self).ids_model(),
+            result == Err(ScheduleResponseError::DifferentGeneration) <==>
+                delivery.generation != old(self).model().0.position_model().generation,
+            result == Err(ScheduleResponseError::AlreadyCommitted) <==>
+                delivery.generation == old(self).model().0.position_model().generation
+                && delivery.tick <= old(self).model().0.position_model().tick,
+            result matches Err(ScheduleResponseError::Response(error)) ==> {
+                let (circuit, ledger, _) = old(self).model();
+                &&& delivery.generation == circuit.position_model().generation
+                &&& delivery.tick > circuit.position_model().tick
+                &&& ledger.rejects_response(id, delivery, error)
+            },
+            result.is_ok() <==> {
+                let (circuit, ledger, _) = old(self).model();
+                &&& delivery.generation == circuit.position_model().generation
+                &&& delivery.tick > circuit.position_model().tick
+                &&& ledger.accepts_response(id, delivery)
+            },
+            result.is_ok() ==> {
+                &&& final(self).model().2.len() == old(self).model().2.len() + 1
+                &&& final(self).model().2.drop_last() == old(self).model().2
+                &&& final(self).model().2.last().position == delivery
+                &&& match final(self).model().2.last().payload {
+                    DeviceEvent::Response(response) => {
+                        &&& response.model().0 == id
+                        &&& response.model().2 == payload
+                        &&& exists|i: int| #[trigger] old(self).model().1.found_request(id, i) && response_update(
+                            old(self).model().1.requests(), final(self).model().1.requests(), i,
+                            ResponseStatus::Awaiting, ResponseStatus::Held(delivery), response.model().1,
+                        )
+                    },
+                    DeviceEvent::Input { .. } => false,
+                }
+            },
     {
-        let reset = self.circuit.prepare_io_reset(&mut self.events)?;
-        Ok(PendingDeviceReset { reset, ledger: &mut self.ledger, ids: &mut self.ids })
+        self.circuit.schedule_device_response(&mut self.ledger, &mut self.events, id, delivery, payload)
     }
 }
 
-impl<'a, T> PendingDeviceTick<'a, T> {
-    /// 準備前の回路、台帳、応答列。
-    pub closed spec fn before_model(&self) -> (ClockedSession, RequestLedger, Seq<ResponseEvent<T>>) {
+impl<'a, E: QueuedResponse> PendingDeviceEvents<'a, E> {
+    /// 準備前の回路、台帳、イベント列。
+    pub closed spec fn before_model(&self) -> (ClockedSession, RequestLedger, Seq<SessionEvent<E>>) {
         (self.tick.before_circuit(), *self.ledger, self.tick.before_events())
     }
 
-    /// 確定または取り消し後の回路、台帳、応答列。
+    /// 確定または取り消し後の回路、台帳、イベント列。
     #[verifier::prophetic]
-    pub closed spec fn after_model(&self) -> (ClockedSession, RequestLedger, Seq<ResponseEvent<T>>) {
+    pub closed spec fn after_model(&self) -> (ClockedSession, RequestLedger, Seq<SessionEvent<E>>) {
         (self.tick.after_circuit(), *final(self.ledger), self.tick.after_events())
     }
 
@@ -304,30 +403,31 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         self.tick.previous_output()
     }
 
-    /// 開始時の列で指定添字以降にある最初の対象応答を返す。
-    pub fn next_response(&self, from: usize) -> (result: Option<(usize, &ResponseEvent<T>)>)
+    /// 開始時の列で指定添字以降にある最初の対象イベントを返す。
+    pub fn next_event(&self, from: usize) -> (result: Option<(usize, &SessionEvent<E>)>)
         ensures next_event_matches(self.before_model().2, self.target_model(), from, result),
     {
         self.tick.next_event(from)
     }
 
-    /// 回路と論理時刻を進め、対象応答だけを同じ実行の台帳から消費する。
+    /// 回路と論理時刻を進め、対象イベントを到着順で消費する。
     ///
     /// # Errors
     ///
-    /// 配送または入力幅のエラーでは回路、台帳、応答列を保持する。
-    pub fn commit(self, input: &[bool]) -> (result: Result<Vec<ResponseEvent<T>>, ResponseTickError>)
+    /// 配送または入力幅のエラーでは、回路、台帳、イベント列を保持する。
+    /// 配送エラーの添字は、対象 tick の応答だけを数えた位置を指す。
+    pub fn commit(self, input: &[bool]) -> (result: Result<Vec<SessionEvent<E>>, ResponseTickError>)
         ensures
             self.before_model().0.valid() ==> self.after_model().0.valid(),
             self.after_ids() == self.before_ids(),
             self.after_model().1.generation_model() == self.before_model().1.generation_model(),
             result.is_ok() <==>
-                self.before_model().1.valid_delivery(response_keys(self.before_model().2, self.target_model()), self.target_model())
+                self.before_model().1.valid_delivery(queued_response_keys(self.before_model().2, self.target_model()), self.target_model())
                 && input@.len() == self.before_model().0.vm_model().external_count(),
             result matches Err(ResponseTickError::Delivery(error)) ==> self.before_model().1.first_delivery_error(
-                response_keys(self.before_model().2, self.target_model()), self.target_model(), error),
+                queued_response_keys(self.before_model().2, self.target_model()), self.target_model(), error),
             result matches Err(ResponseTickError::Input(error)) ==>
-                self.before_model().1.valid_delivery(response_keys(self.before_model().2, self.target_model()), self.target_model())
+                self.before_model().1.valid_delivery(queued_response_keys(self.before_model().2, self.target_model()), self.target_model())
                 && input@.len() != self.before_model().0.vm_model().external_count()
                 && error == crate::netlist::TickInputError::InputCount,
             result.is_err() ==> self.after_model() == self.before_model(),
@@ -339,11 +439,11 @@ impl<'a, T> PendingDeviceTick<'a, T> {
                 &&& after.vm_model().tick_matches(&before.vm_model(), input@, after.output_model())
                 &&& remaining == events_at_tick(events, target, false)
                 &&& consumed@ == events_at_tick(events, target, true)
-                &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests(), response_keys(events, target), target)
+                &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests(), queued_response_keys(events, target), target)
             },
     {
         let Self { tick, ledger, ids: _ } = self;
-        tick.commit_responses(ledger, input)
+        commit_queued_events(tick, ledger, input)
     }
 
     /// 要求を含む tick を確定できない場合に、入力から決まる診断を表す。
@@ -355,7 +455,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         let ids = self.before_ids();
         let (before, ledger, events) = self.before_model();
         let target = self.target_model();
-        let keys = response_keys(events, target);
+        let keys = queued_response_keys(events, target);
         match error {
             RequestBatchTickError::Number(reason) =>
                 reason == RequestIdError::SerialOutOfRange && !ids.fits(requests.len() as u64),
@@ -381,7 +481,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
     #[verifier::prophetic]
     pub open spec fn request_batch_committed(
         &self, input: Seq<bool>, requests: Seq<RequestKey>,
-        consumed: Seq<ResponseEvent<T>>, issued: IssuedRequestIds,
+        consumed: Seq<SessionEvent<E>>, issued: IssuedRequestIds,
     ) -> bool {
         let (before, prior_ledger, events) = self.before_model();
         let (after, updated_ledger, remaining) = self.after_model();
@@ -394,7 +494,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         &&& consumed == events_at_tick(events, target, true)
         &&& updated_ledger.generation_model() == prior_ledger.generation_model()
         &&& delivery_matches(prior_ledger.requests(), updated_ledger.requests().take(count),
-            response_keys(events, target), target)
+            queued_response_keys(events, target), target)
         &&& issued.generation_model() == self.before_ids().generation_model()
         &&& issued.first_model() == self.before_ids().next_model()
         &&& issued.count_model() as nat == requests.len()
@@ -415,7 +515,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
     ///
     /// 採番、要求の登録検査、配送と回路入力の順で診断する。失敗時は確定済みの状態を保持する。
     pub fn commit_with_requests(self, input: &[bool], requests: &[RequestKey])
-        -> (result: Result<(Vec<ResponseEvent<T>>, IssuedRequestIds), RequestBatchTickError>)
+        -> (result: Result<(Vec<SessionEvent<E>>, IssuedRequestIds), RequestBatchTickError>)
         ensures
             result.is_err() ==> {
                 &&& self.after_model().0 == self.before_model().0
@@ -453,7 +553,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         assert(original_ids.fits(count));
         assert(valid_request_batch(&original_ledger, requests@, original_ids.generation_model(),
             original_ids.next_model(), target.tick));
-        match tick.commit_responses(ledger, input) {
+        match commit_queued_events(tick, ledger, input) {
             Ok(events) => {
                 let ghost prior = ledger.requests();
                 let ghost added = prepared.model();
@@ -469,7 +569,7 @@ impl<'a, T> PendingDeviceTick<'a, T> {
         }
     }
 
-    /// 更新を取り消し、回路、時刻、台帳、応答列を保持する。
+    /// 更新を取り消し、回路、時刻、台帳、イベント列を保持する。
     pub fn cancel(self)
         ensures self.after_model() == self.before_model(), self.after_ids() == self.before_ids(),
     {
@@ -477,17 +577,27 @@ impl<'a, T> PendingDeviceTick<'a, T> {
     }
 }
 
-impl<'a, T> PendingDeviceReset<'a, T> {
+impl<'a, T> PendingDeviceEvents<'a, ScheduledResponse<T>> {
+    /// 開始時の列で指定添字以降にある最初の対象応答を返す。
+    pub fn next_response(&self, from: usize)
+        -> (result: Option<(usize, &ScheduledEvent<ScheduledResponse<T>>)>)
+        ensures next_event_matches(self.before_model().2, self.target_model(), from, result),
+    {
+        self.next_event(from)
+    }
+}
+
+impl<'a, E> PendingDeviceEventsReset<'a, E> {
     /// 準備前の回路と要求管理の状態。
     pub closed spec fn before_model(&self)
-        -> ((ClockedSession, RequestLedger, Seq<ResponseEvent<T>>), RequestIds) {
+        -> ((ClockedSession, RequestLedger, Seq<SessionEvent<E>>), RequestIds) {
         ((self.reset.before_circuit(), *self.ledger, self.reset.before_events()), *self.ids)
     }
 
     /// 確定または取り消し後の回路と要求管理の状態。
     #[verifier::prophetic]
     pub closed spec fn after_model(&self)
-        -> ((ClockedSession, RequestLedger, Seq<ResponseEvent<T>>), RequestIds) {
+        -> ((ClockedSession, RequestLedger, Seq<SessionEvent<E>>), RequestIds) {
         ((self.reset.after_circuit(), *final(self.ledger), self.reset.after_events()), *final(self.ids))
     }
 
@@ -503,8 +613,8 @@ impl<'a, T> PendingDeviceReset<'a, T> {
 
     /// 全デバイスの初期化が成功した後に、回路、採番、台帳を新世代へ移す。
     ///
-    /// 期限切れの応答を到着順に返す。
-    pub fn commit(self) -> (removed: Vec<ResponseEvent<T>>)
+    /// 旧世代のイベントを到着順に返す。
+    pub fn commit(self) -> (removed: Vec<SessionEvent<E>>)
         ensures
             self.after_model().0.0.valid(),
             self.after_model().0.0.position_model() == self.target_model(),

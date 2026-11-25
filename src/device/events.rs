@@ -57,7 +57,7 @@ pub enum ScheduleInputError {
 }
 
 /// 対象 tick の応答 ID とタグを、外部入力を除いて到着順に表す。
-pub closed spec fn device_response_keys<I, R>(
+pub open spec fn device_response_keys<I, R>(
     events: Seq<ScheduledEvent<DeviceEvent<I, R>>>, target: TickPosition,
 ) -> Seq<ResponseKey> {
     queued_response_keys(events, target)

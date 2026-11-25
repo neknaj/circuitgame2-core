@@ -20,9 +20,9 @@ pub use ledger::{first_batch_request_error, busy_at, delivery_matches, issued_ro
 pub use request_ids::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds};
 
 pub use response::{HostResponseError, ResponseSlot, ResponseStatus};
-pub use scheduling::{ResponseTickError, ScheduleResponseError, ScheduledResponse};
+pub use scheduling::{QueuedResponse, ResponseTickError, ScheduleResponseError, ScheduledResponse};
 
 #[cfg(verus_only)]
-pub use scheduling::response_keys;
+pub use scheduling::{queued_response_keys, response_keys};
 
-pub use session::{DeviceResponseSession, PendingDeviceReset, PendingDeviceTick, RequestBatchTickError, RequestIssueError};
+pub use session::{DeviceEventSession, DeviceResponseSession, DeviceSession, PendingDeviceEvents, PendingDeviceEventsReset, PendingDeviceReset, PendingDeviceTick, RequestBatchTickError, RequestIssueError};
