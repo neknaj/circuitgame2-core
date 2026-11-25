@@ -79,6 +79,107 @@ impl TickPeriod {
             <= (u64::MAX as int) * ((denominator as int) * (ns_num as int))
     }
 
+    /// 有理数で指定した時間間隔が1 tick 以上であることを表す。
+    pub open spec fn interval_spans_tick(&self, numerator: u64, denominator: u64) -> bool {
+        let (ns_num, ns_den) = self.period();
+        &&& denominator > 0
+        &&& (numerator as int) * (ns_den as int) >= (denominator as int) * (ns_num as int)
+    }
+
+    /// 有理数の時間間隔が1 tick 以上なら `true` を返す。
+    ///
+    /// 時間間隔は `numerator / denominator` ns で渡す。分母が0なら `false` を返す。
+    pub fn interval_at_least_one_tick(&self, numerator: u64, denominator: u64) -> (result: bool)
+        ensures result <==> self.interval_spans_tick(numerator, denominator),
+    {
+        denominator != 0
+            && multiply_u64(numerator, self.denominator) >= multiply_u64(denominator, self.numerator)
+    }
+
+    /// 開始 tick から指定時間が経過した時刻以後の最初の境界を表す。
+    pub open spec fn first_tick_from_start(
+        &self, start: u64, numerator: u64, denominator: u64, tick: nat,
+    ) -> bool {
+        &&& start as nat <= tick
+        &&& self.first_tick_at_or_after_time(numerator, denominator, (tick - start as nat) as nat)
+    }
+
+    /// 開始 tick の境界から指定時間が経過した時刻以後の、最初の論理 tick を返す。
+    ///
+    /// 経過時間は `numerator / denominator` ns。UART などでは、同じ開始 tick を
+    /// 基準にして、各境界までの丸め前の経過時間を渡す。
+    ///
+    /// # Errors
+    ///
+    /// 分母が0なら [`TickTimeError::ZeroDenominator`]、開始 tick を含む結果が
+    /// `u64` に収まらないなら [`TickTimeError::TickOutOfRange`] を返す。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use circuitgame2_core::time::{TickPeriod, TickTimeError};
+    ///
+    /// let period = TickPeriod::new(10, 1).unwrap();
+    /// assert_eq!(period.tick_at_or_after_from(100, 1_000_000_000, 115_200), Ok(969));
+    /// assert_eq!(period.tick_at_or_after_from(100, 10_000_000_000, 115_200), Ok(8_781));
+    /// assert_eq!(
+    ///     period.tick_at_or_after_from(u64::MAX, 1, 1),
+    ///     Err(TickTimeError::TickOutOfRange)
+    /// );
+    /// ```
+    pub fn tick_at_or_after_from(
+        &self, start: u64, numerator: u64, denominator: u64,
+    ) -> (result: Result<u64, TickTimeError>)
+        ensures
+            result.is_ok() <==> exists|tick: u64|
+                #[trigger] self.first_tick_from_start(start, numerator, denominator, tick as nat),
+            result.is_ok() ==> self.first_tick_from_start(start, numerator, denominator, result.unwrap() as nat),
+            result == Err(TickTimeError::ZeroDenominator) <==> denominator == 0,
+            result == Err(TickTimeError::TickOutOfRange) <==> denominator > 0 && !result.is_ok(),
+    {
+        proof { use_type_invariant(self); }
+        match self.tick_at_or_after(numerator, denominator) {
+            Ok(elapsed) => {
+                if let Some(tick) = start.checked_add(elapsed) {
+                    assert(self.first_tick_from_start(start, numerator, denominator, tick as nat));
+                    Ok(tick)
+                } else {
+                    proof {
+                        assert forall|tick: u64| !#[trigger] self.first_tick_from_start(
+                            start, numerator, denominator, tick as nat
+                        ) by {
+                            if self.first_tick_from_start(start, numerator, denominator, tick as nat) {
+                                self.first_tick_is_unique(
+                                    numerator, denominator, (tick as nat - start as nat) as nat, elapsed as nat
+                                );
+                            }
+                        }
+                    }
+                    Err(TickTimeError::TickOutOfRange)
+                }
+            }
+            Err(error) => {
+                proof {
+                    assert forall|tick: u64| !#[trigger] self.first_tick_from_start(
+                        start, numerator, denominator, tick as nat
+                    ) by {
+                        if self.first_tick_from_start(start, numerator, denominator, tick as nat) {
+                            if denominator > 0 {
+                                let (ns_num, ns_den) = self.period();
+                                let offset = tick as int - start as int;
+                                let scale = denominator as int * ns_num as int;
+                                lemma_mul_inequality(0, denominator as int, ns_num as int);
+                                lemma_mul_inequality(offset, u64::MAX as int, scale);
+                                assert(numerator as int * ns_den as int <= offset * scale);
+                                assert(self.time_fits_ticks(numerator, denominator));
+                            }
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
     /// 同じ時刻に対する最初の tick 境界は一意である。
     pub proof fn first_tick_is_unique(&self, numerator: u64, denominator: u64, left: nat, right: nat)
         requires
@@ -207,6 +308,13 @@ proof fn representative_tick_boundaries() {
     assert(period.first_tick_at_or_after_time(1_000_000_000, 115_200, 869)) by (compute);
     assert(period.first_tick_at_or_after_time(10_000_000_000, 115_200, 8_681)) by (compute);
     assert(!period.time_fits_ticks(20, 0)) by (compute);
+
+    assert(period.interval_spans_tick(1_000_000_000, 115_200)) by (compute);
+    assert(!period.interval_spans_tick(9, 1)) by (compute);
+    assert(period.interval_spans_tick(20, 2)) by (compute);
+    assert(!period.interval_spans_tick(20, 0)) by (compute);
+    assert(period.first_tick_from_start(100, 10_000_000_000, 115_200, 8_781)) by (compute);
+    assert(!period.first_tick_from_start(100, 10_000_000_000, 115_200, 8_790)) by (compute);
 
     let unit = TickPeriod { numerator: 1, denominator: 1 };
     assert(unit.first_tick_at_or_after_time(u64::MAX, 1, u64::MAX as nat)) by (compute);
