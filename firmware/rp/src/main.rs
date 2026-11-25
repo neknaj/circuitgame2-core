@@ -3,7 +3,7 @@
 #![no_std]
 #![no_main]
 
-#[cfg(not(any(rp_uart_program, rp_i2c_program)))]
+#[cfg(not(any(rp_uart_program, rp_i2c_program, rp_spi_program)))]
 use circuitgame2_device_timing::SimulationClock;
 
 #[cfg(rp_i2c_program)]
@@ -11,6 +11,13 @@ use circuitgame2_device_timing::SimulationClock;
 mod i2c;
 #[cfg(rp_i2c_program)]
 mod i2c_transport;
+#[cfg(any(rp_i2c_program, rp_spi_program))]
+mod peripheral_program;
+#[cfg(rp_spi_program)]
+#[path = "spi_program.rs"]
+mod spi;
+#[cfg(rp_spi_program)]
+mod spi_transport;
 #[cfg(rp_uart_program)]
 #[path = "uart_program.rs"]
 mod uart;
@@ -20,7 +27,7 @@ use circuitgame2_packed_nor::{
     PackedClockedNorPlan32, PackedNorGate32, read_lane32, replace_lane32,
 };
 use embassy_executor::Spawner;
-use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::gpio::{Input, Level, Output};
 use embassy_time::{Duration, Instant, Timer};
 use panic_halt as _;
 
@@ -29,7 +36,7 @@ include!(concat!(env!("OUT_DIR"), "/program.rs"));
 const LANE: u32 = 0;
 const SOURCE_COUNT: usize = INPUT_COUNT + GATES.len() + 2;
 
-#[cfg(not(any(rp_uart_program, rp_i2c_program)))]
+#[cfg(not(any(rp_uart_program, rp_i2c_program, rp_spi_program)))]
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     // 端子を設定する前に配線番号を検査する。
@@ -92,4 +99,10 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let _ = i2c::run(spawner).await;
+}
+
+#[cfg(rp_spi_program)]
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let _ = spi::run(spawner).await;
 }

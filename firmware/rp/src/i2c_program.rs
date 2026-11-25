@@ -1,23 +1,19 @@
 //! 確定済みの回路出力と I²C の応答を照合し、通信タスクと tick を独立して進める。
 
 use circuitgame2_device_timing::{
-    FixedReceiveError, FixedRequestLedger, HostRequestId, HostResponseError, I2cTransfer,
-    I2cTransferError, RequestKey, TickPosition, i2c_port_bit, i2c_port_octet,
+    HostRequestId, I2cTransfer, I2cTransferError, i2c_port_bit, i2c_port_octet,
 };
 use embassy_rp::{
     Peri, bind_interrupts,
-    gpio::Output,
     i2c::{Async, Config, I2c, Instance, InterruptHandler, SclPin, SdaPin},
     peripherals::{I2C0, I2C1},
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 
 use super::{
-    Duration, GATES, I2C_CAPACITY, I2C_INPUTS, I2C_INSTANCE, I2C_OUTPUTS, INPUT_COUNT, Instant,
-    LANE, Level, OUTPUT_PORTS, PERIOD_US, PORTS, PackedClockedNorPlan32, SOURCE_COUNT, Spawner,
-    Timer, configure_gpio,
+    Duration, I2C_CAPACITY, I2C_INPUTS, I2C_INSTANCE, I2C_OUTPUTS, Spawner,
     i2c_transport::{Controller, Readback, TransferFailure},
-    read_lane32, replace_lane32,
+    peripheral_program::{self, Protocol},
 };
 
 bind_interrupts!(struct I2cIrqs {
@@ -141,114 +137,33 @@ fn request(port: impl Fn(usize) -> bool) -> Request {
     I2cTransfer::from_port_bits(&address, &bytes, write_len.into(), read_len.into())
 }
 
-async fn deadline_fault(fault: &mut Output<'_>) -> Option<()> {
-    // Pico と Pico 2 の基板 LED で、通常の GPIO 出力とは別に停止を知らせる。
-    fault.set_high();
-    core::future::pending().await
+struct I2cProtocol;
+
+impl Protocol for I2cProtocol {
+    type Request = Request;
+    type Response = Response;
+    const INSTANCE: usize = I2C_INSTANCE as usize;
+    const INPUTS: &'static [Option<usize>] = &I2C_INPUTS;
+    const OUTPUTS: &'static [usize] = &I2C_OUTPUTS;
+
+    fn requests() -> &'static Channel<Mutex, (HostRequestId, Request), 1> {
+        &REQUESTS
+    }
+    fn completions() -> &'static Channel<Mutex, (HostRequestId, Response), 1> {
+        &COMPLETIONS
+    }
+    fn available() -> bool {
+        true
+    }
+    fn request(port: impl Fn(usize) -> bool) -> Request {
+        request(port)
+    }
+    fn input(signal: usize, ready: bool, response: Option<&Response>) -> Option<bool> {
+        input(signal, ready, response)
+    }
 }
 
-/// 配線表から作った回路を進め、応答を回路が取り込むまで保持する。
+/// I²C と GPIO を初期化し、配線表の tick を進める。
 pub(super) async fn run(spawner: Spawner) -> Option<()> {
-    let plan = PackedClockedNorPlan32::new(INPUT_COUNT, &GATES, &PORTS).ok()?;
-    let (inputs, mut outputs, mut fault) =
-        configure_gpio(spawner, embassy_rp::init(Default::default()))?;
-    let mut ledger = FixedRequestLedger::<Response, 1>::new();
-    let mut awaiting = None;
-    let mut held = None;
-    let mut source = [0; SOURCE_COUNT];
-    source[SOURCE_COUNT - 1] = u32::MAX;
-    let mut observed = PORTS.map(|wire| source[wire]);
-    let mut candidate_source = [0; SOURCE_COUNT];
-    let mut candidate_observed = [0; PORTS.len()];
-    let mut next = [0; GATES.len()];
-    let Some(period) = Duration::try_from_micros(PERIOD_US) else {
-        return deadline_fault(&mut fault).await;
-    };
-    let Some(mut deadline) = Instant::now().checked_add(period) else {
-        return deadline_fault(&mut fault).await;
-    };
-    loop {
-        let Some(following) = deadline.checked_add(period) else {
-            return deadline_fault(&mut fault).await;
-        };
-        Timer::at(deadline).await;
-        if Instant::now() >= following {
-            // 候補を確定せず、GPIO を保持して最後に確定した出力を残す。
-            return deadline_fault(&mut fault).await;
-        }
-        let current = ledger.position();
-        let target = TickPosition {
-            tick: current.tick.checked_add(1)?,
-            ..current
-        };
-        if let Ok((id, response)) = COMPLETIONS.try_receive() {
-            match ledger.receive(id, target, response) {
-                Ok(())
-                | Err(FixedReceiveError::Response(HostResponseError::DifferentGeneration)) => {}
-                Err(_) => return None,
-            }
-        }
-        let delivered =
-            awaiting.and_then(|id| ledger.peek_at(id, target).map(|(_, result)| (id, result)));
-        let response = held.or(delivered.map(|(_, result)| result));
-        let circuit =
-            |signal: usize| read_lane32(observed[I2C_OUTPUTS[signal]], LANE).unwrap_or(false);
-        // 前の tick の出力と今回の入力フレームの両方から受け渡しを決める。
-        let take_response = response.is_some() && circuit(1);
-        let ready = awaiting.is_none() && response.is_none() && !REQUESTS.is_full();
-        let outgoing = (ready && circuit(0)).then(|| request(circuit));
-        let key = outgoing.as_ref().map(|_| RequestKey {
-            instance: I2C_INSTANCE.into(),
-            tag: 0,
-        });
-        let delivery = delivered.map(|(id, _)| id);
-        let pending = ledger
-            .prepare_tick(delivery.as_slice(), key.as_slice())
-            .ok()?;
-
-        candidate_source.copy_from_slice(&source);
-        for ((wire, gpio), signal) in candidate_source[..INPUT_COUNT]
-            .iter_mut()
-            .zip(&inputs)
-            .zip(I2C_INPUTS)
-        {
-            let level = match (gpio, signal) {
-                (Some(gpio), None) => gpio.is_high(),
-                (None, Some(signal)) => input(signal, ready, response.as_ref())?,
-                _ => return None,
-            };
-            *wire = replace_lane32(*wire, LANE, level)?;
-        }
-        plan.step(&mut candidate_source, &mut next, &mut candidate_observed)
-            .ok()?;
-        if Instant::now() >= following {
-            // 候補を確定せず、GPIO を保持して最後に確定した出力を残す。
-            return deadline_fault(&mut fault).await;
-        }
-        let committed = pending.commit();
-        core::mem::swap(&mut source, &mut candidate_source);
-        core::mem::swap(&mut observed, &mut candidate_observed);
-        if delivery.is_some() {
-            awaiting = None;
-        }
-        held = if take_response { None } else { response };
-        if let Some(request) = outgoing {
-            let id = committed.id_at(0)?;
-            // この tick が唯一の送信元で、空きを調べてから await を挟まない。
-            REQUESTS.try_send((id, request)).ok()?;
-            awaiting = Some(id);
-        }
-        for (port, output) in OUTPUT_PORTS.iter().zip(&mut outputs) {
-            output.set_level(if read_lane32(observed[*port], LANE)? {
-                Level::High
-            } else {
-                Level::Low
-            });
-        }
-        // 確定後の割り込みなどで出力反映が期限を越えた場合も、次の tick に進まない。
-        if Instant::now() >= following {
-            return deadline_fault(&mut fault).await;
-        }
-        deadline = following;
-    }
+    peripheral_program::run::<I2cProtocol>(spawner).await
 }
