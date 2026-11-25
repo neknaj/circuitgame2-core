@@ -79,6 +79,12 @@ impl<'plan, 'p, 'a> ScalarArguments<'plan, 'p, 'a> {
     /// 呼び出し元と呼び出し先の順位を表す。
     pub closed spec fn ranks_model(&self) -> (usize, usize) { (self.callee.from, self.callee.to) }
 
+    pub(super) fn result_type(&self) -> (ty: super::DataType<'a>)
+        ensures ty == self.model().2.signature.result_type.ty,
+    {
+        self.callee.body.signature.result_type.ty
+    }
+
     pub(super) fn into_parts(self)
         -> (parts: (usize, DefnEvaluationBody<'p, 'a>, CallArguments<'plan, 'p, 'a, ScalarValue>))
         ensures
@@ -135,6 +141,23 @@ impl<'plan, 'p, 'a> PendingScalarArgument<'plan, 'p, 'a> {
 
     /// 呼び出し元と呼び出し先の順位を表す。
     pub closed spec fn ranks_model(&self) -> (usize, usize) { (self.callee.from, self.callee.to) }
+
+    pub(super) fn expression_in(&self, Ghost(forms): Ghost<Seq<crate::syntax::Form>>)
+        -> (site: ScalarExpressionSite<'a>)
+        requires defn_call_arguments(forms, self.model().0.at, self.model().0.arguments@),
+        ensures
+            site.at < forms.len(),
+            self.model().1.len() < self.model().2.signature.parameters@.len(),
+            site.at == self.model().0.arguments@[self.model().1.len() as int],
+            site.expected == self.model().2.signature.parameters@[self.model().1.len() as int].ty.ty,
+    {
+        let site = self.expression();
+        let _slot = self.pending.slot();
+        proof {
+            crate::project::defn_call_argument_origin(forms, self.model().0.at, self.model().0.arguments@, _slot);
+        }
+        site
+    }
 
     /// 次の引数の位置と、呼び出し先の署名が要求する型を返す。
     pub fn expression(&self) -> (site: ScalarExpressionSite<'a>)
@@ -196,39 +219,45 @@ impl<'plan, 'p, 'a> PendingScalarArgument<'plan, 'p, 'a> {
     }
 }
 
+/// 取得した引数継続と、計画内の元の呼び出しとの対応を表す。
+pub open spec fn prepared_arguments_match<'plan, 'p, 'a>(
+    plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, site: usize,
+    args: Option<ScalarArguments<'plan, 'p, 'a>>,
+) -> bool {
+    let ranked = plan.order_model();
+    let calls = plan.calls_model_at_rank(rank);
+    &&& args.is_some() == (calls matches Some(edges) && site < edges.len() && {
+        let to = edges[site as int].to;
+        plan.project_model().indexed_defn(to.file, to.item) matches Some(header)
+            && header.parameters@.len() == edges[site as int].arguments@.len()
+    })
+    &&& match args {
+        Some(args) => {
+            let (edge, values, body) = args.model();
+            let (from, to) = args.ranks_model();
+            let project = plan.project_model();
+            &&& edge == calls->Some_0[site as int]
+            &&& values.len() == 0
+            &&& from == rank && to < from < ranked.len()
+            &&& edge.from == ranked[rank as int]
+            &&& ranked.contains(edge.to) && ranked.index_of(edge.to) == to
+            &&& plan.body_matches_at_rank(to, body)
+            &&& edge.from.file < project.sources_model().len()
+            &&& *edge.call.source == project.sources_model()[edge.from.file as int]
+            &&& project.functional_forms_model(edge.from.file) matches Some(forms)
+                && defn_call_arguments(forms, edge.at, edge.arguments@)
+        },
+        None => true,
+    }
+}
+
 /// 型検査で得た呼び出しの辺から、引数を左から受け取る状態を作る。
 ///
 /// 呼び出し列の添字が範囲外か、辺の引数列と対応する署名の個数が異なるときは `None` を返す。
 pub fn prepare_scalar_arguments<'plan, 'p, 'a>(
     plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, site: usize,
 ) -> (args: Option<ScalarArguments<'plan, 'p, 'a>>)
-    ensures {
-        let ranked = plan.order_model();
-        let calls = plan.calls_model_at_rank(rank);
-        &&& args.is_some() == (calls matches Some(edges) && site < edges.len() && {
-            let to = edges[site as int].to;
-            plan.project_model().indexed_defn(to.file, to.item) matches Some(header)
-                && header.parameters@.len() == edges[site as int].arguments@.len()
-        })
-        &&& match args {
-            Some(args) => {
-                let (edge, values, body) = args.model();
-                let (from, to) = args.ranks_model();
-                let project = plan.project_model();
-                &&& edge == calls->Some_0[site as int]
-                &&& values.len() == 0
-                &&& from == rank && to < from < ranked.len()
-                &&& edge.from == ranked[rank as int]
-                &&& ranked.contains(edge.to) && ranked.index_of(edge.to) == to
-                &&& plan.body_matches_at_rank(to, body)
-                &&& edge.from.file < project.sources_model().len()
-                &&& *edge.call.source == project.sources_model()[edge.from.file as int]
-                &&& project.functional_forms_model(edge.from.file) matches Some(forms)
-                    && defn_call_arguments(forms, edge.at, edge.arguments@)
-            },
-            None => true,
-        }
-    },
+    ensures prepared_arguments_match(plan, rank, site, args),
 {
     let edge = plan.calls_at_rank(rank)?.get(site)?;
     let Some(waiting) = plan.call_arguments(rank, site) else { unreachable!() };

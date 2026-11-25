@@ -1,13 +1,13 @@
 //! スカラー式の条件評価と分岐選択を途中から再開する。
 
 use super::{
-    BuiltinDataType, DataType, DataTypeAtom, ScalarCallFrame, ScalarCondition,
+    DataType, ScalarCallFrame, ScalarCondition,
     ScalarExpressionSite, ScalarLiteralError, ScalarValue,
 };
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use super::{scalar_condition_matches, scalar_fits};
+use super::{BuiltinDataType, DataTypeAtom, scalar_condition_matches, scalar_fits};
 #[cfg(verus_only)]
 use super::atom::scalar_atom_matches;
 
@@ -139,7 +139,9 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
     /// 元の構文木で、次に評価する式を返す。
     pub fn expression(&self) -> (site: ScalarExpressionSite<'a>)
         ensures site == self.expression_model(),
+            site.at < self.frame_model().body_model().forms@.len(),
     {
+        proof { use_type_invariant(self); }
         self.cursor.next
     }
 
@@ -200,8 +202,20 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
     /// 評価した整数リテラルが期待型の表現範囲を超えたときなどに返す。
     pub fn advance(self) -> (step: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>)
         ensures self.expression_step_matches(step),
-            step matches Ok(ScalarExpressionStep::Complete { value, frame }) ==>
-                scalar_fits(value, self.result_type_model()) && frame == self.frame_model(),
+            match step {
+                Ok(ScalarExpressionStep::Continue(after)) => {
+                    &&& after.frame_model() == self.frame_model()
+                    &&& after.result_type_model() == self.result_type_model()
+                },
+                Ok(ScalarExpressionStep::Complete { value, frame }) =>
+                    scalar_fits(value, self.result_type_model()) && frame == self.frame_model(),
+                Ok(ScalarExpressionStep::NeedsForm(after)) => {
+                    &&& after.frame_model() == self.frame_model()
+                    &&& after.result_type_model() == self.result_type_model()
+                    &&& after.expression_model() == self.expression_model()
+                },
+                Err(_) => true,
+            },
     {
         proof { use_type_invariant(&self); }
         let ghost previous = self;
