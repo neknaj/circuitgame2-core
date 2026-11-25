@@ -16,6 +16,44 @@ pub open spec fn nor_lane_bit32(word: u32, lane: u32) -> bool
     (word >> lane) & 1u32 == 1u32
 }
 
+
+/// ワードから指定したレーンの値を取り出す。レーン番号は最下位を0とする。
+///
+/// 32以上のレーン番号には `None` を返す。
+#[inline]
+pub fn read_lane32(word: u32, lane: u32) -> (result: Option<bool>)
+    ensures result == if lane < 32 { Some(nor_lane_bit32(word, lane)) } else { None },
+{
+    if lane < 32 { Some((word >> lane) & 1 == 1) } else { None }
+}
+
+/// 指定したレーンだけに新しい値を設定し、残りのレーンを保つ。
+///
+/// 32以上のレーン番号には `None` を返す。
+#[inline]
+pub fn replace_lane32(word: u32, lane: u32, level: bool) -> (result: Option<u32>)
+    ensures
+        result.is_some() <==> lane < 32,
+        result matches Some(updated) ==> forall|other: u32| other < 32 ==>
+            #[trigger] nor_lane_bit32(updated, other)
+                == if other == lane { level } else { nor_lane_bit32(word, other) },
+{
+    if lane >= 32 { return None; }
+    let mask = 1u32 << lane;
+    let updated = if level { word | mask } else { word & !mask };
+    assert forall|other: u32| other < 32 implies
+        #[trigger] nor_lane_bit32(updated, other)
+            == if other == lane { level } else { nor_lane_bit32(word, other) } by {
+        assert(lane < 32 && other < 32 ==> {
+            let mask = 1u32 << lane;
+            let updated = if level { word | mask } else { word & !mask };
+            ((((updated >> other) & 1u32) == 1u32)
+                == if other == lane { level } else { ((word >> other) & 1u32) == 1u32 })
+        }) by (bit_vector);
+    };
+    Some(updated)
+}
+
 /// 同じ NOR を32個の独立した入力対に適用する。
 ///
 /// ビット k の結果は、両入力のビット k だけから決まる。ビット0が最下位に当たる。
