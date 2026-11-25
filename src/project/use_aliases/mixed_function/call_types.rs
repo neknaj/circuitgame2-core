@@ -5,7 +5,7 @@ pub use inputs::MixedFuncInputTypes;
 
 use super::{MixedFuncArityError, MixedTypedSignatureError, MixedUseAliases, ProjectSourceIndex, arity::CheckedMixedCalls};
 use crate::project::{CallInputError, DefinitionPosition, FuncAtomTypeError, FuncCallArity, FuncCallOutputError, FuncCallTarget, FuncLiteralError, FuncLiteralWidths,
-    FuncDrivers, FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
+    FuncDrivers, FuncWiringResult, LocatedName, PortDirection, ProjectSource, SelectionArgumentError, SignalType};
 use crate::project::use_aliases::{
     call_arity::{outputs::transfer_call_output, typed::{cached_signature, signature_port}},
     function_atoms::copy_location, function_literals::{check_literals, index_outputs}, signature_cache::SignatureCache,
@@ -13,7 +13,7 @@ use crate::project::use_aliases::{
 #[cfg(verus_only)]
 use super::{mixed_use_targets_match, parsed_index_evidence, project_source_index_evidence};
 #[cfg(verus_only)]
-use crate::project::{FuncWiring, ResolvedPortType, TypedRoutineSignature};
+use crate::project::{FuncWiring, ResolvedPortType, TypedRoutineSignature, location_in_source};
 #[cfg(verus_only)]
 use crate::project::use_aliases::{
     call_arity::{checks::target_count, outputs::output_transfer},
@@ -62,7 +62,16 @@ pub enum MixedFuncTypeError<'p, 'a> {
     },
     /// 呼び出しが返した型と、対応する出力ポートの型の違い。
     Output(FuncCallOutputError<'p, 'a>),
-    /// 裸の信号の型と、駆動先で要求された型が異なる。
+    /// ビット選択の入力がビット列型に合わない。
+    SelectionInputType {
+        /// 選択の起点となる信号名の範囲。
+        reference: LocatedName<'p, 'a>,
+        /// 起点の型とその位置。
+        actual: SignalType<'p, 'a>,
+    },
+    /// ビット選択の引数または範囲の違反。
+    SelectionArgument(SelectionArgumentError<'p, 'a>),
+    /// 信号参照やビット選択の型と、駆動先で要求された型が異なる。
     Signal(FuncAtomTypeError<'p, 'a>),
     /// 通常呼び出しの実引数の幅または型が合わない。
     Input(CallInputError<'p, 'a>),
@@ -194,6 +203,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     let parsed = &project.indexes_model()[file as int]->Circuit_0;
                     &&& self.mixed_output_context(file, entry, source, parsed, &scope.drivers, prepared.calls)
                     &&& prepared.typed.literals.widths@.len() == scope.drivers.definitions@.len()
+                    &&& mixed_signal_origins(prepared.typed.types@)
                 }
             },
             Err(error) => self.mixed_func_output_types_match(file, entry, limit, Err(error)),
@@ -247,6 +257,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 output_indices(drivers, drivers.outputs@.len() as int, outlets@),
                 signatures.matches_mixed(self, limit),
                 index == types@.len() <= drivers.definitions@.len(),
+                mixed_signal_origins(types@),
                 self.mixed_output_prefix(file, entry, limit, drivers, calls, outlets@, types@),
             decreases drivers.definitions@.len() - index,
         {
@@ -267,6 +278,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             let ghost before = types@;
             types.push(result);
             proof {
+                extend_mixed_signal_origins(before, result);
                 reveal(MixedUseAliases::mixed_output_prefix);
                 assert forall|i: int| 0 <= i < types@.len() implies #[trigger]
                     self.mixed_output_step(file, entry, limit, drivers, calls, outlets@, i, Ok(types@[i])) by {
@@ -296,6 +308,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             final(signatures).matches_mixed(self, limit),
             self.mixed_output_step(_file, entry, limit, drivers, *retained, outlets@, index as int, result),
             result matches Err(error) ==> error is Signature || error is Output,
+            result matches Ok(Some(ty)) ==> location_in_source(ty.origin),
     {
         let ghost calls = *retained;
         proof {
@@ -374,11 +387,12 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         requires
             signatures.matches_mixed(self, _limit),
             index < call.target.port_counts().outputs,
+            location_in_source(LocatedName { source: call.source, span: call.call.span }),
             call.target matches FuncCallTarget::Function { file, entry, arity, .. } ==> {
                 let stored = signatures.signatures();
                 stored.contains_key((file, entry)) && stored[(file, entry)].outputs@.len() == arity.outputs
             },
-        ensures self.mixed_call_returns_type(*call, _limit, index, actual),
+        ensures self.mixed_call_returns_type(*call, _limit, index, actual), location_in_source(actual.origin),
     {
         let signature = cached_signature(signatures, call);
         let Some(port) = signature_port(signature, PortDirection::Output, index) else { unreachable!() };
@@ -393,6 +407,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             if let FuncCallTarget::Function { file, entry, .. } = call.target {
                 let typed = model.signature->Function_0;
                 assert(self.mixed_typed_signature_matches(file, entry, _limit, Ok(Some(typed))));
+                self.mixed_typed_signature_ports(file, entry, _limit, typed);
             }
         }
         actual
@@ -613,6 +628,21 @@ spec fn mixed_output_transfer(actual: SignalType, expected: Option<crate::projec
         Err(MixedFuncTypeError::Output(error)) => output_transfer(actual, expected, target, expression, Err(error)),
         _ => false,
     }
+}
+
+pub(super) open spec fn mixed_signal_origins(types: Seq<Option<SignalType>>) -> bool {
+    forall|i: int| 0 <= i < types.len() && (#[trigger] types[i]) is Some ==> location_in_source(types[i]->Some_0.origin)
+}
+
+proof fn extend_mixed_signal_origins(before: Seq<Option<SignalType>>, next: Option<SignalType>)
+    requires mixed_signal_origins(before), next matches Some(ty) ==> location_in_source(ty.origin),
+    ensures mixed_signal_origins(before.push(next)),
+{
+    let updated = before.push(next);
+    assert forall|i: int| 0 <= i < updated.len() && (#[trigger] updated[i]) is Some
+        implies location_in_source(updated[i]->Some_0.origin) by {
+        if i < before.len() { assert(updated[i] == before[i]); }
+    };
 }
 
 }

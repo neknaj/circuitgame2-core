@@ -17,6 +17,7 @@ use crate::syntax::{AtomKind, Form};
 use vstd::slice::slice_subrange;
 
 mod nested;
+mod selection;
 
 verus! {
 
@@ -37,7 +38,8 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// 実引数の型を確定できない場合は、その先頭の位置を `deferred_argument` に返す。
     /// 定数、裸の信号、定義を直接駆動する呼び出しの出力型から信号の型を求める。
     /// 通常呼び出しの実引数には、内側の通常呼び出しの単一出力型を使う。
-    /// 選択や連接などの複合式は未確定として保持する。実引数がすべて確定していても、
+    /// 右辺全体を占めるビット選択は、起点の信号の型が分かれば選択後の幅を検査する。
+    /// 実引数として渡した選択や連接などは未確定として保持する。実引数がすべて確定していても、
     /// 型が未確定の左辺に対応する `signals` の要素には `None` が残る。
     /// 対象外と展開待ちは結線検査から引き継ぐ。
     ///
@@ -429,6 +431,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             crate::project::parsed_circuit_matches(*source, *parsed), entry < parsed.syntax.entries@.len(),
             expected_output_context(source, parsed, entry as int, scope.drivers),
             widths@.len() == roots@.len() == scope.drivers.definitions@.len(),
+            mixed_signal_origins(roots@),
         ensures
             self.mixed_propagation_result(source, parsed, entry, scope, widths@, roots@, result),
             result matches Ok(types) ==> types@.len() == scope.drivers.definitions@.len(),
@@ -452,6 +455,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 expected_output_context(source, parsed, entry as int, scope.drivers),
                 output_indices(&scope.drivers, scope.drivers.outputs@.len() as int, outlets@),
                 widths@.len() == roots@.len() == scope.drivers.definitions@.len(),
+                mixed_signal_origins(roots@), mixed_signal_origins(types@),
                 index == types@.len() <= scope.drivers.definitions@.len(),
                 self.mixed_propagation_prefix(source, parsed, entry, scope, widths@, roots@, outlets@, types@),
             decreases scope.drivers.definitions@.len() - index,
@@ -475,6 +479,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             let ghost before = types@;
             types.push(next);
             proof {
+                extend_mixed_signal_origins(before, next);
                 reveal(MixedUseAliases::mixed_propagation_prefix);
                 assert forall|i: int| 0 <= i < types@.len() implies #[trigger] self.mixed_propagation_step(
                     source, parsed, entry, scope, widths@, roots@, outlets@, types@.take(i), i, Ok(types@[i])) by {
@@ -515,6 +520,14 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 },
                 _ => result == Ok(actual),
             }
+        } else if driver.result_index == 0 && root is List {
+            let input = selection::selection_input(parsed, entry, row, scope, prior);
+            let expected = if let Some(port) = outlets[index] {
+                Some(drivers.signature.outputs@[port as int])
+            } else { None };
+            (self.mixed_root_selection_matches(source, parsed, row.expression.start, input, expected, Some(result)))
+                || (self.mixed_root_selection_matches(source, parsed, row.expression.start, input, expected, None)
+                    && result == Ok(roots[index]))
         } else { result == Ok(roots[index]) }
     }
 
@@ -547,7 +560,10 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             output_indices(&scope.drivers, scope.drivers.outputs@.len() as int, outlets@),
             widths@.len() == roots@.len() == scope.drivers.definitions@.len(),
             index == prior@.len() < scope.drivers.definitions@.len(),
-        ensures self.mixed_propagation_step(source, parsed, entry, scope, widths@, roots@, outlets@, prior@, index as int, result),
+            mixed_signal_origins(prior@), mixed_signal_origins(roots@),
+        ensures
+            self.mixed_propagation_step(source, parsed, entry, scope, widths@, roots@, outlets@, prior@, index as int, result),
+            result matches Ok(Some(ty)) ==> location_in_source(ty.origin),
     {
         let driver = &scope.drivers.definitions[index];
         let row = &parsed.definitions[driver.definition];
@@ -591,6 +607,15 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 }
             }
             return Ok(actual);
+        }
+        if driver.result_index == 0 && matches!(forms[root], Form::List { .. }) {
+            let expected = match outlets[index] {
+                Some(port) => Some(&scope.drivers.signature.outputs[port]),
+                None => None,
+            };
+            if let Some(result) = self.check_mixed_root_selection(_caller, entry, source, parsed, scope, prior, index, expected) {
+                return result;
+            }
         }
         Ok(copy_signal_type(&roots[index]))
     }
