@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use crate::ncg2m::file::{MetaFileError, MetaItem, index_meta_file};
 #[cfg(verus_only)]
-use crate::ncg2m::file::{meta_file_matches, meta_file_results_agree, valid_meta_file};
+use crate::ncg2m::file::{meta_binding_spans_valid, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
 use super::circuits::index_project_circuit;
 #[cfg(verus_only)]
@@ -74,8 +74,9 @@ impl<'a> ParsedProjectSources<'a> {
 
     /// 各ソースの索引を [`Self::sources`] と同じ位置に並べて返す。
     pub fn indexes(&self) -> (indexes: &[ProjectSourceIndex<'a>])
-        ensures indexes@ == self.indexes_model(),
+        ensures indexes@ == self.indexes_model(), self.has_source_indexes(),
     {
+        proof { use_type_invariant(self); }
         self.indexes.as_slice()
     }
 
@@ -89,15 +90,24 @@ impl<'a> ParsedProjectSources<'a> {
         self.indexes@
     }
 
-    /// 入力と正規化したソースが対応し、同じ位置に各言語の索引があることを表す。
-    pub open spec fn matches(&self, inputs: Seq<SourceSnapshot>) -> bool {
+    /// 正規化されたソースと、それぞれの言語の索引が同じ位置で対応することを表す。
+    pub open spec fn has_source_indexes(&self) -> bool {
         let sources = self.sources_model();
         let indexes = self.indexes_model();
-        &&& project_sources_match(inputs, sources)
         &&& source_ids_unique(sources)
         &&& sources.len() == indexes.len()
         &&& forall|i: int| 0 <= i < sources.len() ==>
             #[trigger] project_source_index_matches(sources[i], indexes[i])
+    }
+
+    #[verifier::type_invariant]
+    spec fn indexes_correspond(&self) -> bool {
+        self.has_source_indexes()
+    }
+
+    /// 入力と正規化したソースが対応し、同じ位置に各言語の索引があることを表す。
+    pub open spec fn matches(&self, inputs: Seq<SourceSnapshot>) -> bool {
+        project_sources_match(inputs, self.sources_model()) && self.has_source_indexes()
     }
 }
 
@@ -107,9 +117,17 @@ pub closed spec fn project_source_index_matches(source: ProjectSource, index: Pr
         ProjectSourceIndex::Circuit(parsed) => source.kind is Circuit && circuit_source_matches(source.text)
             && parsed_circuit_matches(source, parsed),
         ProjectSourceIndex::Functional(items) => source.kind is Functional && valid_meta_file(source.text)
-            && meta_file_matches(source.text, Ok(items)),
+            && meta_file_matches(source.text, Ok(items)) && meta_binding_spans_valid(source.text, items@),
     }
 }
+
+pub(super) proof fn project_source_index_evidence(source: ProjectSource, index: ProjectSourceIndex)
+    requires project_source_index_matches(source, index),
+    ensures match index {
+        ProjectSourceIndex::Circuit(parsed) => parsed_circuit_matches(source, parsed),
+        ProjectSourceIndex::Functional(items) => meta_binding_spans_valid(source.text, items@),
+    },
+{}
 
 spec fn valid_file_text(kind: SourceKind, text: &str) -> bool {
     match kind {

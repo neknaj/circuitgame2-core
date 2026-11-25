@@ -1,22 +1,53 @@
 //! 宣言と名前空間の索引から、出現順で最初の衝突候補を探す。
 
 use super::path_index::PathIndex;
-use super::{Occurrence, key_of};
 #[cfg(verus_only)]
-use super::{before, conflicts, form_key};
-use crate::project::name_keys::NameKey;
+use super::before;
+use crate::project::name_keys::{NameKey, match_namespace_component};
 #[cfg(verus_only)]
 use crate::project::name_keys::{
     full_name_bytes, key_view, key_views_agree, namespace_component, namespace_component_prefix,
 };
-use crate::syntax::circuit::Head;
-#[cfg(verus_only)]
-use crate::syntax::circuit::NamedForm;
 use alloc::collections::BTreeMap;
 use core::cmp::min;
 use vstd::prelude::*;
 
 verus! {
+
+/// 宣言名とその所属、または名前空間のパスを持つ照合キー。
+/// 宣言名とその所属、または名前空間のパスを持つ照合キー。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BindingKey<'a> {
+    // 名前空間では key.name にパス全体を持ち、key.parent は照合に使わない。
+    // 名前空間では key.name にパス全体を持ち、key.parent は照合に使わない。
+    pub(super) key: NameKey<'a>,
+    pub(super) namespace: bool,
+}
+
+/// 位置や宣言種別を保持した行から、索引で照合するキーを取り出す。
+/// 位置や宣言種別を保持した行から、索引で照合するキーを取り出す。
+pub(super) trait CollisionItem<'a>: Sized {
+    spec fn binding_model(&self) -> BindingKey<'a>;
+
+    fn binding_key(&self) -> (key: BindingKey<'a>)
+        ensures key == self.binding_model();
+}
+
+pub(super) open spec fn namespace_binding_matches(path: &str, key: NameKey) -> bool {
+    exists|lo: int, hi: int| #[trigger] namespace_component(path, key, lo, hi)
+}
+
+pub(super) open spec fn binding_keys_conflict(left: BindingKey, right: BindingKey) -> bool {
+    if left.namespace && right.namespace {
+        false
+    } else if left.namespace {
+        namespace_binding_matches(left.key.name, right.key)
+    } else if right.namespace {
+        namespace_binding_matches(right.key.name, left.key)
+    } else {
+        key_view(left.key) == key_view(right.key)
+    }
+}
 
 spec fn indexed_path(paths: Seq<Seq<u8>>, ids: Set<usize>, path: Seq<u8>) -> bool {
     exists|id: usize| #[trigger] ids.contains(id) && id < paths.len() && paths[id as int] == path
@@ -29,19 +60,19 @@ proof fn record_indexed_path(paths: Seq<Seq<u8>>, ids: Set<usize>, id: usize, pa
 }
 
 spec fn binding_indexed(
-    form: NamedForm, paths: Seq<Seq<u8>>, declarations: Set<usize>, namespaces: Set<usize>,
+    form: BindingKey, paths: Seq<Seq<u8>>, declarations: Set<usize>, namespaces: Set<usize>,
 ) -> bool {
-    if form.head is Namespace {
+    if form.namespace {
         forall|key: NameKey, lo: int, hi: int|
-            #[trigger] namespace_component(form.name.word, key, lo, hi) ==>
+            #[trigger] namespace_component(form.key.name, key, lo, hi) ==>
                 indexed_path(paths, namespaces, full_name_bytes(key))
     } else {
-        indexed_path(paths, declarations, full_name_bytes(form_key(form)))
+        indexed_path(paths, declarations, full_name_bytes(form.key))
     }
 }
 
 proof fn keep_indexed(
-    form: NamedForm, old_paths: Seq<Seq<u8>>, paths: Seq<Seq<u8>>,
+    form: BindingKey, old_paths: Seq<Seq<u8>>, paths: Seq<Seq<u8>>,
     old_decls: Set<usize>, decls: Set<usize>, old_ns: Set<usize>, ns: Set<usize>,
 )
     requires
@@ -49,9 +80,9 @@ proof fn keep_indexed(
         binding_indexed(form, old_paths, old_decls, old_ns),
     ensures binding_indexed(form, paths, decls, ns),
 {
-    if form.head is Namespace {
+    if form.namespace {
         assert forall|key: NameKey, lo: int, hi: int|
-            #[trigger] namespace_component(form.name.word, key, lo, hi) implies
+            #[trigger] namespace_component(form.key.name, key, lo, hi) implies
                 indexed_path(paths, ns, full_name_bytes(key)) by {
             let name = full_name_bytes(key);
             let id = choose|id: usize| #[trigger] old_ns.contains(id) && id < old_paths.len()
@@ -59,7 +90,7 @@ proof fn keep_indexed(
             assert(ns.contains(id) && paths[id as int] == name);
         };
     } else {
-        let name = full_name_bytes(form_key(form));
+        let name = full_name_bytes(form.key);
         let id = choose|id: usize| #[trigger] old_decls.contains(id) && id < old_paths.len()
             && old_paths[id as int] == name;
         assert(decls.contains(id) && paths[id as int] == name);
@@ -67,7 +98,7 @@ proof fn keep_indexed(
 }
 
 proof fn indexed_paths_conflict(
-    index: &PathIndex, left: NamedForm, right: NamedForm, decls: Set<usize>, ns: Set<usize>,
+    index: &PathIndex, left: BindingKey, right: BindingKey, decls: Set<usize>, ns: Set<usize>,
     new_decls: Set<usize>, new_ns: Set<usize>,
 )
     requires
@@ -75,25 +106,25 @@ proof fn indexed_paths_conflict(
         binding_indexed(left, index.paths(), decls, ns),
         binding_indexed(right, index.paths(), new_decls, new_ns),
         decls.disjoint(new_decls), ns.disjoint(new_decls), decls.disjoint(new_ns),
-    ensures !conflicts(left, right),
+    ensures !binding_keys_conflict(left, right),
 {
     let paths = index.paths();
-    if conflicts(left, right) {
-        let (first_keys, second_keys, path) = if left.head is Namespace {
-            let key = form_key(right);
+    if binding_keys_conflict(left, right) {
+        let (first_keys, second_keys, path) = if left.namespace {
+            let key = right.key;
             let (_lo, _hi) = choose|lo: int, hi: int|
-                #[trigger] namespace_component(left.name.word, key, lo, hi);
+                #[trigger] namespace_component(left.key.name, key, lo, hi);
             assert(indexed_path(paths, ns, full_name_bytes(key)));
             (ns, new_decls, full_name_bytes(key))
-        } else if right.head is Namespace {
-            let key = form_key(left);
+        } else if right.namespace {
+            let key = left.key;
             let (_lo, _hi) = choose|lo: int, hi: int|
-                #[trigger] namespace_component(right.name.word, key, lo, hi);
+                #[trigger] namespace_component(right.key.name, key, lo, hi);
             assert(indexed_path(paths, new_ns, full_name_bytes(key)));
             (decls, new_ns, full_name_bytes(key))
         } else {
-            key_views_agree(form_key(left), form_key(right));
-            (decls, new_decls, full_name_bytes(form_key(left)))
+            key_views_agree(left.key, right.key);
+            (decls, new_decls, full_name_bytes(left.key))
         };
         let first = choose|id: usize| #[trigger] first_keys.contains(id) && id < paths.len() && paths[id as int] == path;
         let second = choose|id: usize| #[trigger] second_keys.contains(id) && id < paths.len() && paths[id as int] == path;
@@ -137,9 +168,9 @@ fn record_earliest(map: &mut BTreeMap<usize, usize>, id: usize, rank: usize)
     map.insert(id, rank);
 }
 
-pub(super) open spec fn no_pair_before(items: Seq<Occurrence>, start: int, stop_left: int, stop_right: int) -> bool {
+pub(super) open spec fn no_pair_before<'a, T: CollisionItem<'a>>(items: Seq<T>, start: int, stop_left: int, stop_right: int) -> bool {
     forall|i: int, j: int| start <= i < j < items.len() && before(i, j, stop_left, stop_right)
-        ==> !conflicts(*(#[trigger] items[i]).form, *(#[trigger] items[j]).form)
+        ==> !binding_keys_conflict((#[trigger] items[i]).binding_model(), (#[trigger] items[j]).binding_model())
 }
 
 pub(super) struct LookupIndex {
@@ -148,33 +179,32 @@ pub(super) struct LookupIndex {
     namespaces: BTreeMap<usize, usize>,
 }
 
-pub(super) open spec fn lookup_matches(form: NamedForm, key: NameKey, namespace: bool) -> bool {
+pub(super) open spec fn binding_lookup_matches(form: BindingKey, key: NameKey, namespace: bool) -> bool {
     if namespace {
-        form.head is Namespace && exists|lo: int, hi: int|
-            #[trigger] namespace_component(form.name.word, key, lo, hi)
+        form.namespace && namespace_binding_matches(form.key.name, key)
     } else {
-        !(form.head is Namespace) && key_view(form_key(form)) == key_view(key)
+        !(form.namespace) && key_view(form.key) == key_view(key)
     }
 }
 
 impl LookupIndex {
-    pub(super) closed spec fn matches(&self, items: Seq<Occurrence>) -> bool {
+    pub(super) closed spec fn matches<'a, T: CollisionItem<'a>>(&self, items: Seq<T>) -> bool {
         &&& self.paths.valid()
         &&& forall|id: usize| #[trigger] self.declarations@.contains_key(id) ==> self.declarations@[id] < items.len()
         &&& forall|id: usize| #[trigger] self.namespaces@.contains_key(id) ==> self.namespaces@[id] < items.len()
         &&& forall|i: int| 0 <= i < items.len()
-            ==> binding_indexed(*(#[trigger] items[i]).form, self.paths.paths(),
+            ==> binding_indexed((#[trigger] items[i]).binding_model(), self.paths.paths(),
                 before_rank(self.declarations@, i + 1), before_rank(self.namespaces@, i + 1))
     }
 
     // 完全修飾名の候補より前に一致する出現がないことを、構築時の網羅性から示す。
-    pub(super) fn candidate(
-        &self, items: &[Occurrence], key: NameKey, namespace: bool,
+    pub(super) fn candidate<'a, T: CollisionItem<'a>>(
+        &self, items: &[T], key: NameKey, namespace: bool,
     ) -> (rank: usize)
         requires self.matches(items@),
         ensures
             rank <= items@.len(),
-            forall|i: int| 0 <= i < rank ==> !lookup_matches(*(#[trigger] items@[i]).form, key, namespace),
+            forall|i: int| 0 <= i < rank ==> !binding_lookup_matches((#[trigger] items@[i]).binding_model(), key, namespace),
     {
         reveal(LookupIndex::matches);
         let map = if namespace { &self.namespaces } else { &self.declarations };
@@ -187,17 +217,17 @@ impl LookupIndex {
             let paths = self.paths.paths();
             let name = full_name_bytes(key);
             assert forall|i: int| 0 <= i < rank implies
-                !lookup_matches(*(#[trigger] items@[i]).form, key, namespace) by {
-                let form = *items@[i].form;
-                if lookup_matches(form, key, namespace) {
+                !binding_lookup_matches((#[trigger] items@[i]).binding_model(), key, namespace) by {
+                let form = items@[i].binding_model();
+                if binding_lookup_matches(form, key, namespace) {
                     let ids = before_rank(map@, i + 1);
                     assert(binding_indexed(form, paths,
                         before_rank(self.declarations@, i + 1), before_rank(self.namespaces@, i + 1)));
                     if namespace {
                         let (_lo, _hi) = choose|lo: int, hi: int|
-                            #[trigger] namespace_component(form.name.word, key, lo, hi);
+                            #[trigger] namespace_component(form.key.name, key, lo, hi);
                     } else {
-                        key_views_agree(form_key(form), key);
+                        key_views_agree(form.key, key);
                     }
                     assert(indexed_path(paths, ids, name));
                     let id = choose|id: usize| #[trigger] ids.contains(id)
@@ -218,7 +248,7 @@ impl LookupIndex {
 
 // 後ろから走査し、各キーについて処理済みの範囲で最初の添字を保持する。
 // 索引は候補を絞り、呼び出し側は既存の判定でその候補の種類と範囲を確定する。
-pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<LookupIndex, Option<(usize, usize)>>)
+pub(super) fn first_candidate<'a, T: CollisionItem<'a>>(items: &[T]) -> (result: Result<LookupIndex, Option<(usize, usize)>>)
     ensures
         match result {
             Err(Some((left, right))) => left < right < items@.len()
@@ -245,17 +275,17 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<LookupInd
             forall|id: usize| #[trigger] declarations@.contains_key(id) ==> at <= declarations@[id] < count,
             forall|id: usize| #[trigger] namespaces@.contains_key(id) ==> at <= namespaces@[id] < count,
             forall|i: int| at <= i < count
-                ==> binding_indexed(*(#[trigger] items@[i]).form, index.paths(),
+                ==> binding_indexed((#[trigger] items@[i]).binding_model(), index.paths(),
                     before_rank(declarations@, i + 1), before_rank(namespaces@, i + 1)),
         decreases at,
     {
         let left = at - 1;
-        let item = items[left];
+        let item = items[left].binding_key();
         let ghost previous_paths = index.paths();
         let ghost before_decls = declarations@;
         let ghost before_ns = namespaces@;
-        let (right, Ghost(added_decls), Ghost(added_ns)) = if matches!(item.form.head, Head::Namespace) {
-            let bytes = item.form.name.word.as_bytes();
+        let (right, Ghost(added_decls), Ghost(added_ns)) = if item.namespace {
+            let bytes = item.key.name.as_bytes();
             let nodes = index.namespace(bytes).ok_or(None)?;
             let mut right = count;
             let mut pos = 0;
@@ -292,9 +322,9 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<LookupInd
             proof {
                 nodes@.to_set_ensures();
                 assert forall|key: NameKey, lo: int, hi: int|
-                    #[trigger] namespace_component(item.form.name.word, key, lo, hi) implies
+                    #[trigger] namespace_component(item.key.name, key, lo, hi) implies
                         indexed_path(index.paths(), all, full_name_bytes(key)) by {
-                    namespace_component_prefix(item.form.name.word, key, lo, hi);
+                    namespace_component_prefix(item.key.name, key, lo, hi);
                     let p = choose|p: int| 0 <= p < nodes@.len() && index.paths()[(#[trigger] nodes@[p]) as int] == bytes@.take(hi);
                     record_indexed_path(index.paths(), all, nodes@[p], full_name_bytes(key));
                 };
@@ -306,38 +336,38 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<LookupInd
             }
             (right, Ghost(Set::<usize>::empty()), Ghost(all))
         } else {
-            let node = index.declaration(key_of(item.form)).ok_or(None)?;
+            let node = index.declaration(item.key).ok_or(None)?;
             let right = min(earliest(&declarations, node, count), earliest(&namespaces, node, count));
             record_earliest(&mut declarations, node, left);
             let ghost only = set![node];
             proof {
-                record_indexed_path(index.paths(), only, node, full_name_bytes(form_key(*item.form)));
+                record_indexed_path(index.paths(), only, node, full_name_bytes(item.key));
             }
             (right, Ghost(only), Ghost(Set::<usize>::empty()))
         };
         proof {
-            assert(binding_indexed(*item.form, index.paths(), added_decls, added_ns));
+            assert(binding_indexed(item, index.paths(), added_decls, added_ns));
             assert(before_rank(before_decls, right as int).disjoint(added_decls));
             assert(before_rank(before_ns, right as int).disjoint(added_decls));
             assert(before_rank(before_decls, right as int).disjoint(added_ns));
             assert forall|j: int| at <= j < right implies
-                !conflicts(*item.form, *(#[trigger] items@[j]).form) by {
-                keep_indexed(*items@[j].form, previous_paths, index.paths(),
+                !binding_keys_conflict(item, (#[trigger] items@[j]).binding_model()) by {
+                keep_indexed(items@[j].binding_model(), previous_paths, index.paths(),
                     before_rank(before_decls, j + 1), before_rank(before_decls, right as int),
                     before_rank(before_ns, j + 1), before_rank(before_ns, right as int));
-                indexed_paths_conflict(&index, *item.form, *items@[j].form, added_decls, added_ns,
+                indexed_paths_conflict(&index, item, items@[j].binding_model(), added_decls, added_ns,
                     before_rank(before_decls, right as int), before_rank(before_ns, right as int));
             };
             assert forall|i: int| left <= i < count implies
-                binding_indexed(*(#[trigger] items@[i]).form, index.paths(),
+                binding_indexed((#[trigger] items@[i]).binding_model(), index.paths(),
                     before_rank(declarations@, i + 1), before_rank(namespaces@, i + 1)) by {
                 if i == left {
-                    keep_indexed(*item.form, index.paths(), index.paths(), added_decls,
+                    keep_indexed(item, index.paths(), index.paths(), added_decls,
                         before_rank(declarations@, i + 1), added_ns, before_rank(namespaces@, i + 1));
                 } else {
                     earlier_entries_remain(before_decls, declarations@, i + 1);
                     earlier_entries_remain(before_ns, namespaces@, i + 1);
-                    keep_indexed(*items@[i].form, previous_paths, index.paths(),
+                    keep_indexed(items@[i].binding_model(), previous_paths, index.paths(),
                         before_rank(before_decls, i + 1), before_rank(declarations@, i + 1),
                         before_rank(before_ns, i + 1), before_rank(namespaces@, i + 1));
                 }
@@ -354,6 +384,98 @@ pub(super) fn first_candidate(items: &[Occurrence]) -> (result: Result<LookupInd
     } else {
         Err(Some((best_left, best_right)))
     }
+}
+
+
+fn key_pair_conflicts(left: BindingKey, right: BindingKey) -> (conflict: bool)
+    ensures conflict == binding_keys_conflict(left, right),
+{
+    match (left.namespace, right.namespace) {
+        (true, true) => false,
+        (true, false) => match_namespace_component(left.key.name, right.key).is_some(),
+        (false, true) => match_namespace_component(right.key.name, left.key).is_some(),
+        (false, false) => left.key.same_name(right.key),
+    }
+}
+
+// 検索構造で候補を確定できない場合は、基準となる出現順で全組を調べる。
+pub(super) fn search_conflicts<'a, T: CollisionItem<'a>>(items: &[T])
+    -> (result: Result<Option<LookupIndex>, (usize, usize)>)
+    ensures match result {
+        Err((left, right)) => left < right < items@.len()
+            && binding_keys_conflict(items@[left as int].binding_model(), items@[right as int].binding_model())
+            && no_pair_before(items@, 0, left as int, right as int),
+        Ok(lookup) => (lookup matches Some(index) ==> index.matches(items@))
+            && no_pair_before(items@, 0, items@.len() as int, items@.len() as int),
+    },
+{
+    match first_candidate(items) {
+        Ok(index) => return Ok(Some(index)),
+        Err(Some((left, right))) => {
+            if key_pair_conflicts(items[left].binding_key(), items[right].binding_key()) {
+                return Err((left, right));
+            }
+        }
+        Err(None) => {},
+    }
+    let mut left = 0;
+    let mut right = 1;
+    while left < items.len()
+        invariant
+            left <= items@.len(),
+            right <= items@.len() + 1,
+            left < items@.len() ==> left < right,
+            no_pair_before(items@, 0, left as int, right as int),
+        decreases items@.len() - left, items@.len() + 1 - right,
+    {
+        if right >= items.len() {
+            left += 1;
+            right = if left < items.len() { left + 1 } else { left };
+            continue;
+        }
+        if key_pair_conflicts(items[left].binding_key(), items[right].binding_key()) {
+            return Err((left, right));
+        }
+        right += 1;
+    }
+    Ok(None)
+}
+
+pub(super) fn find_binding<'a, T: CollisionItem<'a>>(
+    lookup: Option<&LookupIndex>, items: &[T], key: NameKey, namespace: bool,
+) -> (found: Option<usize>)
+    requires lookup matches Some(index) ==> index.matches(items@),
+    ensures
+        found matches Some(rank) ==> rank < items@.len()
+            && binding_lookup_matches(items@[rank as int].binding_model(), key, namespace)
+            && (forall|i: int| 0 <= i < rank ==> !binding_lookup_matches((#[trigger] items@[i]).binding_model(), key, namespace)),
+        found.is_none() ==> (forall|i: int| 0 <= i < items@.len() ==>
+            !binding_lookup_matches((#[trigger] items@[i]).binding_model(), key, namespace)),
+{
+    let mut at = match lookup {
+        Some(index) => index.candidate(items, key, namespace),
+        None => 0,
+    };
+    while at < items.len()
+        invariant
+            at <= items@.len(),
+            forall|i: int| 0 <= i < at ==> !binding_lookup_matches((#[trigger] items@[i]).binding_model(), key, namespace),
+        decreases items@.len() - at,
+    {
+        let binding = items[at].binding_key();
+        if binding.namespace == namespace {
+            let found = if namespace {
+                match_namespace_component(binding.key.name, key).is_some()
+            } else {
+                binding.key.same_name(key)
+            };
+            if found {
+                return Some(at);
+            }
+        }
+        at += 1;
+    }
+    None
 }
 
 } // verus!

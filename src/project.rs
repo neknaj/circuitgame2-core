@@ -65,11 +65,14 @@ pub use circuits::{
     circuit_project_accepts, circuit_project_error, circuit_project_failure, parsed_circuit_matches,
 };
 pub use declarations::{
-    DeclarationTable, LocatedName, NameConflict, NameConflictKind, index_declarations,
+    DeclarationTable, LocatedName, MixedDeclarationTable, NameConflict, NameConflictKind, ProjectDeclaration,
+    ProjectDeclarationKind, index_declarations, index_mixed_declarations,
 };
 #[cfg(verus_only)]
 pub use declarations::{
-    declaration_table_matches, location_in_source, name_conflict_evidence, project_declares,
+    declaration_table_matches, location_in_source, mixed_declaration_origin, mixed_declaration_table_matches,
+    mixed_name_conflict_evidence, mixed_name_conflicts_agree,
+    mixed_project_names_conflict, name_conflict_evidence, project_declares,
     project_names_conflict,
 };
 pub use exports::{ExportError, ExportTable, index_exports};
