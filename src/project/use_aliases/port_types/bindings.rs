@@ -131,6 +131,25 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 照合済みの列から、元の指定に対応する一つの結果を取り出す。
+    pub proof fn device_binding_at(
+        &self, owner: ModuleBodyPosition, max_width: u64, requests: Seq<DevicePortRequest>,
+        bindings: Vec<DevicePortBinding>, index: int,
+    )
+        requires
+            self.device_bindings_match(owner, max_width, requests, Ok(bindings)),
+            0 <= index < bindings@.len(),
+        ensures
+            index < requests.len(),
+            self.device_port_binding_matches(owner, max_width, requests[index].direction,
+                requests[index].circuit_port, requests[index].expected, Ok(bindings@[index])),
+    {
+        assert(self.resolved_device_prefix(owner, max_width, requests, bindings@));
+        let binding = bindings@[index];
+        assert(self.device_port_binding_matches(owner, max_width, requests[index].direction,
+            requests[index].circuit_port, requests[index].expected, Ok(binding)));
+    }
+
     /// 一つのルート回路に対する接続指定を設定順に検査する。
     ///
     /// すべての接続が通れば、同じ順序で結果を返す。要求が空なら空の結果を返す。

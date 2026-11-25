@@ -111,6 +111,20 @@ spec fn consecutive_port_ranges(ranges: Seq<Range<usize>>, total: usize) -> bool
     }
 }
 
+proof fn ordered_port_ranges(ranges: Seq<Range<usize>>, total: usize, earlier: int, later: int)
+    requires consecutive_port_ranges(ranges, total), 0 <= earlier < later < ranges.len(),
+    ensures ranges[earlier].end <= ranges[later].start,
+    decreases later - earlier,
+{
+    reveal(consecutive_port_ranges);
+    let prior = later - 1;
+    if earlier < prior {
+        ordered_port_ranges(ranges, total, earlier, prior);
+        assert(ranges[prior].start < ranges[prior].end);
+    }
+    assert(ranges[prior].end == ranges[later].start);
+}
+
 impl PortBitLayout {
     #[verifier::type_invariant]
     spec fn valid_port_ranges(&self) -> bool {
@@ -197,17 +211,29 @@ impl PortBitLayout {
         self.ranges.as_slice()
     }
 
+    /// 指定した添字より前のポートが、すべて指定位置までに収まることを示す。
+    pub open spec fn earlier_ranges_end_by(&self, port: usize, start: usize) -> bool {
+        forall|i: int| 0 <= i < port ==> (#[trigger] self.ranges_model()[i]).end <= start
+    }
+
     /// 指定したポートの半開ビット範囲を返す。ポートが存在しなければ `None` を返す。
     pub fn range(&self, port: usize) -> (range: Option<Range<usize>>)
         ensures
             range == if port < self.ranges_model().len() { Some(self.ranges_model()[port as int]) } else { None },
-            range matches Some(bits) ==> bits.start < bits.end <= self.total_bits_model(),
+            range matches Some(bits) ==> {
+                &&& bits.start < bits.end <= self.total_bits_model()
+                &&& self.earlier_ranges_end_by(port, bits.start)
+            },
     {
         proof { use_type_invariant(self); reveal(consecutive_port_ranges); }
         if port >= self.ranges.len() {
             return None;
         }
         let bits = &self.ranges[port];
+        assert forall|i: int| 0 <= i < port implies
+            (#[trigger] self.ranges_model()[i]).end <= bits.start by {
+            ordered_port_ranges(self.ranges@, self.total_bits, i, port as int);
+        }
         Some(bits.start..bits.end)
     }
 

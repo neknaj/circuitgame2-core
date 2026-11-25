@@ -878,3 +878,57 @@ fn reports_selection_in_a_call_at_the_argument_and_input_declaration() {
         }
     }
 }
+
+#[test]
+fn device_port_configuration_uses_the_compiled_vm_bit_ranges() {
+    use circuitgame2_core::device::DeviceEventSession;
+    use circuitgame2_core::project::{
+        ClockedDeviceVmError, ClockedModuleVmLimits, DeviceBindingsError, DevicePortRequest, DevicePortType,
+        PortDirection,
+    };
+
+    let sources = [
+        SourceSnapshot { path: "root.ncg2", revision: 3, text:
+            "(using nor) (latch hold (width 1))
+             (module root (in (data (bits 4)) enable) (out q)
+               (def selected (bit (slice data 0 2 2) 1)))" },
+        SourceSnapshot { path: "part.ncg2", revision: 9, text:
+            "(module-part root (def q (hold selected enable)))" },
+    ];
+    let requests = [
+        DevicePortRequest { direction: PortDirection::Input, circuit_port: "q", expected: DevicePortType::Bits(1) },
+        DevicePortRequest { direction: PortDirection::Output, circuit_port: "enable", expected: DevicePortType::Bits(1) },
+        DevicePortRequest { direction: PortDirection::Output, circuit_port: "data", expected: DevicePortType::Bits(4) },
+        DevicePortRequest { direction: PortDirection::Input, circuit_port: "q", expected: DevicePortType::Bits(1) },
+    ];
+    let lowered = {
+        let project = parse_circuit_project(&sources).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let owner = targets.collect_module_parts().unwrap()[0].module_position;
+        let aliases = check_use_aliases(&targets).unwrap();
+        let limits = ClockedModuleVmLimits { width: 4, wiring_bits: 8, gates: 0, state_bits: 1 };
+        assert!(matches!(
+            aliases.lower_clocked_device_vm(owner, limits, &[requests[2], requests[1], requests[2]]),
+            Err(ClockedDeviceVmError::Binding(DeviceBindingsError::DuplicateDriver { first: 0, later: 2 })),
+        ));
+        aliases.lower_clocked_device_vm(owner, limits, &requests).unwrap()
+    };
+
+    assert_eq!(lowered.port(0).unwrap().circuit_direction, PortDirection::Output);
+    assert_eq!(lowered.port(0).unwrap().bits, 0..1);
+    assert_eq!(lowered.port(1).unwrap().bits, 4..5);
+    assert_eq!(lowered.port(2).unwrap().bits, 0..4);
+    assert_eq!(lowered.port(3).unwrap().bits, 0..1);
+    assert!(lowered.port(4).is_none());
+
+    let (module, ports) = lowered.into_parts();
+    let mut session = DeviceEventSession::<(), ()>::new(module.vm);
+    let mut input = [false; 5];
+    input[ports[1].bits.clone()].copy_from_slice(&[true]);
+    input[ports[2].bits.clone()].copy_from_slice(&[false, false, true, false]);
+    session.prepare_tick().unwrap().commit(&input).unwrap();
+    let next = session.prepare_tick().unwrap();
+    assert_eq!(&next.previous_output()[ports[0].bits.clone()], &[true]);
+    assert_eq!(&next.previous_output()[ports[3].bits.clone()], &[true]);
+    next.cancel();
+}

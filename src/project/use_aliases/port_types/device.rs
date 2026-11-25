@@ -123,6 +123,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
     }
 
+    /// 照合済みポートの回路側の方向、型、名前を取り出す。
+    pub proof fn device_binding_details(
+        &self, owner: ModuleBodyPosition, max_width: u64, request: super::DevicePortRequest,
+        binding: DevicePortBinding,
+    )
+        requires self.device_port_binding_matches(owner, max_width, request.direction,
+            request.circuit_port, request.expected, Ok(binding)),
+        ensures
+            binding.circuit_direction == matching_circuit_direction(request.direction),
+            device_port_types_match(binding.port.ty, request.expected),
+            request.expected matches DevicePortType::Bits(width) ==> binding.port.ty == ResolvedPortType::Bits(width),
+            self.routine_port_lookup_matches(owner.file, owner.entry, max_width, binding.circuit_direction,
+                request.circuit_port, Ok(RoutinePortLookup::Found(binding.port))),
+    {
+    }
+
     /// ルートモジュールの名前付きポートを、デバイス側の方向と型に照合する。
     ///
     /// デバイス側の入力は回路の出力を読み、デバイス側の出力は回路の入力を駆動する。
