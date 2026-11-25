@@ -9,6 +9,7 @@ use crate::ncg2m::file::{meta_binding_span_evidence, meta_export_span_evidence};
 use crate::project::circuits::{read_indexed_atom, read_source_span};
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
+use crate::project::source_indexes::count_directive_entries;
 use crate::project::{
     LocatedName, MixedDeclarationTable, NameKey, ParsedProjectSources, ProjectSourceIndex, index_mixed_declarations,
 };
@@ -16,12 +17,13 @@ use crate::project::{
 use crate::project::{
     location_in_source, mixed_declaration_lookup_agrees, mixed_declaration_table_matches, mixed_name_conflict_evidence, mixed_name_conflicts_agree,
     mixed_project_declares, mixed_project_names_conflict,
-    name_keys::{key_bytes, key_views_agree}, source_indexes::project_source_index_evidence,
+    name_keys::{key_bytes, key_views_agree}, source_indexes::{directive_entry_count, project_source_index_evidence},
 };
 use crate::syntax::{Form, circuit::Head};
 #[cfg(verus_only)]
 use crate::syntax::{form_span, circuit::export_entry_evidence};
 use alloc::vec::Vec;
+#[cfg(verus_only)]
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -37,22 +39,6 @@ pub type MixedExportError<'p, 'a> = ExportError<'p, 'a>;
 pub struct MixedExportTable<'p, 'a> {
     declarations: MixedDeclarationTable<'p, 'a>,
     names: Vec<NameKey<'a>>,
-}
-
-spec fn item_count(index: ProjectSourceIndex) -> nat {
-    match index {
-        ProjectSourceIndex::Circuit(circuit) => circuit.syntax.entries@.len(),
-        ProjectSourceIndex::Functional(items) => items@.len(),
-    }
-}
-
-fn count_items(index: &ProjectSourceIndex) -> (len: usize)
-    ensures len == item_count(*index),
-{
-    match index {
-        ProjectSourceIndex::Circuit(circuit) => circuit.syntax.entries.len(),
-        ProjectSourceIndex::Functional(items) => items.len(),
-    }
 }
 
 spec fn arg_count(index: ProjectSourceIndex, item: int) -> nat {
@@ -73,7 +59,7 @@ spec fn arg_count(index: ProjectSourceIndex, item: int) -> nat {
 
 spec fn at(project: &ParsedProjectSources, file: int, item: int, arg: int) -> bool {
     &&& 0 <= file < project.indexes_model().len()
-    &&& 0 <= item < item_count(project.indexes_model()[file])
+    &&& 0 <= item < directive_entry_count(project.indexes_model()[file])
     &&& 0 <= arg < arg_count(project.indexes_model()[file], item)
 }
 
@@ -115,12 +101,12 @@ pub closed spec fn mixed_publication_requested(project: &ParsedProjectSources, k
 
 fn count_args(project: &ParsedProjectSources, file: usize, item: usize) -> (len: usize)
     requires project.has_source_indexes(), file < project.indexes_model().len(),
-        item < item_count(project.indexes_model()[file as int]),
+        item < directive_entry_count(project.indexes_model()[file as int]),
     ensures len == arg_count(project.indexes_model()[file as int], item as int),
 {
-    let source = &project.sources()[file];
+    let _source = &project.sources()[file];
     let index = &project.indexes()[file];
-    proof { project_source_index_evidence(*source, *index); }
+    proof { project_source_index_evidence(*_source, *index); }
     match index {
         ProjectSourceIndex::Circuit(circuit) => {
             let info = &circuit.syntax.entries[item];
@@ -128,8 +114,8 @@ fn count_args(project: &ParsedProjectSources, file: usize, item: usize) -> (len:
                 return 0;
             }
             proof {
-                parsed_index_evidence(*source, *circuit);
-                export_entry_evidence(source.text, circuit.syntax.forms@, circuit.syntax.entries@, item as int);
+                parsed_index_evidence(*_source, *circuit);
+                export_entry_evidence(_source.text, circuit.syntax.forms@, circuit.syntax.entries@, item as int);
             }
             match &circuit.syntax.forms[info.form] {
                 Form::List { end, .. } => *end - info.form - 2,
@@ -178,7 +164,7 @@ fn read_export<'p, 'a>(
         },
         ProjectSourceIndex::Functional(items) => {
             let info = &items[item];
-            let MetaItemKind::Export { names } = &info.kind else { unreachable!() };
+            let MetaItemKind::Export { names: name_spans } = &info.kind else { unreachable!() };
             proof {
                 meta_binding_span_evidence(source.text, items@, item as int);
                 meta_export_span_evidence(source.text, items@, item as int, arg as int);
@@ -187,7 +173,7 @@ fn read_export<'p, 'a>(
                 Some(path) => Some(read_source_span(source.text, path.start, path.end)),
                 None => None,
             };
-            let word = &names[arg];
+            let word = &name_spans[arg];
             (parent, read_source_span(source.text, word.start, word.end), word.start..word.end)
         },
     };
@@ -246,7 +232,7 @@ proof fn next_item(project: &ParsedProjectSources, names: Seq<NameKey>, file: in
 }
 
 proof fn next_file(project: &ParsedProjectSources, names: Seq<NameKey>, file: int, item: int)
-    requires selected_before(project, names, file, item, 0), item == item_count(project.indexes_model()[file]),
+    requires selected_before(project, names, file, item, 0), item == directive_entry_count(project.indexes_model()[file]),
     ensures selected_before(project, names, file + 1, 0, 0),
 {
     reveal(selected_before);
@@ -419,12 +405,12 @@ pub fn index_mixed_exports<'p, 'a>(project: &'p ParsedProjectSources<'a>)
             selected_before(project, names@, file as int, 0, 0),
         decreases indexes@.len() - file,
     {
-        let items = count_items(&indexes[file]);
+        let items = count_directive_entries(&indexes[file]);
         let mut item = 0;
         while item < items
             invariant
                 indexes@ == project.indexes_model(), project.has_source_indexes(),
-                file < indexes@.len(), item <= items == item_count(indexes@[file as int]),
+                file < indexes@.len(), item <= items == directive_entry_count(indexes@[file as int]),
                 !mixed_project_names_conflict(project), mixed_declaration_table_matches(project, declarations),
                 selected_before(project, names@, file as int, item as int, 0),
             decreases items - item,
@@ -434,7 +420,7 @@ pub fn index_mixed_exports<'p, 'a>(project: &'p ParsedProjectSources<'a>)
             while arg < args
                 invariant
                     indexes@ == project.indexes_model(), project.has_source_indexes(),
-                    file < indexes@.len(), item < item_count(indexes@[file as int]),
+                    file < indexes@.len(), item < directive_entry_count(indexes@[file as int]),
                     arg <= args == arg_count(indexes@[file as int], item as int),
                     !mixed_project_names_conflict(project), mixed_declaration_table_matches(project, declarations),
                     selected_before(project, names@, file as int, item as int, arg as int),

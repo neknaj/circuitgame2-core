@@ -205,6 +205,9 @@ pub use use_aliases::{DevicePortBinding, DevicePortBindingError, DevicePortType}
 pub use use_aliases::{device_port_types_match, matching_circuit_direction};
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, alias_conflicts_agree, use_alias_dispositions_agree, use_aliases_acceptable, use_aliases_match};
-pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};
+pub use use_targets::{
+    MixedResolvedUse, MixedUseTargets, ResolvedUse, UseSite, UseTargetError, UseTargets,
+    index_mixed_use_targets, index_use_targets,
+};
 #[cfg(verus_only)]
-pub use use_targets::{use_target_error_evidence, use_targets_match};
+pub use use_targets::{indexed_mixed_use_at, mixed_use_site_at, mixed_use_target_error_matches, mixed_use_targets_match, use_target_error_evidence, use_targets_match};

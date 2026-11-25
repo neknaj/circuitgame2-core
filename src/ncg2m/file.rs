@@ -8,7 +8,7 @@ use crate::syntax::{
 };
 #[cfg(verus_only)]
 use crate::syntax::{
-    complete_list_indices, form_span, list_source_delimiters, nested_list_indices, strict_preorder_ranges, strict_sexpr_derivation, sexpr_form_model, strict_syntax_rejection,
+    AtomKind, bare_atom_kind, complete_list_indices, form_span, form_spans_valid, list_source_delimiters, nested_list_indices, strict_preorder_ranges, strict_sexpr_derivation, sexpr_form_model, strict_syntax_rejection,
     strict_token_errors_agree, structural_error_location, syntax_error_evidence, well_formed_sexpr,
     circuit::{directive_arguments_match, directive_error_evidence, directive_errors_agree},
 };
@@ -129,18 +129,25 @@ enum ItemContents {
 #[cfg(verus_only)]
 type EntryView = (Range<usize>, Option<Range<usize>>, ItemContents);
 
+pub(crate) open spec fn meta_use_spans_valid(source: &str, target: Range<usize>, alias: Range<usize>) -> bool {
+    &&& readable_span(source, target)
+    &&& readable_span(source, alias)
+    &&& bare_atom_kind(source.spec_bytes()[target.start as int..target.end as int]) == Some(AtomKind::AbsolutePath)
+    &&& bare_atom_kind(source.spec_bytes()[alias.start as int..alias.end as int]) == Some(AtomKind::Name)
+}
+
 spec fn binding_kind_span_valid(source: &str, kind: MetaItemKind) -> bool {
     match kind {
         MetaItemKind::Namespace { path } => readable_span(source, path),
         MetaItemKind::Defn(header) => readable_span(source, header.name_span) && signature_spans_valid(source, header),
         MetaItemKind::Defmacro { name, .. } => readable_span(source, name),
+        MetaItemKind::Use { target, alias } => meta_use_spans_valid(source, target, alias),
         MetaItemKind::Export { names } => forall|i: int| 0 <= i < names@.len()
             ==> readable_span(source, #[trigger] names@[i]),
-        _ => true,
     }
 }
 
-/// 宣言名、所属名前空間、補助関数の署名、公開名の範囲が、元ソースの UTF-8 文字境界にあることを表す。
+/// 宣言名、署名、名前空間のパスと名前解決の指示の引数が、元ソースの UTF-8 文字境界にあることを表す。
 pub closed spec fn meta_binding_spans_valid(source: &str, items: Seq<MetaItem>) -> bool {
     forall|i: int| 0 <= i < items.len() ==> {
         let item = #[trigger] items[i];
@@ -166,6 +173,12 @@ pub(crate) proof fn meta_export_span_evidence(source: &str, items: Seq<MetaItem>
     requires meta_binding_spans_valid(source, items), 0 <= rank < items.len(),
         items[rank].kind is Export, 0 <= arg < items[rank].kind->Export_names@.len(),
     ensures readable_span(source, items[rank].kind->Export_names@[arg]),
+{}
+
+/// 別名指定の参照先と別名が、元ソース上の対応する字句を指すことを示す。
+pub(crate) proof fn meta_use_span_evidence(source: &str, items: Seq<MetaItem>, item: int)
+    requires meta_binding_spans_valid(source, items), 0 <= item < items.len(), items[item].kind is Use,
+    ensures meta_use_spans_valid(source, items[item].kind->Use_target, items[item].kind->Use_alias),
 {}
 
 pub(crate) proof fn meta_defn_signature_spans(source: &str, items: Seq<MetaItem>, rank: int)
@@ -433,7 +446,16 @@ fn read_directive(source: &str, forms: &[Form], root: usize, head: Head)
                 proof { form_span_readable(source, forms@, first); }
                 MetaItemKind::Namespace { path: span_of(&forms[first]) }
             },
-            Head::Use => MetaItemKind::Use { target: span_of(&forms[first]), alias: span_of(&forms[first + 1]) },
+            Head::Use => {
+                proof {
+                    reveal(form_spans_valid);
+                    form_span_readable(source, forms@, first);
+                    form_span_readable(source, forms@, (first + 1) as usize);
+                    assert(forms@[first as int]->Atom_kind == AtomKind::AbsolutePath);
+                    assert(forms@[first + 1]->Atom_kind == AtomKind::Name);
+                }
+                MetaItemKind::Use { target: span_of(&forms[first]), alias: span_of(&forms[first + 1]) }
+            },
             _ => {
                 let names = collect_spans(forms, first, end);
                 proof {

@@ -76,6 +76,22 @@ pub enum ProjectFileSyntaxError {
     Functional(MetaFileError),
 }
 
+pub(super) open spec fn directive_entry_count(index: ProjectSourceIndex) -> nat {
+    match index {
+        ProjectSourceIndex::Circuit(circuit) => circuit.syntax.entries@.len(),
+        ProjectSourceIndex::Functional(items) => items@.len(),
+    }
+}
+
+pub(super) fn count_directive_entries(index: &ProjectSourceIndex) -> (len: usize)
+    ensures len == directive_entry_count(*index),
+{
+    match index {
+        ProjectSourceIndex::Circuit(circuit) => circuit.syntax.entries.len(),
+        ProjectSourceIndex::Functional(items) => items.len(),
+    }
+}
+
 impl<'a> ParsedProjectSources<'a> {
     /// 正規化済みのファイル識別子でまとめたソースを、初出順に返す。
     pub fn sources(&self) -> (sources: &[ProjectSource<'a>])
