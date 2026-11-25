@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use super::{ClockedVm, TickInputError};
-use crate::time::{ClockError, PendingClockChange, SimulationClock, TickPosition};
+use crate::time::{ClockError, PendingClockChange, ScheduledEvent, ScheduledEvents, SimulationClock, TickPosition};
+#[cfg(verus_only)]
+use crate::time::events_by_reset_generation;
 
 verus! {
 
@@ -20,6 +22,13 @@ pub struct ClockedSession {
 /// 準備時に回路実行を排他的に借りる。確定せずに破棄した場合、時刻と回路の状態を保つ。
 pub struct PendingVmTick<'a> {
     session: &'a mut ClockedSession,
+    change: PendingClockChange,
+}
+
+/// 回路とイベント列を保持したまま、次の reset 世代を準備した実行。
+pub struct PendingIoReset<'a, T> {
+    session: &'a mut ClockedSession,
+    events: &'a mut ScheduledEvents<T>,
     change: PendingClockChange,
 }
 
@@ -88,6 +97,35 @@ impl ClockedSession {
         Ok(PendingVmTick { session: self, change })
     }
 
+    /// 回路と待ちイベントを保持したまま、デバイスに渡す次の reset 世代を準備する。
+    ///
+    /// 各デバイスには [`PendingIoReset::target`] を渡す。全件が成功した後に確定する。
+    ///
+    /// # Errors
+    ///
+    /// 世代番号が上限に達していれば、回路とイベント列を保持してエラーを返す。
+    pub fn prepare_io_reset<'a, T>(&'a mut self, events: &'a mut ScheduledEvents<T>)
+        -> (result: Result<PendingIoReset<'a, T>, ClockError>)
+        requires old(self).valid(),
+        ensures
+            result.is_ok() <==> old(self).position_model().generation < u64::MAX,
+            match result {
+                Ok(pending) => {
+                    &&& pending.before_circuit() == *old(self)
+                    &&& pending.after_circuit() == *final(self)
+                    &&& pending.before_events() == old(events).model()
+                    &&& pending.after_events() == final(events).model()
+                    &&& pending.target_model().generation as int == old(self).position_model().generation as int + 1
+                    &&& pending.target_model().tick == 0
+                },
+                Err(error) => error == ClockError::GenerationOutOfRange
+                    && *final(self) == *old(self) && final(events).model() == old(events).model(),
+            },
+    {
+        let change = self.clock.prepare_reset()?;
+        Ok(PendingIoReset { session: self, events, change })
+    }
+
     /// 回路を初期化して reset 世代を進め、tick 0 の公開出力に更新する。
     ///
     /// # Errors
@@ -108,9 +146,83 @@ impl ClockedSession {
             result.is_err() ==> result == Err(ClockError::GenerationOutOfRange) && *final(self) == *old(self),
     {
         let change = self.clock.prepare_reset()?;
+        self.commit_reset(change);
+        Ok(())
+    }
+
+    fn commit_reset(&mut self, change: PendingClockChange)
+        requires old(self).valid(), old(self).position_model() == change.change_model().0,
+        ensures
+            final(self).valid(),
+            final(self).position_model() == change.change_model().1,
+            final(self).vm_model().same_layout(&old(self).vm_model()),
+            final(self).vm_model().reset_matches(final(self).output_model()),
+    {
         self.output = self.vm.reset();
         self.clock.commit_current(change);
-        Ok(())
+    }
+}
+
+impl<'a, T> PendingIoReset<'a, T> {
+    #[verifier::type_invariant]
+    spec fn valid(&self) -> bool {
+        let (from, to) = self.change.change_model();
+        &&& self.session.valid()
+        &&& self.session.position_model() == from
+        &&& to.generation as int == from.generation as int + 1
+        &&& to.tick == 0
+    }
+
+    /// 準備時の確定済みの回路状態。
+    pub closed spec fn before_circuit(&self) -> ClockedSession { *self.session }
+
+    /// 確定または取り消しの後の回路状態。
+    #[verifier::prophetic]
+    pub closed spec fn after_circuit(&self) -> ClockedSession { *final(self.session) }
+
+    /// 準備時の未消費イベント列。
+    pub closed spec fn before_events(&self) -> Seq<ScheduledEvent<T>> { self.events.model() }
+
+    /// 確定または取り消しの後の未消費イベント列。
+    #[verifier::prophetic]
+    pub closed spec fn after_events(&self) -> Seq<ScheduledEvent<T>> { final(self.events).model() }
+
+    /// 確定予定の reset 世代の tick 0。
+    pub closed spec fn target_model(&self) -> TickPosition { self.change.change_model().1 }
+
+    /// デバイスの初期化に渡す新しい世代と tick 0 を返す。
+    pub fn target(&self) -> (target: TickPosition)
+        ensures target == self.target_model(), target.tick == 0,
+            target.generation as int == self.before_circuit().position_model().generation as int + 1,
+    {
+        proof { use_type_invariant(self); }
+        self.change.target()
+    }
+
+    /// 新しい世代を確定し、回路を初期化して、旧世代のイベントを到着順に返す。
+    ///
+    /// デバイスの初期化がすべて成功した後に呼び出す。新世代以降のイベントを保持する。
+    pub fn commit(self) -> (removed: Vec<ScheduledEvent<T>>)
+        ensures
+            self.after_circuit().valid(),
+            self.after_circuit().position_model() == self.target_model(),
+            self.after_circuit().vm_model().same_layout(&self.before_circuit().vm_model()),
+            self.after_circuit().vm_model().reset_matches(self.after_circuit().output_model()),
+            self.after_events() == events_by_reset_generation(self.before_events(), self.target_model().generation, false),
+            removed@ == events_by_reset_generation(self.before_events(), self.target_model().generation, true),
+    {
+        proof { use_type_invariant(&self); }
+        let Self { session, events, change } = self;
+        let target = change.target();
+        session.commit_reset(change);
+        events.take_older_generations(target.generation)
+    }
+
+    /// reset を取り消し、回路と時刻、未消費イベント列を保持する。
+    pub fn cancel(self)
+        ensures self.after_circuit() == self.before_circuit(),
+            self.after_events() == self.before_events(),
+    {
     }
 }
 

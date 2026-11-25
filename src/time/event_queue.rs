@@ -45,6 +45,42 @@ pub open spec fn next_event_matches<T>(
     }
 }
 
+#[derive(Clone, Copy)]
+enum EventSelection {
+    Tick(TickPosition),
+    OlderGeneration(u64),
+}
+
+impl EventSelection {
+    spec fn matches(&self, position: TickPosition) -> bool {
+        match self {
+            Self::Tick(target) => position == *target,
+            Self::OlderGeneration(generation) => position.generation < *generation,
+        }
+    }
+
+    fn includes(&self, position: TickPosition) -> (selected: bool)
+        ensures selected == self.matches(position),
+    {
+        match self {
+            Self::Tick(target) => {
+                let status = classify_event_time(*target, position);
+                if let EventTimeStatus::Ready = status { true } else { false }
+            },
+            Self::OlderGeneration(generation) => position.generation < *generation,
+        }
+    }
+}
+
+spec fn filter_events<T>(
+    events: Seq<ScheduledEvent<T>>, selection: EventSelection, matching: bool,
+) -> Seq<ScheduledEvent<T>> {
+    match selection {
+        EventSelection::Tick(target) => events_at_tick(events, target, matching),
+        EventSelection::OlderGeneration(generation) => events_by_reset_generation(events, generation, matching),
+    }
+}
+
 /// 元の到着順で対象 tick のイベント、または対象外のイベントを取り出す。
 pub open spec fn events_at_tick<T>(
     events: Seq<ScheduledEvent<T>>, target: TickPosition, matching: bool,
@@ -52,17 +88,34 @@ pub open spec fn events_at_tick<T>(
     events.filter(|event: ScheduledEvent<T>| (event.position == target) == matching)
 }
 
-proof fn partition_append<T>(prefix: Seq<ScheduledEvent<T>>, event: ScheduledEvent<T>, target: TickPosition)
+/// 元の到着順で指定の世代より古いイベント、またはその世代以降のイベントを取り出す。
+pub open spec fn events_by_reset_generation<T>(
+    events: Seq<ScheduledEvent<T>>, generation: u64, older: bool,
+) -> Seq<ScheduledEvent<T>> {
+    events.filter(|event: ScheduledEvent<T>| (event.position.generation < generation) == older)
+}
+
+proof fn partition_append<T>(
+    prefix: Seq<ScheduledEvent<T>>, event: ScheduledEvent<T>, selection: EventSelection,
+)
     ensures
-        events_at_tick(prefix.push(event), target, true) ==
-            if event.position == target { events_at_tick(prefix, target, true).push(event) }
-            else { events_at_tick(prefix, target, true) },
-        events_at_tick(prefix.push(event), target, false) ==
-            if event.position == target { events_at_tick(prefix, target, false) }
-            else { events_at_tick(prefix, target, false).push(event) },
+        filter_events(prefix.push(event), selection, true) ==
+            if selection.matches(event.position) { filter_events(prefix, selection, true).push(event) }
+            else { filter_events(prefix, selection, true) },
+        filter_events(prefix.push(event), selection, false) ==
+            if selection.matches(event.position) { filter_events(prefix, selection, false) }
+            else { filter_events(prefix, selection, false).push(event) },
 {
-    prefix.lemma_filter_push(event, |e: ScheduledEvent<T>| (e.position == target) == true);
-    prefix.lemma_filter_push(event, |e: ScheduledEvent<T>| (e.position == target) == false);
+    match selection {
+        EventSelection::Tick(target) => {
+            prefix.lemma_filter_push(event, |e: ScheduledEvent<T>| (e.position == target) == true);
+            prefix.lemma_filter_push(event, |e: ScheduledEvent<T>| (e.position == target) == false);
+        },
+        EventSelection::OlderGeneration(generation) => {
+            prefix.lemma_filter_push(event, |e: ScheduledEvent<T>| (e.position.generation < generation) == true);
+            prefix.lemma_filter_push(event, |e: ScheduledEvent<T>| (e.position.generation < generation) == false);
+        },
+    }
 }
 
 impl<T> ScheduledEvents<T> {
@@ -116,10 +169,19 @@ impl<T> ScheduledEvents<T> {
         None
     }
 
-    fn consume_ready(&mut self, target: TickPosition) -> (consumed: Vec<ScheduledEvent<T>>)
+    /// 新しい reset 世代に引き継がないイベントを、到着順のまま取り出す。
+    pub(crate) fn take_older_generations(&mut self, generation: u64) -> (removed: Vec<ScheduledEvent<T>>)
         ensures
-            final(self).model() == events_at_tick(old(self).model(), target, false),
-            consumed@ == events_at_tick(old(self).model(), target, true),
+            final(self).model() == events_by_reset_generation(old(self).model(), generation, false),
+            removed@ == events_by_reset_generation(old(self).model(), generation, true),
+    {
+        self.take_selected(EventSelection::OlderGeneration(generation))
+    }
+
+    fn take_selected(&mut self, selection: EventSelection) -> (consumed: Vec<ScheduledEvent<T>>)
+        ensures
+            final(self).model() == filter_events(old(self).model(), selection, false),
+            consumed@ == filter_events(old(self).model(), selection, true),
     {
         let len = self.pending.len();
         let mut scanned = 0;
@@ -131,8 +193,8 @@ impl<T> ScheduledEvents<T> {
                 scanned <= len,
                 original == old(self).model(),
                 self.pending@ == original.skip(scanned as int)
-                    + events_at_tick(original.take(scanned as int), target, false),
-                consumed@ == events_at_tick(original.take(scanned as int), target, true),
+                    + filter_events(original.take(scanned as int), selection, false),
+                consumed@ == filter_events(original.take(scanned as int), selection, true),
             decreases len - scanned,
         {
             let ghost prefix = original.take(scanned as int);
@@ -143,20 +205,18 @@ impl<T> ScheduledEvents<T> {
             let event = self.pending.pop_front().unwrap();
             proof {
                 assert(event == original[scanned as int]);
-                assert(self.pending@ =~= next_suffix + events_at_tick(prefix, target, false));
+                assert(self.pending@ =~= next_suffix + filter_events(prefix, selection, false));
                 assert(next_prefix =~= prefix.push(event));
-                partition_append(prefix, event, target);
+                partition_append(prefix, event, selection);
             }
-            let status = classify_event_time(target, event.position);
-            assert((status == EventTimeStatus::Ready) <==> event.position == target);
-            if let EventTimeStatus::Ready = status {
+            if selection.includes(event.position) {
                 consumed.push(event);
             } else {
-                proof { Seq::push_distributes_over_add(next_suffix, events_at_tick(prefix, target, false), event); }
+                proof { Seq::push_distributes_over_add(next_suffix, filter_events(prefix, selection, false), event); }
                 self.pending.push_back(event);
             }
-            assert(self.pending@ == next_suffix + events_at_tick(next_prefix, target, false));
-            assert(consumed@ == events_at_tick(next_prefix, target, true));
+            assert(self.pending@ == next_suffix + filter_events(next_prefix, selection, false));
+            assert(consumed@ == filter_events(next_prefix, selection, true));
             scanned += 1;
         }
         assert(original.skip(len as int) =~= Seq::<ScheduledEvent<T>>::empty());
@@ -194,7 +254,7 @@ impl<'a, T> PendingEvents<'a, T> {
             self.after_model() == events_at_tick(self.before_model(), self.target_model(), false),
             consumed@ == events_at_tick(self.before_model(), self.target_model(), true),
     {
-        self.events.consume_ready(self.target)
+        self.events.take_selected(EventSelection::Tick(self.target))
     }
 
     /// 評価を取り消し、未消費イベントを到着順のまま保持する。
