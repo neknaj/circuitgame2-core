@@ -817,6 +817,77 @@ fn lowers_a_definition_concat_in_low_to_high_operand_order() {
 }
 
 #[test]
+fn lowers_a_concat_of_selected_feedback_bits() {
+    use circuitgame2_core::project::{ClockedModuleVmLimits, ModuleBodyPosition};
+
+    let source = "(using nor) (latch storage (width 2))
+        (module main (in) (out (q (bits 2)))
+          (def data (concat wave (bit q 0)))
+          (def q (storage data 1))
+          (def last (bit q 1))
+          (def wave (nor last last)))";
+    let input = [SourceSnapshot { path: "main.ncg2", revision: 1, text: source }];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry: 2 };
+    let limits = ClockedModuleVmLimits { width: 2, wiring_bits: 8, gates: 1, state_bits: 2 };
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.reset(), [false, false]);
+    for expected in [[false, false], [true, false], [true, true], [true, true], [false, true]] {
+        assert_eq!(compiled.vm.step(&[]).unwrap(), expected);
+    }
+}
+
+#[test]
+fn lowers_a_concat_of_bit_and_slice_selections_and_checks_their_ranges() {
+    use circuitgame2_core::project::{ClockedModuleVmLimits, ModuleBodyPosition};
+
+    let source = "(using nor) (module main (in (bus (bits 5))) (out (q (bits 4)))
+        (def q (concat 1 (slice bus 1 2 2) (bit (slice bus 0 3 2) 2))))";
+    let input = [SourceSnapshot { path: "main.ncg2", revision: 1, text: source }];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry: 1 };
+    let limits = ClockedModuleVmLimits { width: 5, wiring_bits: 8, gates: 0, state_bits: 0 };
+    let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.step(&[false, true, true, false, true]).unwrap(), [true, true, false, true]);
+
+    let malformed = source.replace("bus 1 2 2", "bus 1 3 2");
+    let input = [SourceSnapshot { path: "main.ncg2", revision: 2, text: &malformed }];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let Err(ModuleConcatsError::Selection(SelectionArgumentError::Outside {
+        site, width_origin, start: 1, last: 5, input_width: 5,
+    })) = aliases.check_module_concats(owner, 5) else {
+        panic!("連接内の選択が入力幅を超える事例の診断が必要");
+    };
+    assert_eq!(&site.source.text[site.span], "1 3 2");
+    assert_eq!(&width_origin.source.text[width_origin.span], "5");
+}
+
+#[test]
+fn locates_the_selected_concat_operand_in_a_wire_cycle() {
+    use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits, ModuleBodyPosition};
+
+    let source = "(using nor) (module main (in) (out (q (bits 2)))
+        (def q (concat (bit selected 0) 0))
+        (def selected (slice q 0 2)))";
+    let input = [SourceSnapshot { path: "main.ncg2", revision: 1, text: source }];
+    let project = parse_circuit_project(&input).unwrap();
+    let targets = index_use_targets(&project).unwrap();
+    let aliases = check_use_aliases(&targets).unwrap();
+    let owner = ModuleBodyPosition { file: 0, entry: 1 };
+    let limits = ClockedModuleVmLimits { width: 2, wiring_bits: 4, gates: 0, state_bits: 0 };
+    let Err(ClockedModuleVmError::Endpoints(ClockedEndpointError::AliasCycle(sites))) =
+        aliases.lower_clocked_vm(owner, limits) else { panic!("配線だけの循環を検出する必要がある"); };
+    assert_eq!(sites.len(), 2);
+    assert!(sites.iter().any(|site| &site.source.text[site.span.clone()] == "(bit selected 0)"));
+}
+
+#[test]
 fn locates_the_second_occurrence_of_a_repeated_concat_operand_in_a_cycle() {
     use circuitgame2_core::project::{ClockedEndpointError, ClockedModuleVmError, ClockedModuleVmLimits};
 

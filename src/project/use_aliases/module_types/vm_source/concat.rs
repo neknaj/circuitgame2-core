@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 use super::super::{ModuleConcatOperand, argument_wiring::wire_literal, clocked_driver_bits};
 #[cfg(verus_only)]
-use super::super::{argument_wiring::literal_wires, clocked_driver_bits_result, driver_bits::{checked_whole_port_wiring_error, clocked_whole_port_bits}};
+use super::super::{argument_wiring::literal_wires, clocked_driver_bits_result,
+    driver_bits::{checked_selection_wiring_error, checked_whole_port_wiring_error,
+        clocked_selected_port_bits, clocked_selected_port_ready, clocked_whole_port_bits}};
 #[cfg(verus_only)]
 use crate::project::{OutputDriver, PortDirection, ProjectSource, concat_prefix_width,
     concatenation::{concat_prefix_width_bounds, concat_prefix_width_step, concat_prefix_width_zero},
@@ -34,7 +36,7 @@ spec fn operand_wires(
 ) -> bool {
     &&& row@.len() == operand.width
     &&& match operand.driver {
-        Some(driver) => clocked_driver_bits_result(&ports.inputs, &ports.definitions, driver, None, Ok(row)),
+        Some(driver) => clocked_driver_bits_result(&ports.inputs, &ports.definitions, driver, operand.selection, Ok(row)),
         None => {
             let span = form_span(forms[operand.form as int]);
             literal_wires(source.text.spec_bytes()[span.start as int..span.end as int], operand.width, Ok(row))
@@ -223,9 +225,23 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             decreases operands.len() - i,
         {
             let operand = &concat.operands[i];
-            proof { self.module_concat_operand_evidence(owner, limit, *expressions, slot, i); }
+            proof {
+                self.module_concat_operand_evidence(owner, limit, *expressions, slot, i);
+                if let Some(driver) = operand.driver {
+                    self.clocked_output_layouts(&checked.module, limit, _capacity, ports);
+                    match driver {
+                        OutputDriver::Input(port) => self.routine_bit_layout_port(drivers.signature, limit, _capacity,
+                            &ports.inputs, &ports.outputs, PortDirection::Input, port),
+                        OutputDriver::Definition(definition) => self.clocked_definition_layout_evidence(
+                            expressions, limit, _capacity, &ports.definitions, definition),
+                    }
+                    if let Some(selection) = operand.selection {
+                        assert(clocked_selected_port_ready(&ports.inputs, &ports.definitions, driver, selection));
+                    }
+                }
+            }
             let row = match operand.driver {
-                Some(driver) => clocked_driver_bits(&ports.inputs, &ports.definitions, driver, None),
+                Some(driver) => clocked_driver_bits(&ports.inputs, &ports.definitions, driver, operand.selection),
                 None => {
                     let (word, _) = read_indexed_atom(source.text, forms, operand.form);
                     proof { inferred_literal_width_is_accepted(word.spec_bytes(), limit, operand.width); }
@@ -237,7 +253,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 Err(reason) => {
                     proof {
                         if let Some(driver) = operand.driver {
-                            checked_whole_port_wiring_error(&ports.inputs, &ports.definitions, driver, reason);
+                            if let Some(selection) = operand.selection {
+                                checked_selection_wiring_error(&ports.inputs, &ports.definitions, driver, selection, reason);
+                            } else {
+                                checked_whole_port_wiring_error(&ports.inputs, &ports.definitions, driver, reason);
+                            }
                         }
                     }
                     let reference = self.module_concat_operand_site(owner, limit, expressions, slot, i);
@@ -250,14 +270,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             };
             proof {
                 if let Some(driver) = operand.driver {
-                    self.clocked_output_layouts(&checked.module, limit, _capacity, ports);
-                    match driver {
-                        OutputDriver::Input(port) => self.routine_bit_layout_port(drivers.signature, limit, _capacity,
-                            &ports.inputs, &ports.outputs, PortDirection::Input, port),
-                        OutputDriver::Definition(definition) => self.clocked_definition_layout_evidence(
-                            expressions, limit, _capacity, &ports.definitions, definition),
+                    if let Some(selection) = operand.selection {
+                        clocked_selected_port_bits(&ports.inputs, &ports.definitions, driver, selection, row);
+                    } else {
+                        clocked_whole_port_bits(&ports.inputs, &ports.definitions, driver, row);
                     }
-                    clocked_whole_port_bits(&ports.inputs, &ports.definitions, driver, row);
                 }
                 assert(operand_wires(ports, source, forms@, operands[i as int], row));
                 concat_prefix_width_step(widths, i as nat);
@@ -287,7 +304,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             && self.module_concat_operand_site_at(&expressions, slot, index, site)
     }
 
-    /// 閉路上のビットを担当する引数を特定し、その信号名の範囲を返す。
+    /// 閉路上のビットを含む連接引数のソース範囲を返す。
     pub(super) fn endpoint_concat_site(
         &self, owner: ModuleBodyPosition, limit: u64, checked: &ModuleCalls<'p, 'a>, _ports: &ClockedModuleOutputs,
         slot: usize, bit: usize, Ghost(bits): Ghost<Seq<ClockedWireDriver>>,
