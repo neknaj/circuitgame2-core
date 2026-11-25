@@ -191,6 +191,7 @@ impl<'plan, 'p, 'a> PendingScalarArgument<'plan, 'p, 'a> {
         ensures {
             let (edge, before, callee) = self.model();
             let slot = before.len() as int;
+            &&& edge.arguments@.len() == callee.signature.parameters@.len()
             &&& slot < callee.signature.parameters@.len()
             &&& next.is_ok() == scalar_fits(value, callee.signature.parameters@[slot].ty.ty)
             &&& match next {
@@ -238,6 +239,7 @@ pub open spec fn prepared_arguments_match<'plan, 'p, 'a>(
             let project = plan.project_model();
             &&& edge == calls->Some_0[site as int]
             &&& values.len() == 0
+            &&& edge.arguments@.len() == body.signature.parameters@.len()
             &&& from == rank && to < from < ranked.len()
             &&& edge.from == ranked[rank as int]
             &&& ranked.contains(edge.to) && ranked.index_of(edge.to) == to

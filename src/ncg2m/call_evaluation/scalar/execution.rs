@@ -18,10 +18,14 @@ use crate::syntax::form_span;
 use crate::project::{DefnCallEdge, defn_call_arguments};
 use vstd::prelude::*;
 
+#[cfg(verus_only)]
+pub(super) mod observation;
+#[cfg(verus_only)]
+pub use observation::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
 mod slice;
 #[cfg(verus_only)]
 pub use slice::{
-    resumed_scalar_execution_matches, scalar_execution_slice_matches, scalar_execution_terminal_extends,
+    finite_scalar_executions_agree, resumed_scalar_execution_matches, scalar_execution_slice_matches, scalar_execution_terminal_extends,
 };
 
 verus! {
@@ -414,6 +418,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                     Waiting::Argument { parent, pending, rank: from, .. } => {
                         let (edge, values, target) = pending.model();
                         &&& parent.fits(&frame)
+                        &&& edge.arguments@.len() == target.signature.parameters@.len()
                         &&& exists|expr: ScalarExpression<'p, 'a>| #[trigger] expr.cursor_model() == parent
                             && expr.frame_model() == frame
                             && entering_call(from, expr, edge, values.push(value), target,

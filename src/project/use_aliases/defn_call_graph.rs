@@ -222,11 +222,36 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         &&& defn.file < project.sources_model().len()
         &&& *body.source == project.sources_model()[defn.file as int]
         &&& project.functional_forms_model(defn.file) == Some(body.forms@)
+        &&& crate::ncg2m::file::retained_forms_in_source_order(body.forms@)
         &&& body.at < body.forms@.len()
         &&& form_spans_valid(body.source.text_model(), body.forms@,
             body.source.text_model().spec_bytes().len() as int)
         &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
         &&& project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
+    }
+
+    /// 同じ順位から得た本体は、元文書、構文木上の位置と署名が一致する。
+    pub proof fn bodies_at_rank_agree(&self, rank: usize, first: DefnEvaluationBody<'p, 'a>, second: DefnEvaluationBody<'p, 'a>)
+        requires self.body_matches_at_rank(rank, first), self.body_matches_at_rank(rank, second),
+        ensures
+            *first.source == *second.source,
+            first.forms@ == second.forms@,
+            first.at == second.at,
+            crate::ncg2m::data_types::same_defn_signature(first.signature, second.signature),
+    {
+        let project = self.project_model();
+        let defn = self.order_model()[rank as int];
+        project.indexed_defn_signature_origin(defn.file, defn.item, Some(first.signature));
+        project.indexed_defn_signature_origin(defn.file, defn.item, Some(second.signature));
+        let header = project.indexed_defn(defn.file, defn.item)->Some_0;
+        let source = project.sources_model()[defn.file as int].text_model();
+        crate::ncg2m::data_types::signatures_from_header_agree(source, header, first.signature, second.signature);
+        crate::ncg2m::data_types::signature_result_origin(source, header, first.signature);
+        crate::ncg2m::data_types::signature_result_origin(source, header, second.signature);
+        let forms = first.forms@;
+        reveal(crate::ncg2m::file::retained_forms_in_source_order);
+        assert(crate::syntax::strict_preorder_ranges(forms));
+        crate::ncg2m::file::meta_ast_unique_start(forms, first.at, second.at);
     }
 
     /// 指定した順位の本体を、計画に対応する元の文書版から返す。

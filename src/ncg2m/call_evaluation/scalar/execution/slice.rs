@@ -4,6 +4,8 @@ use core::num::NonZeroUsize;
 use super::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice};
 #[cfg(verus_only)]
 use super::super::scalar_fits;
+#[cfg(verus_only)]
+use super::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
 use vstd::prelude::*;
 
 verus! {
@@ -99,6 +101,63 @@ pub proof fn scalar_execution_terminal_extends<'plan, 'p, 'a>(
 {
     let path = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start, fuel, path, result);
     assert(execution_path_result(start, fuel + extra, path, result));
+}
+
+proof fn observations_agree_along_paths(
+    start_a: ScalarExecution, start_b: ScalarExecution,
+    a: Seq<ScalarExecution>, b: Seq<ScalarExecution>, i: int,
+)
+    requires scalar_execution_states_observe_same(start_a, start_b),
+        execution_path(start_a, a), execution_path(start_b, b), 0 <= i < a.len(), i < b.len(),
+    ensures scalar_execution_states_observe_same(a[i], b[i]),
+    decreases i,
+{
+    reveal(execution_path);
+    if i > 0 {
+        observations_agree_along_paths(start_a, start_b, a, b, i - 1);
+        let step_a = Ok(ScalarExecutionSlice::Suspended(a[i]));
+        let step_b = Ok(ScalarExecutionSlice::Suspended(b[i]));
+        assert(a[i - 1].step_matches(step_a) && b[i - 1].step_matches(step_b));
+        a[i - 1].observed_steps_agree(b[i - 1], step_a, step_b);
+    }
+}
+
+/// 観測が一致する二つの初期状態について、完了までの有限な評価軌跡がそれぞれあれば、
+/// 終端の値または診断は一致する。実行枠は異なっていてもよい。
+pub proof fn finite_scalar_executions_agree<'plan, 'p, 'a>(
+    start_a: ScalarExecution<'plan, 'p, 'a>, start_b: ScalarExecution<'plan, 'p, 'a>,
+    fuel_a: nat, fuel_b: nat,
+    result_a: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    result_b: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+)
+    requires
+        scalar_execution_states_observe_same(start_a, start_b),
+        scalar_execution_slice_matches(start_a, fuel_a, result_a),
+        scalar_execution_slice_matches(start_b, fuel_b, result_b),
+        !(result_a matches Ok(ScalarExecutionSlice::Suspended(_))),
+        !(result_b matches Ok(ScalarExecutionSlice::Suspended(_))),
+    ensures scalar_execution_steps_observe_same(result_a, result_b),
+{
+    let a = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start_a, fuel_a, path, result_a);
+    let b = choose|path: Seq<ScalarExecution>| #[trigger] execution_path_result(start_b, fuel_b, path, result_b);
+    reveal(execution_path);
+    if a.len() < b.len() {
+        let i = a.len() - 1;
+        observations_agree_along_paths(start_a, start_b, a, b, i);
+        let step = Ok(ScalarExecutionSlice::Suspended(b[i + 1]));
+        assert(b[i].step_matches(step));
+        a[i].observed_steps_agree(b[i], result_a, step);
+    } else if b.len() < a.len() {
+        let i = b.len() - 1;
+        observations_agree_along_paths(start_a, start_b, a, b, i);
+        let step = Ok(ScalarExecutionSlice::Suspended(a[i + 1]));
+        assert(a[i].step_matches(step));
+        a[i].observed_steps_agree(b[i], step, result_b);
+    } else {
+        let i = a.len() - 1;
+        observations_agree_along_paths(start_a, start_b, a, b, i);
+        a[i].observed_steps_agree(b[i], result_a, result_b);
+    }
 }
 
 impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {

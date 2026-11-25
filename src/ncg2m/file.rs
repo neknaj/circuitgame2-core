@@ -518,7 +518,7 @@ pub(super) proof fn indexed_standalone_header(
     assert(entry_views(entries@)[0] == entry_view(entries@[0]));
 }
 
-pub(super) proof fn meta_ast_unique_start(forms: Seq<Form>, first: usize, second: usize)
+pub(crate) proof fn meta_ast_unique_start(forms: Seq<Form>, first: usize, second: usize)
     requires strict_preorder_ranges(forms), first < forms.len(), second < forms.len(),
         form_span(forms[first as int]).start == form_span(forms[second as int]).start,
     ensures first == second,
@@ -634,13 +634,21 @@ pub(super) fn indexed_meta_body(
     found
 }
 
+/// 保持した構文木のフォームが、元ソースでの出現順に並ぶことを表す。
+#[verifier::opaque]
+pub open spec fn retained_forms_in_source_order(forms: Seq<Form>) -> bool {
+    strict_preorder_ranges(forms)
+}
+
 /// プロジェクトの評価で使う本体の添字を、保持した構文木から得る。
 pub(crate) fn retained_meta_body(source: &str, forms: &[Form], entries: &[MetaItem], item: usize)
     -> (body: usize)
     requires meta_ast_matches(source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defn,
-    ensures body < forms@.len(), form_span(forms@[body as int]) == entries@[item as int].kind->Defn_0.body_span,
+    ensures retained_forms_in_source_order(forms@), body < forms@.len(),
+        form_span(forms@[body as int]) == entries@[item as int].kind->Defn_0.body_span,
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
 {
+    proof { reveal(retained_forms_in_source_order); }
     indexed_meta_body(source, forms, entries, item)
 }
 
