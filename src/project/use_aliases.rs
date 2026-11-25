@@ -65,6 +65,8 @@ pub(crate) use call_site::call_arity_matches;
 #[cfg(verus_only)]
 pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin};
 mod defn_name;
+mod mixed_function;
+pub use mixed_function::{MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution};
 mod defn_call_graph;
 pub use defn_name::{DefnNameError, ResolvedDefnName};
 pub use defn_call_graph::{DefnCallGraphError, DefnCallPlan};

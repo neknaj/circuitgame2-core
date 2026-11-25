@@ -1,8 +1,6 @@
 //! 配線を確認した関数について、右辺と呼び出しのポート数を検査する。
 
-use super::{DefinitionReferenceError, FuncCallTarget, UseAliases};
-#[cfg(verus_only)]
-use super::FuncCallArity;
+use super::{DefinitionReferenceError, FuncCallArity, FuncCallTarget, UseAliases};
 #[cfg(verus_only)]
 use super::super::definitions::definition_count;
 use crate::project::{FuncWiringError, FuncWiringResult, LocatedName};
@@ -54,6 +52,36 @@ pub enum FuncArityError<'p, 'a> {
         /// 式が返す出力の数。
         actual: usize,
     },
+}
+
+impl<'p, 'a> FuncCallArity<'p, 'a> {
+    /// 直接の実引数数を参照先の入力ポート数と照合する。
+    ///
+    /// 成功時は解決済みの呼び出しを返す。引数の型は後段で検査する。
+    ///
+    /// # Errors
+    ///
+    /// 個数が異なる場合は呼び出し全体の範囲、選んだ参照先、必要な個数と実際の個数を返す。
+    pub fn check_input_count(self) -> (result: Result<Self, FuncArityError<'p, 'a>>)
+        ensures match result {
+            Ok(call) => call == self && self.call.arguments == self.target.port_counts().inputs,
+            Err(FuncArityError::ArgumentCount { call, target, expected, actual }) => {
+                &&& *call.source == *self.source && call.span == self.call.span && target == self.target
+                &&& expected == self.target.port_counts().inputs && actual == self.call.arguments
+                &&& expected != actual
+            },
+            Err(_) => false,
+        },
+    {
+        let expected = self.target.ports().inputs;
+        let actual = self.call.arguments;
+        if actual == expected {
+            Ok(self)
+        } else {
+            let call = LocatedName { source: self.source, span: self.call.span };
+            Err(FuncArityError::ArgumentCount { call, target: self.target, expected, actual })
+        }
+    }
 }
 
 spec fn at_definition(parsed: &NamedBuildCircuit, entry: int, definition: int) -> BuildDefinition {
@@ -246,16 +274,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let ghost resolved = call;
                     assert(self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(resolved))));
                     assert(self.func_call_at(file, entry, definition, reference));
+                    let call = match call.check_input_count() {
+                        Ok(call) => call,
+                        Err(error) => {
+                            assert(call_count_error(parsed, *row, resolved, error));
+                            proof { self.record_count_mismatch(at, parsed, *row, resolved, error); }
+                            return Err(error);
+                        },
+                    };
                     let ports = call.target.ports();
                     let loc = LocatedName { source: call.source, span: call.call.span };
-                    if call.call.arguments != ports.inputs {
-                        let error = FuncArityError::ArgumentCount {
-                            call: loc, target: call.target, expected: ports.inputs, actual: call.call.arguments,
-                        };
-                        assert(call_count_error(parsed, *row, resolved, error));
-                        proof { self.record_count_mismatch(at, parsed, *row, resolved, error); }
-                        return Err(error);
-                    }
                     let root = call.call.form == row.expression.start;
                     let expected = if root { count } else { 1 };
                     if ports.outputs != expected {

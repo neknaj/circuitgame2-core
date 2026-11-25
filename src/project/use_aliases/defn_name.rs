@@ -112,7 +112,7 @@ fn copy_target<'p, 'a, 'q>(target: &MixedAbsoluteTarget<'p, 'a, 'q>) -> (out: Mi
     }
 }
 
-spec fn scoped_binding(
+pub(super) open spec fn scoped_binding(
     aliases: &MixedUseAliases, file: usize, scope: DefnScope, word: &str, binding: Option<MixedAbsoluteTarget>,
 ) -> bool {
     let targets = aliases.targets_model();
@@ -184,7 +184,7 @@ spec fn name_in_scope(
     }
 }
 
-proof fn absolute_name_declares(
+pub(super) proof fn absolute_name_declares(
     exports: &MixedExportTable, name: &str, from: Option<&str>,
     declaration: ProjectDeclaration,
 )
@@ -316,7 +316,7 @@ pub proof fn stage_name_has_no_binding<'p, 'a>(
 }
 
 impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
-    fn binding_for_call<'q>(&'q self, file: usize, scope: DefnScope<'a>, word: &'q str)
+    pub(super) fn binding_for_call<'q>(&'q self, file: usize, scope: DefnScope<'a>, word: &'q str)
         -> (binding: Option<MixedAbsoluteTarget<'p, 'a, 'q>>)
         ensures scoped_binding(self, file, scope, word, binding),
     {
