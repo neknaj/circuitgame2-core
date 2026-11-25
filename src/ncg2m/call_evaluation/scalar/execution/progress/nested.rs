@@ -8,6 +8,7 @@ use crate::ncg2m::expression_types::{
 mod resume;
 mod returning;
 mod stack;
+mod supported;
 
 verus! {
 

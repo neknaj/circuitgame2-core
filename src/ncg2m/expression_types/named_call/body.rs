@@ -608,6 +608,52 @@ pub proof fn defn_call_argument_origin(forms: Seq<Form>, at: usize, arguments: S
     },
 {}
 
+proof fn argument_position_agrees(forms: Seq<Form>, at: usize, first: Seq<usize>, second: Seq<usize>, slot: int)
+    requires
+        defn_call_arguments(forms, at, first), defn_call_arguments(forms, at, second),
+        0 <= slot < first.len() && slot < second.len(),
+    ensures first[slot] == second[slot],
+    decreases slot,
+{
+    if slot > 0 {
+        argument_position_agrees(forms, at, first, second, slot - 1);
+        assert(subtree_limit(forms, first[slot - 1]) == first[slot]);
+        assert(subtree_limit(forms, second[slot - 1]) == second[slot]);
+    }
+}
+
+pub(super) proof fn call_argument_positions_are_unique(
+    forms: Seq<Form>, at: usize, first: Seq<usize>, second: Seq<usize>,
+)
+    requires defn_call_arguments(forms, at, first), defn_call_arguments(forms, at, second),
+    ensures first == second,
+{
+    if first.len() == 0 {
+        if second.len() > 0 {
+            assert(at < second[0] < subtree_limit(forms, second[0]) <= subtree_limit(forms, at));
+        }
+    } else if second.len() == 0 {
+        assert(at < first[0] < subtree_limit(forms, first[0]) <= subtree_limit(forms, at));
+    } else if first.len() < second.len() {
+        let last = first.len() - 1;
+        argument_position_agrees(forms, at, first, second, last);
+        assert(subtree_limit(forms, first[last]) == subtree_limit(forms, at));
+        assert(subtree_limit(forms, second[last]) == second[last + 1]);
+        assert(second[last + 1] < subtree_limit(forms, second[last + 1]) <= subtree_limit(forms, at));
+    } else if second.len() < first.len() {
+        let last = second.len() - 1;
+        argument_position_agrees(forms, at, first, second, last);
+        assert(subtree_limit(forms, second[last]) == subtree_limit(forms, at));
+        assert(subtree_limit(forms, first[last]) == first[last + 1]);
+        assert(first[last + 1] < subtree_limit(forms, first[last + 1]) <= subtree_limit(forms, at));
+    }
+    assert(first =~= second) by {
+        assert forall|slot: int| 0 <= slot < first.len() implies #[trigger] first[slot] == #[trigger] second[slot] by {
+            argument_position_agrees(forms, at, first, second, slot);
+        };
+    };
+}
+
 pub(in crate::ncg2m) proof fn argument_positions_increase(
     forms: Seq<Form>, at: usize, arguments: Seq<usize>, slot: int,
 )

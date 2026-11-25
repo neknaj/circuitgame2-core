@@ -39,7 +39,7 @@ pub use named_call::DefnBodyCallError;
 #[cfg(verus_only)]
 pub use named_call::{
     expression_slot, expression_slot_at_root, scalar_call_syntax_at, scalar_evaluator_syntax,
-    scalar_syntax_call_arguments, scalar_syntax_if_children,
+    scalar_syntax_call_arguments, scalar_syntax_form_kind, scalar_syntax_if_children, scalar_syntax_matches_call_arguments,
 };
 mod local_scopes;
 mod typing;
