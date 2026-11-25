@@ -5,6 +5,7 @@ use super::super::termination::{
     expression_work, expression_work_dominates, expression_work_positive, scalar_expression_order, scalar_subexpression_order,
 };
 use crate::ncg2m::expression_types::named_call::argument_positions_increase;
+use vstd::arithmetic::mul::lemma_mul_inequality;
 
 verus! {
 
@@ -156,6 +157,32 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         (self.local_work_model().0 + waiting_work(self.waiting@), self.local_work_model().1)
     }
 
+    /// 値や診断を返すまでに取り得る、一時停止に終わる遷移の回数の上限を表す。
+    ///
+    /// 探索の残り件数より大きい係数を使い、辞書式の仕事量を自然数一つで表す。
+    /// 実行枠を指定する `usize` とは独立に、自然数の範囲で計算する。
+    pub closed spec fn remaining_continuations_bound(&self) -> nat {
+        let work = self.remaining_work_model();
+        work.0 * (usize::MAX as nat + 2) + work.1
+    }
+
+    /// 一時停止に終わる実際の遷移を一回行うと、残り回数の上限は少なくとも一つ減る。
+    pub proof fn execution_step_reduces_continuation_bound(&self, after: Self)
+        requires self.step_matches(Ok(ScalarExecutionSlice::Suspended(after))),
+        ensures after.remaining_continuations_bound() < self.remaining_continuations_bound(),
+    {
+        self.execution_step_reduces_work(after);
+        let before = self.remaining_work_model();
+        let next = after.remaining_work_model();
+        let width = usize::MAX as nat + 2;
+        after.plan.call_row_fits_runtime_index(after.rank);
+        assert(next.1 < width);
+        if next.0 < before.0 {
+            lemma_mul_inequality(next.0 as int + 1, before.0 as int, width as int);
+            assert((next.0 + 1) * width == next.0 * width + width) by (nonlinear_arith);
+        }
+    }
+
     spec fn local_work_model(&self) -> (nat, nat) {
         let candidates = match self.plan.calls_model_at_rank(self.rank) {
             Some(row) => row.len(),
@@ -163,7 +190,10 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         };
         match self.active {
             Active::Expression(expr) => (expr.expression_work_model(self.rank), candidates + 1),
-            Active::Lookup { parent, site } => (parent.expression_work_model(self.rank), (candidates - site) as nat),
+            Active::Lookup { parent, site } => {
+                let unsurveyed = if site <= candidates { (candidates - site) as nat } else { 0 };
+                (parent.expression_work_model(self.rank), unsurveyed)
+            },
             Active::Value { .. } => (0, 0),
         }
     }

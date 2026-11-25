@@ -312,6 +312,15 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         }
     }
 
+    pub(crate) proof fn call_row_fits_runtime_index(&self, rank: usize)
+        ensures self.calls_model_at_rank(rank) matches Some(row) ==> row.len() <= usize::MAX,
+    {
+        if self.calls_model_at_rank(rank).is_some() {
+            let row = self.edges@[self.order@[rank as int] as int];
+            assert(row.len() == self.calls_model_at_rank(rank)->Some_0.len());
+        }
+    }
+
     /// 指定した順位の補助関数が呼び出す補助関数と、元の呼び出し位置を返す。
     pub fn calls_at_rank(&self, rank: usize) -> (calls: Option<&[DefnCallEdge<'p, 'a>]>)
         ensures self.calls_model_at_rank(rank) == match calls {
