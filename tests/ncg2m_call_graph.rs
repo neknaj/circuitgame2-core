@@ -1,5 +1,6 @@
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{ScalarBindingError, ScalarValue, bind_scalar_call};
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
+use circuitgame2_core::ncg2m::integers::IntegerValue;
 use circuitgame2_core::project::{
     DefnCallGraphError, DefnPosition, SourceSnapshot, check_mixed_use_aliases,
     index_mixed_use_targets, parse_project_sources,
@@ -8,7 +9,7 @@ use circuitgame2_core::project::{
 #[test]
 fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     let source = "(defn caller (as-type (Fn () Bool) (fn () (if false (callee) true))))
-        (defn isolated (as-type (Fn () Bool) (fn () false)))
+        (defn isolated (as-type (Fn () Int) (fn () -9223372036854775808)))
         (defn callee (as-type (Fn () Bool) (fn () true)))";
     let snapshots = [SourceSnapshot { path: "common.ncg2m", revision: 1, text: source }];
     let project = parse_project_sources(&snapshots).unwrap();
@@ -16,12 +17,17 @@ fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     let aliases = check_mixed_use_aliases(&targets).unwrap();
     let plan = aliases.plan_defn_calls().unwrap();
     let order = (0..plan.len()).map(|rank| plan.at_rank(rank).unwrap()).collect::<Vec<_>>();
-    let rank = |item| order.iter().position(|pos| *pos == DefnPosition { file: 0, item }).unwrap();
+    let rank = |item| plan.rank_of(DefnPosition { file: 0, item }).unwrap();
+    assert_eq!(order[rank(2)], DefnPosition { file: 0, item: 2 });
+    assert!(plan.rank_of(DefnPosition { file: 0, item: 3 }).is_none());
     assert_eq!(order.len(), 3);
     assert!(rank(2) < rank(0));
     assert!(plan.at_rank(3).is_none());
     let frame = bind_scalar_call(&plan, rank(2), Vec::new()).unwrap();
     assert!(frame.parameters().is_empty());
+    assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(ScalarValue::Bool(true)));
+    let isolated = bind_scalar_call(&plan, rank(1), Vec::new()).unwrap();
+    assert_eq!(isolated.evaluate_atomic_body().unwrap(), Some(ScalarValue::Integer(IntegerValue::Int(i64::MIN))));
     assert_eq!(frame.body().source.revision, 1);
     assert_eq!(&source[frame.body().signature.body_span.clone()], "true");
     let Err(ScalarBindingError::Arity { source: callee_source, span, expected: 0, found: 1 }) =

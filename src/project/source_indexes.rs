@@ -18,7 +18,7 @@ use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, ch
 use crate::ncg2m::expression_types::named_call::{indexed_call_body_matches, indexed_call_body_origin, defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use crate::syntax::form_span;
+use crate::syntax::{form_span, form_spans_valid};
 #[cfg(verus_only)]
 use crate::ncg2m::file::{meta_ast_matches, meta_call_matches, meta_call_form_origin, meta_binding_span_evidence, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
@@ -344,6 +344,8 @@ impl<'a> ParsedProjectSources<'a> {
                 &&& *body.source == self.sources_model()[file as int]
                 &&& self.functional_forms_model(file) == Some(body.forms@)
                 &&& body.at < body.forms@.len()
+                &&& form_spans_valid(body.source.text_model(), body.forms@,
+                    body.source.text_model().spec_bytes().len() as int)
                 &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
                 &&& self.defn_signature_matches_index(file, item, Some(body.signature))
             },

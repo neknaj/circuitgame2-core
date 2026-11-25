@@ -22,7 +22,9 @@ use super::call_site::{named_body_matches_project, project_named_defn_body_match
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::DefnSignature;
 #[cfg(verus_only)]
-use crate::syntax::form_span;
+use crate::syntax::{form_span, form_spans_valid};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
 
@@ -52,9 +54,128 @@ pub struct DefnCallPlan<'p, 'a> {
     vertices: Vec<DefnPosition>,
     edges: Vec<Vec<DefnCallEdge<'p, 'a>>>,
     order: Vec<usize>,
+    ranks: Vec<usize>,
+}
+
+spec fn reverse_order_matches(order: Seq<usize>, ranks: Seq<usize>) -> bool {
+    &&& order.len() == ranks.len()
+    &&& forall|i: int| 0 <= i < order.len() ==> {
+        let node = #[trigger] order[i];
+        node < ranks.len() && ranks[node as int] == i
+    }
+    &&& forall|node: int| 0 <= node < ranks.len() ==> {
+        let rank = #[trigger] ranks[node];
+        rank < order.len() && order[rank as int] == node
+    }
+}
+
+fn invert_call_order(order: &[usize], Ghost(expected): Ghost<Seq<nat>>) -> (ranks: Vec<usize>)
+    requires
+        order@.len() == expected.len(),
+        completion_order_matches(order@, expected),
+        forall|node: int| 0 <= node < expected.len() ==> {
+            let rank = #[trigger] expected[node];
+            rank < order@.len() && order@[rank as int] == node
+        },
+    ensures reverse_order_matches(order@, ranks@),
+{
+    let mut ranks = Vec::new();
+    while ranks.len() < order.len()
+        invariant ranks@.len() <= order@.len(),
+        decreases order@.len() - ranks@.len(),
+    {
+        ranks.push(0usize);
+    }
+    let mut i = 0;
+    while i < order.len()
+        invariant
+            i <= order@.len() == ranks@.len() == expected.len(),
+            completion_order_matches(order@, expected),
+            forall|node: int| 0 <= node < expected.len() ==> {
+                let rank = #[trigger] expected[node];
+                rank < order@.len() && order@[rank as int] == node
+            },
+            forall|j: int| 0 <= j < i ==> {
+                let node = #[trigger] order@[j];
+                node < ranks@.len() && ranks@[node as int] == j
+            },
+        decreases order@.len() - i,
+    {
+        let node = order[i];
+        let ghost previous = ranks@;
+        ranks.set(node, i);
+        proof {
+            assert forall|j: int| 0 <= j < i implies {
+                let older = #[trigger] order@[j];
+                older < ranks@.len() && ranks@[older as int] == j
+            } by {
+                assert(expected[order@[j] as int] == j);
+                assert(expected[node as int] == i);
+                assert(order@[j] != node);
+                assert(ranks@[order@[j] as int] == previous[order@[j] as int]);
+            };
+        }
+        i += 1;
+    }
+    proof {
+        assert forall|node: int| 0 <= node < ranks@.len() implies {
+            let rank = #[trigger] ranks@[node];
+            rank < order@.len() && order@[rank as int] == node
+        } by {
+            assert(order@[expected[node] as int] == node);
+            assert(ranks@[node] == expected[node]);
+        };
+    }
+    ranks
 }
 
 impl<'p, 'a> DefnCallPlan<'p, 'a> {
+    #[verifier::type_invariant]
+    spec fn ranks_are_valid(&self) -> bool {
+        &&& self.ranks@.len() == self.vertices@.len()
+        &&& reverse_order_matches(self.order@, self.ranks@)
+        &&& forall|a: int, b: int| 0 <= a < b < self.vertices@.len()
+            ==> defn_position_before(#[trigger] self.vertices@[a], #[trigger] self.vertices@[b])
+    }
+
+    /// 宣言の位置から評価順の順位を得る。計画に含まれなければ `None` を返す。
+    pub fn rank_of(&self, position: DefnPosition) -> (rank: Option<usize>)
+        ensures
+            rank.is_some() == self.order_model().contains(position),
+            rank matches Some(i) ==> i < self.order_model().len()
+                && i == self.order_model().index_of(position),
+    {
+        proof { use_type_invariant(self); }
+        let Some(node) = vertex_index(self.vertices.as_slice(), position) else {
+            assert(!self.order_model().contains(position)) by {
+                if self.order_model().contains(position) {
+                    let ranked = self.order_model();
+                    let i = choose|i: int| 0 <= i < ranked.len() && (#[trigger] ranked[i]) == position;
+                    assert(self.vertices@.contains(position));
+                }
+            };
+            return None;
+        };
+        let rank = self.ranks[node];
+        proof {
+            let ranked = self.order_model();
+            assert(self.order@[rank as int] == node);
+            assert(ranked[rank as int] == position);
+            assert(ranked.contains(position));
+            let first = ranked.index_of(position);
+            let first_node = self.order@[first];
+            assert(self.vertices@[first_node as int] == position);
+            if first_node < node {
+                assert(defn_position_before(self.vertices@[first_node as int], self.vertices@[node as int]));
+            } else if node < first_node {
+                assert(defn_position_before(self.vertices@[node as int], self.vertices@[first_node as int]));
+            }
+            assert(first_node == node);
+            assert(self.ranks@[first_node as int] == first);
+        }
+        Some(rank)
+    }
+
     /// 計画が参照する、解析済みのソース集合を表す。
     pub closed spec fn project_model(&self) -> ParsedProjectSources<'a> {
         *self.project
@@ -72,6 +193,8 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
                 &&& *body.source == project.sources_model()[defn.file as int]
                 &&& project.functional_forms_model(defn.file) == Some(body.forms@)
                 &&& body.at < body.forms@.len()
+                &&& form_spans_valid(body.source.text_model(), body.forms@,
+                    body.source.text_model().spec_bytes().len() as int)
                 &&& form_span(body.forms@[body.at as int]) == body.signature.body_span
                 &&& project.defn_signature_matches_index(defn.file, defn.item, Some(body.signature))
             }
@@ -597,7 +720,12 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         match check_dependency_order(graph.as_slice(), true) {
             Err(cycle) => Err(DefnCallGraphError::Cycle(graph_cycle_sites(self, &vertices, &edges, &graph, &cycle))),
             Ok(order) => {
-                let plan = DefnCallPlan { project, vertices, edges, order };
+                let ghost expected = choose|rank: Seq<nat>| #[trigger] dependencies_in_order(graph@, rank)
+                    && order@.len() == graph@.len() && completion_order_matches(order@, rank)
+                    && (forall|node: int| #![trigger rank[node]] 0 <= node < graph@.len()
+                        ==> rank[node] < order@.len() && order@[rank[node] as int] == node);
+                let ranks = invert_call_order(order.as_slice(), Ghost(expected));
+                let plan = DefnCallPlan { project, vertices, edges, order, ranks };
                 proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
                 Ok(plan)
             }

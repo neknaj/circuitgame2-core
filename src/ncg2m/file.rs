@@ -639,6 +639,7 @@ pub(crate) fn retained_meta_body(source: &str, forms: &[Form], entries: &[MetaIt
     -> (body: usize)
     requires meta_ast_matches(source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defn,
     ensures body < forms@.len(), form_span(forms@[body as int]) == entries@[item as int].kind->Defn_0.body_span,
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
 {
     indexed_meta_body(source, forms, entries, item)
 }

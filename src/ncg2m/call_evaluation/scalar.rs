@@ -4,11 +4,18 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use crate::project::{DefnCallPlan, ProjectSource};
 #[cfg(verus_only)]
-use crate::syntax::form_span;
+use crate::syntax::{form_span, form_spans_valid};
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 use crate::ncg2m::data_types::{BuiltinDataType, DataType, DataTypeAtom, DefnSignature};
 use crate::ncg2m::integers::{IntegerType, IntegerValue};
 use vstd::prelude::*;
 use super::DefnEvaluationBody;
+
+mod atom;
+pub use atom::ScalarLiteralError;
+#[cfg(verus_only)]
+pub use atom::atomic_body_matches;
 
 verus! {
 
@@ -96,6 +103,14 @@ pub struct ScalarCallFrame<'p, 'a> {
 }
 
 impl<'p, 'a> ScalarCallFrame<'p, 'a> {
+    #[verifier::type_invariant]
+    spec fn source_and_values_are_ready(&self) -> bool {
+        &&& self.body.at < self.body.forms@.len()
+        &&& form_spans_valid(self.body.source.text_model(), self.body.forms@,
+            self.body.source.text_model().spec_bytes().len() as int)
+        &&& parameters_match(self.body.signature, self.values@)
+    }
+
     /// 呼び出し先の本体と署名を表す。
     pub closed spec fn body_model(&self) -> DefnEvaluationBody<'p, 'a> {
         self.body
@@ -156,6 +171,8 @@ pub open spec fn binding_matches<'p, 'a>(
 
 fn bind<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, values: Vec<ScalarValue>)
     -> (result: Result<ScalarCallFrame<'p, 'a>, ScalarBindingError<'p, 'a>>)
+    requires body.at < body.forms@.len(),
+        form_spans_valid(body.source.text_model(), body.forms@, body.source.text_model().spec_bytes().len() as int),
     ensures binding_matches(body, values@, result),
 {
     let params = &body.signature.parameters;
