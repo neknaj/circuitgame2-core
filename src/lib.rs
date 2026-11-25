@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod backend;
 pub mod device;
 pub mod editor;
 pub mod ncg2m;
