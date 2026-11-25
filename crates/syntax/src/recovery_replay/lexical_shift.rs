@@ -56,7 +56,7 @@ proof fn trivia_extent_shifts(full: Seq<u8>, tail: Seq<u8>, base: int, start: in
     }
 }
 
-proof fn lexeme_shifts(full: Seq<u8>, tail: Seq<u8>, base: int, start: int, end: int, kind: LexemeKind)
+pub(super) proof fn lexeme_shifts(full: Seq<u8>, tail: Seq<u8>, base: int, start: int, end: int, kind: LexemeKind)
     requires 0 <= base <= full.len(), tail == full[base..], 0 <= start < end <= tail.len(),
     ensures lexeme_at(tail, start, end, kind) == lexeme_at(full, base + start, base + end, kind),
 {

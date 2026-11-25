@@ -248,6 +248,7 @@ pub(super) proof fn settled_boundary_in_replay(
         offset <= source.spec_bytes().len(),
         replay_position(frames, index) == offset,
         !replay_separator(frames, index),
+        index == 0 || frames[index - 1].segment.kind is Close,
         replay_at(frames, index).open.len() == 0,
         replay_at(frames, index).root is None,
 {

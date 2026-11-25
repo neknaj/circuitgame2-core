@@ -14,6 +14,8 @@ pub mod circuit;
 mod digits;
 mod natural;
 mod recovery_boundary;
+mod recovery_update;
+pub use recovery_update::{RecoveryEdges, RecoverySection, ReparsedRecovery, remember_recovery_edges};
 #[cfg(verus_only)]
 mod recovery_replay;
 #[cfg(verus_only)]
