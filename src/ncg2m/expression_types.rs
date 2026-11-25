@@ -21,9 +21,9 @@ use super::file::{indexed_standalone_header, meta_ast_body_origin, meta_ast_matc
     meta_ast_unique_start, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches};
 use super::forms::{is_spelling, source_word, subtree_end};
 pub use super::let_syntax::LetSyntaxError;
-use super::let_syntax::{LocalBinding, read_let_structure};
+use super::let_syntax::read_let_structure;
 #[cfg(verus_only)]
-use super::let_syntax::{let_structure, valid_bindings};
+use super::let_syntax::{LocalBinding, let_structure, valid_bindings};
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
 use super::integers::{IntegerLiteralError, IntegerType, read_integer_literal};
@@ -33,16 +33,12 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
-mod inference;
 mod local_scopes;
-mod scoped_check;
-use scoped_check::check_scoped_expression;
-#[cfg(verus_only)]
-use scoped_check::scoped_check;
+mod typing;
 use local_scopes::{LocalScopes, Scope};
-use inference::infer_type;
+use typing::check_typed_body;
 #[cfg(verus_only)]
-use inference::inferred_type;
+use typing::typed_body;
 
 verus! {
 
@@ -758,323 +754,6 @@ enum BodyVerdict<'a> {
     Rejected(ExpressionCheckFailure<'a>),
 }
 
-#[verifier::opaque]
-spec fn expression_check<'a>(
-    source: &'a str, forms: Seq<Form>, parameters: Seq<TypeBinding>, request: Request,
-) -> BodyVerdict<'a>
-    decreases forms.len() - request.at,
-{
-    if !request_ready(forms, request) {
-        BodyVerdict::Rejected(ExpressionCheckFailure::Deferred(DeferredExpression::Form(0..0)))
-    } else {
-        let verdict = match step_model(source, forms, parameters, request) {
-            Err(error) => BodyVerdict::Rejected(error),
-            Ok(step) if !step_children_fit(forms, request.at, step) =>
-                BodyVerdict::Rejected(ExpressionCheckFailure::Deferred(DeferredExpression::Form(form_span(forms[request.at as int])))),
-            Ok(CheckStep::Done) => BodyVerdict::Accepted,
-            Ok(CheckStep::One(child)) => expression_check(source, forms, parameters, child),
-            Ok(CheckStep::Three(condition, yes, no)) => {
-                match expression_check(source, forms, parameters, condition) {
-                    BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
-                    BodyVerdict::Accepted => match expression_check(source, forms, parameters, yes) {
-                        BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
-                        BodyVerdict::Accepted => expression_check(source, forms, parameters, no),
-                    },
-                }
-            }
-        };
-        match verdict {
-            BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
-            BodyVerdict::Accepted => match remaining_elements(forms, request) {
-                Some(next) => expression_check(source, forms, parameters, next),
-                None => BodyVerdict::Accepted,
-            },
-        }
-    }
-}
-
-#[verifier::opaque]
-spec fn pending_check<'a>(
-    source: &'a str, forms: Seq<Form>, parameters: Seq<TypeBinding>, pending: Seq<Request>,
-) -> BodyVerdict<'a>
-    decreases pending.len(),
-{
-    if pending.len() == 0 {
-        BodyVerdict::Accepted
-    } else {
-        match expression_check(source, forms, parameters, pending.last()) {
-            BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
-            BodyVerdict::Accepted => pending_check(source, forms, parameters, pending.drop_last()),
-        }
-    }
-}
-
-proof fn list_type_rules_have_examples() {
-    let source = "(list)";
-    let forms = seq![
-        Form::List { span: 0usize..6usize, end: 2usize },
-        Form::Atom { span: 1usize..5usize, kind: AtomKind::Name },
-    ];
-    reveal_strlit("(list)");
-    reveal_strlit("list");
-    reveal_strlit("as-type");
-    reveal_strlit("if");
-    reveal_strlit("fn");
-    vstd::string::is_ascii_spec_bytes(source);
-    vstd::string::is_ascii_spec_bytes("list");
-    vstd::utf8::encode_utf8_decode_utf8("list"@);
-    vstd::utf8::encode_utf8_decode_utf8("as-type"@);
-    vstd::utf8::encode_utf8_decode_utf8("if"@);
-    vstd::utf8::encode_utf8_decode_utf8("fn"@);
-    assert(spelling(source, forms[1]) =~= "list".spec_bytes());
-    assert("list".spec_bytes() != "as-type".spec_bytes()
-        && "list".spec_bytes() != "if".spec_bytes()
-        && "list".spec_bytes() != "fn".spec_bytes());
-    assert(keyword(spelling(source, forms[1])) == Some(FormTag::List));
-    assert(forms.len() == 2 && forms[0] is List && forms[0]->List_end == 2 && plain_name(forms[1]));
-    assert(shape(source, forms, 0) == Ok(Expression::List));
-    let env = Seq::<TypeBinding>::empty();
-    let list = Request {
-        at: 0,
-        expected: TypeShape { builtin: Some(BuiltinDataType::Bool), list_depth: 1 },
-        list: None,
-    };
-    let scalar = Request { at: 0, expected: scalar_type(BuiltinDataType::Bool), list: None };
-    let error = ExpressionCheckFailure::Type(ExpressionTypeError::ListInScalarContext(0usize..6usize));
-    assert(step_model(source, forms, env, list) == Ok(CheckStep::Done));
-    assert(step_model(source, forms, env, scalar) == Err(error));
-    reveal(expression_check);
-    assert(expression_check(source, forms, env, list) == BodyVerdict::Accepted);
-    assert(expression_check(source, forms, env, scalar) == BodyVerdict::Rejected(error));
-}
-
-spec fn next_requests<'a>(pending: Seq<Request>, step: CheckStep) -> Seq<Request> {
-    match step {
-        CheckStep::Done => pending,
-        CheckStep::One(child) => pending.push(child),
-        CheckStep::Three(condition, yes, no) => pending.push(no).push(yes).push(condition),
-    }
-}
-
-proof fn pending_push<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>, tail: Request,
-)
-    ensures pending_check(source, forms, env, pending.push(tail)) == match expression_check(source, forms, env, tail) {
-        BodyVerdict::Rejected(error) => BodyVerdict::Rejected(error),
-        BodyVerdict::Accepted => pending_check(source, forms, env, pending),
-    },
-{
-    reveal(pending_check);
-    assert(pending.push(tail).drop_last() =~= pending);
-}
-
-proof fn pending_singleton<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, request: Request,
-)
-    ensures pending_check(source, forms, env, Seq::empty().push(request)) == expression_check(source, forms, env, request),
-{
-    reveal(pending_check);
-    let empty = Seq::<Request>::empty();
-    assert(pending_check(source, forms, env, empty) == BodyVerdict::Accepted);
-    pending_push(source, forms, env, empty, request);
-
-}
-
-proof fn popped_error<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>,
-    request: Request, error: ExpressionCheckFailure<'a>,
-)
-    requires request_ready(forms, request), step_model(source, forms, env, request) == Err(error),
-    ensures pending_check(source, forms, env, pending.push(request)) == BodyVerdict::Rejected(error),
-{
-    reveal(expression_check);
-    pending_push(source, forms, env, pending, request);
-}
-
-proof fn popped_step<'a>(
-    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, pending: Seq<Request>,
-    request: Request, step: CheckStep, sibling: Option<Request>,
-)
-    requires request_ready(forms, request), step_children_fit(forms, request.at, step),
-        step_model(source, forms, env, request) == Ok(step), sibling == remaining_elements(forms, request),
-    ensures pending_check(source, forms, env, pending.push(request))
-        == pending_check(source, forms, env, next_requests(with_sibling(pending, sibling), step)),
-{
-    reveal(expression_check);
-    pending_push(source, forms, env, pending, request);
-    if let Some(next) = sibling {
-        pending_push(source, forms, env, pending, next);
-    }
-    let pending = with_sibling(pending, sibling);
-    match step {
-        CheckStep::Done => {},
-        CheckStep::One(child) => {
-            pending_push(source, forms, env, pending, child);
-        }
-        CheckStep::Three(condition, yes, no) => {
-            pending_push(source, forms, env, pending, no);
-            pending_push(source, forms, env, pending.push(no), yes);
-            pending_push(source, forms, env, pending.push(no).push(yes), condition);
-        }
-    }
-}
-
-spec fn with_sibling(pending: Seq<Request>, sibling: Option<Request>) -> Seq<Request> {
-    match sibling {
-        Some(next) => pending.push(next),
-        None => pending,
-    }
-}
-
-spec fn pending_first(forms: Seq<Form>, pending: Seq<Request>) -> nat {
-    if pending.len() == 0 { forms.len() } else { pending.last().at as nat }
-}
-
-spec fn requests_ready(forms: Seq<Form>, pending: Seq<Request>) -> bool {
-    &&& forall|i: int| 0 <= i < pending.len() ==> request_ready(forms, #[trigger] pending[i])
-    &&& forall|i: int, j: int| 0 <= i < j < pending.len() ==>
-        request_limit(forms, #[trigger] pending[j]) <= (#[trigger] pending[i]).at
-}
-
-proof fn append_ready(forms: Seq<Form>, pending: Seq<Request>, child: Request)
-    requires requests_ready(forms, pending), request_ready(forms, child),
-        forall|i: int| 0 <= i < pending.len() ==> request_limit(forms, child) <= (#[trigger] pending[i]).at,
-    ensures requests_ready(forms, pending.push(child)),
-{
-    let rows = pending.push(child);
-    assert forall|i: int, j: int| 0 <= i < j < rows.len() implies
-        request_limit(forms, #[trigger] rows[j]) <= (#[trigger] rows[i]).at by {
-        if j < pending.len() {
-            assert(rows[j] == pending[j]);
-        }
-    };
-}
-
-proof fn step_advances(
-    forms: Seq<Form>, pending: Seq<Request>, parent: Request, step: CheckStep, sibling: Option<Request>,
-)
-    requires requests_ready(forms, pending.push(parent)), step_children_fit(forms, parent.at, step),
-        sibling matches Some(next) ==> request_ready(forms, next)
-            && parent.at < next.at && subtree_limit(forms, parent.at) == next.at
-            && request_limit(forms, next) == request_limit(forms, parent),
-    ensures
-        requests_ready(forms, next_requests(with_sibling(pending, sibling), step)),
-        parent.at < pending_first(forms, next_requests(with_sibling(pending, sibling), step)),
-{
-    let old = pending.push(parent);
-    assert forall|i: int| 0 <= i < pending.len() implies
-        request_limit(forms, parent) <= (#[trigger] pending[i]).at by {
-        assert(old[i] == pending[i] && old[pending.len() as int] == parent);
-    };
-    assert(requests_ready(forms, pending)) by {
-        assert forall|i: int| 0 <= i < pending.len() implies request_ready(forms, #[trigger] pending[i]) by {
-            assert(pending[i] == old[i]);
-        };
-        assert forall|i: int, j: int| 0 <= i < j < pending.len() implies
-            request_limit(forms, #[trigger] pending[j]) <= (#[trigger] pending[i]).at by {
-            assert(pending[i] == old[i] && pending[j] == old[j]);
-        };
-    };
-    if let Some(next) = sibling {
-        append_ready(forms, pending, next);
-    }
-    let extended = with_sibling(pending, sibling);
-    assert forall|i: int| 0 <= i < extended.len() implies
-        subtree_limit(forms, parent.at) <= (#[trigger] extended[i]).at by {
-        if i < pending.len() { assert(extended[i] == pending[i]); }
-    };
-    let pending = extended;
-    match step {
-        CheckStep::Done => {},
-        CheckStep::One(child) => {
-            append_ready(forms, pending, child);
-        }
-        CheckStep::Three(condition, yes, no) => {
-            append_ready(forms, pending, no);
-            let with_no = pending.push(no);
-            assert forall|i: int| 0 <= i < with_no.len() implies
-                request_limit(forms, yes) <= (#[trigger] with_no[i]).at by {
-                if i < pending.len() { assert(with_no[i] == pending[i]); }
-            };
-            append_ready(forms, with_no, yes);
-            let with_yes = with_no.push(yes);
-            assert forall|i: int| 0 <= i < with_yes.len() implies
-                request_limit(forms, condition) <= (#[trigger] with_yes[i]).at by {
-                if i < with_no.len() { assert(with_yes[i] == with_no[i]); }
-            };
-            append_ready(forms, with_yes, condition);
-        }
-    }
-}
-
-// 条件、左、右の順になるように分岐を積む。リストの次の要素を1個ずつ積み、作業領域を抑える。
-fn check_expression<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>],
-    locals: &LocalScopes<'a>, scope: Scope, body: usize, expected: TypeShape,
-) -> (result: BodyVerdict<'a>)
-    requires usable_forms(source, forms@), body < forms@.len(), locals.contains(scope),
-    ensures result == expression_check(source, forms@, lexical_view(parameters@, locals, scope),
-        Request { at: body, expected, list: None }),
-{
-    let start = Request { at: body, expected, list: None };
-    let _size = forms.len();
-    let _end = subtree_end(forms, body);
-    let mut pending = Vec::new();
-    pending.push(start);
-    let ghost env = lexical_view(parameters@, locals, scope);
-    proof {
-        assert(complete_list_indices(forms@));
-        let root = forms@[body as int];
-        if let Form::List { end, .. } = root {
-            assert(body < end <= forms@.len());
-        }
-        assert(body < _end <= _size);
-        assert(pending@ =~= Seq::empty().push(start));
-        assert(requests_ready(forms@, Seq::empty()));
-        append_ready(forms@, Seq::empty(), start);
-        pending_singleton(source, forms@, env, start);
-    }
-    while pending.len() != 0
-        invariant
-            usable_forms(source, forms@), locals.contains(scope),
-            env == lexical_view(parameters@, locals, scope),
-            start == (Request { at: body, expected, list: None }),
-            requests_ready(forms@, pending@),
-            pending_check(source, forms@, env, pending@) == expression_check(source, forms@, env, start),
-        decreases forms@.len() - pending_first(forms@, pending@),
-    {
-        let ghost old = pending@;
-        let Some(request) = pending.pop() else { unreachable!() };
-        assert(old =~= pending@.push(request));
-        let step = match read_check_step(source, forms, parameters, locals, scope, request) {
-            Err(error) => {
-                proof { popped_error(source, forms@, env, pending@, request, error); }
-                return BodyVerdict::Rejected(error);
-            }
-            Ok(step) => step,
-        };
-        let sibling = read_remaining_elements(forms, request);
-        proof {
-            popped_step(source, forms@, env, pending@, request, step, sibling);
-            step_advances(forms@, pending@, request, step, sibling);
-        }
-        if let Some(next) = sibling {
-            pending.push(next);
-        }
-        match step {
-            CheckStep::Done => {},
-            CheckStep::One(child) => pending.push(child),
-            CheckStep::Three(condition, yes, no) => {
-                pending.push(no);
-                pending.push(yes);
-                pending.push(condition);
-            }
-        }
-    }
-    proof { reveal(pending_check); }
-    BodyVerdict::Accepted
-}
-
 spec fn synthesized_type<'a>(source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize)
     -> Result<TypeShape, ExpressionCheckFailure<'a>>
 {
@@ -1150,97 +829,10 @@ fn synthesize_type<'a>(
     }
 }
 
-#[verifier::opaque]
-spec fn binding_types<'a>(
-    source: &'a str, forms: Seq<Form>, outer: Seq<TypeBinding>, rows: Seq<LocalBinding>,
-    at: nat, body_env: Seq<TypeBinding>,
-) -> Result<Seq<TypeBinding>, ExpressionCheckFailure<'a>>
-    decreases rows.len() - at,
-{
-    if at >= rows.len() {
-        Ok(body_env)
-    } else {
-        let row = rows[at as int];
-        match inferred_type(source, forms, outer, row.value) {
-            Err(error) => Err(error),
-            Ok(ty) => {
-                let local = (spelling(source, forms[row.name as int]), ty);
-                binding_types(source, forms, outer, rows, at + 1, Seq::empty().push(local) + body_env)
-            },
-        }
-    }
-}
-
-proof fn local_shadowing_has_an_example() {
-    let name = seq![b'x'];
-    let outside = scalar_type(BuiltinDataType::Bool);
-    let inside = scalar_type(BuiltinDataType::Integer(IntegerType::Nat));
-    let outer = seq![(name, outside)];
-    let body = seq![(name, inside)] + outer;
-    assert(outer[0] == (name, outside) && body[0] == (name, inside));
-    assert(parameter_type(outer, name, 0) == Some(outside));
-    assert(parameter_type(body, name, 0) == Some(inside));
-}
-
-fn read_binding_types<'a>(
-    source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &mut LocalScopes<'a>,
-    outer_scope: Scope, rows: &[LocalBinding], _owner: usize, _bound: usize,
-) -> (result: Result<Scope, ExpressionCheckFailure<'a>>)
-    requires usable_forms(source, forms@), valid_bindings(forms@, rows@, _owner, _bound),
-        old(locals).contains(outer_scope),
-    ensures match result {
-        Ok(scope) => final(locals).contains(scope)
-            && binding_types(source, forms@, lexical_view(parameters@, old(locals), outer_scope), rows@,
-                0, lexical_view(parameters@, old(locals), outer_scope)) == Ok(lexical_view(parameters@, final(locals), scope)),
-        Err(error) => binding_types(source, forms@, lexical_view(parameters@, old(locals), outer_scope), rows@,
-            0, lexical_view(parameters@, old(locals), outer_scope)) == Err(error),
-    },
-    forall|scope: Scope| #[trigger] old(locals).contains(scope) ==>
-        final(locals).contains(scope) && final(locals).local_types(scope) == old(locals).local_types(scope),
-{
-    // 各右辺は元の環境で検査する。本体用の環境にだけ、検査済みの束縛を追加する。
-    let ghost outer = lexical_view(parameters@, locals, outer_scope);
-    let mut body_scope = outer_scope;
-    let mut at = 0;
-    while at < rows.len()
-        invariant
-            usable_forms(source, forms@), valid_bindings(forms@, rows@, _owner, _bound),
-            locals.contains(outer_scope), locals.contains(body_scope),
-            outer == lexical_view(parameters@, locals, outer_scope),
-            outer == lexical_view(parameters@, old(locals), outer_scope),
-            forall|scope: Scope| #[trigger] old(locals).contains(scope) ==>
-                locals.contains(scope) && locals.local_types(scope) == old(locals).local_types(scope),
-            at <= rows@.len(),
-            binding_types(source, forms@, outer, rows@, 0, outer)
-                == binding_types(source, forms@, outer, rows@, at as nat, lexical_view(parameters@, locals, body_scope)),
-        decreases rows@.len() - at,
-    {
-        reveal(binding_types);
-        let row = rows[at];
-        assert(row.name < forms@.len() && row.value < forms@.len());
-        let ty = infer_type(source, forms, parameters, locals, outer_scope, row.value)?;
-        let local = LocalType { name: source_word(source, forms, row.name), ty };
-        let ghost before = lexical_view(parameters@, locals, body_scope);
-        let ghost saved = locals.local_types(outer_scope);
-        let ghost old_arena = *locals;
-        assert(locals.contains(outer_scope));
-        body_scope = locals.extend(body_scope, local);
-        assert forall|scope: Scope| #[trigger] old(locals).contains(scope) implies
-            locals.contains(scope) && locals.local_types(scope) == old(locals).local_types(scope) by {
-            assert(old_arena.contains(scope));
-        };
-        assert(locals.local_types(outer_scope) == saved);
-        assert(lexical_view(parameters@, locals, body_scope)
-            =~= Seq::empty().push((local.name.spec_bytes(), local.ty)) + before);
-        at += 1;
-    }
-    proof { reveal(binding_types); }
-    Ok(body_scope)
-}
 spec fn local_body_check<'a>(source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, expected: TypeShape)
     -> BodyVerdict<'a>
 {
-    scoped_check(source, forms, env, Request { at, expected, list: None })
+    typed_body(source, forms, env, at, expected)
 }
 
 fn check_body<'a>(
@@ -1250,7 +842,7 @@ fn check_body<'a>(
     ensures result == local_body_check(source, forms@, environment_view(signature.parameters@),
         body, type_shape(signature.result_type.ty)),
 {
-    check_scoped_expression(source, forms, &signature.parameters, body, shape_of_type(signature.result_type.ty))
+    check_typed_body(source, forms, &signature.parameters, body, shape_of_type(signature.result_type.ty))
 }
 
 spec fn body_witness<'a>(
@@ -1296,10 +888,9 @@ pub proof fn checked_body_signature_origin(source: &str, signature: DefnSignatur
 /// 真偽値、十進整数、局所名の参照、`as-type`、`if`、`list` を扱う。
 /// `if` は条件、左の分岐、右の分岐の順に検査する。
 /// `list` は期待型の要素型で各要素を左から検査する。空のリストにも同じ期待型を使う。
-/// 署名や周囲の式から期待型が決まる位置で `let` を扱う。束縛の右辺は外側の型環境で
+/// `let` の右辺と本体は、他の式に入れ子にしても同じ規則で検査する。右辺は外側の型環境で
 /// 左から検査し、すべて検査できた後に本体へ束縛を導入する。右辺ではリテラル、局所名の参照、
 /// `as-type`、`if`、空でない `list` の型を求める。各分岐や各要素の型を個別に求め、一致を確かめる。
-/// 束縛の右辺に現れる `let` の型検査は保留する。
 /// 本体が検査を通れば、元ソースの範囲を持つ署名を返す。
 ///
 /// # Errors

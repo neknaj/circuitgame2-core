@@ -154,6 +154,39 @@ fn checks_let_inside_conditionals_and_lists_without_leaking_its_scope() {
 }
 
 #[test]
+fn checks_nested_let_bindings_in_inferred_and_checked_right_hand_sides() {
+    for rhs in [
+        "(let ((n 1)) n)",
+        "(as-type Nat (let ((n 1)) n))",
+        "(if (let ((flag true)) flag) (let ((n 1)) n) 2)",
+    ] {
+        let source = format!("(defn f (as-type (Fn () Nat) (fn () (let ((value {rhs})) value))))");
+        assert!(check_defn_body(&source).is_ok(), "{source}");
+    }
+
+    let source = "; 位置\n(defn f (as-type (Fn () Bool) (fn ()
+        (let ((left (let ((local true)) local)) (right local)) right))))";
+    let outside = source.rfind("local").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Name(
+            outside..outside + "local".len(),
+        ))),
+    );
+}
+
+#[test]
+fn checks_deep_let_bindings_without_using_the_host_call_stack() {
+    let depth = 30_000;
+    let mut source = "(defn f (as-type (Fn () Nat) (fn () ".to_owned();
+    source.push_str(&"(let ((x ".repeat(depth));
+    source.push_str("0");
+    source.push_str(&")) x)".repeat(depth));
+    source.push_str(")))");
+    assert!(check_defn_body(&source).is_ok());
+}
+
+#[test]
 fn infers_deep_lists_without_using_the_host_call_stack() {
     let depth = 30_000;
     let mut source = "(defn f (as-type (Fn () Bool) (fn () (let ((xs ".to_owned();

@@ -160,14 +160,52 @@ spec fn binding_sequence(source: &str, forms: Seq<Form>, limit: usize, at: usize
     }
 }
 
+proof fn binding_sequence_adds_row(
+    source: &str, forms: Seq<Form>, limit: usize, at: usize, prior: Seq<LocalBinding>, row: LocalBinding,
+)
+    requires at < subtree_limit(forms, at) <= limit <= forms.len(),
+        binding_at(forms, at, limit) == Ok(row),
+        earlier_name(source, forms, prior, spelling(source, forms[row.name as int]), 0).is_none(),
+    ensures binding_sequence(source, forms, limit, at, prior)
+        == binding_sequence(source, forms, limit, subtree_limit(forms, at), prior.push(row)),
+{
+    reveal(binding_sequence);
+}
+
 pub(super) open spec fn valid_bindings(forms: Seq<Form>, bindings: Seq<LocalBinding>, first: usize, end: usize) -> bool {
-    forall|i: int| 0 <= i < bindings.len() ==> {
+    &&& forall|i: int| 0 <= i < bindings.len() ==> {
         let row = #[trigger] bindings[i];
         first < row.name < row.value < end <= forms.len()
             && plain_name(forms[row.name as int])
+            && row.value < subtree_limit(forms, row.value) <= end
     }
+    &&& forall|i: int, j: int| 0 <= i < j < bindings.len() ==>
+        subtree_limit(forms, (#[trigger] bindings[i]).value) <= (#[trigger] bindings[j]).name
 }
 
+proof fn append_binding(
+    forms: Seq<Form>, rows: Seq<LocalBinding>, first: usize, at: usize, end: usize, row: LocalBinding,
+)
+    requires valid_bindings(forms, rows, first, at),
+        first < at < row.name < row.value < end <= forms.len(),
+        subtree_limit(forms, row.value) == end, plain_name(forms[row.name as int]),
+    ensures valid_bindings(forms, rows.push(row), first, end),
+{
+    let next = rows.push(row);
+    assert forall|i: int| 0 <= i < next.len() implies {
+        let value = #[trigger] next[i];
+        first < value.name < value.value < end <= forms.len()
+            && plain_name(forms[value.name as int])
+            && value.value < subtree_limit(forms, value.value) <= end
+    } by {
+        if i < rows.len() { assert(next[i] == rows[i]); }
+    };
+    assert forall|i:int, j:int| 0 <= i < j < next.len() implies
+        subtree_limit(forms, (#[trigger] next[i]).value) <= (#[trigger] next[j]).name by {
+        assert(next[i] == rows[i]);
+        if j < rows.len() { assert(next[j] == rows[j]); }
+    };
+}
 fn read_binding_sequence(source: &str, forms: &[Form], first: usize)
     -> (result: Result<Vec<LocalBinding>, LetSyntaxError>)
     requires
@@ -187,7 +225,7 @@ fn read_binding_sequence(source: &str, forms: &[Form], first: usize)
         invariant
             usable_forms(source, forms@), forms@[first as int] is List,
             first < at <= limit <= forms@.len(), limit == subtree_limit(forms@, first),
-            valid_bindings(forms@, rows@, first, limit),
+            valid_bindings(forms@, rows@, first, at),
             binding_sequence(source, forms@, limit, (first + 1) as usize, Seq::empty())
                 == binding_sequence(source, forms@, limit, at, rows@),
         decreases limit - at,
@@ -208,7 +246,12 @@ fn read_binding_sequence(source: &str, forms: &[Form], first: usize)
             });
         }
         let end = subtree_end(forms, at);
-        proof { child_stays_inside(forms@, first, at); }
+        proof {
+            child_stays_inside(forms@, first, at);
+            assert(subtree_limit(forms@, row.value) == end);
+            append_binding(forms@, rows@, first, at, end, row);
+            binding_sequence_adds_row(source, forms@, limit, at, rows@, row);
+        }
         rows.push(row);
         at = end;
     }
@@ -266,11 +309,77 @@ pub(super) fn read_let_structure(source: &str, forms: &[Form], at: usize)
         assert forall|i: int| 0 <= i < rows@.len() implies {
             let row = #[trigger] rows@[i];
             at < row.name < row.value < body <= forms@.len() && plain_name(forms@[row.name as int])
+                && row.value < subtree_limit(forms@, row.value) <= body
         } by {
             assert(valid_bindings(forms@, rows@, bindings, subtree_limit(forms@, bindings)));
         };
     };
     Ok(LetHeader { bindings: rows, body })
+}
+
+pub(super) open spec fn parallel_let_example_forms() -> Seq<Form> {
+    seq![
+        Form::List { span: 0usize..23usize, end: 10usize },
+        Form::Atom { span: 1usize..4usize, kind: crate::syntax::AtomKind::Name },
+        Form::List { span: 5usize..20usize, end: 9usize },
+        Form::List { span: 6usize..14usize, end: 6usize },
+        Form::Atom { span: 7usize..8usize, kind: crate::syntax::AtomKind::Name },
+        Form::Atom { span: 9usize..13usize, kind: crate::syntax::AtomKind::Name },
+        Form::List { span: 14usize..19usize, end: 9usize },
+        Form::Atom { span: 15usize..16usize, kind: crate::syntax::AtomKind::Name },
+        Form::Atom { span: 17usize..18usize, kind: crate::syntax::AtomKind::Name },
+        Form::Atom { span: 21usize..22usize, kind: crate::syntax::AtomKind::Name },
+    ]
+}
+
+pub(super) proof fn parallel_let_example_layout()
+    ensures
+        let_structure("(let ((x true)(y x)) y)", parallel_let_example_forms(), 0) == Ok((
+            seq![LocalBinding { name: 4, value: 5 }, LocalBinding { name: 7, value: 8 }], 9,
+        )),
+        spelling("(let ((x true)(y x)) y)", parallel_let_example_forms()[1]) == "let".spec_bytes(),
+        spelling("(let ((x true)(y x)) y)", parallel_let_example_forms()[4]) == "x".spec_bytes(),
+        spelling("(let ((x true)(y x)) y)", parallel_let_example_forms()[5]) == "true".spec_bytes(),
+        spelling("(let ((x true)(y x)) y)", parallel_let_example_forms()[7]) == "y".spec_bytes(),
+        spelling("(let ((x true)(y x)) y)", parallel_let_example_forms()[8]) == "x".spec_bytes(),
+        spelling("(let ((x true)(y x)) y)", parallel_let_example_forms()[9]) == "y".spec_bytes(),
+{
+    let source = "(let ((x true)(y x)) y)";
+    let forms = parallel_let_example_forms();
+    reveal_strlit("(let ((x true)(y x)) y)");
+    reveal_strlit("let");
+    reveal_strlit("true");
+    reveal_strlit("x");
+    reveal_strlit("y");
+    vstd::string::is_ascii_spec_bytes(source);
+    vstd::string::is_ascii_spec_bytes("let");
+    vstd::string::is_ascii_spec_bytes("true");
+    vstd::string::is_ascii_spec_bytes("x");
+    vstd::string::is_ascii_spec_bytes("y");
+    vstd::utf8::encode_utf8_decode_utf8("x"@);
+    vstd::utf8::encode_utf8_decode_utf8("y"@);
+    assert(spelling(source, forms[1]) =~= "let".spec_bytes());
+    assert(spelling(source, forms[4]) =~= "x".spec_bytes());
+    assert(spelling(source, forms[5]) =~= "true".spec_bytes());
+    assert(spelling(source, forms[7]) =~= "y".spec_bytes());
+    assert(spelling(source, forms[8]) =~= "x".spec_bytes());
+    assert(spelling(source, forms[9]) =~= "y".spec_bytes());
+    assert("x".spec_bytes() != "y".spec_bytes());
+    assert(tagged_arguments(source, forms, 0, "let", true) == Some((2, 9)));
+    reveal(binding_sequence);
+    reveal_with_fuel(earlier_name, 2);
+    let first = LocalBinding { name: 4, value: 5 };
+    let second = LocalBinding { name: 7, value: 8 };
+    assert(binding_at(forms, 3, 9) == Ok(first));
+    assert(binding_at(forms, 6, 9) == Ok(second));
+    assert(earlier_name(source, forms, seq![first], "y".spec_bytes(), 0) == None);
+    binding_sequence_adds_row(source, forms, 9, 6, seq![first], second);
+    binding_sequence_adds_row(source, forms, 9, 3, Seq::empty(), first);
+    assert(Seq::<LocalBinding>::empty().push(first) =~= seq![first]);
+    assert(seq![first].push(second) =~= seq![first, second]);
+    assert(binding_sequence(source, forms, 9, 9, seq![first, second]) == Ok(seq![first, second]));
+    assert(binding_sequence(source, forms, 9, 6, seq![first]) == Ok(seq![first, second]));
+    assert(binding_sequence(source, forms, 9, 3, Seq::empty()) == Ok(seq![first, second]));
 }
 
 }
