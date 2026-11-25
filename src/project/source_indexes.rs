@@ -10,10 +10,13 @@ use crate::ncg2m::expression_types::{
     DefnBodyError, defn_body_matches, indexed_meta_body_agrees_with_standalone, meta_defn_check_matches, meta_defn_check_origin,
     same_defn_body_outcome,
 };
-use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms};
+use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call};
+use crate::ncg2m::expression_types::named_call::CallForm;
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use crate::ncg2m::file::{meta_ast_matches, meta_binding_span_evidence, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
+use crate::syntax::form_span;
+#[cfg(verus_only)]
+use crate::ncg2m::file::{meta_ast_matches, meta_call_matches, meta_call_form_origin, meta_binding_span_evidence, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
 use super::circuits::{index_project_circuit, read_source_span};
 #[cfg(verus_only)]
@@ -164,6 +167,77 @@ impl<'a> ParsedProjectSources<'a> {
             }
             None => Some(DefnScope { namespace: None, block: None }),
         }
+    }
+
+    pub(super) closed spec fn defn_call_form_matches(
+        &self, file: usize, item: usize, at: usize, call: Option<CallForm>,
+    ) -> bool {
+        match self.indexed_defn(file, item) {
+            None => call.is_none(),
+            Some(_) => {
+                let entries = self.indexes_model()[file as int]->Functional_0@;
+                let text = self.sources_model()[file as int].text_model();
+                self.functional_forms_model(file) matches Some(forms)
+                    && meta_call_matches(text, forms, entries, item, at, call)
+            },
+        }
+    }
+
+    pub(super) proof fn defn_call_file_exists(
+        &self, file: usize, item: usize, at: usize, call: CallForm,
+    )
+        requires self.has_source_indexes(), self.defn_call_form_matches(file, item, at, Some(call)),
+        ensures file < self.sources_model().len(),
+    {}
+
+    /// 指定の NCG2M ファイルについて、解析時に保持した S 式構文木を表す。
+    pub closed spec fn functional_forms_model(&self, file: usize) -> Option<Seq<Form>> {
+        if file < self.meta_asts@.len() {
+            match self.meta_asts@[file as int] {
+                Some(forms) => Some(forms@),
+                None => None,
+            }
+        } else { None }
+    }
+
+    pub(super) proof fn defn_call_form_origin(
+        &self, file: usize, item: usize, at: usize, call: CallForm,
+    )
+        requires self.has_source_indexes(), self.defn_call_form_matches(file, item, at, Some(call)),
+        ensures
+            file < self.sources_model().len(),
+            self.indexed_defn(file, item).is_some(),
+            self.functional_forms_model(file) matches Some(forms) && {
+                &&& at + 1 < forms.len()
+                &&& forms[at as int] is List && forms[at + 1] is Atom
+                &&& call.span == form_span(forms[at as int]) && call.head_span == form_span(forms[at + 1])
+            },
+    {
+        let forms = self.meta_asts@[file as int]->Some_0@;
+        let entries = self.indexes_model()[file as int]->Functional_0@;
+        let source = self.sources_model()[file as int];
+        meta_call_form_origin(source.text_model(), forms, entries, item, at, call);
+    }
+
+    /// 保持している補助関数本体の構文木から、指定した添字にある呼び出し形を読む。
+    pub(super) fn defn_call_form(&self, file: usize, item: usize, at: usize)
+        -> (call: Option<CallForm<'a>>)
+        ensures self.defn_call_form_matches(file, item, at, call),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() { return None; }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() || !matches!(items[item].kind, MetaItemKind::Defn(_)) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            use_type_invariant(self);
+            assert(retained_ast_matches(*source, *index, self.meta_asts@[file as int]));
+            project_source_index_evidence(*source, *index);
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        indexed_meta_call(source.text(), forms, items, item, at)
     }
 
     /// 言語別索引の項目が補助関数宣言なら、本体の型検査に使う署名を返す。

@@ -16,6 +16,9 @@ use super::defn::{DefnHeader, DefnHeaderError, is_name, read_defn_at, span_of};
 #[cfg(verus_only)]
 use super::defn::{HeaderContents, defn_header_matches, declaration_model, form_span_readable, header_contents, indexed_body_site, plain_name, readable_span, signature_spans_valid, standalone_header_is_only_root, tagged_arguments, usable_forms};
 use super::forms::{is_spelling, source_word, subtree_end};
+use super::expression_types::named_call::{CallForm, is_expression_slot, read_call_form};
+#[cfg(verus_only)]
+use super::expression_types::named_call::{call_form_matches, call_form_origin, expression_slot};
 #[cfg(verus_only)]
 use super::forms::{spelling, subtree_limit};
 use vstd::prelude::*;
@@ -628,6 +631,49 @@ pub(super) fn indexed_meta_body(
         assert(found == witness.1);
     }
     found
+}
+
+/// 呼び出し形が、補助関数の本体からたどれる式の位置と一致することを表す。
+pub(crate) closed spec fn meta_call_matches(
+    source: &str, forms: Seq<Form>, entries: Seq<MetaItem>, item: usize, at: usize, call: Option<CallForm>,
+) -> bool {
+    &&& item < entries.len()
+    &&& entries[item as int].kind is Defn
+    &&& {
+        let header = entries[item as int].kind->Defn_0;
+        exists|root: usize, body: usize| #[trigger] indexed_body_site(source, forms, root, body, header)
+            && if expression_slot(source, forms, body, at) {
+                call_form_matches(source, forms, at, call)
+            } else { call.is_none() }
+    }
+}
+
+pub(crate) proof fn meta_call_form_origin(
+    source: &str, forms: Seq<Form>, entries: Seq<MetaItem>, item: usize, at: usize, call: CallForm,
+)
+    requires meta_call_matches(source, forms, entries, item, at, Some(call)),
+    ensures
+        at + 1 < forms.len(),
+        forms[at as int] is List, forms[at + 1] is Atom,
+        call.span == form_span(forms[at as int]), call.head_span == form_span(forms[at + 1]),
+{
+    let header = entries[item as int].kind->Defn_0;
+    let (root, body) = choose|root: usize, body: usize| #[trigger] indexed_body_site(source, forms, root, body, header)
+        && expression_slot(source, forms, body, at) && call_form_matches(source, forms, at, Some(call));
+    call_form_origin(source, forms, at, call);
+}
+
+/// 解析済みの本体から式の位置をたどり、指定した添字にある呼び出し形を読む。
+pub(crate) fn indexed_meta_call<'a>(
+    source: &'a str, forms: &[Form], entries: &[MetaItem], item: usize, at: usize,
+) -> (call: Option<CallForm<'a>>)
+    requires meta_ast_matches(source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defn,
+    ensures meta_call_matches(source, forms@, entries@, item, at, call),
+{
+    let body = indexed_meta_body(source, forms, entries, item);
+    if !is_expression_slot(source, forms, body, at) { return None; }
+    proof { super::expression_types::named_call::expression_slot_bounds(source, forms@, body, at); }
+    read_call_form(source, forms, at)
 }
 
 spec fn item_model(source: &str, forms: Seq<Form>, root: usize, in_namespace: bool)

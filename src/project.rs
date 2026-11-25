@@ -91,9 +91,9 @@ pub use exports::{
 };
 pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
-pub use use_aliases::{DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
+pub use use_aliases::{DefnCallError, DefnCallSite, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 #[cfg(verus_only)]
-pub use use_aliases::{defn_name_resolution, resolved_defn_name_origin, stage_name_has_no_binding, mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixed_alias_dispositions_agree, mixed_use_aliases_acceptable, mixed_use_aliases_match};
+pub use use_aliases::{defn_name_resolution, prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, resolved_defn_name_origin, stage_name_has_no_binding, mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixed_alias_dispositions_agree, mixed_use_aliases_acceptable, mixed_use_aliases_match};
 pub use use_aliases::{ModuleDriverError, ModuleDrivers};
 pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,

@@ -57,6 +57,10 @@ mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod reference_cursor;
+mod call_site;
+pub use call_site::{DefnCallError, DefnCallSite, PreparedDefnCall};
+#[cfg(verus_only)]
+pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site};
 mod defn_name;
 pub use defn_name::{DefnNameError, ResolvedDefnName};
 #[cfg(verus_only)]
