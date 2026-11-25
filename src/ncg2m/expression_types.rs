@@ -55,7 +55,9 @@ use typing::typed_body;
 #[cfg(verus_only)]
 pub use typing::scalar::{local_scalar_fragment, local_scalar_site_is_typed};
 #[cfg(verus_only)]
-pub(super) use typing::scalar::{scalar_atom_at, scalar_atom_type_origin, scalar_conditional_child_types};
+pub(crate) use typing::scalar::scalar_atom_at;
+#[cfg(verus_only)]
+pub(super) use typing::scalar::{scalar_atom_type_origin, scalar_conditional_child_types};
 
 verus! {
 

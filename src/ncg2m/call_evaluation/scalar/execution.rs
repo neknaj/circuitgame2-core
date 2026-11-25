@@ -11,7 +11,7 @@ use super::{
 use super::expression::ScalarCursor;
 use crate::ncg2m::defn::span_of;
 #[cfg(verus_only)]
-use super::{binding_at_rank_matches, prepared_arguments_match, scalar_fits};
+use super::{binding_at_rank_matches, parameters_match, prepared_arguments_match, scalar_fits};
 #[cfg(verus_only)]
 use crate::syntax::form_span;
 #[cfg(verus_only)]
@@ -381,15 +381,19 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         &&& (step matches Ok(ScalarExecutionSlice::Suspended(after)) ==>
             after.plan == self.plan && after.result_type@ == self.result_type@)
         &&& match self.active {
-            Active::Expression(expr) => match step {
-                Ok(ScalarExecutionSlice::Suspended(after)) => {
-                    &&& after.rank == rank && after.waiting@ == stack
-                    &&& exists|inner: ScalarExpressionStep<'p, 'a>|
-                        #[trigger] expr.expression_step_matches(Ok(inner))
-                            && next_expression_at(after.active, expr.result_type_model(), inner)
-                },
-                Err(ScalarExecutionError::Literal(error)) => expr.expression_step_matches(Err(error)),
-                _ => false,
+            Active::Expression(expr) => {
+                let frame = expr.frame_model();
+                &&& parameters_match(frame.body_model().signature, frame.parameter_values_model())
+                &&& match step {
+                    Ok(ScalarExecutionSlice::Suspended(after)) => {
+                        &&& after.rank == rank && after.waiting@ == stack
+                        &&& exists|inner: ScalarExpressionStep<'p, 'a>|
+                            #[trigger] expr.expression_step_matches(Ok(inner))
+                                && next_expression_at(after.active, expr.result_type_model(), inner)
+                    },
+                    Err(ScalarExecutionError::Literal(error)) => expr.expression_step_matches(Err(error)),
+                    _ => false,
+                }
             },
             Active::Lookup { parent, site } => {
                 let row = self.plan.calls_model_at_rank(rank);

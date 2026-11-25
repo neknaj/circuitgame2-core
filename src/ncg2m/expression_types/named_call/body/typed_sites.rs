@@ -3,7 +3,9 @@
 use super::*;
 use crate::ncg2m::call_evaluation::DefnEvaluationBody;
 use super::super::fragment::declared_call_syntax_uses_signature;
-use super::super::super::typing::scalar::{accepted_call_has_entry, checked_if_keeps_child_types};
+use super::super::super::typing::scalar::{
+    accepted_call_has_entry, checked_if_keeps_child_types, checked_scalar_atom_has_local_type,
+};
 
 verus! {
 
@@ -90,6 +92,36 @@ pub(crate) proof fn defn_checked_if_child_sites<'p, 'a>(
     assert(at < condition < yes < no < subtree_limit(forms, at));
     checked_if_keeps_child_types(calls, body.source.text_model(), forms, body.signature.parameters@,
         at, expected, condition, yes, no);
+}
+
+pub(crate) proof fn checked_body_scalar_position<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>,
+    body: DefnEvaluationBody<'p, 'a>, at: usize, expected: DataType,
+)
+    requires
+        defn_checked_expression_site(aliases, caller, row, body, at, expected),
+        scalar_evaluator_syntax(body.source.text_model(), body.forms@, body.at),
+        scalar_call_syntax_at(body.source.text_model(), body.forms@, at),
+    ensures expression_slot(body.source.text_model(), body.forms@, body.at, at),
+{
+    let source = body.source.text_model();
+    let forms = body.forms@;
+    declared_call_syntax_uses_signature(source, forms, at);
+    list_in_supported_body_is_expression_slot(source, forms, body.at, at);
+}
+
+pub(crate) proof fn checked_atom_uses_only_parameters<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>,
+    body: DefnEvaluationBody<'p, 'a>, at: usize, expected: DataType,
+)
+    requires
+        defn_checked_expression_site(aliases, caller, row, body, at, expected), scalar_atom_at(body.forms@, at),
+        expected.list_depth == 0,
+        expected.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)),
+    ensures local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, at, expected),
+{
+    checked_scalar_atom_has_local_type(recorded_call_typing(aliases, caller, row).4,
+        body.source.text_model(), body.forms@, body.signature.parameters@, at, expected);
 }
 
 // 型検査で使った署名から、同じ宣言を指す元の式位置の辺を取り出す。

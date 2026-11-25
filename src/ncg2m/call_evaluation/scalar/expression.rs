@@ -7,7 +7,7 @@ use super::{
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use super::{BuiltinDataType, DataTypeAtom, scalar_condition_matches, scalar_fits};
+use super::{BuiltinDataType, DataTypeAtom, parameters_match, scalar_condition_matches, scalar_fits};
 #[cfg(verus_only)]
 use super::atom::{scalar_atom_matches, scalar_atoms_observe_same};
 #[cfg(verus_only)]
@@ -228,6 +228,7 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
     /// 評価した整数リテラルが期待型の表現範囲を超えたときなどに返す。
     pub fn advance(self) -> (step: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>)
         ensures self.expression_step_matches(step),
+            parameters_match(self.frame_model().body_model().signature, self.frame_model().parameter_values_model()),
             match step {
                 Ok(ScalarExpressionStep::Continue(after)) => {
                     &&& after.frame_model() == self.frame_model()
@@ -246,6 +247,7 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
         proof {
             use_type_invariant(&self);
             reveal(ScalarExpression::expression_step_matches);
+            use_type_invariant(&self.frame);
         }
         let ghost previous = self;
         let (frame, ScalarCursor { next, mut branches, result_type, origin }) = self.into_parts();

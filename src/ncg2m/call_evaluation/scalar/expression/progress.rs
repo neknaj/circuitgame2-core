@@ -1,7 +1,6 @@
 //! 型検査を通ったアトムと条件式の評価を、元の部分式と仮引数環境に結び付ける。
 
 use super::*;
-use super::super::parameters_match;
 use super::super::atom::{a_list_has_no_scalar_atom, typed_atom_yields_value};
 use super::super::condition::{conditional_children_follow_parent, conditional_match_has_positions};
 use crate::ncg2m::expression_types::{
@@ -180,6 +179,33 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
         match atom {
             Ok(Some(value)) => self.received_value_resumes_branch(value, step),
             _ => {},
+        }
+    }
+
+    pub(in crate::ncg2m::call_evaluation::scalar) proof fn checked_atom_does_not_request_form(
+        &self, step: ScalarExpressionStep<'p, 'a>,
+    )
+        requires
+            self.expression_step_matches(Ok(step)),
+            ({
+                let frame = self.frame_model();
+                let body = frame.body_model();
+                let site = self.expression_model();
+                &&& scalar_atom_at(body.forms@, site.at)
+                &&& local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@,
+                    site.at, site.expected)
+                &&& parameters_match(body.signature, frame.parameter_values_model())
+            }),
+        ensures !(step is NeedsForm),
+    {
+        if step is NeedsForm {
+            reveal(ScalarExpression::expression_step_matches);
+            let frame = self.frame_model();
+            let site = self.expression_model();
+            let atom = choose|atom: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>|
+                #[trigger] scalar_atom_matches(&frame, site.at, site.expected, atom) && self.atom_transition_matches(atom, Ok(step));
+            typed_atom_yields_value(&frame, site.at, site.expected, atom);
+            self.received_value_resumes_branch(atom->Ok_0->Some_0, step);
         }
     }
 

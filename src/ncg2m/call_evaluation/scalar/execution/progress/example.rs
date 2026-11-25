@@ -50,7 +50,7 @@ proof fn one_int_argument_fits_declared_signature<'plan, 'p, 'a>(
 #[allow(dead_code)]
 fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, plan: &'plan DefnCallPlan<'p, 'a>,
-    rank: usize, Ghost(body): Ghost<DefnEvaluationBody<'p, 'a>>,
+    rank: usize, fuel: NonZeroUsize, Ghost(body): Ghost<DefnEvaluationBody<'p, 'a>>,
 ) -> (result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>)
     requires
         defn_call_plan_matches(aliases, plan), plan.body_matches_at_rank(rank, body),
@@ -58,9 +58,9 @@ fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
         body.signature.result_type.ty == int_type(),
         plan.scalar_fragment_is_closed(rank),
         scalar_call_syntax_at(body.source.text_model(), body.forms@, body.at),
-    ensures result matches Ok(ScalarExecutionSlice::Suspended(after))
-        && (after.searches_checked_scalar_call(aliases) || after.evaluates_checked_expression(aliases))
-        && after.preserves_checked_types(aliases) && after.evaluates_supported_subexpression(),
+    ensures
+        !(result matches Err(ScalarExecutionError::Deferred { .. })),
+        result matches Ok(ScalarExecutionSlice::Suspended(after)) ==> after.preserves_supported_fragment(aliases),
 {
     let actual = plan.body_at_rank(rank);
     assert(actual.is_some());
@@ -85,16 +85,13 @@ fn integer_example_takes_the_root_call_path<'plan, 'p, 'a>(
         plan.bodies_at_rank_agree(rank, body, frame.body_model());
         signature_result_types_agree(body.signature, frame.body_model().signature);
         beginning.supported_root_call_slice(aliases, rank, frame, first);
-        beginning.starting_execution_preserves_checked_types(aliases, rank, supplied);
-        beginning.suspended_slice_preserves_checked_types(aliases, 1, first->Ok_0->Suspended_0);
+        beginning.starting_execution_preserves_supported_fragment(aliases, rank, supplied);
+        beginning.supported_slice_does_not_defer(aliases, 1, first);
     }
     let Ok(ScalarExecutionSlice::Suspended(lookup)) = first else { unreachable!() };
     let ghost search = lookup;
-    let result = lookup.run_slice(one);
-    proof {
-        search.supported_scalar_lookup_slice(aliases, result);
-        search.suspended_slice_preserves_checked_types(aliases, 1, result->Ok_0->Suspended_0);
-    }
+    let result = lookup.run_slice(fuel);
+    proof { search.supported_slice_does_not_defer(aliases, fuel.get() as nat, result); }
     result
 }
 }

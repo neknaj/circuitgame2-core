@@ -105,6 +105,7 @@ pub proof fn scalar_syntax_form_kind(source: &str, forms: Seq<Form>, at: usize)
 pub(super) proof fn declared_call_syntax_uses_signature(source: &str, forms: Seq<Form>, at: usize)
     requires scalar_call_syntax_at(source, forms, at),
     ensures
+        named_call_head(source, forms, at),
         at + 1 < subtree_limit(forms, at) <= forms.len(),
         forms[at as int] is List, forms[at + 1] is Atom,
         shape(source, forms, at) == Err(ExpressionCheckFailure::Deferred(
