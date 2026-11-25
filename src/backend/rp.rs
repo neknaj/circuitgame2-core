@@ -1,5 +1,11 @@
 //! Pico と Pico 2 の外部 GPIO とハードウェア周辺機能の割り当てを検査する。
 
+mod image;
+
+pub use image::{GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin};
+#[cfg(verus_only)]
+pub use image::{gpio_assignment, gpio_binding_indices_match, gpio_image_ports_match, gpio_request};
+
 use vstd::prelude::*;
 
 verus! {

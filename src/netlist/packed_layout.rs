@@ -87,6 +87,7 @@ impl PackedNorLayout32 {
         ensures
             self.input_model() == netlist.input_count,
             self.source_model() == netlist.input_count + netlist.gates@.len() + 2,
+            self.gates_model().len() == netlist.gates@.len(),
             self.outputs_model().len() == netlist.outputs@.len(),
             forall|i: int| 0 <= i < self.outputs_model().len() ==> {
                 let slot = #[trigger] self.outputs_model()[i];
