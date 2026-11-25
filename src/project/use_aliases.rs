@@ -66,7 +66,8 @@ pub(crate) use call_site::call_arity_matches;
 pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin};
 mod defn_name;
 mod mixed_function;
-pub use mixed_function::{MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution};
+pub use mixed_function::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
+    MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 mod defn_call_graph;
 pub use defn_name::{DefnNameError, ResolvedDefnName};
 pub use defn_call_graph::{DefnCallGraphError, DefnCallPlan};
@@ -125,6 +126,8 @@ pub use single_bit_func::{CheckedSingleBitFunc, SingleBitDefinition, SingleBitFu
 pub use function_wiring::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
+#[cfg(verus_only)]
+pub use function_wiring::indexed_signal_driver_matches;
 #[cfg(verus_only)]
 pub use port_types::port_types_equal;
 pub use port_types::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};

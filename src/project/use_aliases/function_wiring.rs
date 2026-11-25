@@ -232,7 +232,7 @@ spec fn signal_error_at(
                 && unavailable_signal(source, inputs, definitions, definition, name, reason)
 }
 
-spec fn signal_sequence_result(
+pub(super) closed spec fn signal_sequence_result(
     source: &ProjectSource, parsed: &NamedBuildCircuit, entry: int, inputs: Seq<NameSite>,
     definitions: Seq<DefinitionDriver>, result: Result<Vec<BoundFuncSignal>, FuncWiringError>,
 ) -> bool {
@@ -247,7 +247,7 @@ spec fn signal_sequence_result(
     }
 }
 
-fn bind_signals<'p, 'a>(
+pub(super) fn bind_signals<'p, 'a>(
     source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, entry: usize,
     inputs: &[NameSite], definitions: &[DefinitionDriver], index: Option<&LocalSignalIndex>,
 ) -> (result: Result<Vec<BoundFuncSignal<'p, 'a>>, FuncWiringError<'p, 'a>>)
@@ -257,7 +257,9 @@ fn bind_signals<'p, 'a>(
         optional_local_index(index, inputs@, definitions@, definitions@.len() as int),
         forall|i: int| 0 <= i < definitions@.len()
             ==> name_in_source(source.text, (#[trigger] definitions@[i]).name),
-    ensures signal_sequence_result(source, parsed, entry as int, inputs@, definitions@, result),
+    ensures
+        signal_sequence_result(source, parsed, entry as int, inputs@, definitions@, result),
+        result matches Err(error) ==> error is Signal,
 {
     let ghost model = parsed.build_model();
     proof {
@@ -464,20 +466,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let parsed = &project.circuits_model()[file as int];
         let source = &project.sources_model()[file as int];
         self.targets.parsed_project_model();
-        parsed_index_evidence(*source, *parsed);
-        let model = parsed.build_model();
-        build_definition_scope_evidence(source.text, &model, entry as int, definition as int);
-        let drivers = wiring.drivers;
         let inputs = self.checked_wiring_input_names(file, entry, limit, wiring);
-        reveal(bound_prefix);
-        let first = parsed.entry_ranges@[entry as int].signals.start;
-        let bound = wiring.signals@[position - first];
-        let name = choose|name: NameSite|
-            #[trigger] signal_site(source, parsed, entry as int, position as int, bound.definition, name)
-                && is_location(source, name, bound.site)
-                && local_binding(inputs, drivers.definitions@, bound.definition, name, bound.driver);
-        build_signal_owner_unique(source.text, &model, entry as int, definition as int,
-            bound.definition as int, position as int);
+        indexed_signal_driver(source, parsed, entry, wiring, inputs, definition, position);
     }
 
     /// 右辺の名前と駆動元が、関数の元の文書と結線表に含まれることを示す。
@@ -664,6 +654,55 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Ok(signals) => Ok(FuncWiringResult::Checked(FuncWiring { drivers, signals })),
             Err(error) => Err(error),
         }
+    }
+}
+
+pub(super) proof fn indexed_signal_driver(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, wiring: FuncWiring,
+    inputs: Seq<NameSite>, definition: usize, position: usize,
+)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len() && entry < parsed.entry_ranges@.len(),
+        inputs.len() == wiring.drivers.signature.inputs@.len(),
+        signal_sequence_result(source, parsed, entry as int, inputs, wiring.drivers.definitions@, Ok(wiring.signals)),
+        ({
+            let frame = parsed.entry_ranges@[entry as int].definitions;
+            &&& frame.start <= definition < frame.end <= parsed.definitions@.len()
+            &&& parsed.definitions@[definition as int].signals.start <= position
+                < parsed.definitions@[definition as int].signals.end
+        }),
+    ensures (indexed_signal_driver_matches(source, parsed, entry, wiring, definition, position)),
+{
+    parsed_index_evidence(*source, *parsed);
+    let model = parsed.build_model();
+    build_definition_scope_evidence(source.text, &model, entry as int, definition as int);
+    reveal(bound_prefix);
+    let first = parsed.entry_ranges@[entry as int].signals.start;
+    let bound = wiring.signals@[position - first];
+    let name = choose|name: NameSite|
+        #[trigger] signal_site(source, parsed, entry as int, position as int, bound.definition, name)
+        && is_location(source, name, bound.site)
+        && local_binding(inputs, wiring.drivers.definitions@, bound.definition, name, bound.driver);
+    build_signal_owner_unique(source.text, &model, entry as int, definition as int,
+        bound.definition as int, position as int);
+}
+
+/// 右辺の信号とその駆動元が厳格索引の指定位置に対応することを表す。
+pub open spec fn indexed_signal_driver_matches(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, wiring: FuncWiring,
+    definition: usize, position: usize,
+) -> bool {
+    let first = parsed.entry_ranges@[entry as int].signals.start;
+    let bound = wiring.signals@[position - first];
+    &&& first <= position && position - first < wiring.signals@.len()
+    &&& bound.definition == definition
+    &&& *bound.site.source == *source && location_in_source(bound.site)
+    &&& bound.site.span == form_span(parsed.syntax.forms@[parsed.signals@[position as int] as int])
+    &&& match bound.driver {
+        OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
+        OutputDriver::Definition(i) => i < wiring.drivers.definitions@.len()
+            && wiring.drivers.definitions@[i as int].definition < definition,
     }
 }
 

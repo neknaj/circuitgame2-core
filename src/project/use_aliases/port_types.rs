@@ -913,7 +913,7 @@ pub(super) open spec fn typed_name_sites(forms: Seq<Form>, typed: Seq<TypedPort>
     }
 }
 
-spec fn shared_types_before(
+pub(super) closed spec fn shared_types_before(
     sources: Seq<OutputSource>, inputs: Seq<TypedPort>, outputs: Seq<TypedPort>, connections: Seq<Option<usize>>,
 ) -> bool {
     &&& connections.len() <= sources.len() && sources.len() == outputs.len()
@@ -928,7 +928,15 @@ spec fn shared_types_before(
     }
 }
 
-spec fn first_shared_type_mismatch(
+pub(super) proof fn shared_input_bounds(
+    sources: Seq<OutputSource>, inputs: Seq<TypedPort>, outputs: Seq<TypedPort>, connections: Seq<Option<usize>>,
+)
+    requires shared_types_before(sources, inputs, outputs, connections),
+    ensures forall|i: int| 0 <= i < connections.len()
+        ==> ((#[trigger] connections[i]) matches Some(input) ==> input < inputs.len()),
+{}
+
+pub(super) closed spec fn first_shared_type_mismatch(
     sources: Seq<OutputSource>, inputs: Seq<TypedPort>, outputs: Seq<TypedPort>, error: TypedSignatureError,
 ) -> bool {
     error matches TypedSignatureError::SharedTypeMismatch { input, output }
@@ -980,7 +988,7 @@ fn copy_typed_port<'p, 'a>(port: &TypedPort<'p, 'a>) -> (copy: TypedPort<'p, 'a>
     }
 }
 
-fn check_shared_types<'p, 'a>(
+pub(super) fn check_shared_types<'p, 'a>(
     sources: &[OutputSource], inputs: &[TypedPort<'p, 'a>], outputs: &[TypedPort<'p, 'a>],
 ) -> (result: Result<Vec<Option<usize>>, TypedSignatureError<'p, 'a>>)
     requires

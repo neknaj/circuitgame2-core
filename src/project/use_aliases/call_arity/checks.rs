@@ -3,19 +3,19 @@
 use super::{DefinitionReferenceError, FuncCallArity, FuncCallTarget, UseAliases};
 #[cfg(verus_only)]
 use super::super::definitions::definition_count;
-use crate::project::{FuncWiringError, FuncWiringResult, LocatedName};
+use crate::project::{FuncWiringError, FuncWiringResult, LocatedName, ProjectSource};
 #[cfg(verus_only)]
-use crate::project::{DefinitionPosition, ProjectSource};
+use crate::project::DefinitionPosition;
 #[cfg(verus_only)]
 use crate::project::circuits::{is_form_location, parsed_circuit_matches, parsed_index_evidence};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
 use crate::project::location_in_source;
-use crate::syntax::circuit::{definition_root_is_call, definition_target_atoms};
+use crate::syntax::circuit::{BuildDefinition, NamedBuildCircuit, definition_root_is_call, definition_target_atoms};
 #[cfg(verus_only)]
 use crate::syntax::{
-    circuit::{BuildDefinition, NamedBuildCircuit, build_definition_scope_evidence,
-        build_entry_ranges_evidence, definition_target_range, ordinary_call_at},
+    circuit::{build_definition_scope_evidence, build_entry_ranges_evidence, definition_call_index,
+        definition_target_range, definition_targets_match, ordinary_call_at},
 };
 use vstd::prelude::*;
 
@@ -84,21 +84,21 @@ impl<'p, 'a> FuncCallArity<'p, 'a> {
     }
 }
 
-spec fn at_definition(parsed: &NamedBuildCircuit, entry: int, definition: int) -> BuildDefinition {
+pub(in crate::project::use_aliases) open spec fn at_definition(parsed: &NamedBuildCircuit, entry: int, definition: int) -> BuildDefinition {
     parsed.definitions@[parsed.entry_ranges@[entry].definitions.start + definition]
 }
 
-spec fn target_count(parsed: &NamedBuildCircuit, row: BuildDefinition) -> int {
+pub(in crate::project::use_aliases) open spec fn target_count(parsed: &NamedBuildCircuit, row: BuildDefinition) -> int {
     let (start, end) = definition_target_range(parsed.syntax.forms@, row);
     end - start
 }
 
-spec fn root_count_valid(source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition) -> bool {
+pub(in crate::project::use_aliases) open spec fn root_count_valid(source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition) -> bool {
     ordinary_call_at(source.text, parsed.syntax.forms@, row.expression.start as int, row.expression.end as int)
         || target_count(parsed, row) == 1
 }
 
-spec fn bad_root_count(
+pub(in crate::project::use_aliases) open spec fn bad_root_count(
     source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, error: FuncArityError,
 ) -> bool {
     &&& !root_count_valid(source, parsed, row)
@@ -108,15 +108,15 @@ spec fn bad_root_count(
     &&& is_form_location(source, parsed.syntax.forms@[row.form + 2], left)
 }
 
-spec fn expected_outputs(parsed: &NamedBuildCircuit, row: BuildDefinition, call: FuncCallArity) -> int {
+pub(in crate::project::use_aliases) open spec fn expected_outputs(parsed: &NamedBuildCircuit, row: BuildDefinition, call: FuncCallArity) -> int {
     if call.call.form == row.expression.start { target_count(parsed, row) } else { 1 }
 }
 
-spec fn call_location(call: FuncCallArity, loc: LocatedName) -> bool {
+pub(in crate::project::use_aliases) open spec fn call_location(call: FuncCallArity, loc: LocatedName) -> bool {
     *loc.source == *call.source && loc.span == call.call.span && location_in_source(loc)
 }
 
-spec fn call_count_error(
+pub(in crate::project::use_aliases) open spec fn call_count_error(
     parsed: &NamedBuildCircuit, row: BuildDefinition, call: FuncCallArity, error: FuncArityError,
 ) -> bool {
     let ports = call.target.port_counts();
@@ -132,6 +132,61 @@ spec fn call_count_error(
                 } else { left is None },
         _ => false,
     }
+}
+
+// 右辺全体が通常呼び出しでない場合の出力数を先に検査する。
+pub(in crate::project::use_aliases) fn check_indexed_root_count<'p, 'a>(
+    source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, row: &BuildDefinition,
+) -> (result: Result<usize, FuncArityError<'p, 'a>>)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        definition_call_index(source.text, parsed.syntax.forms@, *row, parsed.references@),
+        definition_targets_match(parsed.syntax.forms@, *row),
+        row.expression.start < parsed.syntax.forms@.len(),
+    ensures match result {
+        Ok(count) => root_count_valid(source, parsed, *row) && count == target_count(parsed, *row)
+            && row.form + 2 < parsed.syntax.forms@.len(),
+        Err(error) => bad_root_count(source, parsed, *row, error),
+    },
+{
+    let forms = parsed.syntax.forms.as_slice();
+    let targets = definition_target_atoms(forms, row);
+    let count = targets.end - targets.start;
+    if !definition_root_is_call(source.text, forms, row, parsed.references.as_slice()) && count != 1 {
+        proof { parsed_index_evidence(*source, *parsed); }
+        let expression = form_location(source, forms, row.expression.start);
+        let left = form_location(source, forms, row.form + 2);
+        return Err(FuncArityError::OutputCount { expression, left: Some(left), callee: None, expected: count, actual: 1 });
+    }
+    Ok(count)
+}
+
+// 同じ通常呼び出しの引数数を、出力数より先に検査する。
+pub(in crate::project::use_aliases) fn check_indexed_call_counts<'p, 'a>(
+    source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, row: &BuildDefinition,
+    count: usize, call: FuncCallArity<'p, 'a>,
+) -> (result: Result<(), FuncArityError<'p, 'a>>)
+    requires
+        parsed_circuit_matches(*source, *parsed), *call.source == *source,
+        location_in_source(LocatedName { source: call.source, span: call.call.span }),
+        row.form + 2 < parsed.syntax.forms@.len(), count == target_count(parsed, *row),
+    ensures match result {
+        Ok(()) => call.call.arguments == call.target.port_counts().inputs
+            && call.target.port_counts().outputs == expected_outputs(parsed, *row, call),
+        Err(error) => call_count_error(parsed, *row, call, error),
+    },
+{
+    let call = call.check_input_count()?;
+    let ports = call.target.ports();
+    let root = call.call.form == row.expression.start;
+    let expected = if root { count } else { 1 };
+    if ports.outputs != expected {
+        proof { parsed_index_evidence(*source, *parsed); }
+        let left = if root { Some(form_location(source, parsed.syntax.forms.as_slice(), row.form + 2)) } else { None };
+        let expression = LocatedName { source: call.source, span: call.call.span };
+        return Err(FuncArityError::OutputCount { expression, left, callee: Some(call.target), expected, actual: ports.outputs });
+    }
+    Ok(())
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -225,7 +280,6 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let project = self.targets.project();
         let source = &project.sources()[file];
         let parsed = &project.circuits()[file];
-        let forms = parsed.syntax.forms.as_slice();
         let ghost row_model = at_definition(parsed, entry as int, definition as int);
         let ghost index = parsed.build_model();
         proof {
@@ -235,13 +289,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 parsed.entry_ranges@[entry as int].definitions.start + definition);
         }
         let row = &parsed.definitions[parsed.entry_ranges[entry].definitions.start + definition];
-        let targets = definition_target_atoms(forms, row);
-        let count = targets.end - targets.start;
-        if !definition_root_is_call(source.text, forms, row, parsed.references.as_slice()) && count != 1 {
-            let expression = form_location(source, forms, row.expression.start);
-            let left = form_location(source, forms, row.form + 2);
-            return Err(FuncArityError::OutputCount { expression, left: Some(left), callee: None, expected: count, actual: 1 });
-        }
+        let count = check_indexed_root_count(source, parsed, row)?;
         let mut reference = 0;
         let stop = row.references.end - row.references.start;
         proof { reveal(UseAliases::definition_refs_valid); }
@@ -249,9 +297,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             invariant
                 self.can_resolve(), self.arity_func(file, entry), parsed_circuit_matches(*source, *parsed),
                 *source == project.sources_model()[file as int], *project == self.targets.project_model(),
-                *parsed == project.circuits_model()[file as int], forms@ == parsed.syntax.forms@,
+                *parsed == project.circuits_model()[file as int],
                 row_model == at_definition(parsed, entry as int, definition as int), *row == row_model,
-                row.form + 2 < forms@.len(), row.expression.start < forms@.len(),
+                row.form + 2 < parsed.syntax.forms@.len(), row.expression.start < parsed.syntax.forms@.len(),
                 row.references.end <= parsed.references@.len(),
                 row.references.start <= row.references.end,
                 definition < definition_count(parsed, entry as int),
@@ -274,25 +322,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     let ghost resolved = call;
                     assert(self.func_call_arity_evidence(file, entry, definition, reference, Ok(Some(resolved))));
                     assert(self.func_call_at(file, entry, definition, reference));
-                    let call = match call.check_input_count() {
-                        Ok(call) => call,
-                        Err(error) => {
-                            assert(call_count_error(parsed, *row, resolved, error));
-                            proof { self.record_count_mismatch(at, parsed, *row, resolved, error); }
-                            return Err(error);
-                        },
-                    };
-                    let ports = call.target.ports();
-                    let loc = LocatedName { source: call.source, span: call.call.span };
-                    let root = call.call.form == row.expression.start;
-                    let expected = if root { count } else { 1 };
-                    if ports.outputs != expected {
-                        proof { parsed_index_evidence(*source, *parsed); }
-                        let left = if root { Some(form_location(source, forms, row.form + 2)) } else { None };
-                        let error = FuncArityError::OutputCount {
-                            expression: loc, left, callee: Some(call.target), expected, actual: ports.outputs,
-                        };
-                        assert(call_count_error(parsed, *row, resolved, error));
+                    if let Err(error) = check_indexed_call_counts(source, parsed, row, count, call) {
                         proof { self.record_count_mismatch(at, parsed, *row, resolved, error); }
                         return Err(error);
                     }
