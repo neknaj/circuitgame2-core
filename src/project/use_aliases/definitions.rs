@@ -551,6 +551,21 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     {
     }
 
+    pub(super) proof fn rejected_reference_location(
+        &self, at: super::DefinitionPosition, site: DefinitionReferenceSite, reason: DefinitionReferenceReason,
+    )
+        requires self.definition_resolution_evidence(
+            at.file, at.entry, at.definition, at.reference, Err(DefinitionReferenceError::Rejected { site, reason }),
+        ),
+        ensures ({
+            let sources = self.targets.project_model().sources_model();
+            &&& at.file < sources.len()
+            &&& *site.source == sources[at.file as int]
+            &&& crate::project::circuits::name_in_source(site.source.text, site.name)
+        }),
+    {
+    }
+
     pub(super) proof fn resolved_reference_is_func_call(
         &self, at: super::DefinitionPosition, resolved: ResolvedDefinitionReference,
     )

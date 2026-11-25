@@ -33,6 +33,25 @@ pub struct ProjectSource<'a> {
     pub(super) first_input: usize,
 }
 
+impl<'a> ProjectSource<'a> {
+    /// 文書バージョンに対応する UTF-8 本文を返す。
+    pub fn text(&self) -> (text: &'a str)
+        ensures text == self.text_model(),
+    {
+        self.text
+    }
+
+    /// このスナップショットを解析したときの本文を表す。
+    pub closed spec fn text_model(&self) -> &'a str {
+        self.text
+    }
+
+    pub(super) proof fn text_model_is_text(&self)
+        ensures self.text_model() == self.text,
+    {
+    }
+}
+
 /// ソースをファイル識別子で整理できなかった理由。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceSetError {
