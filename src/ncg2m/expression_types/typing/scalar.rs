@@ -3,7 +3,7 @@
 use super::*;
 
 mod declared_progress;
-pub(in crate::ncg2m::expression_types) use declared_progress::root_call_preserves_checked_types;
+pub(in crate::ncg2m::expression_types) use declared_progress::call_preserves_checked_types;
 
 verus! {
 
@@ -110,6 +110,34 @@ pub(in crate::ncg2m) proof fn scalar_atom_type_origin(
     }
 }
 
+pub(in crate::ncg2m::expression_types) proof fn checked_if_keeps_child_types(
+    calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    at: usize, expected: DataType, condition: usize, yes: usize, no: usize,
+)
+    requires
+        typed_body_with_calls(calls, source, forms, environment_view(parameters), at, type_shape(expected))
+            == BodyVerdict::Accepted,
+        conditional_positions(source, forms, at) == Some((condition, yes, no)),
+    ensures
+        typed_body_with_calls(calls, source, forms, environment_view(parameters), condition,
+            scalar_type(BuiltinDataType::Bool)) == BodyVerdict::Accepted,
+        typed_body_with_calls(calls, source, forms, environment_view(parameters), yes, type_shape(expected))
+            == BodyVerdict::Accepted,
+        typed_body_with_calls(calls, source, forms, environment_view(parameters), no, type_shape(expected))
+            == BodyVerdict::Accepted,
+{
+    reveal(typed_expression);
+    let env = environment_view(parameters);
+    let ty = type_shape(expected);
+    let bool_ty = scalar_type(BuiltinDataType::Bool);
+    assert(shape(source, forms, at) == Ok(Expression::Conditional { condition, yes, no }));
+    assert(step_model(source, forms, env, Request { at, expected: ty, list: None }) == Ok(CheckStep::Three(
+        Request { at: condition, expected: bool_ty, list: None },
+        Request { at: yes, expected: ty, list: None },
+        Request { at: no, expected: ty, list: None },
+    )));
+}
+
 pub(in crate::ncg2m) proof fn scalar_conditional_child_types(
     source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>, at: usize, expected: DataType,
     condition: usize, yes: usize, no: usize,
@@ -122,16 +150,7 @@ pub(in crate::ncg2m) proof fn scalar_conditional_child_types(
         local_scalar_site_is_typed(source, forms, parameters, yes, expected),
         local_scalar_site_is_typed(source, forms, parameters, no, expected),
 {
-    reveal(typed_expression);
-    let env = environment_view(parameters);
-    let ty = type_shape(expected);
-    let bool_ty = scalar_type(BuiltinDataType::Bool);
-    assert(shape(source, forms, at) == Ok(Expression::Conditional { condition, yes, no }));
-    assert(step_model(source, forms, env, Request { at, expected: ty, list: None }) == Ok(CheckStep::Three(
-        Request { at: condition, expected: bool_ty, list: None },
-        Request { at: yes, expected: ty, list: None },
-        Request { at: no, expected: ty, list: None },
-    )));
+    checked_if_keeps_child_types(Seq::empty(), source, forms, parameters, at, expected, condition, yes, no);
 }
 
 proof fn local_expression_needs_no_call_types(

@@ -2,11 +2,13 @@
 
 use super::*;
 use super::slice::scalar_execution_slice_matches;
+use super::super::expression::expression_positions_agree;
 use crate::project::{
     MixedUseAliases, defn_call_plan_matches, defn_call_plan_root_scalar_call, defn_call_plan_site_at_rank,
 };
 
 mod example;
+mod nested;
 
 verus! {
 
@@ -56,24 +58,44 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             && after.searches_scalar_root_call() && after.plan_model() == plan,
     {
         self.one_step_slice_matches(result);
-        let at = defn_call_plan_site_at_rank(aliases, plan, rank, site);
         reveal(ScalarExecution::starts_with);
+        self.expression_dispatches_to_indexed_call(aliases, site, result);
+        let row = plan.calls_model_at_rank(rank)->Some_0;
+        assert(exists|found: int| 0 <= found < row.len() && (#[trigger] row[found]).at == frame.body_model().at);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn expression_dispatches_to_indexed_call(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, candidate: usize,
+        result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()), self.step_matches(result),
+            self.active matches Active::Expression(expr) && {
+                &&& self.plan.body_matches_at_rank(self.rank, expr.frame_model().body_model())
+                &&& self.plan.calls_model_at_rank(self.rank) matches Some(row) && candidate < row.len()
+                    && row[candidate as int].at == expr.expression_model().at
+            },
+        ensures result matches Ok(ScalarExecutionSlice::Suspended(after))
+            && after.plan == self.plan && after.rank == self.rank
+            && (after.active matches Active::Lookup { parent, site: 0 }
+                && expression_positions_agree(self.active->Expression_0, parent)),
+    {
+        let at = defn_call_plan_site_at_rank(aliases, self.plan, self.rank, candidate);
         reveal(ScalarExecution::step_matches);
         let expr = self.active->Expression_0;
-        let body = frame.body_model();
-        let row = plan.calls_model_at_rank(rank)->Some_0;
-        assert(row[site as int].from == plan.order_model()[rank as int]);
-        assert(expr.frame_model() == frame && expr.expression_model().at == body.at && body.at == at);
+        let body = expr.frame_model().body_model();
+        let row = self.plan.calls_model_at_rank(self.rank)->Some_0;
+        assert(row[candidate as int].from == self.plan.order_model()[self.rank as int]);
+        assert(expr.expression_model().at == at);
         assert(body.forms@[at as int] is List);
-        assert(*body.source == *row[site as int].call.source);
+        assert(*body.source == *row[candidate as int].call.source);
         assert(crate::ncg2m::expression_types::conditional_positions(body.source.text_model(), body.forms@, at).is_none());
         match result {
             Ok(ScalarExecutionSlice::Suspended(after)) => {
                 let inner = choose|inner: ScalarExpressionStep<'p, 'a>| #[trigger] expr.expression_step_matches(Ok(inner))
                     && next_expression_at(after.active, expr.result_type_model(), inner);
                 expr.declared_call_requests_lookup(Ok(inner));
-                assert(after.active is Lookup);
-                assert(exists|found: int| 0 <= found < row.len() && (#[trigger] row[found]).at == frame.body_model().at);
             },
             Err(ScalarExecutionError::Literal(error)) => {
                 expr.declared_call_requests_lookup(Err(error));

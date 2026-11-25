@@ -28,6 +28,9 @@ use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
 
+#[cfg(verus_only)]
+mod typing;
+
 verus! {
 
 /// 補助関数の呼び出し順を求められなかった理由。

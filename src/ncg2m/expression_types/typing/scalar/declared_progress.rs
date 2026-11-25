@@ -120,40 +120,42 @@ proof fn accepted_call_keeps_signature(
     accepted_declaration_keeps_signature(calls, source, forms, env, body, index, expected);
 }
 
-// 根の宣言呼び出しで確認した型を、元の引数位置と呼び出し先の署名に結び付ける。
-pub(in crate::ncg2m::expression_types) proof fn root_call_preserves_checked_types(
+// 宣言呼び出しで確認した型を、元の引数位置と呼び出し先の署名に結び付ける。
+pub(in crate::ncg2m::expression_types) proof fn call_preserves_checked_types(
     calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>,
-    caller: DefnSignature, callee: DefnSignature, body: usize, index: usize,
+    parameters: Seq<SignatureParameter>, callee: DefnSignature, at: usize, expected: DataType, index: usize,
 )
     requires
         call_entries_fit(forms, calls), index < calls.len(),
-        calls[index as int].at == body,
-        shape(source, forms, body) == Err(ExpressionCheckFailure::Deferred(
-            DeferredExpression::Form(form_span(forms[body as int])),
+        calls[index as int].at == at,
+        shape(source, forms, at) == Err(ExpressionCheckFailure::Deferred(
+            DeferredExpression::Form(form_span(forms[at as int])),
         )),
         call_signature_types_match(calls[index as int], callee),
-        typed_body_with_calls(calls, source, forms, environment_view(caller.parameters@),
-            body, type_shape(caller.result_type.ty)) == BodyVerdict::Accepted,
+        typed_body_with_calls(calls, source, forms, environment_view(parameters),
+            at, type_shape(expected)) == BodyVerdict::Accepted,
     ensures
-        type_shape(caller.result_type.ty) == type_shape(callee.result_type.ty),
+        type_shape(expected) == type_shape(callee.result_type.ty),
         forall|slot: int| 0 <= slot < calls[index as int].arguments@.len() ==> {
             let arg = #[trigger] calls[index as int].arguments@[slot];
             let expected = callee.parameters@[slot].ty.ty;
-            local_scalar_fragment(source, forms, arg.at) && expected.list_depth == 0
+            &&& typed_body_with_calls(calls, source, forms, environment_view(parameters), arg.at, type_shape(expected))
+                == BodyVerdict::Accepted
+            &&& (local_scalar_fragment(source, forms, arg.at) && expected.list_depth == 0
                 && (expected.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
-                ==> local_scalar_site_is_typed(source, forms, caller.parameters@, arg.at, expected)
+                ==> local_scalar_site_is_typed(source, forms, parameters, arg.at, expected))
         },
 {
     let entry = calls[index as int];
-    let env = environment_view(caller.parameters@);
-    let expected = type_shape(caller.result_type.ty);
-    accepted_call_keeps_signature(calls, source, forms, env, body, index, expected);
+    let env = environment_view(parameters);
+    accepted_call_keeps_signature(calls, source, forms, env, at, index, type_shape(expected));
     assert forall|slot: int| 0 <= slot < entry.arguments@.len() implies {
         let arg = #[trigger] entry.arguments@[slot];
         let ty = callee.parameters@[slot].ty.ty;
-        local_scalar_fragment(source, forms, arg.at) && ty.list_depth == 0
+        &&& typed_body_with_calls(calls, source, forms, env, arg.at, type_shape(ty)) == BodyVerdict::Accepted
+        &&& (local_scalar_fragment(source, forms, arg.at) && ty.list_depth == 0
             && (ty.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
-            ==> local_scalar_site_is_typed(source, forms, caller.parameters@, arg.at, ty)
+            ==> local_scalar_site_is_typed(source, forms, parameters, arg.at, ty))
     } by {
         call_argument_was_checked(calls, source, forms, env, entry, 0, slot as nat);
         let arg = entry.arguments@[slot];
