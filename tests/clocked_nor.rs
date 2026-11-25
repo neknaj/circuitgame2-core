@@ -44,6 +44,49 @@ fn oscillator_and_constant_are_observed_from_reset() {
 }
 
 #[test]
+fn prepared_clocked_session_only_exposes_committed_outputs() {
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![NorGate {
+            left: Wire::Gate(0),
+            right: Wire::Input(0),
+        }],
+        outputs: vec![Wire::Gate(0), Wire::Constant(true)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+
+    let tick = session.prepare_tick().unwrap();
+    assert_eq!(tick.target(), TickPosition { generation: 0, tick: 1 });
+    assert_eq!(tick.previous_output(), [false, true]);
+    tick.cancel();
+
+    let tick = session.prepare_tick().unwrap();
+    assert_eq!(tick.target().tick, 1);
+    assert_eq!(tick.commit(&[]), Err(TickInputError::InputCount));
+    assert_eq!(session.position().tick, 0);
+    assert_eq!(session.output(), [false, true]);
+
+    session.prepare_tick().unwrap().commit(&[false]).unwrap();
+    assert_eq!(session.position().tick, 1);
+    assert_eq!(session.output(), [true, true]);
+
+    let tick = session.prepare_tick().unwrap();
+    assert_eq!(tick.previous_output(), [true, true]);
+    tick.commit(&[false]).unwrap();
+    assert_eq!(session.output(), [false, true]);
+
+    session.prepare_tick().unwrap().commit(&[false]).unwrap();
+    assert_eq!(session.output(), [true, true]);
+    session.reset().unwrap();
+    assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
+    assert_eq!(session.output(), [false, true]);
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,
