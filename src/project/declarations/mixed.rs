@@ -25,6 +25,8 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+use crate::project::DefnPosition;
+
 verus! {
 
 /// 言語をまたいで照合する独立宣言の種類。
@@ -727,11 +729,112 @@ proof fn declaration_site_rank(
     }
 }
 
+pub(crate) open spec fn defn_position_before(first: DefnPosition, second: DefnPosition) -> bool {
+    first.file < second.file || (first.file == second.file && first.item < second.item)
+}
+
+pub(crate) open spec fn defn_vertices_valid(project: &ParsedProjectSources, positions: Seq<DefnPosition>) -> bool {
+    &&& positions.len() <= usize::MAX
+    &&& forall|i: int| 0 <= i < positions.len() ==> {
+        let pos = #[trigger] positions[i];
+        project.indexed_defn(pos.file, pos.item).is_some()
+    }
+    &&& forall|file: usize, item: usize| #[trigger] project.indexed_defn(file, item).is_some()
+        ==> positions.contains(DefnPosition { file, item })
+    &&& forall|i: int, j: int| 0 <= i < j < positions.len()
+        ==> defn_position_before(#[trigger] positions[i], #[trigger] positions[j])
+}
+
+proof fn source_defn_site(project: &ParsedProjectSources, site: Site)
+    requires source_site(project, site),
+    ensures project.indexed_defn(site.file, site.item).is_some()
+        <==> site.kind == Some(ProjectDeclarationKind::Defn),
+{
+    project.indexed_defn_presence(site.file, site.item);
+}
+
+proof fn indexed_defn_is_source_site(project: &ParsedProjectSources, file: usize, item: usize)
+    requires project.indexed_defn(file, item).is_some(),
+    ensures file < project.indexes_model().len(), selected_site(project, file as int, item as int),
+{
+    project.indexed_defn_presence(file, item);
+}
+
 impl<'p, 'a> MixedDeclarationTable<'p, 'a> {
     #[verifier::type_invariant]
     spec fn sites_valid(&self) -> bool {
         &&& self.lookup matches Some(index) ==> index.matches(self.sites@)
         &&& forall|i: int| 0 <= i < self.sites@.len() ==> site_is_readable(#[trigger] self.sites@[i])
+    }
+
+    pub(crate) fn defn_positions(&self, _project: &ParsedProjectSources<'a>) -> (positions: Vec<DefnPosition>)
+        requires mixed_declaration_table_matches(_project, *self),
+        ensures defn_vertices_valid(_project, positions@),
+    {
+        let mut positions = Vec::<DefnPosition>::new();
+        let mut cursor = 0;
+        let ghost mut picked: Seq<usize> = Seq::empty();
+        while cursor < self.sites.len()
+            invariant
+                full_sites(_project, self.sites@),
+                cursor <= self.sites@.len(),
+                picked.len() == positions@.len(),
+                forall|i: int| 0 <= i < picked.len() ==> {
+                    let j = #[trigger] picked[i];
+                    let site = self.sites@[j as int];
+                    j < cursor && site.kind == Some(ProjectDeclarationKind::Defn)
+                        && positions@[i] == (DefnPosition { file: site.file, item: site.item })
+                },
+                forall|i: int, j: int| 0 <= i < j < picked.len()
+                    ==> (#[trigger] picked[i]) < (#[trigger] picked[j]),
+                forall|i: usize| i < cursor && (#[trigger] self.sites@[i as int]).kind == Some(ProjectDeclarationKind::Defn)
+                    ==> picked.contains(i),
+            decreases self.sites@.len() - cursor,
+        {
+            let site = &self.sites[cursor];
+            if let Some(ProjectDeclarationKind::Defn) = site.kind {
+                positions.push(DefnPosition { file: site.file, item: site.item });
+                proof {
+                    assert forall|i: usize| picked.contains(i) implies picked.push(cursor).contains(i) by {
+                        let j = choose|j: int| 0 <= j < picked.len() && (#[trigger] picked[j]) == i;
+                        assert(picked.push(cursor)[j] == i);
+                    };
+                    let last = picked.len() as int;
+                    picked = picked.push(cursor);
+                    assert(0 <= last < picked.len() && picked[last] == cursor);
+                    assert(picked.contains(cursor));
+                }
+            }
+            cursor += 1;
+        }
+        proof {
+            let sites = self.sites@;
+            reveal(sites_before);
+            assert forall|i: int| 0 <= i < positions@.len() implies _project.indexed_defn(
+                (#[trigger] positions@[i]).file, positions@[i].item).is_some() by {
+                let site = sites[picked[i] as int];
+                assert(source_site(_project, site));
+                source_defn_site(_project, site);
+            };
+            assert forall|file: usize, item: usize| #[trigger] _project.indexed_defn(file, item).is_some()
+                implies positions@.contains(DefnPosition { file, item }) by {
+                indexed_defn_is_source_site(_project, file, item);
+                let i = choose|i: int| 0 <= i < sites.len() && (#[trigger] sites[i]).file == file && sites[i].item == item;
+                source_defn_site(_project, sites[i]);
+                assert(picked.contains(i as usize));
+                let j = choose|j: int| 0 <= j < picked.len() && (#[trigger] picked[j]) == i as usize;
+                assert(positions@[j] == (DefnPosition { file, item }));
+            };
+            assert forall|i: int, j: int| 0 <= i < j < positions@.len()
+                implies defn_position_before(#[trigger] positions@[i], #[trigger] positions@[j]) by {
+                assert(picked[i] < picked[j]);
+                let a = sites[picked[i] as int];
+                let b = sites[picked[j] as int];
+                assert(before(a.file as int, a.item as int, b.file as int, b.item as int));
+            };
+        }
+        let _count = positions.len();
+        positions
     }
 
     /// 指定のキーに対応する宣言が索引にあることを表す。

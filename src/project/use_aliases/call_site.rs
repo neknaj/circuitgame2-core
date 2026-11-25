@@ -16,6 +16,26 @@ use vstd::prelude::*;
 
 verus! {
 
+/// プロジェクト索引における補助関数の位置。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DefnPosition {
+    /// 正規化済みのソース列におけるファイルの添字。
+    pub file: usize,
+    /// ファイル内の NCG2M 索引における宣言の添字。
+    pub item: usize,
+}
+
+/// 補助関数の本体にある、宣言先を解決した呼び出し。
+#[derive(Debug)]
+pub struct DefnCallEdge<'p, 'a> {
+    /// 呼び出し元の補助関数。
+    pub from: DefnPosition,
+    /// 呼び出しを記述したファイル、文書版と範囲。
+    pub call: DefnCallSite<'p, 'a>,
+    /// 呼び出し先の補助関数。
+    pub to: DefnPosition,
+}
+
 /// 補助関数の本体に書かれた呼び出し形の位置。
 #[derive(Debug)]
 pub struct DefnCallSite<'p, 'a> {
@@ -167,6 +187,14 @@ pub closed spec fn project_named_defn_body_matches<'p, 'a>(
     aliases.targets_model().project_model().named_defn_body_matches(aliases, file, item, result)
 }
 
+pub(super) proof fn named_body_matches_project<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+    result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+)
+    requires aliases.targets_model().project_model().named_defn_body_matches(aliases, file, item, result),
+    ensures project_named_defn_body_matches(aliases, file, item, result),
+{}
+
 /// 成功時の署名が索引に対応し、名前や引数個数の診断が指定した本体の範囲内を指すことを示す。
 pub proof fn project_named_defn_body_origin<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
@@ -253,7 +281,10 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
         ensures project_named_defn_body_matches(self, file, item, result),
     {
-        self.targets().project().check_named_defn_body(self, file, item)
+        match self.targets().project().check_named_defn_body(self, file, item, false) {
+            Some((outcome, _)) => Some(outcome),
+            None => None,
+        }
     }
 
     /// 元の補助関数本体の構文木添字から、呼び出し先と引数の個数を検査する。

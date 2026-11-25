@@ -1,6 +1,7 @@
 //! 期待型付きの検査と型合成を、式ごとの型環境で進める。
 
 use super::*;
+use crate::project::DefnPosition;
 use super::super::let_syntax::LetHeader;
 use super::fold::checked_fold_item;
 #[cfg(verus_only)]
@@ -31,6 +32,7 @@ pub(super) struct CallArgument {
 /// 本体を検査する前に確定した、一つの宣言呼び出しの型情報。
 pub(super) struct CallTypeEntry {
     pub(super) at: usize,
+    pub(super) target: DefnPosition,
     pub(super) arguments: Vec<CallArgument>,
     pub(super) result: TypeShape,
 }
@@ -1111,12 +1113,80 @@ fn start_call_action<'a>(
     Ok(Action::Visit(check_job(request, job.scope), Some(waiting)))
 }
 
+pub(super) open spec fn call_trace_model(trace: Option<Vec<usize>>) -> Seq<usize> {
+    match trace { Some(entries) => entries@, None => Seq::empty() }
+}
+
+spec fn trace_step(
+    before: Option<Vec<usize>>, after: Option<Vec<usize>>, entry: Option<usize>,
+) -> bool {
+    match before {
+        Some(entries) => after matches Some(updated) && updated@ == match entry {
+            Some(entry) => entries@.push(entry),
+            None => entries@,
+        },
+        None => after.is_none(),
+    }
+}
+
+fn record_call(trace: &mut Option<Vec<usize>>, entry: usize)
+    ensures trace_step(*old(trace), *final(trace), Some(entry)),
+{
+    if let Some(entries) = trace {
+        entries.push(entry);
+    }
+}
+
+/// 型検査が訪れた宣言呼び出しの索引が、本体の根以降を指すことを表す。
+#[verifier::opaque]
+pub(super) open spec fn call_trace_fits(
+    calls: Seq<CallTypeEntry>, trace: Seq<usize>, root: usize, end: nat,
+) -> bool {
+    forall|i: int| 0 <= i < trace.len() ==> {
+        let entry = #[trigger] trace[i];
+        entry < calls.len() && root <= calls[entry as int].at < end
+    }
+}
+
+pub(super) proof fn trace_entry_in_range(
+    calls: Seq<CallTypeEntry>, trace: Seq<usize>, root: usize, end: nat, i: int,
+)
+    requires call_trace_fits(calls, trace, root, end), 0 <= i < trace.len(),
+    ensures trace[i] < calls.len() && root <= calls[trace[i] as int].at < end,
+{
+    reveal(call_trace_fits);
+}
+
+proof fn extend_call_trace(
+    calls: Seq<CallTypeEntry>, before: Option<Vec<usize>>, after: Option<Vec<usize>>, entry: Option<usize>,
+    root: usize, at: usize, end: nat,
+)
+    requires
+        root <= at < end,
+        call_trace_fits(calls, call_trace_model(before), root, end),
+        trace_step(before, after, entry),
+        entry matches Some(index) ==> index < calls.len() && calls[index as int].at == at,
+    ensures call_trace_fits(calls, call_trace_model(after), root, end),
+{
+    reveal(call_trace_fits);
+    let previous = call_trace_model(before);
+    let updated = call_trace_model(after);
+    assert forall|i: int| 0 <= i < updated.len() implies {
+        let index = #[trigger] updated[i];
+        index < calls.len() && root <= calls[index as int].at < end
+    } by {
+        if i < previous.len() { assert(updated[i] == previous[i]); }
+    };
+}
+
 fn start_action<'a>(
     calls: &[CallTypeEntry],
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, job: Job,
+    trace: &mut Option<Vec<usize>>,
 ) -> (result: Result<Action, ExpressionCheckFailure<'a>>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), job_in_bounds(forms@, job), locals.contains(job.scope), job.request.list.is_none(),
-    ensures result matches Ok(action) ==> action_valid(calls@, forms@, locals, action),
+    ensures trace_step(*old(trace), *final(trace), applicable_call(calls@, source, forms@, job.request.at)),
+        result matches Ok(action) ==> action_valid(calls@, forms@, locals, action),
         result matches Ok(action) ==> job.request.at < usize::MAX
             && action_advances(calls@, forms@, action, (job.request.at + 1) as usize)
             && action_limit(calls@, forms@, action) <= subtree_limit(forms@, job.request.at),
@@ -1129,6 +1199,7 @@ fn start_action<'a>(
     if matches!(parsed, Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(_)))) {
         if let Some(entry) = find_call_entry(calls, req.at) {
             assert(canonical_call(forms@, calls@[entry as int]));
+            record_call(trace, entry);
             return start_call_action(calls, source, forms, parameters, locals, job, entry);
         }
     }
@@ -1911,10 +1982,13 @@ proof fn peer_preserves_typing<'a>(
 fn type_with_scopes<'a>(
     calls: &[CallTypeEntry],
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], at: usize, expected: TypeShape,
+    trace: &mut Option<Vec<usize>>,
 ) -> (result: Result<TypeShape, ExpressionCheckFailure<'a>>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), at < forms@.len(),
+        call_trace_model(*old(trace)).len() == 0,
     ensures result == typed_expression(calls@, source, forms@, environment_view(parameters@),
         Request { at, expected, list: None }, Goal::Check(expected)),
+        call_trace_fits(calls@, call_trace_model(*final(trace)), at, forms@.len()),
 {
     let mut locals = LocalScopes::new();
     let mut job = check_job(Request { at, expected, list: None }, None);
@@ -1927,11 +2001,16 @@ fn type_with_scopes<'a>(
         assert(complete_list_indices(forms@));
         assert(at < _end <= _size);
         assert(lexical_view(parameters@, &locals, None) =~= environment_view(parameters@));
+        assert(call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len())) by {
+            reveal(call_trace_fits);
+        };
         reveal(completed_typing);
     }
     loop
         invariant
             call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
+            call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
+            at <= job.request.at,
             locals.contains(job.scope), pending_ranges(calls@, forms@, pending@, job), pending_scopes(&locals, pending@),
             root == typed_expression(calls@, source, forms@, environment_view(parameters@),
                 Request { at, expected, list: None }, Goal::Check(expected)),
@@ -1948,7 +2027,14 @@ fn type_with_scopes<'a>(
         };
         proof { peer_preserves_typing(calls@, source, forms@, parameters@, &locals, job); }
         job = attach_action(calls, source, forms, parameters, &locals, &mut pending, job, single, after);
-        let mut ty = match start_action(calls, source, forms, parameters, &locals, job) {
+        assert(job.request.at == single.request.at && at <= job.request.at < forms@.len());
+        let ghost before_trace = *trace;
+        let ghost call = applicable_call(calls@, source, forms@, job.request.at);
+        let action = start_action(calls, source, forms, parameters, &locals, job, trace);
+        proof {
+            extend_call_trace(calls@, before_trace, *trace, call, at, job.request.at, forms@.len());
+        }
+        let mut ty = match action {
             Err(error) => {
                 proof { reveal(completed_typing); }
                 return Err(error);
@@ -1966,6 +2052,8 @@ fn type_with_scopes<'a>(
                 completed_typing(calls@, source, forms@, parameters@, &locals, pending@, Ok(ty)) == root,
             invariant
                 call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
+                call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
+                at <= job.request.at,
                 locals.contains(job.scope), pending_ranges(calls@, forms@, pending@, job), pending_scopes(&locals, pending@),
                 root == typed_expression(calls@, source, forms@, environment_view(parameters@),
                     Request { at, expected, list: None }, Goal::Check(expected)),
@@ -2026,7 +2114,7 @@ pub(super) fn check_typed_body<'a>(
 {
     let calls: &[CallTypeEntry] = &[];
     assert(calls@ =~= Seq::<CallTypeEntry>::empty());
-    match type_with_scopes(calls, source, forms, parameters, at, expected) {
+    match type_with_scopes(calls, source, forms, parameters, at, expected, &mut None) {
         Ok(_) => BodyVerdict::Accepted,
         Err(error) => BodyVerdict::Rejected(error),
     }
@@ -2045,12 +2133,14 @@ pub(super) closed spec fn typed_body_with_calls<'a>(
 /// 本体を検査し、各呼び出しの引数を署名の期待型で左から調べる。
 pub(super) fn check_typed_body_with_calls<'a>(
     calls: &[CallTypeEntry], source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>],
-    at: usize, expected: TypeShape,
+    at: usize, expected: TypeShape, trace: &mut Option<Vec<usize>>,
 ) -> (verdict: BodyVerdict<'a>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), at < forms@.len(),
+        call_trace_model(*old(trace)).len() == 0,
     ensures verdict == typed_body_with_calls(calls@, source, forms@, environment_view(parameters@), at, expected),
+        call_trace_fits(calls@, call_trace_model(*final(trace)), at, forms@.len()),
 {
-    match type_with_scopes(calls, source, forms, parameters, at, expected) {
+    match type_with_scopes(calls, source, forms, parameters, at, expected, trace) {
         Ok(_) => BodyVerdict::Accepted,
         Err(error) => BodyVerdict::Rejected(error),
     }

@@ -1,0 +1,537 @@
+//! NCG2M の補助関数の呼び出しを並べ、循環があれば元の呼び出しを返す。
+
+use alloc::vec::Vec;
+use vstd::prelude::*;
+use crate::ncg2m::expression_types::DefnBodyCallError;
+use super::{DefnCallEdge, DefnCallSite, DefnPosition, MixedUseAliases};
+use super::dependency_order::{DependencyEdge, check_dependency_order};
+#[cfg(verus_only)]
+use super::dependency_order::{complete_dependency_order, completion_order_matches, dependencies_in_order,
+    dependency_cycle, dependency_edge, dependency_graph_valid};
+#[cfg(verus_only)]
+use super::super::declarations::{defn_position_before, defn_vertices_valid};
+#[cfg(verus_only)]
+use super::super::exports::mixed_exports_use_project_declarations;
+#[cfg(verus_only)]
+use super::super::mixed_use_targets_match;
+#[cfg(verus_only)]
+use super::call_site::{named_body_matches_project, project_named_defn_body_matches};
+#[cfg(verus_only)]
+use crate::ncg2m::data_types::DefnSignature;
+#[cfg(verus_only)]
+use crate::syntax::form_span;
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+
+verus! {
+
+/// 補助関数の呼び出し順を求められなかった理由。
+#[derive(Debug)]
+pub enum DefnCallGraphError<'p, 'a> {
+    /// 補助関数の本体で診断または段階の確定待ちが生じた。
+    Body {
+        /// 本体を検査した補助関数。
+        from: DefnPosition,
+        /// 呼び出しまたは式の診断。
+        error: DefnBodyCallError<'p, 'a>,
+    },
+    /// 型検査の記録から漏れた、本体内の補助関数の呼び出し。
+    ///
+    /// 構文上の式の位置と型検査の記録が食い違ったことを示す。
+    UnvisitedCall(DefnCallEdge<'p, 'a>),
+    /// 元の呼び出しを順につないだ閉路。最後の呼び出し先は先頭の呼び出し元に戻る。
+    Cycle(Vec<DefnCallEdge<'p, 'a>>),
+}
+
+/// 検査した補助関数と、呼び出し先を先に並べた順序。
+pub struct DefnCallPlan<'p, 'a> {
+    vertices: Vec<DefnPosition>,
+    edges: Vec<Vec<DefnCallEdge<'p, 'a>>>,
+    order: Vec<usize>,
+}
+
+impl<'p, 'a> DefnCallPlan<'p, 'a> {
+    /// 呼び出し先から呼び出し元の順に並べた補助関数。
+    pub closed spec fn order_model(&self) -> Seq<DefnPosition> {
+        self.order@.map_values(|node: usize| self.vertices@[node as int])
+    }
+
+    /// 呼び出し元ごとの呼び出し列。
+    pub closed spec fn edges_model(&self) -> Seq<Vec<DefnCallEdge<'p, 'a>>> {
+        self.edges@
+    }
+
+    /// 並びに含まれる補助関数の件数。
+    pub fn len(&self) -> (count: usize)
+        ensures count == self.order_model().len(),
+    {
+        self.order.len()
+    }
+
+    /// 指定した順位の補助関数を返す。範囲外なら `None` を返す。
+    pub fn at_rank(&self, rank: usize) -> (position: Option<DefnPosition>)
+        ensures match position {
+            Some(position) => rank < self.order_model().len() && position == self.order_model()[rank as int],
+            None => rank >= self.order_model().len() || !self.order_nodes_valid(),
+        },
+    {
+        let node = *self.order.get(rank)?;
+        self.vertices.get(node).copied()
+    }
+
+    /// 順位で指定した補助関数の呼び出し列を表す。
+    pub closed spec fn calls_model_at_rank(&self, rank: usize) -> Option<Seq<DefnCallEdge<'p, 'a>>> {
+        if rank < self.order@.len() && self.order@[rank as int] < self.edges@.len() {
+            Some(self.edges@[self.order@[rank as int] as int]@)
+        } else {
+            None
+        }
+    }
+
+    /// 指定した順位の補助関数が呼び出す補助関数と、元の呼び出し位置を返す。
+    pub fn calls_at_rank(&self, rank: usize) -> (calls: Option<&[DefnCallEdge<'p, 'a>]>)
+        ensures self.calls_model_at_rank(rank) == match calls {
+            Some(sites) => Some(sites@),
+            None => None,
+        },
+    {
+        let node = *self.order.get(rank)?;
+        let sites = self.edges.get(node)?;
+        Some(sites.as_slice())
+    }
+
+    /// 順序のすべての添字から補助関数の位置を取り出せることを表す。
+    pub closed spec fn order_nodes_valid(&self) -> bool {
+        forall|i: int| 0 <= i < self.order@.len() ==> (#[trigger] self.order@[i]) < self.vertices@.len()
+    }
+}
+
+spec fn contains_vertex(positions: Seq<DefnPosition>, pos: DefnPosition) -> bool {
+    positions.contains(pos)
+}
+
+fn vertex_index(positions: &[DefnPosition], pos: DefnPosition) -> (index: Option<usize>)
+    requires forall|a: int, b: int| 0 <= a < b < positions@.len()
+        ==> defn_position_before(#[trigger] positions@[a], #[trigger] positions@[b]),
+    ensures index.is_some() == contains_vertex(positions@, pos),
+        index matches Some(i) ==> i < positions@.len() && positions@[i as int] == pos,
+{
+    let mut lo = 0;
+    let mut hi = positions.len();
+    while lo < hi
+        invariant
+            lo <= hi <= positions@.len(),
+            forall|i: int| 0 <= i < lo ==> defn_position_before(#[trigger] positions@[i], pos),
+            forall|i: int| hi <= i < positions@.len() ==> defn_position_before(pos, #[trigger] positions@[i]),
+            forall|a: int, b: int| 0 <= a < b < positions@.len()
+                ==> defn_position_before(#[trigger] positions@[a], #[trigger] positions@[b]),
+        decreases hi - lo,
+    {
+        let mid = lo + (hi - lo) / 2;
+        let found = positions[mid];
+        if found.file < pos.file || (found.file == pos.file && found.item < pos.item) {
+            lo = mid + 1;
+        } else if pos.file < found.file || (pos.file == found.file && pos.item < found.item) {
+            hi = mid;
+        } else {
+            return Some(mid);
+        }
+    }
+    None
+}
+
+spec fn graph_row_matches(
+    aliases: &MixedUseAliases, vertices: Seq<DefnPosition>, from: usize,
+    edges: Seq<DefnCallEdge>, row: Seq<Option<usize>>,
+) -> bool {
+    &&& from < vertices.len()
+    &&& edges.len() == row.len() <= usize::MAX
+    &&& forall|i: int| 0 <= i < row.len() ==> {
+        let edge = #[trigger] edges[i];
+        &&& edge.from == vertices[from as int]
+        &&& defn_call_edge_matches(aliases, edge)
+        &&& row[i] matches Some(to) && to < vertices.len() && edge.to == vertices[to as int]
+    }
+}
+
+fn link_graph_row(
+    _aliases: &MixedUseAliases, vertices: &[DefnPosition], _from: usize, edges: &[DefnCallEdge],
+) -> (row: Vec<Option<usize>>)
+    requires
+        defn_vertices_valid(&_aliases.targets_model().project_model(), vertices@),
+        _from < vertices@.len(),
+        forall|i: int| 0 <= i < edges@.len() ==> {
+            let edge = #[trigger] edges@[i];
+            edge.from == vertices@[_from as int] && defn_call_edge_matches(_aliases, edge)
+        },
+    ensures graph_row_matches(_aliases, vertices@, _from, edges@, row@),
+{
+    let _count = edges.len();
+    let mut row = Vec::<Option<usize>>::new();
+    let mut i = 0;
+    while i < edges.len()
+        invariant
+            i <= edges@.len() == _count,
+            defn_vertices_valid(&_aliases.targets_model().project_model(), vertices@),
+            _from < vertices@.len(),
+            forall|j: int| 0 <= j < edges@.len() ==> {
+                let edge = #[trigger] edges@[j];
+                edge.from == vertices@[_from as int] && defn_call_edge_matches(_aliases, edge)
+            },
+            graph_row_matches(_aliases, vertices@, _from, edges@.take(i as int), row@),
+        decreases edges@.len() - i,
+    {
+        let edge = &edges[i];
+        assert(defn_call_edge_matches(_aliases, *edge));
+        assert(contains_vertex(vertices@, edge.to)) by {
+            reveal(defn_call_edge_matches);
+        };
+        let Some(to) = vertex_index(vertices, edge.to) else { unreachable!() };
+        row.push(Some(to));
+        assert(edges@.take(i as int + 1) =~= edges@.take(i as int).push(*edge));
+        i += 1;
+    }
+    assert(edges@.take(i as int) =~= edges@);
+    row
+}
+
+spec fn checked_body(aliases: &MixedUseAliases, pos: DefnPosition) -> bool {
+    exists|signature: DefnSignature|
+        #[trigger] project_named_defn_body_matches(aliases, pos.file, pos.item, Some(Ok(signature)))
+}
+
+spec fn graph_matches(
+    aliases: &MixedUseAliases, vertices: Seq<DefnPosition>,
+    rows: Seq<Vec<DefnCallEdge>>, graph: Seq<Vec<Option<usize>>>,
+) -> bool {
+    &&& rows.len() == graph.len() <= vertices.len() <= usize::MAX
+    &&& forall|i: int| 0 <= i < rows.len() ==> {
+        &&& graph_row_matches(aliases, vertices, i as usize, (#[trigger] rows[i])@, graph[i]@)
+        &&& checked_body(aliases, vertices[i])
+        &&& defn_body_calls_cover_slots(aliases, vertices[i], rows[i]@)
+    }
+}
+
+fn graph_rows<'t, 'p, 'a>(
+    aliases: &MixedUseAliases<'t, 'p, 'a>, vertices: &[DefnPosition],
+) -> (result: Result<(Vec<Vec<DefnCallEdge<'p, 'a>>>, Vec<Vec<Option<usize>>>), DefnCallGraphError<'p, 'a>>)
+    requires
+        mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
+        defn_vertices_valid(&aliases.targets_model().project_model(), vertices@),
+    ensures
+        match result {
+            Ok((rows, graph)) => graph@.len() == vertices@.len() && graph_matches(aliases, vertices@, rows@, graph@)
+                && dependency_graph_valid(graph@),
+            Err(DefnCallGraphError::Body { from, error }) =>
+                project_named_defn_body_matches(aliases, from.file, from.item, Some(Err(error))),
+            Err(DefnCallGraphError::UnvisitedCall(edge)) => defn_call_is_expression_slot(aliases, edge),
+            Err(DefnCallGraphError::Cycle(_)) => false,
+        },
+{
+    let project = aliases.targets().project();
+    let mut rows = Vec::<Vec<DefnCallEdge>>::new();
+    let mut graph = Vec::<Vec<Option<usize>>>::new();
+    let mut node = 0;
+    while node < vertices.len()
+        invariant
+            node == rows@.len() <= vertices@.len(),
+            *project == aliases.targets_model().project_model(),
+            mixed_use_targets_match(project, aliases.targets_model()),
+            defn_vertices_valid(project, vertices@),
+            graph_matches(aliases, vertices@, rows@, graph@),
+        decreases vertices@.len() - node,
+    {
+        let from = vertices[node];
+        let Some((body, capture)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
+        match body {
+            Err(error) => {
+                proof { named_body_matches_project(aliases, from.file, from.item, Some(Err(error))); }
+                return Err(DefnCallGraphError::Body { from, error });
+            }
+            Ok(signature) => {
+                proof {
+                    named_body_matches_project(aliases, from.file, from.item, Some(Ok(signature)));
+                    assert(checked_body(aliases, from));
+                }
+            }
+        }
+        let edges = match capture {
+            Ok(edges) => edges,
+            Err(edge) => return Err(DefnCallGraphError::UnvisitedCall(edge)),
+        };
+        let linked = link_graph_row(aliases, vertices, node, edges.as_slice());
+        rows.push(edges);
+        graph.push(linked);
+        node += 1;
+    }
+    proof {
+        assert forall|node: int, field: int| 0 <= node < graph@.len() && 0 <= field < graph@[node]@.len()
+            implies ((#[trigger] graph@[node]@[field]) matches Some(target) ==> target < graph@.len()) by {
+            assert(graph_row_matches(aliases, vertices@, node as usize, rows@[node]@, graph@[node]@));
+            assert(defn_call_edge_matches(aliases, rows@[node]@[field]));
+        };
+    }
+    Ok((rows, graph))
+}
+
+fn copy_edge<'p, 'a>(edge: &DefnCallEdge<'p, 'a>) -> (copy: DefnCallEdge<'p, 'a>)
+    ensures copy == *edge,
+{
+    let site = &edge.call;
+    DefnCallEdge { from: edge.from, to: edge.to, call: DefnCallSite {
+        source: site.source, span: site.span.start..site.span.end, head: site.head.start..site.head.end,
+    } }
+}
+
+/// 循環を構成するすべての呼び出しが元のソースを指し、順につながることを表す。
+pub open spec fn defn_call_cycle(aliases: &MixedUseAliases, cycle: Seq<DefnCallEdge>) -> bool {
+    &&& cycle.len() > 0
+    &&& forall|i: int| 0 <= i < cycle.len() ==> defn_call_edge_matches(aliases, #[trigger] cycle[i])
+    &&& forall|i: int, j: int| 0 <= i && j == i + 1 && j < cycle.len()
+        ==> (#[trigger] cycle[i]).to == (#[trigger] cycle[j]).from
+    &&& cycle.last().to == cycle[0].from
+}
+
+fn graph_cycle_sites<'p, 'a>(
+    _aliases: &MixedUseAliases<'_, 'p, 'a>, _vertices: &[DefnPosition], rows: &[Vec<DefnCallEdge<'p, 'a>>],
+    _graph: &[Vec<Option<usize>>], cycle: &[DependencyEdge],
+) -> (sites: Vec<DefnCallEdge<'p, 'a>>)
+    requires
+        dependency_cycle(_graph@, cycle@),
+        graph_matches(_aliases, _vertices@, rows@, _graph@),
+    ensures defn_call_cycle(_aliases, sites@),
+{
+    let mut sites = Vec::<DefnCallEdge>::new();
+    let mut i = 0;
+    while i < cycle.len()
+        invariant
+            i == sites@.len() <= cycle@.len(),
+            dependency_cycle(_graph@, cycle@),
+            graph_matches(_aliases, _vertices@, rows@, _graph@),
+            forall|j: int| 0 <= j < sites@.len() ==> {
+                let step = #[trigger] cycle@[j];
+                &&& sites@[j] == rows@[step.from as int]@[step.field as int]
+                &&& sites@[j].from == _vertices@[step.from as int]
+                &&& sites@[j].to == _vertices@[step.to as int]
+                &&& defn_call_edge_matches(_aliases, sites@[j])
+            },
+        decreases cycle@.len() - i,
+    {
+        let step = &cycle[i];
+        assert(dependency_edge(_graph@, *step));
+        assert(graph_row_matches(_aliases, _vertices@, step.from, rows@[step.from as int]@, _graph@[step.from as int]@));
+        let edge = &rows[step.from][step.field];
+        sites.push(copy_edge(edge));
+        i += 1;
+    }
+    proof {
+        assert forall|j: int| 0 <= j < sites@.len()
+            implies defn_call_edge_matches(_aliases, #[trigger] sites@[j]) by {
+            assert(dependency_edge(_graph@, cycle@[j]));
+        };
+        assert forall|a: int, b: int| 0 <= a && b == a + 1 && b < sites@.len()
+            implies (#[trigger] sites@[a]).to == (#[trigger] sites@[b]).from by {
+            assert(cycle@[a].to == cycle@[b].from);
+        };
+        let last = sites@.len() - 1;
+        assert(cycle@[last].to == cycle@[0].from);
+        assert(sites@[last].to == sites@[0].from);
+    }
+    sites
+}
+
+/// 成功した計画の順序が全補助関数を含み、すべての呼び出しで順位が下がることを表す。
+pub closed spec fn defn_call_plan_matches(aliases: &MixedUseAliases, plan: &DefnCallPlan) -> bool {
+    let order = plan.order_model();
+    &&& defn_vertices_valid(&aliases.targets_model().project_model(), plan.vertices@)
+    &&& plan.order_nodes_valid()
+    &&& plan.edges_model().len() == plan.vertices@.len()
+    &&& order.no_duplicates()
+    &&& forall|pos: DefnPosition| #[trigger] plan.vertices@.contains(pos) ==> order.contains(pos)
+    &&& forall|pos: DefnPosition| #[trigger] plan.vertices@.contains(pos) ==> checked_body(aliases, pos)
+    &&& forall|row: int| 0 <= row < plan.edges_model().len()
+        ==> defn_body_calls_cover_slots(aliases, plan.vertices@[row], (#[trigger] plan.edges_model()[row])@)
+    &&& forall|row: int, slot: int| 0 <= row < plan.edges_model().len()
+        && 0 <= slot < plan.edges_model()[row]@.len() ==> {
+            let edge = #[trigger] plan.edges_model()[row]@[slot];
+            &&& defn_call_edge_matches(aliases, edge)
+            &&& edge.from == plan.vertices@[row]
+            &&& order.contains(edge.from) && order.contains(edge.to)
+            &&& order.index_of(edge.to) < order.index_of(edge.from)
+        }
+}
+
+/// 指定した補助関数の本体が型検査を通り、計画の順序に含まれることを示す。
+pub proof fn defn_call_plan_contains(
+    aliases: &MixedUseAliases, plan: &DefnCallPlan, pos: DefnPosition,
+)
+    requires defn_call_plan_matches(aliases, plan),
+        aliases.targets_model().project_model().indexed_defn(pos.file, pos.item).is_some(),
+    ensures
+        plan.order_model().contains(pos),
+        exists|signature: DefnSignature|
+            #[trigger] project_named_defn_body_matches(aliases, pos.file, pos.item, Some(Ok(signature))),
+{}
+
+/// 計画で補助関数に割り当てられた順位と、指定した呼び出しでの順位減少を取り出す。
+pub proof fn defn_call_plan_edge_order(
+    aliases: &MixedUseAliases, plan: &DefnCallPlan, rank: usize,
+)
+    requires defn_call_plan_matches(aliases, plan), rank < plan.order_model().len(),
+    ensures plan.calls_model_at_rank(rank) matches Some(sites) && {
+        &&& defn_body_calls_cover_slots(aliases, plan.order_model()[rank as int], sites)
+        &&& forall|j: int| 0 <= j < sites.len() ==> {
+            let edge = #[trigger] sites[j];
+            let order = plan.order_model();
+            &&& defn_call_edge_matches(aliases, edge)
+            &&& edge.from == order[rank as int]
+            &&& order.contains(edge.to)
+            &&& order.index_of(edge.to) < rank
+        }
+    },
+{
+    let order = plan.order_model();
+    let node = plan.order@[rank as int] as int;
+    let sites = plan.edges@[node]@;
+    assert(plan.calls_model_at_rank(rank) == Some(sites));
+    assert(defn_body_calls_cover_slots(aliases, plan.vertices@[node], plan.edges_model()[node]@));
+    assert forall|j: int| 0 <= j < sites.len() implies {
+        let edge = #[trigger] sites[j];
+        &&& defn_call_edge_matches(aliases, edge)
+        &&& edge.from == order[rank as int]
+        &&& order.contains(edge.to)
+        &&& order.index_of(edge.to) < rank
+    } by {
+        let edge = plan.edges_model()[node]@[j];
+        assert(edge.from == plan.vertices@[node] && edge.from == order[rank as int]);
+        assert(order.index_of(edge.from) == rank);
+    };
+}
+
+/// 順位ごとの呼び出し列から、元の構文木の位置と呼び出し先の順位を取り出す。
+pub proof fn defn_call_plan_site_at_rank(
+    aliases: &MixedUseAliases, plan: &DefnCallPlan, rank: usize, site: usize,
+) -> (at: usize)
+    requires
+        defn_call_plan_matches(aliases, plan),
+        rank < plan.order_model().len(),
+        plan.calls_model_at_rank(rank) matches Some(sites) && site < sites.len(),
+    ensures {
+        let sites = plan.calls_model_at_rank(rank)->Some_0;
+        let edge = sites[site as int];
+        let order = plan.order_model();
+        let project = aliases.targets_model().project_model();
+        &&& edge.from == order[rank as int]
+        &&& order.contains(edge.to)
+        &&& order.index_of(edge.to) < rank
+        &&& edge.from.file < project.sources_model().len()
+        &&& *edge.call.source == project.sources_model()[edge.from.file as int]
+        &&& project.functional_forms_model(edge.from.file) matches Some(forms) && {
+            &&& at + 1 < forms.len()
+            &&& forms[at as int] is List
+            &&& forms[at + 1] is Atom
+            &&& edge.call.span == form_span(forms[at as int])
+            &&& edge.call.head == form_span(forms[at + 1])
+        }
+    },
+{
+    defn_call_plan_edge_order(aliases, plan, rank);
+    let edge = plan.calls_model_at_rank(rank)->Some_0[site as int];
+    assert(defn_call_edge_matches(aliases, edge));
+    reveal(defn_call_edge_matches);
+    let project = aliases.targets_model().project_model();
+    let forms = project.functional_forms_model(edge.from.file)->Some_0;
+    choose|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List && forms[at + 1] is Atom
+        && edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
+}
+
+proof fn checked_dependency_order_is_call_plan(
+    aliases: &MixedUseAliases, plan: &DefnCallPlan, graph: Seq<Vec<Option<usize>>>,
+)
+    requires
+        defn_vertices_valid(&aliases.targets_model().project_model(), plan.vertices@),
+        graph.len() == plan.vertices@.len(),
+        graph_matches(aliases, plan.vertices@, plan.edges@, graph),
+        complete_dependency_order(graph, plan.order@),
+    ensures defn_call_plan_matches(aliases, plan),
+{
+    let nodes = plan.vertices@;
+    let order = plan.order@;
+    let ranked = plan.order_model();
+    let ranks = choose|rank: Seq<nat>| #[trigger] dependencies_in_order(graph, rank)
+        && order.len() == graph.len() && completion_order_matches(order, rank)
+        && (forall|node: int| #![trigger rank[node]] 0 <= node < graph.len()
+            ==> rank[node] < order.len() && order[rank[node] as int] == node);
+    assert forall|pos: DefnPosition| #[trigger] nodes.contains(pos) implies ranked.contains(pos) by {
+        let i = choose|i: int| 0 <= i < nodes.len() && (#[trigger] nodes[i]) == pos;
+        assert(ranked[ranks[i] as int] == pos);
+    };
+    assert forall|pos: DefnPosition| #[trigger] nodes.contains(pos) implies checked_body(aliases, pos) by {
+        let i = choose|i: int| 0 <= i < nodes.len() && (#[trigger] nodes[i]) == pos;
+        assert(graph_row_matches(aliases, nodes, i as usize, plan.edges@[i]@, graph[i]@));
+        assert(checked_body(aliases, nodes[i]));
+    };
+    assert forall|a: int, b: int| 0 <= a < b < ranked.len() implies (#[trigger] ranked[a]) != (#[trigger] ranked[b]) by {
+        let left = order[a] as int;
+        let right = order[b] as int;
+        assert(ranks[left] == a && ranks[right] == b && left != right);
+        if left < right { assert(defn_position_before(nodes[left], nodes[right])); }
+        else { assert(defn_position_before(nodes[right], nodes[left])); }
+    };
+    assert forall|row: int, slot: int| 0 <= row < plan.edges@.len() && 0 <= slot < plan.edges@[row]@.len()
+        implies {
+            let edge = #[trigger] plan.edges@[row]@[slot];
+            defn_call_edge_matches(aliases, edge) && edge.from == nodes[row]
+                && ranked.contains(edge.from) && ranked.contains(edge.to)
+                && ranked.index_of(edge.to) < ranked.index_of(edge.from)
+        } by {
+        let to = graph[row]@[slot]->Some_0;
+        let edge = plan.edges@[row]@[slot];
+        assert(graph_row_matches(aliases, nodes, row as usize, plan.edges@[row]@, graph[row]@));
+        assert(dependency_edge(graph, DependencyEdge { from: row as usize, field: slot as usize, to }));
+        assert(ranked[ranks[row] as int] == edge.from && ranked[ranks[to as int] as int] == edge.to);
+        assert(ranked.index_of(edge.from) == ranks[row] && ranked.index_of(edge.to) == ranks[to as int]);
+    };
+}
+
+impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
+    /// プロジェクト内の補助関数を検査し、呼び出し先を先に並べる。
+    ///
+    /// 反復回数にかかわらず、反復本体で訪れた補助関数の呼び出しを含める。
+    ///
+    /// # Errors
+    ///
+    /// 型検査を完了できない本体、訪問記録に漏れた呼び出し、または循環を返す。組み込みやテンプレートの検査に
+    /// 実行段階が必要な場合は、その本体の保留を返す。
+    pub fn plan_defn_calls(&self) -> (result: Result<DefnCallPlan<'p, 'a>, DefnCallGraphError<'p, 'a>>)
+        requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures match result {
+            Ok(plan) => defn_call_plan_matches(self, &plan),
+            Err(DefnCallGraphError::Body { from, error }) =>
+                project_named_defn_body_matches(self, from.file, from.item, Some(Err(error))),
+            Err(DefnCallGraphError::UnvisitedCall(edge)) => defn_call_is_expression_slot(self, edge),
+            Err(DefnCallGraphError::Cycle(sites)) => defn_call_cycle(self, sites@),
+        },
+    {
+        let targets = self.targets();
+        let project = targets.project();
+        let exports = targets.exports();
+        let declarations = exports.declarations();
+        proof {
+            targets.mixed_use_exports_match(project);
+            mixed_exports_use_project_declarations(project, exports);
+        }
+        let vertices = declarations.defn_positions(project);
+        let (edges, graph) = graph_rows(self, &vertices)?;
+        match check_dependency_order(graph.as_slice(), true) {
+            Err(cycle) => Err(DefnCallGraphError::Cycle(graph_cycle_sites(self, &vertices, &edges, &graph, &cycle))),
+            Ok(order) => {
+                let plan = DefnCallPlan { vertices, edges, order };
+                proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
+                Ok(plan)
+            }
+        }
+    }
+}
+
+}

@@ -1,6 +1,7 @@
 //! 補助関数の本体にある呼び出し形から、先頭の名前と引数列を取り出す。
 
 use super::*;
+use crate::project::DefnPosition;
 use super::typing::{CallArgument, CallTypeEntry};
 #[cfg(verus_only)]
 use super::typing::canonical_call;
@@ -10,10 +11,12 @@ pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
 pub(crate) use body::{indexed_call_body_matches, indexed_call_body_origin};
-mod slots;
-pub(in crate::ncg2m) use slots::is_expression_slot;
 #[cfg(verus_only)]
-pub(in crate::ncg2m) use slots::{expression_slot, expression_slot_bounds};
+pub use body::{defn_body_calls_cover_slots, defn_call_edge_matches, defn_call_is_expression_slot};
+mod slots;
+pub(in crate::ncg2m) use slots::{is_expression_slot, mark_expression_slots};
+#[cfg(verus_only)]
+pub(in crate::ncg2m) use slots::{expression_slot, expression_slot_bounds, slot_marked};
 
 verus! {
 
@@ -100,6 +103,7 @@ pub(in crate::ncg2m) proof fn call_form_origin(source: &str, forms: Seq<Form>, a
         at + 1 < subtree_limit(forms, at) <= forms.len(),
         forms[at as int] is List, forms[at + 1] is Atom,
         call.span == form_span(forms[at as int]), call.head_span == form_span(forms[at + 1]),
+        call.word.spec_bytes() == spelling(source, forms[at + 1]),
 {}
 
 fn count_call_arguments(forms: &[Form], _call: usize, first: usize, end: usize) -> (count: usize)
@@ -190,11 +194,12 @@ pub(super) open spec fn call_signature_types_match(entry: CallTypeEntry, signatu
 }
 
 pub(super) fn prepare_call_types<'a>(
-    source: &'a str, forms: &[Form], call: usize, signature: &DefnSignature<'a>,
+    source: &'a str, forms: &[Form], call: usize, target: DefnPosition, signature: &DefnSignature<'a>,
 ) -> (entry: CallTypeEntry)
     requires usable_forms(source, forms@), call_has_arity(source, forms@, call, signature.parameters@.len() as usize),
         signature.parameters@.len() <= usize::MAX,
-    ensures canonical_call(forms@, entry), entry.at == call, call_signature_types_match(entry, *signature),
+    ensures canonical_call(forms@, entry), entry.at == call, entry.target == target,
+        call_signature_types_match(entry, *signature),
 {
     let Some((head, end, _)) = read_named_head(source, forms, call) else { unreachable!() };
     let first = head + 1;
@@ -234,6 +239,6 @@ pub(super) fn prepare_call_types<'a>(
         assert(argument_count(forms@, cursor, end) > 0);
         assert(false);
     }
-    CallTypeEntry { at: call, arguments, result: shape_of_type(signature.result_type.ty) }
+    CallTypeEntry { at: call, target, arguments, result: shape_of_type(signature.result_type.ty) }
 }
 }

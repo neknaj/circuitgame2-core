@@ -5,6 +5,11 @@ use crate::ncg2m::let_syntax::LetHeader;
 #[cfg(verus_only)]
 use crate::ncg2m::let_syntax::LocalBinding;
 
+mod coverage;
+pub(in crate::ncg2m) use coverage::mark_expression_slots;
+#[cfg(verus_only)]
+pub(in crate::ncg2m) use coverage::slot_marked;
+
 verus! {
 
 spec fn contains(forms: Seq<Form>, child: usize, at: usize) -> bool {
