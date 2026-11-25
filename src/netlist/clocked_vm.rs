@@ -681,6 +681,15 @@ impl ClockedVm {
     /// ゲートの登録値をネットリスト順に並べた列。
     pub closed spec fn gate_values_model(&self) -> Seq<bool> { self.gates@ }
 
+    /// 階層展開後の2入力 NOR ゲートの数を返す。
+    ///
+    /// ラッチや RAM は別の状態素子として保持するため、この数に含めない。
+    pub fn nor_gate_count(&self) -> (count: usize)
+        ensures count == self.netlist_model().gates@.len(),
+    {
+        self.circuit.checked_netlist().gates.len()
+    }
+
     /// 回路の出力フレームのビット数を返す。
     pub fn output_count(&self) -> (count: usize)
         ensures count == self.netlist_model().outputs@.len(),

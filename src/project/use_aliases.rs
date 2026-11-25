@@ -18,7 +18,7 @@ mod definitions;
 mod dependency_order;
 mod settling;
 mod settling_hint;
-pub use settling_hint::ModuleSettlingHint;
+pub use settling_hint::{ModuleExpansionHint, ModuleSettlingHint};
 pub use settling::clocked_nor_settling_bound;
 #[cfg(verus_only)]
 pub use settling::{clocked_nor_bound_matches, clocked_nor_depths, clocked_nor_has_cycle, clocked_nor_states_settle, fixed_nor_states};

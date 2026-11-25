@@ -110,7 +110,7 @@ pub use use_aliases::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits, Dev
 pub use use_aliases::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use use_aliases::ClockedModuleObservation;
-pub use use_aliases::ModuleSettlingHint;
+pub use use_aliases::{ModuleExpansionHint, ModuleSettlingHint};
 pub use use_aliases::{ClockedArgumentWiringError, ClockedModuleOutputs, ClockedModuleOutputsError};
 pub use use_aliases::{ClockedDriverBitsError, clocked_driver_bits};
 #[cfg(verus_only)]
