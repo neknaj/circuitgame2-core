@@ -92,6 +92,40 @@ fn local_recovery_keeps_only_the_changed_middle_owned_by_the_update() {
     );
 }
 
+#[test]
+fn localized_original_list_inspection_uses_current_document_positions() {
+    use circuitgame2_syntax::circuit::{CircuitRecovery, recover_circuit_forms};
+
+    let previous = "(using nor)(before)\r\n) (unknown-directive) (unfinished";
+    let current = "(using nor)(after \"🦊\")\r\n) (unknown-directive) (unfinished";
+    let start = "(using nor)".len();
+    let join = "(using nor)(before)".len();
+    let edges = remember_recovery_edges(previous, start, join).unwrap();
+    let update = edges.reparse(current).unwrap();
+    assert!(update.has_repairs());
+    let CircuitRecovery::WithSyntaxRepairs { recovered, original } = recover_circuit_forms(current) else {
+        panic!("expected syntax repairs");
+    };
+
+    let location = update.original_list_location(2, 0).unwrap();
+    assert_eq!(location.span, recovered.original_lists[2]);
+    assert!(matches!(&recovered.forms[location.form], Form::List { span, .. } if span == &location.span));
+    assert_eq!(
+        update.form_location(2, 0).unwrap(),
+        location,
+    );
+    let verified = update.inspect_original_list(2, 0).unwrap();
+    let reference = original[2].as_ref().unwrap();
+    assert_eq!(verified.span, reference.span);
+    assert_eq!(verified.forms, reference.forms);
+    assert!(!verified.source_diagnostics().is_empty());
+    assert!(verified.source_diagnostics().iter().any(Option::is_some));
+    assert_eq!(verified.source_diagnostics(), reference.source_diagnostics());
+    assert!(update.original_list_location(2, 1).is_none());
+    assert!(update.form_location(3, 0).is_none());
+    assert!(update.inspect_original_list(2, 1).is_none());
+}
+
 fn relative_to_tail(mut whole: Recovered, offset: usize) -> Recovered {
     let relative = |span: &Range<usize>| span.start - offset..span.end - offset;
     let first_form = whole.forms.partition_point(|form| match form {

@@ -497,6 +497,58 @@ pub closed spec fn recovery_three_parts_projection(
     &&& placed.original == whole.original_lists@
 }
 
+pub(super) proof fn observe_recovery_projection(
+    whole: &crate::Recovered, head: &crate::Recovered, changed: &crate::Recovered, tail: &crate::Recovered,
+    start: usize, join: usize, section: int, local: &crate::Recovered,
+    byte: int, form_base: int, list_base: int,
+)
+    requires
+        recovery_three_parts_projection(whole, head, changed, tail, start, join),
+        0 <= section < 3,
+        if section == 0 {
+            local == head && byte == 0 && form_base == 0 && list_base == 0
+        } else if section == 1 {
+            local == changed && byte == start && form_base == head.forms@.len()
+                && list_base == head.original_lists@.len()
+        } else {
+            local == tail && byte == join && form_base == head.forms@.len() + changed.forms@.len()
+                && list_base == head.original_lists@.len() + changed.original_lists@.len()
+        },
+    ensures
+        whole.repairs@.len() == head.repairs@.len() + changed.repairs@.len() + tail.repairs@.len(),
+        0 <= form_base && form_base + local.forms@.len() <= whole.forms@.len(),
+        0 <= list_base && list_base + local.original_lists@.len() <= whole.original_lists@.len(),
+        forall|i: int| 0 <= i < local.forms@.len()
+            ==> form_span(#[trigger] whole.forms@[form_base + i]) == place_range(form_span(local.forms@[i]), byte),
+        forall|i: int| 0 <= i < local.original_lists@.len()
+            ==> #[trigger] whole.original_lists@[list_base + i] == place_range(local.original_lists@[i], byte),
+{
+    let placed = project_parts_state(head, changed, tail, start, join);
+    assert(placed.forms == whole.forms@);
+    assert(placed.repairs == whole.repairs@);
+    assert(placed.original == whole.original_lists@);
+    assert forall|i: int| 0 <= i < local.forms@.len() implies
+        #[trigger] whole.forms@[form_base + i] == place_form(local.forms@[i], form_base, byte) by {
+        if section == 0 {
+            let form = local.forms@[i];
+            assert(place_form(form, 0, 0) == form) by {
+                assert(place_range(form_span(form), 0) == form_span(form));
+            };
+        }
+    }
+    assert forall|i: int| 0 <= i < local.forms@.len() implies
+        form_span(#[trigger] whole.forms@[form_base + i]) == place_range(form_span(local.forms@[i]), byte) by {
+        assert(whole.forms@[form_base + i] == place_form(local.forms@[i], form_base, byte));
+    }
+    assert forall|i: int| 0 <= i < local.original_lists@.len() implies
+        #[trigger] whole.original_lists@[list_base + i] == place_range(local.original_lists@[i], byte) by {
+        if section == 0 {
+            let span = local.original_lists@[i];
+            assert(place_range(span, 0) == span);
+        }
+    }
+}
+
 proof fn clean_middle_ends_at(
     all: Seq<ReplayFrame>, local: Seq<ReplayFrame>, split: int, start: usize, join: usize,
 )
