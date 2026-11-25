@@ -5,6 +5,32 @@ use super::super::super::named_call::call_signature_types_match;
 
 verus! {
 
+// 局所の型規則で保留される呼び出し形は、対応する署名がある場合に型検査を通る。
+pub(in crate::ncg2m::expression_types) proof fn accepted_call_has_entry(
+    calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>,
+    parameters: Seq<SignatureParameter>, at: usize, expected: DataType,
+) -> (site: usize)
+    requires
+        at < forms.len(),
+        shape(source, forms, at) == Err(ExpressionCheckFailure::Deferred(
+            DeferredExpression::Form(form_span(forms[at as int])),
+        )),
+        typed_body_with_calls(calls, source, forms, environment_view(parameters), at, type_shape(expected))
+            == BodyVerdict::Accepted,
+    ensures site < calls.len(), calls[site as int].at == at,
+{
+    if applicable_call(calls, source, forms, at).is_none() {
+        let expected = type_shape(expected);
+        let env = environment_view(parameters);
+        let request = Request { at, expected, list: None };
+        assert(step_model(source, forms, env, request) ==
+            Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(form_span(forms[at as int])))));
+        reveal_with_fuel(typed_expression, 2);
+        assert(false);
+    }
+    applicable_call(calls, source, forms, at)->Some_0
+}
+
 spec fn checked_argument_at(
     calls: Seq<CallTypeEntry>, source: &str, forms: Seq<Form>, env: Seq<TypeBinding>,
     entry: CallTypeEntry, slot: nat,

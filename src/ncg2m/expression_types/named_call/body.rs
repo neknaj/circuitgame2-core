@@ -20,7 +20,7 @@ mod coverage;
 #[cfg(verus_only)]
 mod typed_sites;
 #[cfg(verus_only)]
-pub(crate) use typed_sites::{defn_checked_call_arguments, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
+pub(crate) use typed_sites::{defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
 use coverage::first_unvisited_expression_entry;
 #[cfg(verus_only)]
 use coverage::call_trace_covers_slots;

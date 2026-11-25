@@ -3,7 +3,7 @@
 use super::*;
 
 mod declared_progress;
-pub(in crate::ncg2m::expression_types) use declared_progress::call_preserves_checked_types;
+pub(in crate::ncg2m::expression_types) use declared_progress::{accepted_call_has_entry, call_preserves_checked_types};
 
 verus! {
 

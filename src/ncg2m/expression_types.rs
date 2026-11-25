@@ -36,6 +36,11 @@ use vstd::string::StringSliceAdditionalSpecFns;
 mod fold;
 pub(crate) mod named_call;
 pub use named_call::DefnBodyCallError;
+#[cfg(verus_only)]
+pub use named_call::{
+    expression_slot, expression_slot_at_root, scalar_call_syntax_at, scalar_evaluator_syntax,
+    scalar_syntax_call_arguments, scalar_syntax_if_children,
+};
 mod local_scopes;
 mod typing;
 pub use fold::FoldSyntaxError;
