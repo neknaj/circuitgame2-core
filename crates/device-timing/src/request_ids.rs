@@ -7,6 +7,15 @@ use vstd::prelude::*;
 
 verus! {
 
+/// 発行する要求のインスタンスと、そのデバイス内のタグ。
+#[derive(Clone, Copy, Debug)]
+pub struct RequestKey {
+    /// 実行設定におけるデバイスの識別子。
+    pub instance: usize,
+    /// デバイス内のタグ番号。
+    pub tag: u64,
+}
+
 /// 応答を発行元の要求へ結び付ける、実行内の識別子。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostRequestId {
@@ -58,6 +67,43 @@ impl RequestIds {
 
     /// 次に発行する通し番号。全件発行後の値は `u64::MAX + 1`。
     pub closed spec fn next_model(&self) -> int { self.next as int }
+
+    /// 指定した通し番号が、この世代で確定した範囲に含まれるかを返す。
+    ///
+    /// 通し番号だけを照合する。要求のインスタンスを確かめるには、対応する要求 ID が必要になる。
+    pub fn contains_serial(&self, serial: u64) -> (contains: bool)
+        ensures contains == ((serial as int) < self.next_model()),
+    {
+        (serial as u128) < self.next
+    }
+
+    // 確定前の候補にだけ通し番号を割り当てられるように現在の状態を複製する。
+    pub(crate) fn snapshot(&self) -> (snapshot: Self)
+        ensures snapshot == *self,
+    {
+        proof { use_type_invariant(self); }
+        Self { generation: self.generation, next: self.next }
+    }
+
+    // 台帳に書き込む準備が済むまで、現在の採番状態を保持して次の状態だけを作る。
+    pub(crate) fn next_request(&self, instance: usize) -> (result: Result<(Self, HostRequestId), RequestIdError>)
+        ensures
+            result.is_ok() <==> self.fits(1),
+            result matches Ok((next, id)) ==> {
+                &&& next.generation_model() == self.generation_model()
+                &&& next.next_model() == self.next_model() + 1
+                &&& id.instance == instance
+                &&& id.generation == self.generation_model()
+                &&& id.serial as int == self.next_model()
+            },
+            result matches Err(error) ==> error == RequestIdError::SerialOutOfRange,
+    {
+        let mut next = self.snapshot();
+        let pending = next.prepare(1)?;
+        let Some(id) = pending.proposed_id(0, instance) else { unreachable!() };
+        pending.commit();
+        Ok((next, id))
+    }
 
     /// 指定の reset 世代を、未発行の状態から開始する。
     ///
@@ -113,6 +159,7 @@ impl RequestIds {
                 },
                 Err(error) => error == RequestIdError::SerialOutOfRange && *final(self) == *old(self),
             },
+        no_unwind
     {
         proof { use_type_invariant(&*self); }
         if self.next + count as u128 > u64::MAX as u128 + 1 {
@@ -167,6 +214,7 @@ impl<'a> PendingRequestIds<'a> {
             issued.count_model() == self.count_model(),
             self.after_model().next_model() == issued.first_model() + issued.count_model() as int,
             self.after_model().generation_model() == issued.generation_model(),
+        no_unwind
     {
         proof { use_type_invariant(&self); }
         let Self { sequence, count } = self;
