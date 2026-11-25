@@ -10,6 +10,27 @@ use vstd::utf8::{
 
 verus! {
 
+/// UTF-8 文字境界で指定された空でないバイト範囲を借りる。
+pub(crate) fn source_span(source: &str, start: usize, end: usize) -> (text: &str)
+    requires
+        start < end <= source.spec_bytes().len(),
+        is_char_boundary(source.spec_bytes(), start as int),
+        is_char_boundary(source.spec_bytes(), end as int),
+    ensures text.spec_bytes() == source.spec_bytes()[start as int..end as int],
+{
+    let (prefix, _) = source.split_at(end);
+    proof {
+        encode_utf8_valid_utf8(source@);
+        encode_utf8_valid_utf8(prefix@);
+        assert(prefix.spec_bytes()[start as int] == source.spec_bytes()[start as int]);
+        is_char_boundary_iff_not_is_continuation_byte(source.spec_bytes(), start as int);
+        is_char_boundary_iff_not_is_continuation_byte(prefix.spec_bytes(), start as int);
+    }
+    let (_, text) = prefix.split_at(start);
+    assert(text.spec_bytes() =~= source.spec_bytes()[start as int..end as int]);
+    text
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Boundary {
     NonSpace,

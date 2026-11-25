@@ -1,6 +1,6 @@
 //! S 式を回路文法に照らして検査し、宣言の位置を取り出す。
 
-use crate::{AtomKind, Error, Form, parse};
+use crate::{AtomKind, Error, Form, boundary::source_span, parse};
 #[cfg(verus_only)]
 use crate::{
     complete_list_indices, form_span, form_spans_valid, list_delimited, list_source_delimiters,
@@ -179,7 +179,6 @@ use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
 use vstd::utf8::{
     encode_utf8_decode_utf8, encode_utf8_valid_utf8, is_char_boundary,
-    is_char_boundary_iff_not_is_continuation_byte,
 };
 
 verus! {
@@ -685,26 +684,6 @@ fn form_span_exec(form: &Form) -> (span: Range<usize>)
     match form {
         Form::Atom { span, .. } | Form::List { span, .. } => span.start..span.end,
     }
-}
-
-fn source_span(source: &str, start: usize, end: usize) -> (word: &str)
-    requires
-        start < end <= source.spec_bytes().len(),
-        is_char_boundary(source.spec_bytes(), start as int),
-        is_char_boundary(source.spec_bytes(), end as int),
-    ensures word.spec_bytes() == source.spec_bytes()[start as int..end as int],
-{
-    let (prefix, _) = source.split_at(end);
-    proof {
-        encode_utf8_valid_utf8(source@);
-        encode_utf8_valid_utf8(prefix@);
-        assert(prefix.spec_bytes()[start as int] == source.spec_bytes()[start as int]);
-        is_char_boundary_iff_not_is_continuation_byte(source.spec_bytes(), start as int);
-        is_char_boundary_iff_not_is_continuation_byte(prefix.spec_bytes(), start as int);
-    }
-    let (_, word) = prefix.split_at(start);
-    assert(word.spec_bytes() =~= source.spec_bytes()[start as int..end as int]);
-    word
 }
 
 /// 区間内で、先行するリストの部分木に属さないフォームの位置を表す。
