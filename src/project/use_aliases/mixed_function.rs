@@ -4,7 +4,7 @@ mod arity;
 mod call_types;
 mod typed;
 pub use arity::MixedFuncArityError;
-pub use call_types::{MixedFuncOutputTypes, MixedFuncTypeError};
+pub use call_types::{MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError};
 pub use typed::{MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 
 use super::{MixedUseAliases, call_arity::{FuncCallArity, FuncCallTarget}, definitions::DefinitionReferenceSite,

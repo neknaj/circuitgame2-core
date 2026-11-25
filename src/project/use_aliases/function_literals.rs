@@ -266,6 +266,7 @@ pub(super) fn check_literals<'p, 'a>(
         _entry < parsed.syntax.entries@.len(),
         expected_output_context(source, parsed, _entry as int, *drivers),
     ensures literal_widths_match(source, parsed, drivers, limit, result),
+        result matches Ok(widths) ==> widths@.len() == drivers.definitions@.len(),
         result matches Err(error) ==> !(error is Arity),
 {
     let map = index_outputs(drivers);

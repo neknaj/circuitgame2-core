@@ -1,7 +1,10 @@
 //! 混在プロジェクトで通常呼び出しの出力型を左辺の名前に対応付ける。
 
+mod inputs;
+pub use inputs::MixedFuncInputTypes;
+
 use super::{MixedFuncArityError, MixedTypedSignatureError, MixedUseAliases, ProjectSourceIndex, arity::CheckedMixedCalls};
-use crate::project::{DefinitionPosition, FuncCallArity, FuncCallOutputError, FuncCallTarget, FuncLiteralError, FuncLiteralWidths,
+use crate::project::{CallInputError, DefinitionPosition, FuncAtomTypeError, FuncCallArity, FuncCallOutputError, FuncCallTarget, FuncLiteralError, FuncLiteralWidths,
     FuncDrivers, FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
 use crate::project::use_aliases::{
     call_arity::{outputs::transfer_call_output, typed::{cached_signature, signature_port}},
@@ -37,7 +40,13 @@ pub struct MixedFuncOutputTypes<'p, 'a> {
     pub types: Vec<Option<SignalType<'p, 'a>>>,
 }
 
-/// 混在プロジェクトの関数で、出力型の検査までに見つかった違反。
+struct PreparedMixedOutputs<'p, 'a> {
+    typed: MixedFuncOutputTypes<'p, 'a>,
+    calls: CheckedMixedCalls<'p, 'a>,
+    signatures: SignatureCache<'p, 'a>,
+}
+
+/// 混在プロジェクトの関数で、結線、個数、型または幅を検査して見つかった違反。
 #[derive(Debug)]
 pub enum MixedFuncTypeError<'p, 'a> {
     /// 結線またはポート数の違反。
@@ -53,6 +62,10 @@ pub enum MixedFuncTypeError<'p, 'a> {
     },
     /// 呼び出しが返した型と、対応する出力ポートの型の違い。
     Output(FuncCallOutputError<'p, 'a>),
+    /// 裸の信号の型と、駆動先で要求された型が異なる。
+    Signal(FuncAtomTypeError<'p, 'a>),
+    /// 通常呼び出しの実引数の幅または型が合わない。
+    Input(CallInputError<'p, 'a>),
 }
 
 impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
@@ -159,12 +172,38 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
         ensures self.mixed_func_output_types_match(file, entry, limit, result),
     {
+        match self.prepare_mixed_output_analysis(file, entry, limit) {
+            Ok(prepared) => Ok(prepared.typed),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prepare_mixed_output_analysis(&self, file: usize, entry: usize, limit: u64)
+        -> (result: Result<PreparedMixedOutputs<'p, 'a>, MixedFuncTypeError<'p, 'a>>)
+        requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures match result {
+            Ok(prepared) => {
+                let project = self.targets_model().project_model();
+                &&& self.mixed_func_output_types_match(file, entry, limit, Ok(prepared.typed))
+                &&& prepared.signatures.matches_mixed(self, limit)
+                &&& prepared.typed.literals.wiring matches FuncWiringResult::Checked(scope) ==> {
+                    let source = &project.sources_model()[file as int];
+                    let parsed = &project.indexes_model()[file as int]->Circuit_0;
+                    &&& self.mixed_output_context(file, entry, source, parsed, &scope.drivers, prepared.calls)
+                    &&& prepared.typed.literals.widths@.len() == scope.drivers.definitions@.len()
+                }
+            },
+            Err(error) => self.mixed_func_output_types_match(file, entry, limit, Err(error)),
+        },
+    {
         let (wiring, calls) = match self.prepare_mixed_func_arity(file, entry, limit, true) {
             Ok(prepared) => prepared,
             Err(error) => return Err(MixedFuncTypeError::Arity(error)),
         };
+        let mut signatures = SignatureCache::new();
         let FuncWiringResult::Checked(ref scope) = wiring else {
-            return Ok(MixedFuncOutputTypes { literals: FuncLiteralWidths { wiring, widths: Vec::new() }, types: Vec::new() });
+            let typed = MixedFuncOutputTypes { literals: FuncLiteralWidths { wiring, widths: Vec::new() }, types: Vec::new() };
+            return Ok(PreparedMixedOutputs { typed, calls, signatures });
         };
         proof {
             self.mixed_arity_preserves_wiring(file, entry, limit, wiring);
@@ -190,7 +229,6 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             Err(error) => return Err(MixedFuncTypeError::Literal(error)),
         };
         let outlets = index_outputs(drivers);
-        let mut signatures = SignatureCache::new();
         let mut types = Vec::new();
         let mut index = 0;
         proof { reveal(MixedUseAliases::mixed_output_prefix); }
@@ -234,7 +272,8 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             }
             index += 1;
         }
-        Ok(MixedFuncOutputTypes { literals: FuncLiteralWidths { wiring, widths }, types })
+        let typed = MixedFuncOutputTypes { literals: FuncLiteralWidths { wiring, widths }, types };
+        Ok(PreparedMixedOutputs { typed, calls, signatures })
     }
 
     #[verifier::spinoff_prover]

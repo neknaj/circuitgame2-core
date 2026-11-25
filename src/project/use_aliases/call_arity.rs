@@ -6,9 +6,9 @@ pub(super) mod outputs;
 pub(super) mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
-pub(super) use inputs::check_leaf;
+pub(super) use inputs::{check_leaf, report_call_argument};
 #[cfg(verus_only)]
-pub(super) use inputs::{checked_literal_leaf_width, checked_name_leaf_type, checked_nor_literal_width, leaf_result};
+pub(super) use inputs::{checked_literal_leaf_width, checked_name_leaf_type, checked_nor_literal_width, leaf_result, reported_argument};
 pub(super) use inputs::CallArgumentProjections;
 pub(super) use inputs::{CallArgumentSource, ProjectedCallArgument, RetainedCallTarget};
 pub use outputs::{FuncCallOutputError, FuncCallOutputTypes};

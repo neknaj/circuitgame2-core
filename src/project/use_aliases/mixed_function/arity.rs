@@ -123,6 +123,17 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         }
     }
 
+    pub(super) proof fn retained_def_ranges_ordered(definitions: Seq<Range<usize>>, i: int, j: int)
+        requires
+            0 <= i < j < definitions.len(),
+            forall|k: int| 0 < k < definitions.len() ==> (#[trigger] definitions[k]).start == definitions[k - 1].end,
+            forall|k: int| 0 <= k < definitions.len() ==> (#[trigger] definitions[k]).start <= definitions[k].end,
+        ensures definitions[i].end <= definitions[j].start,
+        decreases j - i,
+    {
+        if i + 1 < j { Self::retained_def_ranges_ordered(definitions, i, j - 1); }
+    }
+
     fn check_mixed_definition_arity(&self, file: usize, entry: usize, definition: usize,
         retain: bool, positions: &mut Vec<(usize, FuncCallArity<'p, 'a>)>)
         -> (result: Result<(), MixedFuncArityError<'p, 'a>>)
