@@ -723,7 +723,8 @@ pub open spec fn following_direct_form(forms: Seq<Form>, index: int, next: int) 
     }
 }
 
-proof fn node_end_is_following_direct_form(forms: Seq<Form>, index: int, next: int)
+/// 部分木の末尾が、直下のフォームを走査するときの次の位置になることを示す。
+pub proof fn node_end_is_following_direct_form(forms: Seq<Form>, index: int, next: int)
     requires
         0 <= index < next <= forms.len(),
         if forms[index] is List { forms[index]->List_end == next } else { next == index + 1 },

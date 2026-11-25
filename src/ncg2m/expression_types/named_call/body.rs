@@ -608,6 +608,22 @@ pub proof fn defn_call_argument_origin(forms: Seq<Form>, at: usize, arguments: S
     },
 {}
 
+pub(super) proof fn call_arguments_from_intervals(
+    forms: Seq<Form>, owner: usize, arguments: Seq<usize>,
+)
+    requires
+        owner < forms.len(), forms[owner as int] is List,
+        owner + 2 <= subtree_limit(forms, owner) <= forms.len(),
+        if arguments.len() == 0 { owner + 2 == subtree_limit(forms, owner) } else { arguments[0] == owner + 2 },
+        forall|i: int| 0 <= i < arguments.len() ==> {
+            let child = #[trigger] arguments[i];
+            &&& owner < child < subtree_limit(forms, child) <= subtree_limit(forms, owner)
+            &&& if i + 1 < arguments.len() { subtree_limit(forms, child) == arguments[i + 1] }
+                else { subtree_limit(forms, child) == subtree_limit(forms, owner) }
+        },
+    ensures defn_call_arguments(forms, owner, arguments),
+{}
+
 pub(super) proof fn call_argument_intervals(
     forms: Seq<Form>, owner: usize, arguments: Seq<usize>, index: int,
 )

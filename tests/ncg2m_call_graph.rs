@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{
-    ScalarArgumentsStep, ScalarBindingError, ScalarExecution, ScalarExecutionError, ScalarExecutionSlice, ScalarExpression, ScalarExpressionStep, ScalarInvocationError,
-    ScalarInvocationSlice, ScalarValue, bind_scalar_call,
-    prepare_scalar_arguments, prepare_scalar_invocation,
+    ScalarArgumentsStep, ScalarBindingError, ScalarEntryError, ScalarExecution, ScalarExecutionError,
+    ScalarExecutionSlice, ScalarExpression, ScalarExpressionStep, ScalarInvocationError, ScalarInvocationSlice,
+    ScalarValue, bind_scalar_call, prepare_scalar_arguments, prepare_scalar_entry, prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
 use circuitgame2_core::ncg2m::integers::IntegerValue;
@@ -214,4 +214,43 @@ fn slices_resume_nested_arguments_in_the_original_environment() {
         }
     }
     panic!("the small call graph should finish within the test's step limit");
+}
+
+
+#[test]
+fn scalar_fragment_support_checks_bodies_reachable_through_either_branch() {
+    let snapshots = [SourceSnapshot {
+        path: "support.ncg2m", revision: 1,
+        text: "(defn root (as-type (Fn () Bool) (fn () (if (pass (leaf)) true (pending)))))
+               (defn pass (as-type (Fn (Bool) Bool) (fn (x) x)))
+               (defn leaf (as-type (Fn () Bool) (fn () true)))
+               (defn pending (as-type (Fn () Bool) (fn () (as-type Bool true))))
+               (defn accepted (as-type (Fn () Bool) (fn () (if (pass (leaf)) true false))))",
+    }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    for (item, (body_support, fragment_support)) in
+        [(true, false), (true, true), (true, true), (false, false), (true, true)]
+            .into_iter()
+            .enumerate()
+    {
+        let rank = plan.rank_of(DefnPosition { file: 0, item }).unwrap();
+        assert_eq!(plan.scalar_body_support_at_rank(rank), Some(body_support));
+        assert_eq!(plan.scalar_fragment_support_at_rank(rank), Some(fragment_support));
+    }
+    let accepted = plan.rank_of(DefnPosition { file: 0, item: 4 }).unwrap();
+    let entry = prepare_scalar_entry(&plan, DefnPosition { file: 0, item: 4 }).unwrap();
+    assert_eq!(entry.rank(), accepted);
+    assert!(matches!(entry.start(vec![ScalarValue::Bool(false)]), Err(ScalarBindingError::Arity { .. })));
+    let state = entry.start(Vec::new()).unwrap();
+    let result = state.run_slice(NonZeroUsize::new(128).unwrap()).unwrap();
+    assert!(matches!(result, ScalarExecutionSlice::Complete(ScalarValue::Bool(true))));
+    assert!(matches!(prepare_scalar_entry(&plan, DefnPosition { file: 0, item: 0 }),
+        Err(ScalarEntryError::UnsupportedFragment)));
+    assert!(matches!(prepare_scalar_entry(&plan, DefnPosition { file: 1, item: 0 }),
+        Err(ScalarEntryError::UnknownDefinition)));
+    assert_eq!(plan.scalar_body_support_at_rank(usize::MAX), None);
+    assert_eq!(plan.scalar_fragment_support_at_rank(usize::MAX), None);
 }

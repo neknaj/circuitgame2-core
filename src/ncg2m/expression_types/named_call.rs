@@ -7,8 +7,8 @@ use super::typing::{CallArgument, CallTypeEntry};
 use super::typing::canonical_call;
 
 mod body;
-#[cfg(verus_only)]
 mod fragment;
+pub(crate) use fragment::check_scalar_body_syntax;
 #[cfg(verus_only)]
 pub use fragment::{scalar_call_syntax_at, scalar_evaluator_syntax, scalar_syntax_call_arguments,
     scalar_syntax_form_kind, scalar_syntax_if_children, scalar_syntax_matches_call_arguments,

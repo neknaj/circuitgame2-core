@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod runtime;
+pub(crate) use runtime::check_scalar_body_syntax;
+
 verus! {
 
 /// 補助関数名を先頭に書く呼び出し形を表す。名前と署名の照合は別の判断で扱う。

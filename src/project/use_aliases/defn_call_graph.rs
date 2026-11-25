@@ -30,6 +30,7 @@ use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, de
 
 #[cfg(verus_only)]
 mod typing;
+mod runtime_support;
 
 verus! {
 
@@ -178,9 +179,12 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
     /// 宣言の位置から評価順の順位を得る。計画に含まれなければ `None` を返す。
     pub fn rank_of(&self, position: DefnPosition) -> (rank: Option<usize>)
         ensures
+            self.order_nodes_valid(),
             rank.is_some() == self.order_model().contains(position),
             rank matches Some(i) ==> i < self.order_model().len()
-                && i == self.order_model().index_of(position),
+                && i == self.order_model().index_of(position)
+                && self.order_model()[i as int] == position
+                && self.project_model().indexed_defn(position.file, position.item).is_some(),
     {
         proof { use_type_invariant(self); }
         let Some(node) = vertex_index(self.vertices.as_slice(), position) else {
@@ -195,6 +199,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         };
         let rank = self.ranks[node];
         proof {
+            reveal(ordered_edges);
             let ranked = self.order_model();
             assert(self.order@[rank as int] == node);
             assert(ranked[rank as int] == position);
@@ -228,6 +233,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         &&& *body.source == project.sources_model()[defn.file as int]
         &&& project.functional_forms_model(defn.file) == Some(body.forms@)
         &&& crate::ncg2m::file::retained_forms_in_source_order(body.forms@)
+        &&& crate::syntax::complete_list_indices(body.forms@) && crate::syntax::nested_list_indices(body.forms@)
         &&& body.at < body.forms@.len()
         &&& form_spans_valid(body.source.text_model(), body.forms@,
             body.source.text_model().spec_bytes().len() as int)
@@ -309,6 +315,15 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
             Some(self.edges@[self.order@[rank as int] as int]@)
         } else {
             None
+        }
+    }
+
+    pub(crate) proof fn call_row_fits_runtime_index(&self, rank: usize)
+        ensures self.calls_model_at_rank(rank) matches Some(row) ==> row.len() <= usize::MAX,
+    {
+        if self.calls_model_at_rank(rank).is_some() {
+            let row = self.edges@[self.order@[rank as int] as int];
+            assert(row.len() == self.calls_model_at_rank(rank)->Some_0.len());
         }
     }
 
