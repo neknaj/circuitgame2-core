@@ -70,13 +70,13 @@ pub enum RelativeResolutionError<'p, 'a> {
     Private(LocatedName<'p, 'a>),
 }
 
-spec fn parent_spelling(head: NameKey, middle: Option<&str>) -> Seq<char> {
+pub(super) open spec fn parent_spelling(head: NameKey, middle: Option<&str>) -> Seq<char> {
     let separator = "::"@;
     let base = if let Some(parent) = head.parent { parent@ + separator + head.name@ } else { head.name@ };
     if let Some(middle) = middle { base + separator + middle@ } else { base }
 }
 
-fn destination_parent(head: NameKey, middle: Option<&str>) -> (parent: String)
+pub(super) fn destination_parent(head: NameKey, middle: Option<&str>) -> (parent: String)
     ensures parent@ == parent_spelling(head, middle),
 {
     let mut path = String::new();

@@ -363,6 +363,108 @@ fn typed_host_requests_keep_notifications_in_order_without_using_request_numbers
 }
 
 #[test]
+fn mixed_device_events_keep_arrival_order_after_a_cancelled_update() {
+    use circuitgame2_core::device::{
+        DeviceEvent, HostRequestId, RequestLedger, ResponseTickError, ScheduleInputError,
+    };
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::{ScheduledEvents, TickPosition};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+    let mut ledger = RequestLedger::new(0);
+    let mut events = ScheduledEvents::new();
+    let id = HostRequestId { instance: 1, generation: 0, serial: 0 };
+    let target = TickPosition { generation: 0, tick: 1 };
+    let later = TickPosition { generation: 0, tick: 2 };
+    ledger.register(id, 7, 0).unwrap();
+    assert_eq!(session.schedule_device_input(&mut events, 0, session.position(), 9),
+        Err(ScheduleInputError::AlreadyCommitted));
+    session.schedule_device_input(&mut events, 0, target, 10).unwrap();
+    session.schedule_device_input(&mut events, 0, later, 20).unwrap();
+    session.schedule_device_response(&mut ledger, &mut events, id, target, "answer").unwrap();
+    session.schedule_device_input(&mut events, 1, target, 30).unwrap();
+
+    let prepared = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(prepared.next_event(1).map(|(index, _)| index), Some(2));
+    assert!(matches!(prepared.commit_device_events(&mut ledger, &[]),
+        Err(ResponseTickError::Input(TickInputError::InputCount))));
+    assert_eq!(session.position().tick, 0);
+
+    let ready = session.prepare_io_tick(&mut events).unwrap()
+        .commit_device_events(&mut ledger, &[true]).unwrap();
+    assert_eq!(ready.len(), 3);
+    assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 10 }));
+    assert!(matches!(&ready[1].payload, DeviceEvent::Response(response)
+        if response.request_id() == id && response.tag() == 7 && response.payload() == &"answer"));
+    assert!(matches!(ready[2].payload, DeviceEvent::Input { instance: 1, payload: 30 }));
+
+    let ready = session.prepare_io_tick(&mut events).unwrap()
+        .commit_device_events(&mut ledger, &[false]).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 20 }));
+}
+
+#[test]
+fn device_session_commits_mixed_events_and_new_requests_then_discards_old_inputs_on_reset() {
+    use circuitgame2_core::device::{
+        CommittedHostRequest, DeviceEvent, DeviceEventSession, DeviceHostRequest, HostRequest,
+    };
+    use circuitgame2_core::netlist::ClockedVm;
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceEventSession::<u8, &str>::new(vm);
+
+    let first_request: [DeviceHostRequest<(), _>; 1] = [DeviceHostRequest {
+        instance: 0,
+        request: HostRequest::Request { tag: 1, payload: "first" },
+    }];
+    let (_, outgoing) = session.prepare_tick().unwrap()
+        .commit_host_requests(&[false], &first_request).unwrap();
+    let Some(CommittedHostRequest::Request { id, .. }) = outgoing.get(0) else {
+        panic!("expected a committed request");
+    };
+
+    let target = TickPosition { generation: 0, tick: 2 };
+    session.schedule_input(0, target, 4).unwrap();
+    session.schedule_response(id, target, "answer").unwrap();
+    session.schedule_input(0, TickPosition { generation: 0, tick: 3 }, 5).unwrap();
+
+    let pending = session.prepare_tick().unwrap();
+    assert!(matches!(&pending.next_event(0).unwrap().1.payload,
+        DeviceEvent::Input { instance: 0, payload: 4 }));
+    pending.cancel();
+
+    let next_request = [DeviceHostRequest {
+        instance: 0,
+        request: HostRequest::Request { tag: 2, payload: "next" },
+    }, DeviceHostRequest { instance: 0, request: HostRequest::Notify("notice") }];
+    let (events, outgoing) = session.prepare_tick().unwrap()
+        .commit_host_requests(&[true], &next_request).unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0].payload, DeviceEvent::Input { payload: 4, .. }));
+    assert!(matches!(&events[1].payload, DeviceEvent::Response(response)
+        if response.request_id() == id && response.payload() == &"answer"));
+    assert!(matches!(outgoing.get(0), Some(CommittedHostRequest::Request { id, .. }) if id.serial == 1));
+
+    let discarded = session.prepare_reset().unwrap().commit();
+    assert_eq!(discarded.len(), 1);
+    assert!(matches!(&discarded[0].payload, DeviceEvent::Input { payload: 5, .. }));
+    assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,

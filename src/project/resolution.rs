@@ -429,7 +429,7 @@ impl<'p, 'a> MixedExportTable<'p, 'a> {
         }
     }
 
-    fn resolve_mixed_key<'q>(&self, key: NameKey<'q>, from: Option<&str>)
+    pub(in crate::project) fn resolve_mixed_key<'q>(&self, key: NameKey<'q>, from: Option<&str>)
         -> (result: Result<MixedAbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>>)
         ensures mixed_key_resolution(self, key, from, result),
     {

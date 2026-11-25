@@ -34,6 +34,8 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
 mod fold;
+pub(crate) mod named_call;
+pub use named_call::DefnBodyCallError;
 mod local_scopes;
 mod typing;
 pub use fold::FoldSyntaxError;
