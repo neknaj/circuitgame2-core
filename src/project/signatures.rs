@@ -752,6 +752,24 @@ impl<'a> ParsedProjectSources<'a> {
         indexed_width_sites(source, &parsed.syntax, entry as int, max_width, ports);
     }
 
+    pub(in crate::project) proof fn mixed_routine_indexed_sites(
+        &self, file: usize, entry: usize, max_width: u64, signature: CheckedRoutineSignature,
+    )
+        requires self.mixed_routine_signature_evidence(file, entry, max_width, Ok(Some(signature))),
+        ensures ({
+            let parsed = self.indexes_model()[file as int]->Circuit_0;
+            &&& checked_name_sites(parsed.syntax.forms@, signature.ports.inputs@)
+            &&& checked_name_sites(parsed.syntax.forms@, signature.ports.outputs@)
+        }),
+    {
+        let source = &self.sources_model()[file as int];
+        let parsed = self.indexes_model()[file as int]->Circuit_0;
+        let (ports, inputs, outputs) = choose|ports: RoutinePortWidths, inputs: Seq<NameSite>, outputs: Seq<NameSite>|
+            indexed_port_widths_evidence(source, &parsed.syntax, entry as int, max_width, Ok(Some(ports)))
+                && #[trigger] checked_signature_evidence(source, parsed.syntax.forms@, &ports, inputs, outputs, Ok(Some(signature)));
+        indexed_width_sites(source, &parsed.syntax, entry as int, max_width, ports);
+    }
+
     /// 混在ソース集合から回路の署名を検査する。
     ///
     /// `file` は正規化した混在ソース列、`entry` はファイル内の厳格索引の添字。
