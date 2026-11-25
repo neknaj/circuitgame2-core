@@ -1,6 +1,9 @@
 //! 回復後も確認できる宣言と名前空間を、元のソースに結び付ける。
 
+use alloc::vec::Vec;
 use super::declarations::defines_binding;
+#[cfg(verus_only)]
+use super::name_keys::key_bytes;
 #[cfg(verus_only)]
 use super::declarations::named_binding;
 use super::{LocatedName, NameKey, ProjectSource, SourceKind};
@@ -200,6 +203,243 @@ impl<'p, 'a> CircuitEditorFile<'p, 'a> {
         })
     }
 }
+
+type PositionedBinding<'p, 'a> = (RecoveredNamePosition, ObservedCircuitBinding<'p, 'a>);
+
+impl ObservedCircuitBinding<'_, '_> {
+    /// 独立宣言が指定した完全修飾名を持つことを表す。
+    pub open spec fn has_declaration_key(&self, key: NameKey) -> bool {
+        match self.kind {
+            ObservedCircuitBindingKind::Declaration { key: candidate, .. } => key_bytes(candidate) == key_bytes(key),
+            ObservedCircuitBindingKind::Namespace(_) => false,
+        }
+    }
+}
+
+spec fn is_candidate_result(binding: Option<ObservedCircuitBinding>, key: NameKey) -> bool {
+    binding matches Some(binding) && binding.has_declaration_key(key)
+}
+
+proof fn candidates_agree(
+    file: &CircuitEditorFile, position: RecoveredNamePosition, key: NameKey,
+    left: Option<ObservedCircuitBinding>, right: Option<ObservedCircuitBinding>,
+)
+    requires file.binding_matches(position, left), file.binding_matches(position, right),
+    ensures is_candidate_result(left, key) == is_candidate_result(right, key),
+{
+    reveal(CircuitEditorFile::binding_matches);
+    let names = file.recovered_names_model();
+    let source = file.source_model();
+    let a = choose|name: Option<RecoveredName>| #[trigger] names.name_matches(position, name)
+        && left == match name {
+            Some(name) => observed_binding(source, name),
+            None => None,
+        };
+    let b = choose|name: Option<RecoveredName>| #[trigger] names.name_matches(position, name)
+        && right == match name {
+            Some(name) => observed_binding(source, name),
+            None => None,
+        };
+    names.names_agree_at(position, a, b);
+}
+
+proof fn exclude_candidate(
+    file: &CircuitEditorFile, position: RecoveredNamePosition, key: NameKey,
+    result: Option<ObservedCircuitBinding>,
+)
+    requires file.binding_matches(position, result), !is_candidate_result(result, key),
+    ensures forall|binding: ObservedCircuitBinding|
+        #[trigger] file.binding_matches(position, Some(binding)) ==> !binding.has_declaration_key(key),
+{
+    assert forall|binding: ObservedCircuitBinding|
+        #[trigger] file.binding_matches(position, Some(binding)) implies !binding.has_declaration_key(key) by {
+        candidates_agree(file, position, key, result, Some(binding));
+    };
+}
+
+
+spec fn observes_candidate(
+    file: &CircuitEditorFile, key: NameKey, group: usize, item: usize, row: Option<PositionedBinding>,
+) -> bool {
+    match file.recovered_names_model().position_model(group, item) {
+        None => row.is_none(),
+        Some(position) => match row {
+            Some((at, binding)) => at == position
+                && file.binding_matches(position, Some(binding)) && binding.has_declaration_key(key),
+            None => forall|binding: ObservedCircuitBinding|
+                #[trigger] file.binding_matches(position, Some(binding)) ==> !binding.has_declaration_key(key),
+        },
+    }
+}
+
+#[verifier::opaque]
+spec fn candidate_group_prefix(
+    file: &CircuitEditorFile, key: NameKey, group: usize, rows: Seq<PositionedBinding>, rank: Seq<nat>,
+) -> bool {
+    &&& rank.len() > 0
+    &&& forall|i: int| 0 <= i < rank.len() - 1 ==> {
+        let first = #[trigger] rank[i];
+        let next = rank[i + 1];
+        &&& first <= next <= rows.len()
+        &&& next <= first + 1
+        &&& observes_candidate(file, key, group, i as usize,
+            if first == next { None } else { Some(rows[first as int]) })
+    }
+}
+
+proof fn item_for_candidate(rank: Seq<nat>, row: int, from: int, end: int) -> (item: int)
+    requires
+        0 <= from < end < rank.len(),
+        rank[from] <= row < rank[end],
+        forall|i: int| from <= i < end ==> #[trigger] rank[i + 1] <= rank[i] + 1,
+    ensures from <= item < end, rank[item] == row, rank[item + 1] == row + 1,
+    decreases end - from,
+{
+    if row < rank[from + 1] {
+        from
+    } else {
+        item_for_candidate(rank, row, from + 1, end)
+    }
+}
+
+
+proof fn candidate_group_extend(
+    file: &CircuitEditorFile, key: NameKey, group: usize,
+    before: Seq<PositionedBinding>, after: Seq<PositionedBinding>, rank: Seq<nat>,
+)
+    requires
+        candidate_group_prefix(file, key, group, before, rank),
+        rank.last() == before.len(),
+        before.len() <= after.len() <= before.len() + 1,
+        after.take(before.len() as int) == before,
+        rank.len() - 1 <= usize::MAX,
+        observes_candidate(file, key, group, (rank.len() - 1) as usize,
+            if before.len() == after.len() { None } else { Some(after.last()) }),
+    ensures candidate_group_prefix(file, key, group, after, rank.push(after.len())),
+{
+    reveal(candidate_group_prefix);
+    let extended = rank.push(after.len());
+    assert forall|i: int| 0 <= i < extended.len() - 1 implies {
+        let first = #[trigger] extended[i];
+        let next = extended[i + 1];
+        &&& first <= next <= after.len()
+        &&& next <= first + 1
+        &&& observes_candidate(file, key, group, i as usize,
+            if first == next { None } else { Some(after[first as int]) })
+    } by {
+        if i + 1 < rank.len() {
+            assert(extended[i] == rank[i]);
+            assert(extended[i + 1] == rank[i + 1]);
+            if rank[i] < rank[i + 1] {
+                assert(after[rank[i] as int] == before[rank[i] as int]);
+            }
+        } else {
+            assert(extended[i] == rank.last());
+            assert(extended[i + 1] == after.len());
+            if before.len() < after.len() {
+                assert(after[before.len() as int] == after.last());
+            }
+        }
+    };
+}
+
+impl<'p, 'a> CircuitEditorFile<'p, 'a> {
+    /// フォーム群の各項目と候補列との対応を表す。候補の順番は検査項目の順番に従う。
+    pub closed spec fn group_candidates_match(
+        &self, key: NameKey, group: usize, rows: Seq<PositionedBinding<'p, 'a>>,
+    ) -> bool {
+        &&& self.recovered_names_model().position_count_model(group) <= usize::MAX
+        &&& exists|rank: Seq<nat>| #[trigger] candidate_group_prefix(self, key, group, rows, rank)
+            && rank.len() == self.recovered_names_model().position_count_model(group) + 1
+            && rank.first() == 0 && rank.last() == rows.len()
+    }
+
+    /// 候補列の行に対応するフォーム群内の項目を特定する。
+    pub proof fn group_candidate_origin(
+        &self, key: NameKey, group: usize, rows: Seq<PositionedBinding<'p, 'a>>, row: int,
+    ) -> (item: usize)
+        requires self.group_candidates_match(key, group, rows), 0 <= row < rows.len(),
+        ensures
+            item < self.recovered_names_model().position_count_model(group),
+            self.recovered_names_model().position_model(group, item) == Some(rows[row].0),
+            self.binding_matches(rows[row].0, Some(rows[row].1)),
+            rows[row].1.has_declaration_key(key),
+    {
+        let rank = choose|rank: Seq<nat>| #[trigger] candidate_group_prefix(self, key, group, rows, rank)
+            && rank.len() == self.recovered_names_model().position_count_model(group) + 1
+            && rank.first() == 0 && rank.last() == rows.len();
+        reveal(candidate_group_prefix);
+        let end = rank.len() - 1;
+        assert forall|i: int| 0 <= i < end implies #[trigger] rank[i + 1] <= rank[i] + 1 by {
+            assert(rank[i] <= rank[i + 1]);
+        };
+        let item = item_for_candidate(rank, row, 0, end);
+        assert(observes_candidate(self, key, group, item as usize, Some(rows[row])));
+        item as usize
+    }
+
+
+    fn declaration_candidate_at(&self, key: NameKey, group: usize, item: usize)
+        -> (candidate: Option<PositionedBinding<'p, 'a>>)
+        ensures observes_candidate(self, key, group, item, candidate),
+    {
+        let names = self.recovered_names();
+        let position = names.position(group, item)?;
+        let found = self.observed_binding_at(position);
+        if let Some(binding) = found {
+            if let ObservedCircuitBindingKind::Declaration { key: candidate, .. } = &binding.kind {
+                if candidate.same_name(key) {
+                    return Some((position, binding));
+                }
+            }
+        }
+        proof { exclude_candidate(self, position, key, found); }
+        None
+    }
+
+
+    /// 同じ完全修飾名の宣言を、指定したフォーム群から元ソース順に集める。
+    ///
+    /// 回復から確認できた宣言を対象とする。空の結果はプロジェクト内に宣言がないことを意味しない。
+    pub fn declaration_candidates_in_group(&self, key: NameKey, group: usize)
+        -> (rows: Vec<PositionedBinding<'p, 'a>>)
+        ensures
+            self.group_candidates_match(key, group, rows@),
+            group >= self.recovered_names_model().position_group_count_model() ==> rows@.len() == 0,
+    {
+        let names = self.recovered_names();
+        let count = names.position_count(group);
+        let mut rows = Vec::new();
+        let mut item = 0usize;
+        let ghost mut rank = seq![0nat];
+        proof { reveal(candidate_group_prefix); }
+        while item < count
+            invariant
+                names == self.recovered_names_model(),
+                count == names.position_count_model(group),
+                item <= count,
+                rank.len() == item + 1,
+                rank.first() == 0,
+                rank.last() == rows@.len(),
+                candidate_group_prefix(self, key, group, rows@, rank),
+            decreases count - item,
+        {
+            let ghost before = rows@;
+            if let Some(candidate) = self.declaration_candidate_at(key, group, item) {
+                rows.push(candidate);
+            }
+            proof {
+                assert(rows@.take(before.len() as int) =~= before);
+                candidate_group_extend(self, key, group, before, rows@, rank);
+                rank = rank.push(rows@.len());
+                assert(rank.last() == rows@.len());
+            }
+            item += 1;
+        }
+        rows
+    }
+}
+
 
 /// 元のソーススナップショットに回路フォームの回復結果を結び付ける。
 ///

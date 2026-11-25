@@ -39,3 +39,23 @@ fn recovered_declaration_retains_the_collected_file_and_revision() {
     sources[1].kind = SourceKind::Circuit;
     assert!(inspect_circuit_file(&sources[1]).is_none());
 }
+
+#[test]
+fn finds_all_observed_declarations_in_check_order() {
+    let text = concat!(
+        "(namespace app (bad) (func target (in) (out y) (def y 0)) ",
+        "(func other (in) (out y) (def y 0)) (func target (in) (out y) (def y 1)))",
+    );
+    let input = [SourceSnapshot { path: "main.ncg2", revision: 7, text }];
+    let sources = collect_sources(&input).unwrap();
+    let file = inspect_circuit_file(&sources[0]).unwrap();
+    let key = circuitgame2_core::project::NameKey { parent: Some("app"), name: "target" };
+    let names = file.recovered_names();
+    assert_eq!(names.position_group_count(), 1);
+    let hits = file.declaration_candidates_in_group(key, 0);
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].0, RecoveredNamePosition::File(2));
+    assert_eq!(hits[1].0, RecoveredNamePosition::File(4));
+    assert!(hits[0].1.location.span.end < hits[1].1.location.span.start);
+    assert!(file.declaration_candidates_in_group(key, 1).is_empty());
+}

@@ -74,6 +74,80 @@ spec fn projected_item(
     }
 }
 
+/// 名前と所属が同じ種別、元の範囲、UTF-8 本文を持つことを表す。
+pub open spec fn recovered_names_agree(left: Option<RecoveredName>, right: Option<RecoveredName>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.head == right.head
+            && left.name.span == right.name.span && left.name.word.spec_bytes() == right.name.word.spec_bytes()
+            && match (left.namespace, right.namespace) {
+                (None, None) => true,
+                (Some(left), Some(right)) => left.span == right.span && left.word.spec_bytes() == right.word.spec_bytes(),
+                _ => false,
+            },
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+proof fn projected_entries_agree(
+    a: &str, b: &str, forms: Seq<Form>, entry: Entry, offset: usize,
+    left: Option<RecoveredName>, right: Option<RecoveredName>,
+)
+    requires
+        a.spec_bytes() == b.spec_bytes(),
+        projected_entry(a, forms, entry, offset, left),
+        projected_entry(b, forms, entry, offset, right),
+    ensures recovered_names_agree(left, right),
+{
+    if named_head(entry.head) {
+        let l = left->Some_0;
+        let r = right->Some_0;
+        let x = choose|x: NamedForm| {
+            &&& #[trigger] named_form_matches(a, forms, entry, x)
+            &&& l.head == x.head
+            &&& l.name == shift_site(offset, x.name)
+            &&& l.namespace == match x.namespace {
+                Some(name) => Some(shift_site(offset, name)),
+                None => None,
+            }
+        };
+        let y = choose|y: NamedForm| {
+            &&& #[trigger] named_form_matches(b, forms, entry, y)
+            &&& r.head == y.head
+            &&& r.name == shift_site(offset, y.name)
+            &&& r.namespace == match y.namespace {
+                Some(name) => Some(shift_site(offset, name)),
+                None => None,
+            }
+        };
+        reveal(named_form_matches);
+        reveal(name_site_matches);
+        assert(name_site_matches(a, forms, entry.form + 2, x.name));
+        assert(name_site_matches(b, forms, entry.form + 2, y.name));
+        if let Some(parent) = entry.namespace {
+            assert(name_site_matches(a, forms, parent + 2, x.namespace->Some_0));
+            assert(name_site_matches(b, forms, parent + 2, y.namespace->Some_0));
+        }
+    }
+}
+
+proof fn projected_items_agree(
+    a: &str, b: &str, forms: Seq<Form>, item: RecoveredCircuitForm, offset: usize,
+    left: Option<RecoveredName>, right: Option<RecoveredName>,
+)
+    requires
+        a.spec_bytes() == b.spec_bytes(),
+        projected_item(a, forms, item, offset, left),
+        projected_item(b, forms, item, offset, right),
+    ensures recovered_names_agree(left, right),
+{
+    if let RecoveredFormOutcome::Valid(head) = item.outcome {
+        projected_entries_agree(a, b, forms, Entry { head, form: item.form, namespace: item.namespace },
+            offset, left, right);
+    }
+}
+
+
 proof fn shift_boundary(source: &str, fragment: &str, span: Range<usize>, at: usize)
     requires
         valid_utf8(source.spec_bytes()),
@@ -267,6 +341,86 @@ impl<'a> RecoveredNames<'a> {
         &self.recovery
     }
 
+    /// 回復した名前の走査で参照するフォーム群の数を表す。
+    pub closed spec fn position_group_count_model(&self) -> nat {
+        match self.recovery {
+            CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => 1,
+            CircuitRecovery::WithSyntaxRepairs { original, .. } => original@.len(),
+        }
+    }
+
+    /// フォーム群の数を返す。S 式が正しければ全文が一群で、修復があれば元の区間ごとに一群とする。
+    pub fn position_group_count(&self) -> (count: usize)
+        ensures count == self.position_group_count_model(),
+    {
+        match &self.recovery {
+            CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => 1,
+            CircuitRecovery::WithSyntaxRepairs { original, .. } => original.len(),
+        }
+    }
+
+    /// フォーム群の中で選べる検査項目の数を表す。
+    pub closed spec fn position_count_model(&self, group: usize) -> nat {
+        match self.recovery {
+            CircuitRecovery::Complete(syntax) => if group == 0 { syntax.entries@.len() } else { 0 },
+            CircuitRecovery::Inspected { checked, .. } => if group == 0 { checked@.len() } else { 0 },
+            CircuitRecovery::WithSyntaxRepairs { original, .. } => {
+                if group < original@.len() {
+                    match original@[group as int] {
+                        Some(list) => list.checked@.len(),
+                        None => 0,
+                    }
+                } else {
+                    0
+                }
+            },
+        }
+    }
+
+    /// フォーム群内の検査項目数を返す。範囲外や検査できなかった区間は 0 件とする。
+    pub fn position_count(&self, group: usize) -> (count: usize)
+        ensures
+            count == self.position_count_model(group),
+            group >= self.position_group_count_model() ==> count == 0,
+    {
+        match &self.recovery {
+            CircuitRecovery::Complete(syntax) => if group == 0 { syntax.entries.len() } else { 0 },
+            CircuitRecovery::Inspected { checked, .. } => if group == 0 { checked.len() } else { 0 },
+            CircuitRecovery::WithSyntaxRepairs { original, .. } => match original.get(group) {
+                Some(Some(list)) => list.checked.len(),
+                _ => 0,
+            },
+        }
+    }
+
+    /// フォーム群とその中の順番から、回復結果内の位置を定める。
+    pub closed spec fn position_model(&self, group: usize, item: usize) -> Option<RecoveredNamePosition> {
+        if item >= self.position_count_model(group) {
+            None
+        } else {
+            match self.recovery {
+                CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => Some(RecoveredNamePosition::File(item)),
+                CircuitRecovery::WithSyntaxRepairs { .. } => Some(RecoveredNamePosition::Original { fragment: group, item }),
+            }
+        }
+    }
+
+    /// フォーム群と検査項目を選ぶ。指定が範囲外なら `None` を返す。
+    pub fn position(&self, group: usize, item: usize) -> (position: Option<RecoveredNamePosition>)
+        ensures
+            position == self.position_model(group, item),
+            position.is_some() <==> item < self.position_count_model(group),
+    {
+        if item >= self.position_count(group) {
+            return None;
+        }
+        Some(match &self.recovery {
+            CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => RecoveredNamePosition::File(item),
+            CircuitRecovery::WithSyntaxRepairs { .. } => RecoveredNamePosition::Original { fragment: group, item },
+        })
+    }
+
+
     /// 取得した名前が、解析対象の元ソースと選んだ検査項目を指すことを表す。
     pub closed spec fn name_matches(&self, position: RecoveredNamePosition, result: Option<RecoveredName>) -> bool {
         let source = self.source;
@@ -284,6 +438,44 @@ impl<'a> RecoveredNames<'a> {
             _ => result.is_none(),
         }
     }
+
+    /// 同じ回復結果の同じ位置からは、同じ名前と所属が得られることを示す。
+    pub proof fn names_agree_at(
+        &self, position: RecoveredNamePosition, left: Option<RecoveredName>, right: Option<RecoveredName>,
+    )
+        requires self.name_matches(position, left), self.name_matches(position, right),
+        ensures recovered_names_agree(left, right),
+    {
+        let source = self.source;
+        match (self.recovery, position) {
+            (CircuitRecovery::Complete(syntax), RecoveredNamePosition::File(index))
+                if index < syntax.entries@.len() => {
+                    projected_entries_agree(source, source, syntax.forms@, syntax.entries@[index as int], 0, left, right);
+                },
+            (CircuitRecovery::Inspected { forms, checked }, RecoveredNamePosition::File(index))
+                if index < checked@.len() => {
+                    projected_items_agree(source, source, forms@, checked@[index as int], 0, left, right);
+                },
+            (CircuitRecovery::WithSyntaxRepairs { original, .. }, RecoveredNamePosition::Original { fragment, item })
+                if fragment < original@.len() => {
+                    if let Some(list) = original@[fragment as int] {
+                        if item < list.checked@.len() {
+                            let a = choose|part: &str| {
+                                &&& part.spec_bytes() == source.spec_bytes()[list.span.start as int..list.span.end as int]
+                                &&& #[trigger] projected_item(part, list.forms@, list.checked@[item as int], list.span.start, left)
+                            };
+                            let b = choose|part: &str| {
+                                &&& part.spec_bytes() == source.spec_bytes()[list.span.start as int..list.span.end as int]
+                                &&& #[trigger] projected_item(part, list.forms@, list.checked@[item as int], list.span.start, right)
+                            };
+                            projected_items_agree(a, b, list.forms@, list.checked@[item as int], list.span.start, left, right);
+                        }
+                    }
+                },
+            _ => {},
+        }
+    }
+
 
     /// 指定した元のフォームから名前と所属を取り出す。
     ///
