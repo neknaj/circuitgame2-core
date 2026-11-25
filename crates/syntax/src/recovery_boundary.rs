@@ -58,6 +58,12 @@ spec fn ends_at_boundary(trace: Seq<Step>, offset: int) -> bool {
     })
 }
 
+pub(super) proof fn settled_boundary_transfers_on_bytes(left: &str, right: &str, offset: usize)
+    requires left.spec_bytes() == right.spec_bytes(), settled_recovery_boundary(left, offset),
+    ensures settled_recovery_boundary(right, offset),
+{
+}
+
 /// 検査対象の位置が、先頭か、深さ 1 から 0 に戻った元の閉じ括弧の直後であることを表す。
 pub closed spec fn settled_recovery_boundary(source: &str, offset: usize) -> bool {
     let bytes = source.spec_bytes();

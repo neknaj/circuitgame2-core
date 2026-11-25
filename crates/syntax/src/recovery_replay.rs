@@ -256,6 +256,14 @@ proof fn finished_frames_agree(bytes: Seq<u8>, left: Seq<ReplayFrame>, right: Se
     assert(left =~= right);
 }
 
+pub(super) proof fn recovery_replay_transfers_on_bytes(left: &str, right: &str, result: &crate::Recovered)
+    requires
+        left.spec_bytes() == right.spec_bytes(),
+        recovered_replay_matches(left, result.forms@, result.repairs@, result.original_lists@),
+    ensures recovered_replay_matches(right, result.forms@, result.repairs@, result.original_lists@),
+{
+}
+
 /// 同じ UTF-8 バイト列の回復結果は、診断順と関連範囲を含めて一致する。
 pub proof fn recovered_replays_agree(
     old: &str, new: &str, left: &crate::Recovered, right: &crate::Recovered,
