@@ -1,12 +1,11 @@
 //! 論理 tick と有理数で表した時刻の対応を扱う。
 
-mod clock;
 mod event_queue;
 mod events;
 
-pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
+pub use circuitgame2_device_timing::{ClockError, PendingClockChange, SimulationClock, TickPosition};
 #[cfg(verus_only)]
-pub use clock::clock_change_matches;
+pub use circuitgame2_device_timing::clock_change_matches;
 pub(crate) use event_queue::PendingEvents;
 pub use event_queue::{ScheduledEvent, ScheduledEvents};
 #[cfg(verus_only)]

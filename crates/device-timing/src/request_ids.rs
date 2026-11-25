@@ -1,5 +1,8 @@
 //! 1回の実行の各 reset 世代で、ホスト要求の通し番号を確定する。
 
+#[cfg(not(verus_only))]
+use verus_builtin_macros::verus;
+#[cfg(verus_only)]
 use vstd::prelude::*;
 
 verus! {
@@ -81,10 +84,13 @@ impl RequestIds {
     /// # Examples
     ///
     /// ```
-    /// use circuitgame2_core::device::{HostRequestId, RequestIdError, RequestIds};
+    /// use circuitgame2_device_timing::{HostRequestId, RequestIdError, RequestIds};
     ///
     /// let mut sequence = RequestIds::new(4);
-    /// sequence.prepare(2).unwrap().cancel();
+    /// let pending = sequence.prepare(2).unwrap();
+    /// assert_eq!(pending.proposed_id(1, 3).unwrap().serial, 1);
+    /// assert!(pending.proposed_id(2, 3).is_none());
+    /// pending.cancel();
     /// let bulk = sequence.prepare(u64::MAX).unwrap().commit();
     /// assert_eq!(bulk.id_at(0, 1), Some(HostRequestId {
     ///     instance: 1, generation: 4, serial: 0,
@@ -131,15 +137,26 @@ impl<'a> PendingRequestIds<'a> {
     pub closed spec fn count_model(&self) -> u64 { self.count }
 
     /// 他の検査が終わるまで確定を保留したまま、指定位置の要求 ID を組み立てる。
-    pub(super) fn proposed_id(&self, index: u64, instance: usize) -> (id: HostRequestId)
-        requires index < self.count_model(),
+    ///
+    /// 添字は準備した範囲の先頭を0とする。範囲外の場合は `None` を返す。
+    /// ここで得た ID は、範囲を確定してからホストへ渡す。
+    pub fn proposed_id(&self, index: u64, instance: usize) -> (result: Option<HostRequestId>)
         ensures
-            id.instance == instance,
-            id.generation == self.before_model().generation_model(),
-            id.serial as int == self.before_model().next_model() + index as int,
+            result.is_some() <==> index < self.count_model(),
+            result matches Some(id) ==> {
+                &&& id.instance == instance
+                &&& id.generation == self.before_model().generation_model()
+                &&& id.serial as int == self.before_model().next_model() + index as int
+            },
     {
         proof { use_type_invariant(self); }
-        HostRequestId { instance, generation: self.sequence.generation, serial: (self.sequence.next + index as u128) as u64 }
+        if index >= self.count { return None; }
+        let id = HostRequestId {
+            instance,
+            generation: self.sequence.generation,
+            serial: (self.sequence.next + index as u128) as u64,
+        };
+        Some(id)
     }
 
     /// tick の成功後に要求番号を確定し、発行に使う番号の範囲を返す。

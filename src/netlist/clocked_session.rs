@@ -159,7 +159,7 @@ impl ClockedSession {
             final(self).vm_model().reset_matches(final(self).output_model()),
     {
         self.output = self.vm.reset();
-        self.clock.commit_current(change);
+        let Ok(()) = self.clock.commit(change) else { unreachable!() };
     }
 }
 
@@ -277,7 +277,7 @@ impl<'a> PendingVmTick<'a> {
         let session = self.session;
         let output = session.vm.step(input)?;
         session.output = output;
-        session.clock.commit_current(self.change);
+        let Ok(()) = session.clock.commit(self.change) else { unreachable!() };
         Ok(())
     }
 
