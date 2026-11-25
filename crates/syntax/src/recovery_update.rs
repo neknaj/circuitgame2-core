@@ -94,6 +94,8 @@ fn reparse_edges<'p, 's>(
     ensures result matches Some(update) ==> {
         &&& update.source_model() == source
         &&& update.valid()
+        &&& source.spec_bytes()[..update.section_model(1).byte_base as int] == old_prefix.spec_bytes()
+        &&& source.spec_bytes()[update.section_model(2).byte_base as int..] == old_suffix.spec_bytes()
         &&& update.section_model(0).recovered == head
         &&& update.section_model(2).recovered == tail
     },

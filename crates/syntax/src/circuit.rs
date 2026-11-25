@@ -104,6 +104,7 @@ pub use expression_forest::{expression_forest, expression_region};
 pub use expression_forest::{ordinary_call_at, ordinary_call_excludes_special_forms};
 pub use index::{
     CachedCircuitRecovery, CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
+    relocate_circuit_span,
     RecoveredName, RecoveredNamePosition, RecoveredNames, index_headers, recover_circuit_build_index, recover_circuit_forms,
     recover_circuit_names, recover_circuit_names_with_cache,
 };
@@ -111,7 +112,7 @@ pub use index::{
 pub use index::{
     basis_entry_evidence, circuit_directive_errors_agree, circuit_header_error_at, circuit_header_errors_agree,
     circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_recovery_repair_evidence, circuit_recovery_results_agree_on_sexpr,
-    circuit_recovery_transfers_on_sexpr_bytes, one_original_circuit_list, original_diagnostic_within, original_list_is_inspectable, original_list_observations_agree, repaired_circuit_recoveries_agree,
+    circuit_recovery_transfers_on_sexpr_bytes, one_original_circuit_list, original_diagnostic_relocated, original_list_diagnostics_relocate, original_diagnostic_within, original_list_is_inspectable, original_list_observations_agree, repaired_circuit_recoveries_agree,
     circuit_source_error, circuit_source_errors_agree,
     circuit_token_errors_agree, first_circuit_header_error,
     circuit_source_matches, complete_recovery_agrees_with_index, export_entry_evidence, indexed_entry_evidence, indexed_location,

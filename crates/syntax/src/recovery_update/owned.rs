@@ -1,9 +1,11 @@
 //! 文書が所有する回復キャッシュから、現在の本文の解析結果を得る。
 
 use alloc::string::String;
+#[cfg(verus_only)]
+use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8};
+use vstd::{string::StringSliceAdditionalSpecFns, utf8::{encode_utf8, encode_utf8_valid_utf8, is_char_boundary_iff_not_is_continuation_byte}};
 
 use super::{ReparsedRecovery, remember_edges_at, reparse_edges, split_source};
 #[cfg(verus_only)]
@@ -62,6 +64,23 @@ impl OwnedRecoveryCache {
     /// 接尾部の解析結果を表す。
     pub closed spec fn tail_model(&self) -> Recovered { self.tail }
 
+    /// 旧本文の再利用する接頭部の終了位置。
+    pub closed spec fn head_end_model(&self) -> usize { self.start }
+
+    /// 旧本文の再利用する接尾部の開始位置。
+    pub closed spec fn tail_start_model(&self) -> usize { self.join }
+
+    /// 現在の接頭部・接尾部のバイト列が、旧本文の対応区間と等しいことを表す。
+    pub open spec fn reuses_edge_bytes(&self, update: &ReparsedRecovery) -> bool {
+        let old = encode_utf8(self.text_model());
+        let current = update.source_model().spec_bytes();
+        &&& update.valid()
+        &&& self.head_end_model() <= self.tail_start_model() <= old.len()
+        &&& update.section_model(1).byte_base <= update.section_model(2).byte_base <= current.len()
+        &&& old[..self.head_end_model() as int] == current[..update.section_model(1).byte_base as int]
+        &&& old[self.tail_start_model() as int..] == current[update.section_model(2).byte_base as int..]
+    }
+
     /// 旧本文を引き取り、変更予定の区間の前後を一度だけ解析する。
     ///
     /// `start` と `join` は旧本文の UTF-8 バイト位置。
@@ -73,7 +92,8 @@ impl OwnedRecoveryCache {
     /// 受け取った本文をエラーとして返す。
     pub fn remember(text: String, revision: u64, start: usize, join: usize) -> (result: Result<Self, String>)
         ensures
-            result matches Ok(cache) ==> cache.text_model() == text@ && cache.revision_model() == revision,
+            result matches Ok(cache) ==> cache.text_model() == text@ && cache.revision_model() == revision
+                && cache.head_end_model() == start && cache.tail_start_model() == join,
             result matches Err(unchanged) ==> unchanged@ == text@,
     {
         let source = text.as_str();
@@ -123,10 +143,61 @@ impl OwnedRecoveryCache {
             &&& (revision == self.revision_model() ==> source@ == self.text_model())
             &&& *update.section_model(0).recovered == self.head_model()
             &&& *update.section_model(2).recovered == self.tail_model()
+            &&& self.reuses_edge_bytes(&update)
         },
     {
         let recovery = SnapshotRecovery::Local(self.try_reparse(source, revision)?);
         Some(RecoverySnapshot { revision, source, recovery })
+    }
+
+    /// 再利用する接頭部または接尾部で、旧本文の範囲に対応する現在の範囲を求める。
+    ///
+    /// `section` は接頭部なら0、接尾部なら2。`try_snapshot` が局所解析を返せば、
+    /// 前後の本文が等しい条件を満たす。旧範囲は指定した区間内に収まるものを渡す。
+    pub proof fn reused_range_in_current(
+        &self, old: &str, update: &ReparsedRecovery, old_span: Range<usize>, section: int,
+    ) -> (new_span: Range<usize>)
+        requires
+            old@ == self.text_model(), self.reuses_edge_bytes(update),
+            crate::located_span(old, old_span),
+            section == 0 && old_span.end <= self.head_end_model()
+                || section == 2 && self.tail_start_model() <= old_span.start,
+        ensures
+            crate::located_span(update.source_model(), new_span),
+            old.spec_bytes()[old_span.start as int..old_span.end as int]
+                == update.source_model().spec_bytes()[new_span.start as int..new_span.end as int],
+            section == 0 ==> new_span == old_span,
+            section == 2 ==> {
+                let old_base = self.tail_start_model();
+                let current_base = update.section_model(2).byte_base;
+                &&& new_span.start as int == old_span.start - old_base + current_base
+                &&& new_span.end as int == old_span.end - old_base + current_base
+            },
+    {
+        reveal(ReparsedRecovery::valid);
+        let current = update.source_model();
+        let a = old.spec_bytes();
+        let b = current.spec_bytes();
+        encode_utf8_valid_utf8(current@);
+        crate::is_char_boundary_start_end_of_seq(b);
+        let (old_base, old_limit, current_base, current_limit) = if section == 0 {
+            (0int, self.head_end_model() as int, 0int, update.section_model(1).byte_base as int)
+        } else {
+            (self.tail_start_model() as int, a.len() as int,
+                update.section_model(2).byte_base as int, b.len() as int)
+        };
+        let shared = a[old_base..old_limit];
+        assert(shared == b[current_base..current_limit]);
+        let first = old_span.start - old_base;
+        let last = old_span.end - old_base;
+        let start = current_base + first;
+        let end = current_base + last;
+        assert(0 <= start < end <= current_limit <= b.len() <= usize::MAX);
+        assert(a[old_span.start as int..old_span.end as int] =~= shared[first..last]);
+        assert(b[start..end] =~= shared[first..last]);
+        edge_range_boundary(old, current, old_base, old_limit, current_base, current_limit, first);
+        edge_range_boundary(old, current, old_base, old_limit, current_base, current_limit, last);
+        start as usize..end as usize
     }
 
     fn try_reparse<'p, 's>(&'p self, source: &'s str, revision: u64)
@@ -137,6 +208,7 @@ impl OwnedRecoveryCache {
             &&& (revision == self.revision_model() ==> source@ == self.text_model())
             &&& *update.section_model(0).recovered == self.head_model()
             &&& *update.section_model(2).recovered == self.tail_model()
+            &&& self.reuses_edge_bytes(&update)
         },
     {
         if revision < self.revision {
@@ -162,6 +234,36 @@ impl OwnedRecoveryCache {
             );
         }
         reparse_edges(source, prefix, suffix, &self.head, &self.tail)
+    }
+}
+
+// 末尾以外の位置は、保存したバイトが UTF-8 の継続バイトかどうかで決まる。
+proof fn edge_range_boundary(
+    old: &str, current: &str, old_base: int, old_limit: int, current_base: int, current_limit: int, offset: int,
+)
+    requires
+        0 <= old_base <= old_limit <= old.spec_bytes().len(),
+        0 <= current_base <= current_limit <= current.spec_bytes().len(),
+        old.spec_bytes()[old_base..old_limit] == current.spec_bytes()[current_base..current_limit],
+        0 <= offset <= old_limit - old_base,
+        crate::is_char_boundary(old.spec_bytes(), old_base + offset),
+        crate::is_char_boundary(current.spec_bytes(), current_limit),
+    ensures crate::is_char_boundary(current.spec_bytes(), current_base + offset),
+{
+    let a = old.spec_bytes();
+    let b = current.spec_bytes();
+    let shared = a[old_base..old_limit];
+    let reused = b[current_base..current_limit];
+    assert(shared == reused);
+    assert(shared.len() == old_limit - old_base);
+    assert(reused.len() == current_limit - current_base);
+    if offset < shared.len() {
+        encode_utf8_valid_utf8(old@);
+        encode_utf8_valid_utf8(current@);
+        is_char_boundary_iff_not_is_continuation_byte(a, old_base + offset);
+        is_char_boundary_iff_not_is_continuation_byte(b, current_base + offset);
+        assert(a[old_base + offset] == shared[offset]);
+        assert(b[current_base + offset] == shared[offset]);
     }
 }
 
@@ -209,6 +311,7 @@ pub fn recover_snapshot<'p, 's>(
             &&& (revision == saved.revision_model() ==> source@ == saved.text_model())
             &&& *update.section_model(0).recovered == saved.head_model()
             &&& *update.section_model(2).recovered == saved.tail_model()
+            &&& saved.reuses_edge_bytes(&update)
         },
 {
     if let Some(cache) = cache {
