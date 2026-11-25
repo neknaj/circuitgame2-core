@@ -5,6 +5,8 @@ use super::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice};
 #[cfg(verus_only)]
 use super::super::scalar_fits;
 #[cfg(verus_only)]
+use crate::project::{MixedUseAliases, defn_call_plan_matches};
+#[cfg(verus_only)]
 use super::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
 use vstd::prelude::*;
 
@@ -39,6 +41,23 @@ pub closed spec fn scalar_execution_slice_matches<'plan, 'p, 'a>(
 }
 
 impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
+    /// 実行枠を使い切ったとき、再開状態の全継続が元の型判断を保つことを示す。
+    pub proof fn suspended_slice_preserves_checked_types(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, fuel: nat, after: Self,
+    )
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()),
+            self.preserves_checked_types(aliases),
+            scalar_execution_slice_matches(*self, fuel, Ok(ScalarExecutionSlice::Suspended(after))),
+        ensures self.plan_model() == after.plan_model(), after.preserves_checked_types(aliases),
+    {
+        let result = Ok(ScalarExecutionSlice::Suspended(after));
+        let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+            #[trigger] execution_path_result(*self, fuel, path, result);
+        reveal(execution_path);
+        checked_types_at_step(aliases, *self, path, path.len() - 1);
+    }
+
     /// 予算が一つの実行枠の結果から、実装が行った一遷移を取り出す。
     pub proof fn one_step_slice_matches(
         &self, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
@@ -56,6 +75,26 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         } else {
             assert(path.len() == 1 && path.last() == *self);
         }
+    }
+}
+
+proof fn checked_types_at_step<'plan, 'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, start: ScalarExecution<'plan, 'p, 'a>,
+    path: Seq<ScalarExecution<'plan, 'p, 'a>>, i: int,
+)
+    requires
+        execution_path(start, path), 0 <= i < path.len(),
+        defn_call_plan_matches(aliases, start.plan_model()), start.preserves_checked_types(aliases),
+    ensures path[i].plan_model() == start.plan_model(), path[i].preserves_checked_types(aliases),
+    decreases i,
+{
+    reveal(execution_path);
+    if i > 0 {
+        checked_types_at_step(aliases, start, path, i - 1);
+        let previous = path[i - 1];
+        let next = path[i];
+        assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(next))));
+        previous.suspended_step_preserves_checked_types(aliases, next);
     }
 }
 

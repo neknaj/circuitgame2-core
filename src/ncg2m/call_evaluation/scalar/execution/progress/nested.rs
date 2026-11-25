@@ -5,6 +5,7 @@ use crate::ncg2m::expression_types::conditional_positions;
 
 mod resume;
 mod returning;
+mod stack;
 
 verus! {
 
