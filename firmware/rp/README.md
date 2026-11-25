@@ -91,4 +91,10 @@ cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target t
 
 通信エラーや 20 ms のタイムアウトが起きると GP3 は High になり、新規の読み出しは停止する。GP4 が反転を続けていれば回路の tick は進んでいる。配線を確認してからボードを reset すると、通信を再開できる。
 
+## 名前付き回路を I²C につなぐ
+
+`ncg2 rp-plan --project circuitgame2.toml --board board.toml` で配線表を作る。ボード設定の `[i2c]` にピンと回路ポートを指定する。配線表を UTF-8 で保存し、その絶対パスを `NCG2_RP_PROGRAM` に指定して `ncg2-rp` をビルドする。Pico の機能指定は `pico,i2c`、Pico 2 は `pico2,i2c`。 [回路・設定・実行手順](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-i2c-lm75b)
+
+次の tick の開始時刻までに処理が終わらないと、基板の LED が点灯して実行が止まる。周期をタイマーで表せない場合も同じように停止する。次の出力を確定する前に期限を検出した場合、GPIO は直前の確定値を保持する。確定後に GPIO への反映が遅れた場合は、その tick の値を保持して停止する。I²C の通信エラーは回路の応答状態に返す。
+
 SPI と I²C の接続仕様を参照する。 [GPU と RP マイコンの実行バックエンド](https://neknaj.github.io/circuitgame2/docs/backends.html)
