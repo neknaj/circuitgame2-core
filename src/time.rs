@@ -1,11 +1,15 @@
 //! 論理 tick と有理数で表した時刻の対応を扱う。
 
 mod clock;
+mod event_queue;
 mod events;
 
 pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
 #[cfg(verus_only)]
 pub use clock::clock_change_matches;
+pub use event_queue::{PendingEvents, ScheduledEvent, ScheduledEvents};
+#[cfg(verus_only)]
+pub use event_queue::{events_at_tick, next_event_matches};
 pub use events::{EventTimeStatus, classify_event_time, ready_event_indices};
 #[cfg(verus_only)]
 pub use events::{event_indices_match, event_time_status};
