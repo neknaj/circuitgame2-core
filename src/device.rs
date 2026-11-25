@@ -1,11 +1,14 @@
 //! 外付けデバイスとホストの間で要求と応答の対応を管理する。
 
+mod button;
 mod events;
 mod host_requests;
 mod ledger;
 mod scheduling;
 mod session;
 mod state_session;
+
+pub use button::{BUTTON_KIND, BUTTON_PORT, ButtonInput, button_port_request};
 
 pub use events::{DeviceEvent, ScheduleInputError};
 #[cfg(verus_only)]
