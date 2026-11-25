@@ -221,6 +221,19 @@ pub closed spec fn missing_input_first(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    /// 配線表の先頭から見て、指定した入力が最初の未接続入力であることを表す。
+    pub closed spec fn missing_rp_i2c_input(
+        &self, owner: ModuleBodyPosition, width: u64, gpio: Seq<GpioBinding>, names: I2cPortNames, port: usize,
+    ) -> bool {
+        &&& exists|netlist: crate::netlist::NorNetlist|
+            #[trigger] self.clocked_module_source_layout(owner, width, &netlist) && port < netlist.input_count
+        &&& exists|resolved: Vec<DevicePortBinding>, indices: Seq<usize>|
+            #[trigger] gpio_binding_indices_match(resolved@, indices)
+            && self.device_bindings_match(owner, width, i2c_image_requests(gpio, names), Ok(resolved))
+            && (exists|prefix: Seq<I2cInputSource>|
+                #[trigger] missing_input_first(gpio, indices, names.to_circuit@.len(), prefix, port))
+    }
+
     /// I²C と GPIO をルートモジュールの単一ビットポートに接続する。
     ///
     /// すべての回路入力に駆動元を一つ割り当てる。I²C が読む出力は信号の指定順で保持する。
@@ -277,14 +290,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             result matches Err(I2cImageError::Circuit(GpioImageError::Binding(error))) ==>
                 self.device_bindings_match(owner, width_limit, i2c_image_requests(gpio@, names), Err(error)),
             result matches Err(I2cImageError::Circuit(GpioImageError::MissingInput { port })) ==>
-                (exists|netlist: crate::netlist::NorNetlist|
-                    #[trigger] self.clocked_module_source_layout(owner, width_limit, &netlist)
-                    && port < netlist.input_count)
-                && exists|resolved: Vec<DevicePortBinding>, indices: Seq<usize>|
-                    #[trigger] gpio_binding_indices_match(resolved@, indices)
-                    && self.device_bindings_match(owner, width_limit, i2c_image_requests(gpio@, names), Ok(resolved))
-                    && (exists|prefix: Seq<I2cInputSource>|
-                        #[trigger] missing_input_first(gpio@, indices, names.to_circuit@.len(), prefix, port)),
+                self.missing_rp_i2c_input(owner, width_limit, gpio@, names, port),
     {
         if tick_micros == 0 { return Err(I2cImageError::Circuit(GpioImageError::ZeroTickPeriod)); }
         if setup.frequency_hz != 100_000 && setup.frequency_hz != 400_000 { return Err(I2cImageError::Frequency); }
@@ -350,6 +356,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     assert(exists|source: crate::netlist::NorNetlist|
                         #[trigger] self.clocked_module_source_layout(owner, width_limit, &source)
                         && i < source.input_count);
+                    assert(self.missing_rp_i2c_input(owner, width_limit, gpio@, names, i));
                     return Err(I2cImageError::Circuit(GpioImageError::MissingInput { port: i }));
                 };
             assert(matches_input(gpio@, indices@, controller@, i, Some(source)));
