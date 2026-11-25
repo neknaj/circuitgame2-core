@@ -11,7 +11,9 @@ use crate::ncg2m::expression_types::{
     same_defn_body_outcome,
 };
 use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call};
-use crate::ncg2m::expression_types::named_call::CallForm;
+use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::named_call::{indexed_call_body_matches, indexed_call_body_origin};
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::form_span;
@@ -21,9 +23,9 @@ use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
 use super::circuits::{index_project_circuit, read_source_span};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{circuit_source_error, circuit_source_errors_agree, circuit_source_matches};
-use super::{ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources};
+use super::{MixedUseAliases, ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources};
 #[cfg(verus_only)]
-use super::{normalized_path, parsed_circuit_matches, project_sources_match, source_kind_of, valid_source_snapshots};
+use super::{mixed_use_targets_match, prepared_call_site, normalized_path, parsed_circuit_matches, project_sources_match, source_kind_of, valid_source_snapshots};
 #[cfg(verus_only)]
 use super::sources::{
     collected_source_for_input, collected_source_ids_unique, collected_source_origin,
@@ -238,6 +240,73 @@ impl<'a> ParsedProjectSources<'a> {
         }
         let Some(forms) = &self.meta_asts[file] else { unreachable!() };
         indexed_meta_call(source.text(), forms, items, item, at)
+    }
+
+    pub(super) closed spec fn named_defn_body_matches<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+        result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+    ) -> bool {
+        &&& *self == aliases.targets_model().project_model()
+        &&& match (self.indexed_defn(file, item), result) {
+            (None, None) => true,
+            (Some(_), Some(outcome)) => {
+                let entries = self.indexes_model()[file as int]->Functional_0@;
+                let text = self.sources_model()[file as int].text_model();
+                self.functional_forms_model(file) matches Some(forms)
+                    && indexed_call_body_matches(aliases, file, item, text, forms, entries, outcome)
+            },
+            _ => false,
+        }
+    }
+
+    pub(super) proof fn named_defn_body_origin<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+        result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+    )
+        requires self.named_defn_body_matches(aliases, file, item, result),
+        ensures
+            result.is_some() == self.indexed_defn(file, item).is_some(),
+            result matches Some(Ok(signature)) ==>
+                self.defn_signature_matches_index(file, item, Some(signature)),
+            result matches Some(Err(DefnBodyCallError::Call(error))) ==> {
+                let site = prepared_call_site(Err(error));
+                &&& *site.source == self.sources_model()[file as int]
+                &&& self.functional_forms_model(file) matches Some(forms)
+                && exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List
+                    && forms[at + 1] is Atom
+                    && site.span == form_span(forms[at as int]) && site.head == form_span(forms[at + 1])
+            },
+    {
+        if let Some(outcome) = result {
+            let entries = self.indexes_model()[file as int]->Functional_0@;
+            let text = self.sources_model()[file as int].text_model();
+            let forms = self.functional_forms_model(file)->Some_0;
+            indexed_call_body_origin(aliases, file, item, text, forms, entries, outcome);
+        }
+    }
+
+    pub(super) fn check_named_defn_body<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+    ) -> (result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>)
+        requires *self == aliases.targets_model().project_model(),
+            mixed_use_targets_match(self, aliases.targets_model()),
+        ensures self.named_defn_body_matches(aliases, file, item, result),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() { return None; }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() || !matches!(items[item].kind, MetaItemKind::Defn(_)) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            use_type_invariant(self);
+            assert(retained_ast_matches(*source, *index, self.meta_asts@[file as int]));
+            project_source_index_evidence(*source, *index);
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        assert(self.functional_forms_model(file) == Some(forms@));
+        Some(check_indexed_call_body(aliases, file, item, source.text(), forms, items))
     }
 
     /// 言語別索引の項目が補助関数宣言なら、本体の型検査に使う署名を返す。

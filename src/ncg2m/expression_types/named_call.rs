@@ -1,7 +1,15 @@
 //! 補助関数の本体にある呼び出し形から、先頭の名前と引数列を取り出す。
 
 use super::*;
+use super::typing::{CallArgument, CallTypeEntry};
+#[cfg(verus_only)]
+use super::typing::canonical_call;
 
+mod body;
+pub use body::DefnBodyCallError;
+pub(crate) use body::check_indexed_call_body;
+#[cfg(verus_only)]
+pub(crate) use body::{indexed_call_body_matches, indexed_call_body_origin};
 mod slots;
 pub(in crate::ncg2m) use slots::is_expression_slot;
 #[cfg(verus_only)]
@@ -161,4 +169,71 @@ pub(in crate::ncg2m) fn read_call_form<'a>(source: &'a str, forms: &[Form], at: 
     })
 }
 
+/// 呼び出し形の直下から、指定した個数の引数を読み取れることを表す。
+pub(crate) closed spec fn call_has_arity(source: &str, forms: Seq<Form>, at: usize, count: usize) -> bool {
+    &&& named_call_head(source, forms, at)
+    &&& argument_count(forms, (at + 2) as usize, forms[at as int]->List_end) == count
+}
+
+pub(in crate::ncg2m) proof fn decoded_call_has_arity(
+    source: &str, forms: Seq<Form>, at: usize, call: CallForm,
+)
+    requires call_form_matches(source, forms, at, Some(call)),
+    ensures call_has_arity(source, forms, at, call.arguments),
+{}
+
+pub(super) open spec fn call_signature_types_match(entry: CallTypeEntry, signature: DefnSignature) -> bool {
+    &&& entry.result == type_shape(signature.result_type.ty)
+    &&& entry.arguments@.len() == signature.parameters@.len()
+    &&& forall|i: int| 0 <= i < entry.arguments@.len() ==>
+        (#[trigger] entry.arguments@[i]).expected == type_shape(signature.parameters@[i].ty.ty)
+}
+
+pub(super) fn prepare_call_types<'a>(
+    source: &'a str, forms: &[Form], call: usize, signature: &DefnSignature<'a>,
+) -> (entry: CallTypeEntry)
+    requires usable_forms(source, forms@), call_has_arity(source, forms@, call, signature.parameters@.len() as usize),
+        signature.parameters@.len() <= usize::MAX,
+    ensures canonical_call(forms@, entry), entry.at == call, call_signature_types_match(entry, *signature),
+{
+    let Some((head, end, _)) = read_named_head(source, forms, call) else { unreachable!() };
+    let first = head + 1;
+    let params = &signature.parameters;
+    let mut arguments = Vec::<CallArgument>::new();
+    let mut cursor = first;
+    let mut i = 0;
+    let _len = params.len();
+    assert(argument_count(forms@, first, end) == params@.len());
+    while i < params.len()
+        invariant
+            usable_forms(source, forms@), forms@[call as int] is List, subtree_limit(forms@, call) == end,
+            call + 2 == first <= cursor <= end <= forms@.len(),
+            i == arguments@.len() <= params@.len(),
+            argument_count(forms@, cursor, end) + i == params@.len(),
+            i == 0 ==> cursor == first,
+            i > 0 ==> arguments@[0].at == first
+                && subtree_limit(forms@, arguments@[i - 1].at) == cursor,
+            forall|j: int| 0 <= j < arguments@.len() ==> {
+                let arg = #[trigger] arguments@[j];
+                &&& call < arg.at < subtree_limit(forms@, arg.at) <= end
+                &&& arg.expected == type_shape(params@[j].ty.ty)
+                &&& j + 1 < i ==> subtree_limit(forms@, arg.at) == arguments@[j + 1].at
+            },
+        decreases params@.len() - i,
+    {
+        assert(cursor < end);
+        proof { super::super::forms::child_stays_inside(forms@, call, cursor); }
+        let next = subtree_end(forms, cursor);
+        let expected = shape_of_type(params[i].ty.ty);
+        arguments.push(CallArgument { at: cursor, expected });
+        cursor = next;
+        i += 1;
+    }
+    if cursor < end {
+        proof { super::super::forms::child_stays_inside(forms@, call, cursor); }
+        assert(argument_count(forms@, cursor, end) > 0);
+        assert(false);
+    }
+    CallTypeEntry { at: call, arguments, result: shape_of_type(signature.result_type.ty) }
+}
 }

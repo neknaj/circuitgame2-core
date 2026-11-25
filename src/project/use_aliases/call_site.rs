@@ -4,7 +4,7 @@ use super::{DefnNameError, MixedUseAliases, ResolvedDefnName};
 #[cfg(verus_only)]
 use super::{defn_name_resolution, resolved_defn_name_origin};
 use crate::ncg2m::data_types::DefnSignature;
-#[cfg(verus_only)]
+use crate::ncg2m::expression_types::DefnBodyCallError;
 use crate::ncg2m::expression_types::named_call::CallForm;
 use crate::project::{ProjectDeclaration, ProjectSource};
 #[cfg(verus_only)]
@@ -66,11 +66,11 @@ pub enum DefnCallError<'p, 'a> {
     },
 }
 
-spec fn site_matches(source: ProjectSource, call: CallForm, site: DefnCallSite) -> bool {
+pub(crate) open spec fn site_matches(source: ProjectSource, call: CallForm, site: DefnCallSite) -> bool {
     *site.source == source && site.head == call.head_span && site.span == call.span
 }
 
-spec fn call_arity_matches(
+pub(crate) open spec fn call_arity_matches(
     aliases: &MixedUseAliases, file: usize, item: usize, call: CallForm,
     result: Result<PreparedDefnCall, DefnCallError>,
 ) -> bool {
@@ -161,7 +161,96 @@ pub proof fn prepared_defn_call_origin(
     project.defn_call_form_origin(file, item, at, form->Some_0);
 }
 
+/// 呼び出しを含む本体の検査結果が、元の補助関数の索引と保持した構文木に対応することを表す。
+pub closed spec fn project_named_defn_body_matches<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+    result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+) -> bool {
+    aliases.targets_model().project_model().named_defn_body_matches(aliases, file, item, result)
+}
+
+/// 成功時の署名と、名前や引数個数の診断が、元の索引と構文木に由来することを示す。
+pub proof fn project_named_defn_body_origin<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+    result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+)
+    requires project_named_defn_body_matches(aliases, file, item, result),
+    ensures {
+        let project = aliases.targets_model().project_model();
+        &&& result.is_some() == project.indexed_defn(file, item).is_some()
+        &&& result matches Some(Ok(signature)) ==>
+            project.defn_signature_matches_index(file, item, Some(signature))
+        &&& result matches Some(Err(DefnBodyCallError::Call(error))) ==> {
+            let site = prepared_call_site(Err(error));
+            &&& *site.source == project.sources_model()[file as int]
+            &&& project.functional_forms_model(file) matches Some(forms)
+            && exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List
+                && forms[at + 1] is Atom
+                && site.span == form_span(forms[at as int]) && site.head == form_span(forms[at + 1])
+        }
+    },
+{
+    aliases.targets_model().project_model().named_defn_body_origin(aliases, file, item, result);
+}
+
 impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
+    /// 補助関数の本体を、同じプロジェクトの呼び出し先の署名を使って型検査する。
+    ///
+    /// 引数は呼び出し元の局所環境で、署名の期待型を使って左から検査する。
+    /// 呼び出し式の型は宣言の戻り型に従う。指定が補助関数を指さない場合は `None` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 呼び出しでは名前と引数数、呼び出し式の戻り型、各引数の型をこの順に検査する。
+    /// 呼び出し先や引数数の診断は元の文書版を保持し、式の型診断の範囲は指定したファイルの文書版を基準とする。
+    /// 組み込みや段階固有型の解決が必要な場合は保留を返す。
+    ///
+    /// # Examples
+    ///
+    /// 呼び出しは局所変数を引数に取れる。数値リテラルは引数の期待型で検査する。
+    ///
+    /// ```
+    /// use circuitgame2_core::project::{
+    ///     DefnCallError, DefnNameError, SourceSnapshot, check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
+    /// };
+    /// use circuitgame2_core::ncg2m::expression_types::{
+    ///     DefnBodyCallError, ExpressionCheckFailure, ExpressionTypeError,
+    /// };
+    ///
+    /// let source = "(defn take (as-type (Fn (Int Bool) Bool) (fn (number flag) flag)))
+    ///     (defn identity (as-type (Fn (Bool) Bool) (fn (value) value)))
+    ///     (defn good (as-type (Fn () Bool) (fn () (let ((x true)) (take 7 (identity x))))))
+    ///     (defn bad-arg (as-type (Fn () Bool) (fn () (take true false))))
+    ///     (defn bad-result (as-type (Fn () Int) (fn () (identity false))))
+    ///     (defn early-type (as-type (Fn () Bool) (fn () (take true (::missing false)))))
+    ///     (defn bad-name (as-type (Fn () Bool) (fn () (take 7 (::missing false)))))";
+    /// let snapshots = [SourceSnapshot { path: "program.ncg2m", revision: 1, text: source }];
+    /// let project = parse_project_sources(&snapshots).unwrap();
+    /// let targets = index_mixed_use_targets(&project).unwrap();
+    /// let aliases = check_mixed_use_aliases(&targets).unwrap();
+    /// assert!(aliases.check_defn_body_with_calls(0, 2).unwrap().is_ok());
+    /// for (item, expression) in [(3, "true"), (4, "(identity false)"), (5, "true")] {
+    ///     let got = aliases.check_defn_body_with_calls(0, item).unwrap();
+    ///     let Err(DefnBodyCallError::Expression(ExpressionCheckFailure::Type(
+    ///         ExpressionTypeError::Mismatch { span, .. },
+    ///     ))) = got else { panic!("{got:?}") };
+    ///     assert_eq!(&source[span], expression);
+    /// }
+    /// let got = aliases.check_defn_body_with_calls(0, 6).unwrap();
+    /// let Err(DefnBodyCallError::Call(DefnCallError::Name {
+    ///     site, error: DefnNameError::Missing,
+    /// })) = got else { panic!("{got:?}") };
+    /// assert_eq!(&source[site.head], "::missing");
+    /// assert_eq!(site.source.revision, 1);
+    /// ```
+    pub fn check_defn_body_with_calls(&self, file: usize, item: usize)
+        -> (result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>)
+        requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures project_named_defn_body_matches(self, file, item, result),
+    {
+        self.targets().project().check_named_defn_body(self, file, item)
+    }
+
     /// 元の補助関数本体の構文木添字から、呼び出し先と引数の個数を検査する。
     ///
     /// `item` は NCG2M のファイル内索引で補助関数を指す。 `at` は元ファイルの
@@ -209,10 +298,19 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     {
         let project = self.targets().project();
         let Some(form) = project.defn_call_form(file, item, at) else { return None; };
-        let sources = project.sources();
         let _indexes = project.indexes();
         proof { project.defn_call_file_exists(file, item, at, form); }
-        let source = &sources[file];
+        Some(self.prepare_decoded_call(file, item, &form))
+    }
+
+    pub(crate) fn prepare_decoded_call(&self, file: usize, item: usize, form: &CallForm<'a>)
+        -> (result: Result<PreparedDefnCall<'p, 'a>, DefnCallError<'p, 'a>>)
+        requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+            file < self.targets_model().project_model().sources_model().len(),
+        ensures call_arity_matches(self, file, item, *form, result),
+    {
+        let project = self.targets().project();
+        let source = &project.sources()[file];
         let site = DefnCallSite { source, head: form.head_span.start..form.head_span.end,
             span: form.span.start..form.span.end };
         let found = match self.resolve_defn_name(file, item, form.word) {
@@ -231,8 +329,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             Ok(ResolvedDefnName::StageName) => Ok(PreparedDefnCall::StageName(site)),
             Err(error) => Err(DefnCallError::Name { site, error }),
         };
-        assert(call_arity_matches(self, file, item, form, found));
-        Some(found)
+        found
     }
 }
 
