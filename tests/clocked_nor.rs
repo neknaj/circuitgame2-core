@@ -87,6 +87,53 @@ fn prepared_clocked_session_only_exposes_committed_outputs() {
 }
 
 #[test]
+fn event_tick_retries_with_the_same_inputs_and_consumes_once() {
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::{ScheduledEvent, ScheduledEvents, TickPosition};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+    let mut events = ScheduledEvents::new();
+    for (tick, payload) in [(2, "future"), (1, "first"), (1, "second")] {
+        events.enqueue(ScheduledEvent {
+            position: TickPosition { generation: 0, tick },
+            payload,
+        });
+    }
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(pending.target().tick, 1);
+    assert_eq!(pending.previous_output(), [false]);
+    assert_eq!(pending.next_event(0).unwrap().1.payload, "first");
+    pending.cancel();
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert!(matches!(pending.commit(&[]), Err(TickInputError::InputCount)));
+    assert_eq!(session.position().tick, 0);
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    let (index, first) = pending.next_event(0).unwrap();
+    assert_eq!(first.payload, "first");
+    assert_eq!(pending.next_event(index + 1).unwrap().1.payload, "second");
+    let consumed = pending.commit(&[true]).unwrap();
+    assert_eq!(consumed.iter().map(|event| event.payload).collect::<Vec<_>>(), ["first", "second"]);
+    assert_eq!(session.position().tick, 1);
+    assert_eq!(session.output(), [true]);
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(pending.previous_output(), [true]);
+    let (index, future) = pending.next_event(0).unwrap();
+    assert_eq!(future.payload, "future");
+    assert!(pending.next_event(index + 1).is_none());
+    assert_eq!(pending.commit(&[false]).unwrap().len(), 1);
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,
