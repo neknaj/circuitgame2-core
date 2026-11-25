@@ -57,6 +57,7 @@ spec fn parsed_from(source: &str, parsed: &Recovered) -> bool {
     &&& form_spans_valid(source, parsed.forms@, source.spec_bytes().len() as int)
     &&& original_list_ranges(source, parsed.original_lists@, parsed.repairs@, source.spec_bytes().len() as int)
     &&& original_list_roots(parsed.forms@, parsed.original_lists@)
+    &&& repair::repairs_within(parsed, source.spec_bytes().len())
 }
 
 spec fn clean_prefix(source: &str, parsed: &Recovered) -> bool {
@@ -231,6 +232,7 @@ fn remember_edges_at(source: &str, start: usize, join: usize) -> (result: Option
     let (prefix, _, suffix) = split_source(source, start, join)?;
     let head = analyze_closed(prefix)?;
     let tail = parse_recovering(suffix);
+    proof { repair::repaired_records_within(suffix, &tail); }
     Some(RecoveryEdges { prefix, suffix, head, tail })
 }
 
@@ -242,6 +244,7 @@ fn analyze_closed(source: &str) -> (result: Option<Recovered>)
     if !parsed.repairs.is_empty() || recovery_boundary_at(source, length).is_none() {
         return None;
     }
+    proof { repair::repaired_records_within(source, &parsed); }
     Some(parsed)
 }
 
