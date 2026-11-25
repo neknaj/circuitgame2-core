@@ -2,8 +2,8 @@
 
 pub(super) mod checks;
 mod inputs;
-mod outputs;
-mod typed;
+pub(super) mod outputs;
+pub(super) mod typed;
 pub use checks::FuncArityError;
 pub use inputs::{CallInputError, CallInputReason, CheckedCallInputs, FuncCallInputsError};
 pub(super) use inputs::check_leaf;
@@ -87,6 +87,22 @@ pub struct FuncCallArity<'p, 'a> {
     pub call: CallShape,
     /// 呼び出しが解決された関数または基底 NOR。
     pub target: FuncCallTarget<'p, 'a>,
+}
+
+impl<'p, 'a> FuncCallArity<'p, 'a> {
+    pub(super) fn copy_site(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        let target = match &self.target {
+            FuncCallTarget::Nor => FuncCallTarget::Nor,
+            FuncCallTarget::Function { arity, declaration, file, entry } => FuncCallTarget::Function {
+                arity: *arity, declaration: super::function_atoms::copy_location(declaration), file: *file, entry: *entry,
+            },
+        };
+        Self { source: self.source, target, call: CallShape {
+            form: self.call.form, span: self.call.span.start..self.call.span.end, arguments: self.call.arguments,
+        } }
+    }
 }
 
 spec fn target_ports_match(project: &CircuitProject, resolved: ResolvedDefinitionReference, target: FuncCallTarget) -> bool {

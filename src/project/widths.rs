@@ -372,6 +372,18 @@ pub(super) proof fn checked_width_counts(
 {
     let source = &project.sources_model()[file];
     let syntax = &project.circuits_model()[file].syntax;
+    indexed_width_counts(source, syntax, entry, max_width, widths, arity);
+}
+
+pub(super) proof fn indexed_width_counts(
+    source: &ProjectSource, syntax: &CircuitForms, entry: int, max_width: u64,
+    widths: RoutinePortWidths, arity: RoutineArity,
+)
+    requires
+        indexed_port_widths_evidence(source, syntax, entry, max_width, Ok(Some(widths))),
+        routine_arity_matches(source.text, syntax, entry, Some(arity)),
+    ensures widths.inputs@.len() == arity.inputs, widths.outputs@.len() == arity.outputs,
+{
     let ports = choose|ports: RoutinePorts| #[trigger] routine_ports_match(source.text, syntax, entry, Some(ports))
         && widths.inputs@.len() == ports.inputs@.len() && widths.outputs@.len() == ports.outputs@.len()
         && checked_before(source.text, syntax, ports.inputs@, widths.inputs@, max_width)

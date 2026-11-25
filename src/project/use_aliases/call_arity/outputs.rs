@@ -14,12 +14,13 @@ use super::super::function_drivers::{expected_output_context, indexed_driver_sit
 use super::super::function_literals::index_outputs;
 #[cfg(verus_only)]
 use super::super::function_literals::{output_indices, output_indices_agree};
-use crate::project::{FuncWiring, FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType};
+use crate::project::{FuncWiring, FuncWiringResult, LocatedName, PortDirection, ProjectSource, SignalType, TypedPort};
 use crate::project::circuits::form_location;
 #[cfg(verus_only)]
-use crate::project::{FuncDrivers, TypedPort, location_in_source, port_types_equal, ResolvedPortType, circuits::{
-    is_form_location, parsed_circuit_matches, parsed_index_evidence,
+use crate::project::{FuncDrivers, location_in_source, port_types_equal, ResolvedPortType, circuits::{
+    is_form_location, name_in_source, parsed_circuit_matches, parsed_index_evidence,
 }};
+use crate::syntax::circuit::NameSite;
 use crate::syntax::circuit::{NamedBuildCircuit, definition_root_is_call, definition_target_atoms};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
@@ -92,7 +93,7 @@ spec fn call_output_type<'p, 'a>(
     }
 }
 
-spec fn output_transfer(
+pub(in crate::project::use_aliases) open spec fn output_transfer(
     actual: SignalType, expected: Option<TypedPort>, target: LocatedName, call: LocatedName,
     result: Result<Option<SignalType>, FuncCallOutputError>,
 ) -> bool {
@@ -103,6 +104,27 @@ spec fn output_transfer(
             })
         } else { result == Ok(Some(actual)) }
     } else { result == Ok(Some(actual)) }
+}
+
+// 左辺が出力ポートを駆動する場合だけ、宣言型と呼び出しの型を照合する。
+pub(in crate::project::use_aliases) fn transfer_call_output<'p, 'a>(
+    source: &'p ProjectSource<'a>, target: &NameSite, call: LocatedName<'p, 'a>,
+    expected: Option<&TypedPort<'p, 'a>>, actual: SignalType<'p, 'a>,
+) -> (result: Result<SignalType<'p, 'a>, FuncCallOutputError<'p, 'a>>)
+    requires name_in_source(source.text, *target),
+    ensures output_transfer(actual, match expected { Some(port) => Some(*port), None => None },
+        LocatedName { source, span: target.span }, call,
+        match result { Ok(actual) => Ok(Some(actual)), Err(error) => Err(error) }),
+{
+    if let Some(expected) = expected {
+        if !actual.ty.is_same_type(&expected.ty) {
+            return Err(FuncCallOutputError::OutputType {
+                target: name_location(source, target), call,
+                expected: SignalType { ty: expected.ty, origin: copy_location(&expected.annotation) }, actual,
+            });
+        }
+    }
+    Ok(actual)
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -752,21 +774,20 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 };
                 let actual = SignalType { ty: port.ty, origin };
                 assert(actual == call_output_type(&model, &expression, driver.result_index as int));
-                if let Some(output) = outlets[index] {
-                    let expected = &drivers.signature.outputs[output];
-                    if !actual.ty.is_same_type(&expected.ty) {
-                        let error = FuncCallOutputError::OutputType {
-                            target: name_location(source, &driver.name), call: expression,
-                            expected: SignalType { ty: expected.ty, origin: copy_location(&expected.annotation) },
-                            actual,
-                        };
+                let expected = match outlets[index] {
+                    Some(output) => Some(&drivers.signature.outputs[output]),
+                    None => None,
+                };
+                let actual = match transfer_call_output(source, &driver.name, expression, expected, actual) {
+                    Ok(actual) => actual,
+                    Err(error) => {
                         proof {
                             assert(self.call_output_step(file, entry, max_width, drivers, outlets@, index as int, Err(error)));
                             self.record_output_error(file, entry, max_width, scope, outlets@, types@, error);
                         }
                         return Err(error);
-                    }
-                }
+                    },
+                };
                 assert(self.call_output_step(file, entry, max_width, drivers, outlets@, index as int, Ok(Some(actual))));
                 Some(actual)
             } else {

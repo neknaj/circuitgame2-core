@@ -94,6 +94,7 @@ pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 pub use use_aliases::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
+    MixedFuncOutputTypes, MixedFuncTypeError,
     MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 #[cfg(verus_only)]
 pub(crate) use use_aliases::call_arity_matches;

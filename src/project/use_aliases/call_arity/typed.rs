@@ -127,13 +127,13 @@ pub(in crate::project::use_aliases) open spec fn cached_call_model<'p, 'a>(
 }
 
 /// 関数の署名が既に登録されているか、基底 NOR の呼び出しであることを表す。
-pub(super) open spec fn cached_call_available(cache: &SignatureCache, call: FuncCallArity) -> bool {
+pub(in crate::project::use_aliases) open spec fn cached_call_available(cache: &SignatureCache, call: FuncCallArity) -> bool {
     call.target matches FuncCallTarget::Function { file, entry, .. }
         ==> cache.signatures().contains_key((file, entry))
 }
 
 /// 登録済みの呼び出し先の署名を借用する。`None` は基底 NOR を表す。
-pub(super) fn cached_signature<'s, 'p, 'a>(
+pub(in crate::project::use_aliases) fn cached_signature<'s, 'p, 'a>(
     cache: &'s SignatureCache<'p, 'a>, call: &FuncCallArity<'p, 'a>,
 ) -> (signature: Option<&'s TypedRoutineSignature<'p, 'a>>)
     requires cached_call_available(cache, *call),
