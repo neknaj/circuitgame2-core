@@ -1,0 +1,25 @@
+name: Downstream compatibility
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/compatibility.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "src/**"
+      - "crates/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: downstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    uses: neknaj/circuitgame2/.github/workflows/compatibility.yml@main
+    with:
+      core_ref: ${{ github.sha }}
