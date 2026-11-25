@@ -1,4 +1,4 @@
-# Pico・Pico 2 の GPIO ファームウェア
+# Pico・Pico 2 のファームウェア
 
 順序 NOR 回路の1 tick を 32 レーンまとめて実行する。物理 GPIO はレーン 0 に接続する。起動時の出力レベルはボード設定で決まり、各 tick の確定後は回路の結果を出力する。
 
@@ -22,4 +22,47 @@ cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target t
 
 組み込み例を確認するときは GND を共通にし、GP2 に 3.3 V ロジックの信号を入れる。GP2 と GP3 をロジックアナライザーで観測すると、次の tick で反転値が現れる設計になっている。端子の位置は、使用するボードのピン配置図で確認する。 [Pico シリーズのピン配置](https://www.raspberrypi.com/documentation/microcontrollers/pico-series.html)
 
-UART・SPI・I²C の接続は実装計画を参照。 [GPU と RP マイコンの実行バックエンド](https://neknaj.github.io/circuitgame2/docs/backends.html)
+## 名前付き回路を UART につなぐ
+
+`ncg2 rp-plan` に UART と GPIO の設定を渡すと、ファームウェアで使う配線表を生成できる。
+UART の回路ポートには単一ビットの名前を指定し、`rx-data` と `tx-data` は最下位ビットから8個並べる。回路の各入力に割り当てる駆動元は一つ。GPIO と UART の両方に同じ入力を指定すると、`rp-plan` が重複を報告する。
+UART0 と UART1 のいずれか1系統を選び、TX/RX を指定する。GPIO のみの設定は従来の `ncg2-rp-gpio-v1` を使う。
+
+```sh
+ncg2 rp-plan --project circuitgame2.toml --board board.toml > board.rp
+NCG2_RP_PROGRAM="$PWD/board.rp" cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,uart --bin ncg2-rp
+```
+
+Pico 2 では `--target thumbv8m.main-none-eabihf --features pico2,uart` を使う。配線表には UTF-8 のテキストを指定する。ボーレートがボードの周辺クロックと Embassy の分周値で設定できない場合、ファームウェアは UART を起動せずに停止する。回線は 8N1 で、ハードウェアによるフロー制御は使わない。
+
+tick の開始時に、直前に確定した回路出力と今回のデバイス入力を照合する。`rx-valid` と `rx-ready` がともに1なら、今回の受信イベントを回路に渡す。回路が受け取るまで受信データと異常フラグを保持する。フレーミング等の異常は `rx-framing`、受信列のあふれは `rx-overrun` で示す。受信列のあふれはまとめて通知する。
+
+`tx-valid` と `tx-ready` がともに1の tick が確定すると、送信要求を通信タスクへ渡す。一度に1件を処理し、完了通知を要求 ID と世代で照合する。届いた結果は `tx-done` と `tx-ok` で示し、回路が `tx-done-ready` を1にするまで保持する。異常終了した送信は自動で再試行しない。
+
+tick の期限を超えた場合、候補の回路状態と要求を確定せずに実行を止める。同じ tick を再実行する入口は設けていない。生成したファームウェアはボードの reset で、UART、待ち行列、台帳を初期化する。通信ピンで既にやり取りされたデータは、ボードの状態と別に扱う。
+
+## UART の折り返し例
+
+`ncg2-rp-uart` は UART0 で受信した1バイトを、組み込みの回路のビット入出力を通して送り返す。この実行例では組み込みの配線を使う。Pico と Pico 2 のどちらも 115200 baud、8N1、フロー制御なしで動作する。
+
+```sh
+cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,uart --bin ncg2-rp-uart
+cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2,uart --bin ncg2-rp-uart
+```
+
+出力 ELF の名前は `ncg2-rp-uart`。上の手順と同じ UF2 ファミリーを指定して変換する。3.3 V ロジックの UART アダプターを接続し、1バイトずつ送って折り返しを確認する。
+
+| 端子 | 接続または観測 |
+| --- | --- |
+| GND | アダプターの GND |
+| GP0 | アダプターの RX |
+| GP1 | アダプターの TX |
+| GP2 | GND に接続すると論理 reset を1回行う |
+| GP3 | 診断を検出すると High になり、論理 reset で Low に戻る |
+| GP4 | 1 ms 周期の各 tick が確定するたびに反転する |
+
+tick は到着済みのイベントだけを確認する。送信タスクは tick の確定後に受け取った要求を処理し、最大20 ms 待って完了または失敗を返す。完了は要求 ID と reset 世代を照合し、次の tick に渡す。受信エラー、受信列のあふれ、送信失敗、tick の期限超過は GP3 に出る。
+
+論理 reset は取り込み済みの旧世代のイベントと完了通知を破棄し、旧世代の送信データを追加でキューに入れる処理を打ち切る。UART の送信レジスタや割り込みバッファーに渡したバイトは物理ポートから送信され得る。受信バイトの世代は、受信タスクが UART バッファーから取り出した時点で付ける。
+
+SPI と I²C の接続仕様を参照する。 [GPU と RP マイコンの実行バックエンド](https://neknaj.github.io/circuitgame2/docs/backends.html)

@@ -3,7 +3,14 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(rp_uart_program))]
 use circuitgame2_device_timing::SimulationClock;
+
+#[cfg(rp_uart_program)]
+#[path = "uart_program.rs"]
+mod uart;
+#[cfg(rp_uart_program)]
+mod uart_transport;
 use circuitgame2_packed_nor::{
     PackedClockedNorPlan32, PackedNorGate32, read_lane32, replace_lane32,
 };
@@ -17,6 +24,7 @@ include!(concat!(env!("OUT_DIR"), "/program.rs"));
 const LANE: u32 = 0;
 const SOURCE_COUNT: usize = INPUT_COUNT + GATES.len() + 2;
 
+#[cfg(not(rp_uart_program))]
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     // 端子を設定する前に配線番号を検査する。
@@ -67,4 +75,10 @@ async fn main(_spawner: Spawner) {
         }
         deadline = following_deadline;
     }
+}
+
+#[cfg(rp_uart_program)]
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let _ = uart::run(spawner).await;
 }

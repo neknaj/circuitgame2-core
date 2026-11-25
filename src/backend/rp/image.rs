@@ -1,5 +1,11 @@
 //! 一つのルート回路と GPIO 接続を、RP 向けの配線配置にまとめる。
 
+mod uart;
+
+pub use uart::{RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartOutputPorts, UartPortNames, UartSetup};
+#[cfg(verus_only)]
+pub use uart::{uart_assignment, uart_image_ports_match, uart_image_requests, uart_output_indices_fit};
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -183,13 +189,13 @@ spec fn input_at(bindings: Seq<GpioBinding>, ports: Seq<usize>, port: usize) -> 
 }
 
 fn input_pin(bindings: &[GpioBinding], ports: &[usize], port: usize) -> (pin: Option<u8>)
-    requires bindings@.len() == ports@.len(),
+    requires bindings@.len() <= ports@.len(),
     ensures pin == input_at(bindings@, ports@, port),
 {
     let mut i = 0;
     while i < bindings.len()
         invariant
-            i <= bindings@.len() == ports@.len(),
+            i <= bindings@.len() <= ports@.len(),
             forall|j: int| 0 <= j < i ==> !#[trigger] is_input_at(bindings@[j], ports@[j], port),
         decreases bindings.len() - i,
     {
@@ -241,7 +247,7 @@ spec fn outputs_before(bindings: Seq<GpioBinding>, ports: Seq<usize>, end: nat) 
 }
 
 fn append_outputs(bindings: &[GpioBinding], ports: &[usize], port: usize, output: &mut Vec<GpioOutputPin>)
-    requires bindings@.len() == ports@.len(),
+    requires bindings@.len() <= ports@.len(),
     ensures final(output)@ == old(output)@ + outputs_at(bindings@, ports@, port),
 {
     let ghost rows = Seq::new(bindings@.len(), |i: int| output_for_port(bindings@[i], ports@[i], port));
@@ -251,7 +257,7 @@ fn append_outputs(bindings: &[GpioBinding], ports: &[usize], port: usize, output
     let mut i = 0;
     while i < bindings.len()
         invariant
-            i <= bindings@.len() == ports@.len() == rows.len(),
+            i <= bindings@.len() == rows.len() <= ports@.len(),
             forall|j: int| 0 <= j < rows.len() ==> #[trigger] rows[j] == output_for_port(bindings@[j], ports@[j], port),
             forall|entry: Option<GpioOutputPin>| #[trigger] some(entry) == entry.is_some(),
             forall|entry: Option<GpioOutputPin>| entry.is_some() ==> #[trigger] unwrap(entry) == entry.unwrap(),
@@ -369,6 +375,90 @@ fn assemble_image<'p, 'a, 'n>(
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
+    // GPIO と UART の名前を、同じルート回路のパック済み配線配置に照合する。
+    fn lower_rp_ports<'n>(
+        &self, owner: ModuleBodyPosition, requests: &[DevicePortRequest<'n>],
+        width_limit: u64, bit_limit: usize, gate_limit: usize,
+    ) -> (result: Result<(PackedNorLayout32, Vec<usize>), GpioImageError<'p, 'a, 'n>>)
+        requires self.can_resolve(),
+        ensures match result {
+            Ok((layout, indices)) => {
+                &&& layout.source_model() <= u32::MAX
+                &&& layout.gates_model().len() <= gate_limit
+                &&& layout.input_model() <= bit_limit
+                &&& layout.outputs_model().len() <= bit_limit
+                &&& crate::netlist::wires_fit(layout.gates_model(), layout.source_model() as usize)
+                &&& exists|netlist: crate::netlist::NorNetlist| #[trigger] layout.matches(&netlist)
+                    && self.clocked_module_source_layout(owner, width_limit, &netlist)
+                &&& exists|resolved: Vec<DevicePortBinding>|
+                    #[trigger] gpio_binding_indices_match(resolved@, indices@)
+                    && self.device_bindings_match(owner, width_limit, requests@, Ok(resolved))
+                &&& indices@.len() == requests@.len()
+                &&& forall|i: int| 0 <= i < indices@.len() ==> #[trigger] indices@[i]
+                    < (if requests@[i].direction is Output { layout.input_model() } else { layout.outputs_model().len() })
+                &&& forall|i: int, j: int| 0 <= i < j < indices@.len()
+                    && requests@[i].direction is Output && requests@[j].direction is Output
+                    ==> (#[trigger] indices@[i]) != (#[trigger] indices@[j])
+            },
+            Err(GpioImageError::Binding(error)) => self.device_bindings_match(owner, width_limit, requests@, Err(error)),
+            Err(error) => !(error is ZeroTickPeriod) && !(error is Pin),
+        },
+    {
+        let resolved = match self.resolve_device_port_bindings(owner, width_limit, requests) {
+            Ok(resolved) => resolved,
+            Err(error) => return Err(GpioImageError::Binding(error)),
+        };
+        let circuit = match self.lower_clocked_module_with_limits(owner, width_limit, bit_limit, gate_limit) {
+            Ok(Some(circuit)) => circuit,
+            Ok(None) => return Err(GpioImageError::NoModule),
+            Err(error) => return Err(GpioImageError::Circuit(error)),
+        };
+        let Some(layout) = circuit.packed_layout32() else { return Err(GpioImageError::LayoutSize); };
+        if layout.source_count() as u128 > u32::MAX as u128 { return Err(GpioImageError::LayoutSize); }
+        let ghost netlist = circuit.netlist_model();
+        let mut indices: Vec<usize> = Vec::new();
+        let mut i = 0;
+        while i < resolved.len()
+            invariant
+                self.can_resolve(),
+                layout.matches(&netlist),
+                self.clocked_module_ports_match(owner, width_limit, &netlist),
+                self.clocked_module_source_layout(owner, width_limit, &netlist),
+                self.device_bindings_match(owner, width_limit, requests@, Ok(resolved)),
+                i == indices@.len() <= resolved@.len() == requests@.len(),
+                forall|j: int| 0 <= j < i ==> #[trigger] indices@[j] == resolved@[j].port.index
+                    && indices@[j] < (if requests@[j].direction is Output {
+                        layout.input_model()
+                    } else { layout.outputs_model().len() }),
+            decreases resolved.len() - i,
+        {
+            let bound = &resolved[i];
+            proof {
+                let j = i as int;
+                let request = requests@[j];
+                self.device_binding_at(owner, width_limit, requests@, resolved, j);
+                self.device_binding_details(owner, width_limit, request, *bound);
+                self.clocked_module_port_in_layout(owner, width_limit, &netlist, &layout,
+                    bound.circuit_direction, request.circuit_port, bound.port);
+                assert(bound.circuit_direction == if requests@[j].direction is Output {
+                    PortDirection::Input
+                } else { PortDirection::Output });
+            }
+            indices.push(bound.port.index);
+            i += 1;
+        }
+        proof { layout.port_slots(&netlist); }
+        assert(gpio_binding_indices_match(resolved@, indices@));
+        assert forall|i: int, j: int| 0 <= i < j < indices@.len() && requests@[i].direction is Output
+            && requests@[j].direction is Output implies (#[trigger] indices@[i]) != (#[trigger] indices@[j]) by {
+            self.device_binding_at(owner, width_limit, requests@, resolved, i);
+            self.device_binding_at(owner, width_limit, requests@, resolved, j);
+            self.device_binding_details(owner, width_limit, requests@[i], resolved@[i]);
+            self.device_binding_details(owner, width_limit, requests@[j], resolved@[j]);
+        };
+        Ok((layout, indices))
+    }
+
     /// ルートモジュールをパックした NOR 回路と GPIO 接続を組み立てる。
     ///
     /// ルートから到達する回路の型と展開は、指定の幅、ビット列長、ゲート数の上限で検査する。
@@ -411,56 +501,10 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         if tick_micros == 0 { return Err(GpioImageError::ZeroTickPeriod); }
         let (assignments, requests) = requests(bindings);
         if let Err(error) = check_assignments(board, &assignments) { return Err(GpioImageError::Pin(error)); }
-        let resolved = match self.resolve_device_port_bindings(owner, width_limit, &requests) {
-            Ok(resolved) => resolved,
-            Err(error) => return Err(GpioImageError::Binding(error)),
-        };
-        let circuit = match self.lower_clocked_module_with_limits(owner, width_limit, bit_limit, gate_limit) {
-            Ok(Some(circuit)) => circuit,
-            Ok(None) => return Err(GpioImageError::NoModule),
-            Err(error) => return Err(GpioImageError::Circuit(error)),
-        };
-        let Some(layout) = circuit.packed_layout32() else { return Err(GpioImageError::LayoutSize); };
-        if layout.source_count() as u128 > u32::MAX as u128 { return Err(GpioImageError::LayoutSize); }
-        let ghost netlist = circuit.netlist_model();
-        let mut indices: Vec<usize> = Vec::new();
-        let mut i = 0;
-        while i < resolved.len()
-            invariant
-                self.can_resolve(),
-                layout.matches(&netlist),
-                self.clocked_module_ports_match(owner, width_limit, &netlist),
-                self.clocked_module_source_layout(owner, width_limit, &netlist),
-                requests@ == bindings@.map_values(|binding: GpioBinding| gpio_request(binding)),
-                self.device_bindings_match(owner, width_limit, requests@, Ok(resolved)),
-                i == indices@.len() <= resolved@.len() == bindings@.len(),
-                forall|j: int| 0 <= j < i ==> #[trigger] indices@[j] == resolved@[j].port.index
-                    && indices@[j] < (if bindings@[j] is Input {
-                        layout.input_model()
-                    } else { layout.outputs_model().len() }),
-            decreases resolved.len() - i,
-        {
-            let bound = &resolved[i];
-            proof {
-                let j = i as int;
-                let request = requests@[j];
-                self.device_binding_at(owner, width_limit, requests@, resolved, j);
-                self.device_binding_details(owner, width_limit, request, *bound);
-                self.clocked_module_port_in_layout(owner, width_limit, &netlist, &layout,
-                    bound.circuit_direction, request.circuit_port, bound.port);
-                assert(bound.circuit_direction == if bindings@[j] is Input {
-                    PortDirection::Input
-                } else { PortDirection::Output });
-            }
-            indices.push(bound.port.index);
-            i += 1;
-        }
-        proof { layout.port_slots(&netlist); }
-        assert(gpio_binding_indices_match(resolved@, indices@));
+        let (layout, indices) = self.lower_rp_ports(owner, &requests, width_limit, bit_limit, gate_limit)?;
         let result = assemble_image(board, bindings, &indices, layout, tick_micros);
         proof {
             if let Ok(image) = &result {
-                assert(image.layout_model().matches(&circuit.netlist_model()));
                 assert(gpio_image_ports_match(image, bindings@, indices@));
             }
         }

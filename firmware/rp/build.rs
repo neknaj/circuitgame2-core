@@ -36,5 +36,13 @@ fn main() {
     } else {
         program::Program::example(board).expect("組み込みの GPIO 例")
     };
+    println!("cargo:rustc-check-cfg=cfg(rp_uart_program)");
+    if program.has_uart() {
+        assert!(
+            env::var_os("CARGO_FEATURE_UART").is_some(),
+            "UART 配線表には uart feature が必要。"
+        );
+        println!("cargo:rustc-cfg=rp_uart_program");
+    }
     fs::write(directory.join("program.rs"), program.rust()).expect("program.rs");
 }
