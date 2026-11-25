@@ -7,7 +7,10 @@ use super::declarations::{
     declaration_table_matches, form_key, project_names_conflict,
 };
 #[cfg(verus_only)]
-use super::{CircuitProject, location_in_source};
+use super::{
+    CircuitProject, ParsedProjectSources, location_in_source, mixed_declarations_agree,
+    mixed_export_table_matches, exports::mixed_exports_use_project_declarations,
+};
 #[cfg(verus_only)]
 use super::name_keys::key_view;
 use super::{
@@ -326,6 +329,72 @@ pub open spec fn mixed_absolute_resolution_evidence(
     }
 }
 
+
+/// 同じ混在宣言表で得た二つの結果が、同じ宣言または名前空間を指すことを表す。
+pub open spec fn same_mixed_target(left: MixedAbsoluteTarget, right: MixedAbsoluteTarget) -> bool {
+    match (left, right) {
+        (MixedAbsoluteTarget::Declaration(a), MixedAbsoluteTarget::Declaration(b)) =>
+            a.file == b.file && a.item == b.item,
+        (MixedAbsoluteTarget::Namespace { key: a, .. }, MixedAbsoluteTarget::Namespace { key: b, .. }) =>
+            key_view(a) == key_view(b),
+        _ => false,
+    }
+}
+
+impl MixedAbsoluteTarget<'_, '_, '_> {
+    /// 同じ混在宣言表で解決した二つの名前が、同じ対象を指すかを返す。
+    pub(in crate::project) fn is_same_target(&self, other: &MixedAbsoluteTarget) -> (same: bool)
+        ensures same == same_mixed_target(*self, *other),
+    {
+        match (self, other) {
+            (Self::Declaration(a), MixedAbsoluteTarget::Declaration(b)) =>
+                a.file == b.file && a.item == b.item,
+            (Self::Namespace { key: a, .. }, MixedAbsoluteTarget::Namespace { key: b, .. }) =>
+                a.same_name(*b),
+            _ => false,
+        }
+    }
+}
+
+pub(in crate::project) open spec fn mixed_direct_target_matches(
+    table: &MixedExportTable, key: NameKey, target: Option<MixedAbsoluteTarget>,
+) -> bool {
+    match target {
+        Some(found) => mixed_key_resolution(table, key, key.parent, Ok(found)),
+        None => mixed_key_resolution(table, key, key.parent, Err(AbsoluteResolutionError::Missing)),
+    }
+}
+
+pub(in crate::project) proof fn mixed_direct_targets_agree(
+    project: &ParsedProjectSources, table: &MixedExportTable, key: NameKey,
+    left: Option<MixedAbsoluteTarget>, right: Option<MixedAbsoluteTarget>,
+)
+    requires mixed_export_table_matches(project, *table),
+        mixed_direct_target_matches(table, key, left), mixed_direct_target_matches(table, key, right),
+    ensures left == right,
+{
+    mixed_exports_use_project_declarations(project, table);
+    let declarations = table.declarations_model();
+    if let Some(MixedAbsoluteTarget::Declaration(a)) = left {
+        declarations.declaration_at_exists(key, a);
+        assert(right matches Some(MixedAbsoluteTarget::Declaration(_)));
+        let b = right->Some_0->Declaration_0;
+        mixed_declarations_agree(project, &declarations, key, a, b);
+    } else if let Some(MixedAbsoluteTarget::Declaration(b)) = right {
+        declarations.declaration_at_exists(key, b);
+        assert(false);
+    }
+    if let Some(MixedAbsoluteTarget::Namespace { introduced_at: a, .. }) = left {
+        declarations.namespace_at_exists(key, a);
+        assert(right matches Some(MixedAbsoluteTarget::Namespace { .. }));
+        let b = right->Some_0->Namespace_introduced_at;
+        declarations.namespace_origins_agree(key, a, b);
+    } else if let Some(MixedAbsoluteTarget::Namespace { introduced_at: b, .. }) = right {
+        declarations.namespace_at_exists(key, b);
+        assert(false);
+    }
+}
+
 impl<'p, 'a> MixedExportTable<'p, 'a> {
     /// 混在プロジェクトの完全修飾名を、参照元の名前空間から解決する。
     ///
@@ -346,6 +415,18 @@ impl<'p, 'a> MixedExportTable<'p, 'a> {
         let key = NameKey { parent, name };
         assert(absolute_path_parts(path, key.parent, key.name));
         self.resolve_mixed_key(key, from)
+    }
+
+    // 別名との衝突検査では、同じ名前空間の直下を公開状態に関わらず参照する。
+    pub(in crate::project) fn mixed_direct_target<'q>(&self, key: NameKey<'q>)
+        -> (target: Option<MixedAbsoluteTarget<'p, 'a, 'q>>)
+        ensures mixed_direct_target_matches(self, key, target),
+    {
+        match self.resolve_mixed_key(key, key.parent) {
+            Ok(target) => Some(target),
+            Err(AbsoluteResolutionError::Missing) => None,
+            Err(_) => unreachable!(),
+        }
     }
 
     fn resolve_mixed_key<'q>(&self, key: NameKey<'q>, from: Option<&str>)

@@ -315,6 +315,11 @@ pub closed spec fn mixed_export_table_matches(project: &ParsedProjectSources, ta
     &&& forall|key: NameKey| #[trigger] table.publishes(key) <==> mixed_publication_requested(project, key)
 }
 
+pub(in crate::project) proof fn mixed_exports_use_project_declarations(project: &ParsedProjectSources, table: &MixedExportTable)
+    requires mixed_export_table_matches(project, *table),
+    ensures mixed_declaration_table_matches(project, table.declarations_model()), !mixed_project_names_conflict(project),
+{}
+
 /// 公開状態と宣言表が、元の言語別索引に対応することを指定の名前について示す。
 pub proof fn mixed_publication_agrees(
     project: &ParsedProjectSources, table: &MixedExportTable, key: NameKey,

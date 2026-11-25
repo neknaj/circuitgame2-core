@@ -247,6 +247,11 @@ impl<'p, 'a> MixedUseTargets<'p, 'a> {
         self.project
     }
 
+    pub(in crate::project) proof fn mixed_use_exports_match(&self, project: &ParsedProjectSources)
+        requires mixed_use_targets_match(project, *self),
+        ensures mixed_export_table_matches(project, self.exports_model()),
+    {}
+
     /// 別名の解決に使った解析済みプロジェクトを表す。
     pub closed spec fn project_model(&self) -> ParsedProjectSources<'a> {
         *self.project

@@ -32,6 +32,8 @@ use vstd::string::StringSliceAdditionalSpecFns;
 
 mod mixed;
 
+#[cfg(verus_only)]
+pub(super) use mixed::mixed_exports_use_project_declarations;
 pub use mixed::{MixedExportError, MixedExportTable, index_mixed_exports};
 #[cfg(verus_only)]
 pub use mixed::{mixed_export_error_evidence, mixed_export_errors_agree, mixed_export_table_matches, mixed_project_exports_valid, mixed_publication_agrees, mixed_publication_requested};

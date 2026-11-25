@@ -677,6 +677,56 @@ pub proof fn mixed_declaration_origin(
     assert(source_site(project, table.sites@[i]));
 }
 
+
+/// 同じ完全修飾名で見つかる宣言は、元ソース上の一個の宣言に対応する。
+pub proof fn mixed_declarations_agree(
+    project: &ParsedProjectSources, table: &MixedDeclarationTable,
+    key: NameKey, left: ProjectDeclaration, right: ProjectDeclaration,
+)
+    requires mixed_declaration_table_matches(project, *table), !mixed_project_names_conflict(project),
+        table.declaration_at(key, left), table.declaration_at(key, right),
+    ensures left == right,
+{
+    reveal(sites_before);
+    let i = declaration_site_rank(table, key, left);
+    let j = declaration_site_rank(table, key, right);
+    if i != j {
+        let a = table.sites@[i];
+        let b = table.sites@[j];
+        assert(source_site(project, a) && source_site(project, b));
+        assert(!a.binding.namespace && !b.binding.namespace);
+        assert(binding_keys_conflict(a.binding, b.binding));
+        if i < j {
+            assert(site_before(a, b));
+        } else {
+            assert(site_before(b, a));
+            assert(binding_keys_conflict(b.binding, a.binding));
+        }
+        assert(mixed_project_names_conflict(project));
+    }
+    assert(left.name == right.name);
+}
+
+proof fn declaration_site_rank(
+    table: &MixedDeclarationTable, key: NameKey, declaration: ProjectDeclaration,
+) -> (i: int)
+    requires table.declaration_at(key, declaration),
+    ensures
+        0 <= i < table.sites@.len(),
+        binding_lookup_matches(table.sites@[i].binding, key, false),
+        position_of(table.sites@[i], declaration.name),
+        table.sites@[i].kind == Some(declaration.kind),
+        table.sites@[i].file == declaration.file && table.sites@[i].item == declaration.item,
+{
+    choose|i: int| 0 <= i < table.sites@.len() && {
+        let site = #[trigger] table.sites@[i];
+        &&& binding_lookup_matches(site.binding, key, false)
+        &&& position_of(site, declaration.name)
+        &&& site.kind == Some(declaration.kind)
+        &&& site.file == declaration.file && site.item == declaration.item
+    }
+}
+
 impl<'p, 'a> MixedDeclarationTable<'p, 'a> {
     #[verifier::type_invariant]
     spec fn sites_valid(&self) -> bool {
@@ -715,6 +765,15 @@ impl<'p, 'a> MixedDeclarationTable<'p, 'a> {
         })
     }
 
+    /// 宣言の位置に根拠があるなら、その名前の宣言が存在することを示す。
+    pub proof fn declaration_at_exists(&self, key: NameKey, declaration: ProjectDeclaration)
+        requires self.declaration_at(key, declaration),
+        ensures self.declares(key),
+    {
+        let i = declaration_site_rank(self, key, declaration);
+        assert(binding_lookup_matches(self.sites@[i].binding, key, false));
+    }
+
     /// 指定のキーに対応する名前空間が索引にあることを表す。
     pub closed spec fn has_namespace(&self, key: NameKey) -> bool {
         exists|i: int| 0 <= i < self.sites@.len()
@@ -729,6 +788,39 @@ impl<'p, 'a> MixedDeclarationTable<'p, 'a> {
             &&& namespace_position(site, key, location)
             &&& forall|j: int| 0 <= j < i ==> !binding_lookup_matches((#[trigger] self.sites@[j]).binding, key, true)
         }
+    }
+
+    /// 名前空間を導入した位置に根拠があるなら、その名前空間が存在することを示す。
+    pub proof fn namespace_at_exists(&self, key: NameKey, location: LocatedName)
+        requires self.first_namespace_at(key, location),
+        ensures self.has_namespace(key),
+    {}
+
+    proof fn namespace_site_rank(&self, key: NameKey, location: LocatedName) -> (i: int)
+        requires self.first_namespace_at(key, location),
+        ensures
+            0 <= i < self.sites@.len(),
+            binding_lookup_matches(self.sites@[i].binding, key, true),
+            namespace_position(self.sites@[i], key, location),
+            forall|j: int| 0 <= j < i ==> !binding_lookup_matches((#[trigger] self.sites@[j]).binding, key, true),
+    {
+        choose|i: int| 0 <= i < self.sites@.len()
+            && binding_lookup_matches((#[trigger] self.sites@[i]).binding, key, true)
+            && namespace_position(self.sites@[i], key, location)
+            && forall|j: int| 0 <= j < i ==> !binding_lookup_matches((#[trigger] self.sites@[j]).binding, key, true)
+    }
+
+    /// 同じ名前空間の最初の導入位置は、元ソースとバイト範囲まで一致することを示す。
+    pub(in crate::project) proof fn namespace_origins_agree(&self, key: NameKey, a: LocatedName, b: LocatedName)
+        requires self.first_namespace_at(key, a), self.first_namespace_at(key, b),
+        ensures a == b,
+    {
+        let i = self.namespace_site_rank(key, a);
+        let j = self.namespace_site_rank(key, b);
+        if i < j { assert(!binding_lookup_matches(self.sites@[i].binding, key, true)); }
+        if j < i { assert(!binding_lookup_matches(self.sites@[j].binding, key, true)); }
+        let site = self.sites@[i];
+        namespace_positions_agree(site, site, key, key, a, b);
     }
 
     /// 明示された名前空間やパスの中間にある名前空間を探し、最初の導入箇所を返す。
