@@ -5,7 +5,9 @@ use crate::ncg2m::call_evaluation::scalar::ScalarExpressionSite;
 use crate::ncg2m::data_types::{BuiltinDataType, DataType, DataTypeAtom};
 use crate::ncg2m::expression_types::{conditional_positions, expression_slot, local_scalar_site_is_typed, scalar_atom_at, scalar_call_syntax_at, scalar_evaluator_syntax};
 use crate::ncg2m::expression_types::named_call::{
-    checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax, defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
+    CheckedNamedTarget, checked_atom_uses_only_parameters, checked_body_scalar_position, recorded_edge_has_call_syntax,
+    defn_checked_call_arguments, defn_checked_call_target, defn_checked_expression_site,
+    defn_checked_if_child_sites, defn_checked_site_at_body_root,
 };
 
 mod scalar_closure;
@@ -20,7 +22,9 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
     ) -> bool {
         &&& self.body_matches_at_rank(rank, body)
         &&& self.calls_model_at_rank(rank) matches Some(row)
-            && defn_checked_expression_site(aliases, self.order_model()[rank as int], row, body, site.at, site.expected)
+            && self.arithmetic_model_at_rank(rank) matches Some(arithmetic)
+            && defn_checked_expression_site(aliases, self.order_model()[rank as int], row, arithmetic,
+                body, site.at, site.expected)
     }
 
     pub(crate) proof fn checked_site_has_the_rank_body(
@@ -42,7 +46,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         ensures expression_slot(body.source.text_model(), body.forms@, body.at, site.at),
     {
         let row = self.calls_model_at_rank(rank)->Some_0;
-        checked_body_scalar_position(aliases, self.order_model()[rank as int], row, body, site.at, site.expected);
+        checked_body_scalar_position(aliases, self.order_model()[rank as int], row, self.arithmetic_model_at_rank(rank)->Some_0, body, site.at, site.expected);
     }
 
     pub(crate) proof fn checked_atom_keeps_local_type(
@@ -55,7 +59,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         ensures local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, site.at, site.expected),
     {
         let row = self.calls_model_at_rank(rank)->Some_0;
-        checked_atom_uses_only_parameters(aliases, self.order_model()[rank as int], row, body, site.at, site.expected);
+        checked_atom_uses_only_parameters(aliases, self.order_model()[rank as int], row, self.arithmetic_model_at_rank(rank)->Some_0, body, site.at, site.expected);
     }
 
     /// 計画から得た本体を、元の署名の戻り型で検査したことを示す。
@@ -68,8 +72,9 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         }),
     {
         defn_call_plan_edge_order(aliases, self, rank);
+        body_sites_are_covered_at_rank(aliases, self, rank);
         let row = self.calls_model_at_rank(rank)->Some_0;
-        defn_checked_site_at_body_root(aliases, self.order_model()[rank as int], row, body);
+        defn_checked_site_at_body_root(aliases, self.order_model()[rank as int], row, self.arithmetic_model_at_rank(rank)->Some_0, body);
     }
 
     /// 型検査を通った `if` の条件は真偽値であり、両分岐の期待型は親の期待型に一致する。
@@ -88,7 +93,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
             self.scalar_site_is_checked(aliases, rank, body, ScalarExpressionSite { at: no, expected: site.expected }),
     {
         let row = self.calls_model_at_rank(rank)->Some_0;
-        defn_checked_if_child_sites(aliases, self.order_model()[rank as int], row, body, site.at,
+        defn_checked_if_child_sites(aliases, self.order_model()[rank as int], row, self.arithmetic_model_at_rank(rank)->Some_0, body, site.at,
             site.expected, condition, yes, no);
     }
 
@@ -104,8 +109,62 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
             self.calls_model_at_rank(rank)->Some_0[site as int].at),
     {
         defn_call_plan_edge_order(aliases, self, rank);
+        body_sites_are_covered_at_rank(aliases, self, rank);
         let row = self.calls_model_at_rank(rank)->Some_0;
-        recorded_edge_has_call_syntax(aliases, self.order_model()[rank as int], row, body, site);
+        recorded_edge_has_call_syntax(aliases, self.order_model()[rank as int], row, self.arithmetic_model_at_rank(rank)->Some_0, body, site);
+    }
+
+    /// 指定した本体の式位置に、宣言への呼び出しがあることを表す。
+    pub open spec fn scalar_site_has_declared_edge(&self, rank: usize, at: usize) -> bool {
+        self.calls_model_at_rank(rank) matches Some(row)
+            && exists|i: int| 0 <= i < row.len() && (#[trigger] row[i]).at == at
+    }
+
+    /// 型検査済みの名前付きフォームで、選択した宣言または組み込みの型判断を取り出す。
+    pub(crate) proof fn checked_named_target_at_rank(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize,
+        body: DefnEvaluationBody<'p, 'a>, position: ScalarExpressionSite<'a>,
+    ) -> (selected: CheckedNamedTarget)
+        requires
+            defn_call_plan_matches(aliases, self), self.scalar_site_is_checked(aliases, rank, body, position),
+            (expression_slot(body.source.text_model(), body.forms@, body.at, position.at)
+                && scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at))
+                || self.arithmetic_site_model(rank, position.at).is_some(),
+        ensures match selected {
+            CheckedNamedTarget::Declaration(site) => {
+                &&& self.calls_model_at_rank(rank) matches Some(row) && 0 <= site < row.len() && row[site].at == position.at
+                &&& self.arithmetic_site_model(rank, position.at).is_none()
+            },
+            CheckedNamedTarget::Arithmetic(site, ty) => {
+                &&& site.at == position.at
+                &&& self.arithmetic_site_model(rank, position.at) == Some(site)
+                &&& !self.scalar_site_has_declared_edge(rank, position.at)
+                &&& scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at)
+                &&& position.expected.list_depth == 0
+                &&& position.expected.atom == DataTypeAtom::Builtin(BuiltinDataType::Integer(ty))
+                &&& defn_call_arguments(body.forms@, position.at, seq![site.arguments.0, site.arguments.1])
+                &&& self.scalar_site_is_checked(aliases, rank, body,
+                    ScalarExpressionSite { at: site.arguments.0, expected: position.expected })
+                &&& self.scalar_site_is_checked(aliases, rank, body,
+                    ScalarExpressionSite { at: site.arguments.1, expected: position.expected })
+            },
+        },
+    {
+        body_sites_are_covered_at_rank(aliases, self, rank);
+        reveal(DefnCallPlan::arithmetic_site_model);
+        let row = self.calls_model_at_rank(rank)->Some_0;
+        let arithmetic = self.arithmetic_model_at_rank(rank)->Some_0;
+        let selected = defn_checked_call_target(aliases, self.order_model()[rank as int], row, arithmetic,
+            body, position.at, position.expected);
+        if let CheckedNamedTarget::Arithmetic(site, _) = selected {
+            let at = position.at;
+            let actual = choose|i: int| 0 <= i < arithmetic.len() && (#[trigger] arithmetic[i]) == site;
+            let stored = choose|i: int| 0 <= i < arithmetic.len() && (#[trigger] arithmetic[i]).at == at;
+            if actual < stored { assert(arithmetic[actual].at < arithmetic[stored].at); }
+            if stored < actual { assert(arithmetic[stored].at < arithmetic[actual].at); }
+            assert(stored == actual);
+        }
+        selected
     }
 
     /// 型検査済みの宣言呼び出しの、元の構文位置と呼び出し先の順位を計画から得る。
@@ -117,6 +176,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
             defn_call_plan_matches(aliases, self), self.scalar_site_is_checked(aliases, rank, body, position),
             expression_slot(body.source.text_model(), body.forms@, body.at, position.at),
             scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at),
+            self.scalar_site_has_declared_edge(rank, position.at),
         ensures self.calls_model_at_rank(rank) matches Some(row) && site < row.len() && {
             let edge = row[site as int];
             let order = self.order_model();
@@ -132,8 +192,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
     {
         defn_call_plan_edge_order(aliases, self, rank);
         let row = self.calls_model_at_rank(rank)->Some_0;
-        let decl = self.order_model()[rank as int];
-        let site = defn_checked_call_has_edge(aliases, decl, row, body, position.at, position.expected);
+        let site = choose|i: int| 0 <= i < row.len() && (#[trigger] row[i]).at == position.at;
         let storage = self.edges@[self.order@[rank as int] as int];
         assert(storage.len() == row.len());
         let site = site as usize;
@@ -171,7 +230,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         let edge = row[candidate as int];
         let order = self.order_model();
         assert(order[order.index_of(edge.to)] == edge.to);
-        defn_checked_call_arguments(aliases, self.order_model()[rank as int], row, candidate, body, site.expected, callee);
+        defn_checked_call_arguments(aliases, self.order_model()[rank as int], row, self.arithmetic_model_at_rank(rank)->Some_0, candidate, body, site.expected, callee);
     }
 }
 

@@ -59,12 +59,14 @@ pub use basis::{CircuitBasisError, validate_circuit_basis, validate_mixed_circui
 pub use basis::{basis_result_evidence, circuit_basis_valid, mixed_basis_result_evidence, mixed_circuit_basis_valid};
 pub use circuits::{
     CircuitProject, CircuitProjectError, CircuitProjectFailure, parse_circuit_project,
-    parse_circuit_project_with_cached_indexes, parse_circuit_project_with_recovery,
+    parse_circuit_project_recording_indexes, parse_circuit_project_with_cached_indexes,
+    parse_circuit_project_with_recovery,
 };
 pub(crate) use circuits::read_source_span;
 #[cfg(verus_only)]
 pub use circuits::{
     circuit_project_accepts, circuit_project_error, circuit_project_failure, parsed_circuit_matches,
+    recorded_circuit_index_matches,
 };
 pub use declarations::{
     DeclarationTable, LocatedName, MixedDeclarationTable, NameConflict, NameConflictKind, ProjectDeclaration,
@@ -91,6 +93,9 @@ pub use exports::{
     mixed_export_table_matches, mixed_project_exports_valid, mixed_publication_agrees, mixed_publication_requested, project_exports_valid,
 };
 pub use name_keys::NameKey;
+pub(crate) use use_aliases::TypedArithmeticSite;
+#[cfg(verus_only)]
+pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 pub use use_aliases::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
@@ -228,4 +233,4 @@ pub use use_targets::{
 pub use use_targets::{indexed_mixed_use_at, mixed_use_site_at, mixed_use_target_error_matches, mixed_use_targets_match, use_target_error_evidence, use_targets_match};
 
 #[cfg(verus_only)]
-pub use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
+pub use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot, unvisited_arithmetic_at_source};

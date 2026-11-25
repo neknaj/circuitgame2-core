@@ -59,6 +59,9 @@ pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod reference_cursor;
 mod call_site;
+pub(crate) use call_site::TypedArithmeticSite;
+#[cfg(verus_only)]
+pub(crate) use call_site::arithmetic_sites_fit;
 pub use call_site::{DefnCallEdge, DefnCallError, DefnCallSite, DefnPosition, PreparedDefnCall};
 #[cfg(verus_only)]
 pub(crate) use call_site::call_arity_matches;

@@ -111,6 +111,8 @@ pub enum ExpressionTypeError<'a> {
         /// 整数の読み取りで報告された違反。
         error: IntegerLiteralError,
     },
+    /// 組み込みの加減乗は `Nat` または `Int` を返す。演算式全体の範囲を保持する。
+    ArithmeticResult(Range<usize>),
 }
 
 /// 現在の検査で式の型を確定できない理由。

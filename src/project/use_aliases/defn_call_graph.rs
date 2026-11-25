@@ -6,7 +6,9 @@ use crate::ncg2m::{
     call_evaluation::{CallArguments, DefnEvaluationBody}, expression_types::DefnBodyCallError,
 };
 use crate::project::ParsedProjectSources;
-use super::{DefnCallEdge, DefnCallSite, DefnPosition, MixedUseAliases};
+#[cfg(verus_only)]
+use crate::project::arithmetic_sites_fit;
+use super::{DefnCallEdge, DefnCallSite, DefnPosition, MixedUseAliases, TypedArithmeticSite};
 use super::dependency_order::{DependencyEdge, check_dependency_order};
 #[cfg(verus_only)]
 use super::dependency_order::{complete_dependency_order, completion_order_matches, dependencies_in_order,
@@ -26,7 +28,8 @@ use crate::syntax::{form_span, form_spans_valid};
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 #[cfg(verus_only)]
-use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
+use crate::ncg2m::expression_types::named_call::{defn_body_calls_cover_slots, defn_body_sites_cover_slots,
+    defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot, unvisited_arithmetic_at_source};
 
 #[cfg(verus_only)]
 mod typing;
@@ -48,6 +51,15 @@ pub enum DefnCallGraphError<'p, 'a> {
     ///
     /// 構文上の式の位置と型検査の記録が食い違ったことを示す。
     UnvisitedCall(DefnCallEdge<'p, 'a>),
+    /// 本体にある算術の式位置を、型検査の訪問記録から取得できなかった。
+    UnvisitedArithmetic {
+        /// 算術を書いた補助関数。
+        from: DefnPosition,
+        /// 元の平坦な構文木における演算式の位置。
+        at: usize,
+        /// 演算式の元ファイル、文書版、範囲。
+        site: DefnCallSite<'p, 'a>,
+    },
     /// 元の呼び出しを順につないだ閉路。最後の呼び出し先は先頭の呼び出し元に戻る。
     Cycle(Vec<DefnCallEdge<'p, 'a>>),
 }
@@ -57,6 +69,7 @@ pub struct DefnCallPlan<'p, 'a> {
     project: &'p ParsedProjectSources<'a>,
     vertices: Vec<DefnPosition>,
     edges: Vec<Vec<DefnCallEdge<'p, 'a>>>,
+    arithmetic: Vec<Vec<TypedArithmeticSite>>,
     order: Vec<usize>,
     ranks: Vec<usize>,
 }
@@ -149,6 +162,52 @@ spec fn anchored_arguments(project: &ParsedProjectSources, vertices: Seq<DefnPos
 }
 
 #[verifier::opaque]
+spec fn arithmetic_rows_fit(
+    project: &ParsedProjectSources, vertices: Seq<DefnPosition>, rows: Seq<Vec<TypedArithmeticSite>>,
+) -> bool {
+    &&& rows.len() <= vertices.len()
+    &&& forall|i: int| 0 <= i < rows.len() ==>
+        arithmetic_row_fits(project, vertices[i], #[trigger] rows[i])
+}
+
+spec fn arithmetic_row_fits(project: &ParsedProjectSources, from: DefnPosition, sites: Vec<TypedArithmeticSite>) -> bool {
+    project.functional_forms_model(from.file) matches Some(forms) && arithmetic_sites_fit(forms, sites@)
+}
+
+proof fn arithmetic_rows_fit_after_push(
+    project: &ParsedProjectSources, vertices: Seq<DefnPosition>, rows: Seq<Vec<TypedArithmeticSite>>,
+    sites: Vec<TypedArithmeticSite>,
+)
+    requires
+        arithmetic_rows_fit(project, vertices, rows), rows.len() < vertices.len(),
+        arithmetic_row_fits(project, vertices[rows.len() as int], sites),
+    ensures arithmetic_rows_fit(project, vertices, rows.push(sites)),
+{
+    reveal(arithmetic_rows_fit);
+    let grown = rows.push(sites);
+    assert(grown.len() == rows.len() + 1 <= vertices.len());
+    assert forall|i: int| 0 <= i < grown.len() implies
+        arithmetic_row_fits(project, vertices[i], #[trigger] grown[i]) by {
+        if i < rows.len() {
+            assert(grown[i] == rows[i]);
+            assert(arithmetic_row_fits(project, vertices[i], rows[i]));
+        } else {
+            assert(i == rows.len() && grown[i] == sites);
+        }
+    };
+}
+
+#[verifier::opaque]
+spec fn arithmetic_typing_covered(
+    aliases: &MixedUseAliases, vertices: Seq<DefnPosition>, edges: Seq<Vec<DefnCallEdge>>,
+    arithmetic: Seq<Vec<TypedArithmeticSite>>,
+) -> bool {
+    &&& arithmetic.len() == edges.len() <= vertices.len()
+    &&& forall|i: int| 0 <= i < arithmetic.len() ==>
+        defn_body_sites_cover_slots(aliases, vertices[i], (#[trigger] edges[i])@, arithmetic[i]@)
+}
+
+#[verifier::opaque]
 spec fn ordered_edges(
     project: &ParsedProjectSources, vertices: Seq<DefnPosition>, edges: Seq<Vec<DefnCallEdge>>,
     order: Seq<usize>, ranks: Seq<usize>,
@@ -171,6 +230,8 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         &&& anchored_arguments(self.project, self.vertices@, self.edges@)
         &&& ordered_edges(self.project, self.vertices@, self.edges@, self.order@, self.ranks@)
         &&& self.ranks@.len() == self.vertices@.len()
+        &&& self.arithmetic@.len() == self.vertices@.len()
+        &&& arithmetic_rows_fit(self.project, self.vertices@, self.arithmetic@)
         &&& reverse_order_matches(self.order@, self.ranks@)
         &&& forall|a: int, b: int| 0 <= a < b < self.vertices@.len()
             ==> defn_position_before(#[trigger] self.vertices@[a], #[trigger] self.vertices@[b])
@@ -339,6 +400,95 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         Some(sites.as_slice())
     }
 
+    /// 型検査が訪れた算術式を、順位で指定した本体の構文順に表す。
+    pub(crate) closed spec fn arithmetic_model_at_rank(&self, rank: usize) -> Option<Seq<TypedArithmeticSite>> {
+        if rank < self.order@.len() && self.order@[rank as int] < self.arithmetic@.len() {
+            Some(self.arithmetic@[self.order@[rank as int] as int]@)
+        } else {
+            None
+        }
+    }
+
+    /// 本体の型検査で確定した算術式を返す。順位の範囲外なら `None` を返す。
+    pub(crate) fn arithmetic_at_rank(&self, rank: usize) -> (sites: Option<&[TypedArithmeticSite]>)
+        ensures
+            sites.is_some() == (rank < self.order_model().len()),
+            self.arithmetic_model_at_rank(rank) == match sites {
+                Some(row) => Some(row@),
+                None => None,
+            },
+            sites matches Some(row) ==> self.project_model().functional_forms_model(self.order_model()[rank as int].file)
+                matches Some(forms) && arithmetic_sites_fit(forms, row@),
+    {
+        proof { use_type_invariant(self); reveal(arithmetic_rows_fit); }
+        let node = *self.order.get(rank)?;
+        let sites = self.arithmetic.get(node)?;
+        Some(sites.as_slice())
+    }
+
+    pub(crate) closed spec fn arithmetic_site_model(&self, rank: usize, at: usize) -> Option<TypedArithmeticSite> {
+        if let Some(row) = self.arithmetic_model_at_rank(rank) {
+            if exists|i: int| 0 <= i < row.len() && (#[trigger] row[i]).at == at {
+                let index = choose|i: int| 0 <= i < row.len() && (#[trigger] row[i]).at == at;
+                Some(row[index])
+            } else { None }
+        } else { None }
+    }
+
+    /// 元の構文木の添字で、型検査が確定した算術式を探す。
+    pub(crate) fn arithmetic_site(&self, rank: usize, at: usize) -> (site: Option<TypedArithmeticSite>)
+        ensures
+            site == self.arithmetic_site_model(rank, at),
+            site.is_some() == (self.arithmetic_model_at_rank(rank) matches Some(row)
+                && exists|i: int| 0 <= i < row.len() && (#[trigger] row[i]).at == at),
+            site matches Some(found) ==> {
+                &&& found.at == at
+                &&& self.arithmetic_model_at_rank(rank) matches Some(row) && row.contains(found)
+                &&& self.project_model().functional_forms_model(self.order_model()[rank as int].file) matches Some(forms)
+                    && defn_call_arguments(forms, at, seq![found.arguments.0, found.arguments.1])
+            },
+    {
+        let sites = self.arithmetic_at_rank(rank)?;
+        let mut first = 0;
+        let mut end = sites.len();
+        while first < end
+            invariant
+                first <= end <= sites@.len(),
+                self.arithmetic_model_at_rank(rank) == Some(sites@),
+                self.project_model().functional_forms_model(self.order_model()[rank as int].file)
+                    matches Some(forms) && arithmetic_sites_fit(forms, sites@),
+                forall|i: int| 0 <= i < first ==> (#[trigger] sites@[i]).at < at,
+                forall|i: int| end <= i < sites@.len() ==> at < (#[trigger] sites@[i]).at,
+            decreases end - first,
+        {
+            let middle = first + (end - first) / 2;
+            let here = sites[middle];
+            if here.at < at {
+                assert forall|i: int| first <= i <= middle implies (#[trigger] sites@[i]).at < at by {
+                    if i < middle { assert(sites@[i].at < sites@[middle as int].at); }
+                };
+                first = middle + 1;
+            } else if at < here.at {
+                assert forall|i: int| middle <= i < end implies at < (#[trigger] sites@[i]).at by {
+                    if middle < i { assert(sites@[middle as int].at < sites@[i].at); }
+                };
+                end = middle;
+            } else {
+                assert(sites@.contains(here));
+                assert(exists|i: int| 0 <= i < sites@.len() && (#[trigger] sites@[i]).at == at);
+                proof {
+                    let index = choose|i: int| 0 <= i < sites@.len() && (#[trigger] sites@[i]).at == at;
+                    if index < middle { assert(sites@[index].at < sites@[middle as int].at); }
+                    if index > middle { assert(sites@[middle as int].at < sites@[index].at); }
+                    assert(index == middle);
+                    assert(self.arithmetic_site_model(rank, at) == Some(here));
+                }
+                return Some(here);
+            }
+        }
+        None
+    }
+
     /// 計画に含まれる呼び出しの引数評価を始める。
     ///
     /// 呼び出し元の順位または呼び出し列の添字が範囲外なら `None` を返す。
@@ -489,27 +639,39 @@ spec fn graph_matches(
 
 fn graph_rows<'t, 'p, 'a>(
     aliases: &MixedUseAliases<'t, 'p, 'a>, vertices: &[DefnPosition],
-) -> (result: Result<(Vec<Vec<DefnCallEdge<'p, 'a>>>, Vec<Vec<Option<usize>>>), DefnCallGraphError<'p, 'a>>)
+) -> (result: Result<(Vec<Vec<DefnCallEdge<'p, 'a>>>, Vec<Vec<Option<usize>>>,
+    Vec<Vec<TypedArithmeticSite>>), DefnCallGraphError<'p, 'a>>)
     requires
         mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
         defn_vertices_valid(&aliases.targets_model().project_model(), vertices@),
     ensures
         match result {
-            Ok((rows, graph)) => graph@.len() == vertices@.len() && graph_matches(aliases, vertices@, rows@, graph@)
+            Ok((rows, graph, arithmetic)) => graph@.len() == vertices@.len() && arithmetic@.len() == graph@.len()
+                && graph_matches(aliases, vertices@, rows@, graph@)
+                && arithmetic_rows_fit(&aliases.targets_model().project_model(), vertices@, arithmetic@)
+                && arithmetic_typing_covered(aliases, vertices@, rows@, arithmetic@)
                 && dependency_graph_valid(graph@),
             Err(DefnCallGraphError::Body { from, error }) =>
                 project_named_defn_body_matches(aliases, from.file, from.item, Some(Err(error))),
             Err(DefnCallGraphError::UnvisitedCall(edge)) => defn_call_is_expression_slot(aliases, edge),
+            Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }) =>
+                unvisited_arithmetic_at_source(aliases, from, at, site),
             Err(DefnCallGraphError::Cycle(_)) => false,
         },
 {
     let project = aliases.targets().project();
     let mut rows = Vec::<Vec<DefnCallEdge>>::new();
     let mut graph = Vec::<Vec<Option<usize>>>::new();
+    let mut arithmetic = Vec::<Vec<TypedArithmeticSite>>::new();
     let mut node = 0;
+    reveal(arithmetic_rows_fit);
+    reveal(arithmetic_typing_covered);
     while node < vertices.len()
         invariant
             node == rows@.len() <= vertices@.len(),
+            node == arithmetic@.len(),
+            arithmetic_rows_fit(project, vertices@, arithmetic@),
+            arithmetic_typing_covered(aliases, vertices@, rows@, arithmetic@),
             *project == aliases.targets_model().project_model(),
             mixed_use_targets_match(project, aliases.targets_model()),
             defn_vertices_valid(project, vertices@),
@@ -517,7 +679,7 @@ fn graph_rows<'t, 'p, 'a>(
         decreases vertices@.len() - node,
     {
         let from = vertices[node];
-        let Some((body, capture)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
+        let Some((body, capture, sites)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
         match body {
             Err(error) => {
                 proof { named_body_matches_project(aliases, from.file, from.item, Some(Err(error))); }
@@ -532,11 +694,36 @@ fn graph_rows<'t, 'p, 'a>(
         }
         let edges = match capture {
             Ok(edges) => edges,
-            Err(edge) => return Err(DefnCallGraphError::UnvisitedCall(edge)),
+            Err(error) => return Err(error),
         };
         let linked = link_graph_row(aliases, vertices, node, edges.as_slice());
+        let ghost earlier_edges = rows@;
+        let ghost captured_edges = edges@;
         rows.push(edges);
         graph.push(linked);
+        let ghost earlier_sites = arithmetic@;
+        let ghost captured = sites;
+        arithmetic.push(sites);
+        proof {
+            reveal(arithmetic_typing_covered);
+            assert(arithmetic@.len() == node + 1 <= vertices@.len());
+            assert(arithmetic@[node as int] == captured);
+            assert(project.functional_forms_model(from.file) matches Some(forms)
+                && arithmetic_sites_fit(forms, captured@));
+            assert(arithmetic@ == earlier_sites.push(captured));
+            assert(vertices@[earlier_sites.len() as int] == from);
+            arithmetic_rows_fit_after_push(project, vertices@, earlier_sites, captured);
+            assert forall|i: int| 0 <= i < arithmetic@.len() implies
+                defn_body_sites_cover_slots(aliases, vertices@[i], (#[trigger] rows@[i])@, arithmetic@[i]@) by {
+                if i < node {
+                    assert(rows@[i] == earlier_edges[i] && arithmetic@[i] == earlier_sites[i]);
+                } else {
+                    assert(i == node && vertices@[i] == from);
+                    assert(rows@[i]@ == captured_edges);
+                }
+            };
+            assert(arithmetic_typing_covered(aliases, vertices@, rows@, arithmetic@));
+        }
         node += 1;
     }
     proof {
@@ -546,7 +733,7 @@ fn graph_rows<'t, 'p, 'a>(
             assert(defn_call_edge_matches(aliases, rows@[node]@[field]));
         };
     }
-    Ok((rows, graph))
+    Ok((rows, graph, arithmetic))
 }
 
 fn copy_edge<'p, 'a>(
@@ -643,6 +830,8 @@ pub closed spec fn defn_call_plan_matches(aliases: &MixedUseAliases, plan: &Defn
     &&& defn_vertices_valid(&aliases.targets_model().project_model(), plan.vertices@)
     &&& plan.order_nodes_valid()
     &&& plan.edges_model().len() == plan.vertices@.len()
+    &&& arithmetic_typing_covered(aliases, plan.vertices@, plan.edges@, plan.arithmetic@)
+    &&& arithmetic_rows_fit(plan.project, plan.vertices@, plan.arithmetic@)
     &&& order.no_duplicates()
     &&& forall|pos: DefnPosition| #[trigger] plan.vertices@.contains(pos) ==> order.contains(pos)
     &&& forall|pos: DefnPosition| #[trigger] plan.vertices@.contains(pos) ==> checked_body(aliases, pos)
@@ -656,6 +845,23 @@ pub closed spec fn defn_call_plan_matches(aliases: &MixedUseAliases, plan: &Defn
             &&& order.contains(edge.from) && order.contains(edge.to)
             &&& order.index_of(edge.to) < order.index_of(edge.from)
         }
+}
+
+proof fn body_sites_are_covered_at_rank(aliases: &MixedUseAliases, plan: &DefnCallPlan, rank: usize)
+    requires defn_call_plan_matches(aliases, plan), rank < plan.order_model().len(),
+    ensures
+        plan.calls_model_at_rank(rank) matches Some(edges)
+            && plan.arithmetic_model_at_rank(rank) matches Some(sites)
+            && defn_body_sites_cover_slots(aliases, plan.order_model()[rank as int], edges, sites),
+        plan.arithmetic_model_at_rank(rank) matches Some(sites)
+            && plan.project_model().functional_forms_model(plan.order_model()[rank as int].file) matches Some(forms)
+            && arithmetic_sites_fit(forms, sites),
+{
+    reveal(arithmetic_typing_covered);
+    reveal(arithmetic_rows_fit);
+    let node = plan.order@[rank as int] as int;
+    assert(node < plan.vertices@.len());
+    assert(plan.order_model()[rank as int] == plan.vertices@[node]);
 }
 
 /// 指定した補助関数の本体が型検査を通り、計画の順序に含まれることを示す。
@@ -804,12 +1010,13 @@ pub proof fn defn_call_plan_root_scalar_call<'p, 'a>(
         },
 {
     defn_call_plan_edge_order(aliases, plan, rank);
+    body_sites_are_covered_at_rank(aliases, plan, rank);
     let row = plan.calls_model_at_rank(rank)->Some_0;
     let caller = plan.order_model()[rank as int];
     let edge = row[site as int];
     assert(plan.order_model()[plan.order_model().index_of(edge.to)] == edge.to);
     crate::ncg2m::expression_types::named_call::defn_root_call_preserves_scalar_types(
-        aliases, caller, row, site, body, callee,
+        aliases, caller, row, plan.arithmetic_model_at_rank(rank)->Some_0, site, body, callee,
     );
 }
 
@@ -881,6 +1088,8 @@ proof fn checked_dependency_order_is_call_plan(
         defn_vertices_valid(&aliases.targets_model().project_model(), plan.vertices@),
         graph.len() == plan.vertices@.len(),
         graph_matches(aliases, plan.vertices@, plan.edges@, graph),
+        arithmetic_typing_covered(aliases, plan.vertices@, plan.edges@, plan.arithmetic@),
+        arithmetic_rows_fit(plan.project, plan.vertices@, plan.arithmetic@),
         complete_dependency_order(graph, plan.order@),
     ensures defn_call_plan_matches(aliases, plan),
 {
@@ -939,6 +1148,8 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             Err(DefnCallGraphError::Body { from, error }) =>
                 project_named_defn_body_matches(self, from.file, from.item, Some(Err(error))),
             Err(DefnCallGraphError::UnvisitedCall(edge)) => defn_call_is_expression_slot(self, edge),
+            Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }) =>
+                unvisited_arithmetic_at_source(self, from, at, site),
             Err(DefnCallGraphError::Cycle(sites)) => defn_call_cycle(self, sites@),
         },
     {
@@ -951,7 +1162,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             mixed_exports_use_project_declarations(project, exports);
         }
         let vertices = declarations.defn_positions(project);
-        let (edges, graph) = graph_rows(self, &vertices)?;
+        let (edges, graph, arithmetic) = graph_rows(self, &vertices)?;
         match check_dependency_order(graph.as_slice(), true) {
             Err(cycle) => Err(DefnCallGraphError::Cycle(graph_cycle_sites(self, &vertices, &edges, &graph, &cycle))),
             Ok(order) => {
@@ -964,7 +1175,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     checked_rows_anchor_arguments(self, project, vertices@, edges@, graph@);
                     checked_edges_have_order(self, project, vertices@, edges@, graph@, order@, ranks@, expected);
                 }
-                let plan = DefnCallPlan { project, vertices, edges, order, ranks };
+                let plan = DefnCallPlan { project, vertices, edges, arithmetic, order, ranks };
                 proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
                 Ok(plan)
             }
