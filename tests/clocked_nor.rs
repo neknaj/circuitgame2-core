@@ -161,7 +161,7 @@ fn event_tick_retries_with_the_same_inputs_and_consumes_once() {
 
 #[test]
 fn scheduled_host_response_is_visible_at_its_delivery_tick() {
-    use circuitgame2_core::device::{HostResponseError, RequestIds, RequestLedger, ScheduleResponseError};
+    use circuitgame2_core::device::{DeliveryError, HostResponseError, RequestIds, RequestLedger, ResponseKey, ScheduleResponseError};
     use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
     use circuitgame2_core::time::{ScheduledEvents, TickPosition};
 
@@ -175,9 +175,12 @@ fn scheduled_host_response_is_visible_at_its_delivery_tick() {
     let mut ids = RequestIds::new(0);
     let mut ledger = RequestLedger::new(0);
     let mut events = ScheduledEvents::new();
-    let id = ids.prepare(1).unwrap().commit().id_at(0, 1).unwrap();
+    let issued = ids.prepare(2).unwrap().commit();
+    let id = issued.id_at(0, 1).unwrap();
+    let second = issued.id_at(1, 2).unwrap();
     session.prepare_io_tick(&mut events).unwrap().commit(&[false]).unwrap();
     ledger.register(id, 9, 1).unwrap();
+    ledger.register(second, 10, 1).unwrap();
 
     assert_eq!(session.schedule_response(&mut ledger, &mut events, id, session.position(), "late"),
         Err(ScheduleResponseError::AlreadyCommitted));
@@ -186,17 +189,29 @@ fn scheduled_host_response_is_visible_at_its_delivery_tick() {
     assert_eq!(session.schedule_response(&mut ledger, &mut events, id, delivery, "duplicate"),
         Err(ScheduleResponseError::Response(HostResponseError::DuplicateResponse)));
 
+    session.schedule_response(&mut ledger, &mut events, second, delivery, "second").unwrap();
+    let key = ResponseKey { id, tag: 9 };
+    let second_key = ResponseKey { id: second, tag: 10 };
+    let wrong_tag = ResponseKey { id: second, tag: 9 };
+    assert!(matches!(ledger.prepare_delivery(&[key, wrong_tag], delivery), Err(DeliveryError::WrongTag(1))));
+    assert!(matches!(ledger.prepare_delivery(&[key, key], delivery), Err(DeliveryError::Duplicate(1))));
     let pending = session.prepare_io_tick(&mut events).unwrap();
+    let acknowledgment = ledger.prepare_delivery(&[key, second_key], delivery).unwrap();
     assert_eq!(pending.next_event(0).unwrap().1.payload.payload(), &"data");
     assert!(matches!(pending.commit(&[]), Err(TickInputError::InputCount)));
+    acknowledgment.cancel();
 
     let pending = session.prepare_io_tick(&mut events).unwrap();
     let event = &pending.next_event(0).unwrap().1.payload;
     assert_eq!(event.request_id(), id);
     assert_eq!(event.tag(), 9);
+    let acknowledgment = ledger.prepare_delivery(&[key, second_key], delivery).unwrap();
     let ready = pending.commit(&[true]).unwrap();
-    assert_eq!(ready.len(), 1);
-    assert_eq!(ledger.consume_at(ready[0].payload.request_id(), ready[0].position), Some(9));
+    acknowledgment.commit();
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[1].payload.request_id(), second);
+    assert_eq!(ledger.consume_at(ready[0].payload.request_id(), ready[0].position), None);
+    assert_eq!(ledger.consume_at(ready[1].payload.request_id(), ready[1].position), None);
 }
 
 #[test]

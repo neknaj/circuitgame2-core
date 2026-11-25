@@ -1,5 +1,11 @@
 //! 要求 ID とデバイス内タグを対応付け、応答の配送まで追跡する。
 
+mod delivery;
+
+pub use delivery::{DeliveryError, PendingDelivery, ResponseKey};
+#[cfg(verus_only)]
+pub use delivery::delivery_matches;
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
