@@ -1,11 +1,14 @@
 //! 発行済みの要求に対する応答を、未開始の tick へ予約する。
 
+use alloc::vec::Vec;
 use vstd::prelude::*;
 
-use super::{HostRequestId, HostResponseError, RequestLedger};
+use super::{DeliveryError, HostRequestId, HostResponseError, RequestLedger, ResponseKey};
 #[cfg(verus_only)]
-use super::{ResponseStatus, response_update};
-use crate::netlist::ClockedSession;
+use super::{ResponseStatus, delivery_matches, response_update};
+use crate::netlist::{ClockedSession, PendingIoTick, TickInputError};
+#[cfg(verus_only)]
+use crate::time::events_at_tick;
 use crate::time::{ScheduledEvent, ScheduledEvents, TickPosition};
 
 verus! {
@@ -119,4 +122,162 @@ impl ClockedSession {
     }
 }
 
+/// 応答を伴う tick を確定できなかった理由。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseTickError {
+    /// キューにある応答と台帳が一致しない。
+    Delivery(DeliveryError),
+    /// 回路へ渡した入力のビット数が違う。
+    Input(TickInputError),
+}
+
+spec fn key_of<T>(event: ScheduledEvent<ScheduledResponse<T>>) -> ResponseKey {
+    let (id, tag, _) = event.payload.model();
+    ResponseKey { id, tag }
+}
+
+/// 対象 tick に渡す応答の要求 ID とタグを、到着順に表す。
+pub closed spec fn response_keys<T>(
+    events: Seq<ScheduledEvent<ScheduledResponse<T>>>, target: TickPosition,
+) -> Seq<ResponseKey> {
+    events_at_tick(events, target, true).map_values(|event| key_of(event))
+}
+
+proof fn skip_other_events<T>(
+    events: Seq<ScheduledEvent<ScheduledResponse<T>>>, target: TickPosition, from: int, to: int,
+)
+    requires
+        0 <= from <= to <= events.len(),
+        forall|j: int| from <= j < to ==> (#[trigger] events[j]).position != target,
+    ensures
+        response_keys(events.take(to), target) == response_keys(events.take(from), target),
+{
+    let prefix = events.take(from);
+    let skipped = events.subrange(from, to);
+    let selected = |event: ScheduledEvent<ScheduledResponse<T>>| (event.position == target) == true;
+    assert forall|j: int| 0 <= j < skipped.len() implies (#[trigger] skipped[j]).position != target by {
+        assert(skipped[j] == events[from + j]);
+    }
+    skipped.lemma_all_neg_filter_empty(selected);
+    assert(skipped.filter(selected) =~= Seq::<ScheduledEvent<ScheduledResponse<T>>>::empty());
+    assert(events.take(to) =~= prefix + skipped);
+    Seq::filter_distributes_over_add(prefix, skipped, selected);
+}
+
+proof fn append_response_key<T>(
+    events: Seq<ScheduledEvent<ScheduledResponse<T>>>, target: TickPosition, index: int,
+)
+    requires 0 <= index < events.len(), events[index].position == target,
+    ensures response_keys(events.take(index + 1), target) ==
+        response_keys(events.take(index), target).push(key_of(events[index])),
+{
+    let prefix = events.take(index);
+    let event = events[index];
+    assert(events.take(index + 1) =~= prefix.push(event));
+    prefix.lemma_filter_push(event, |e: ScheduledEvent<ScheduledResponse<T>>| (e.position == target) == true);
+    assert(response_keys(events.take(index + 1), target) =~=
+        response_keys(events.take(index), target).push(key_of(event)));
+}
+
+impl<'a, T> PendingIoTick<'a, ScheduledResponse<T>> {
+    fn ready_keys(&self) -> (keys: Vec<ResponseKey>)
+        ensures keys@ == response_keys(self.before_events(), self.target_model()),
+    {
+        let mut keys = Vec::new();
+        let mut from = 0;
+        let ghost events = self.before_events();
+        let target = self.target();
+        assert(response_keys(events.take(0), target).len() == 0);
+        loop
+            invariant
+                from <= events.len(),
+                events == self.before_events(),
+                target == self.target_model(),
+                keys@ == response_keys(events.take(from as int), target),
+            decreases events.len() - from,
+        {
+            let Some((index, event)) = self.next_event(from) else {
+                proof {
+                    skip_other_events(events, target, from as int, events.len() as int);
+                    assert(events.take(events.len() as int) =~= events);
+                }
+                return keys;
+            };
+            let key = ResponseKey { id: event.payload.request_id(), tag: event.payload.tag() };
+            proof {
+                skip_other_events(events, target, from as int, index as int);
+                append_response_key(events, target, index as int);
+                assert(key == key_of(events[index as int]));
+            }
+            keys.push(key);
+            from = index + 1;
+        }
+    }
+
+    /// 回路、時刻、イベント列、要求台帳をまとめて更新する。
+    ///
+    /// この実行の台帳を渡す。同じ tick の応答をすべて照合した後に回路を更新し、
+    /// 成功した場合だけ応答を台帳から消費する。応答を予約したイベント列には、台帳と同時に確定するこの関数を使う。
+    ///
+    /// # Errors
+    ///
+    /// 配送列の不一致を先に検査する。配送または入力幅のエラーではどの状態も変更しない。
+    pub fn commit_responses(
+        self, ledger: &mut RequestLedger, input: &[bool],
+    ) -> (result: Result<Vec<ScheduledEvent<ScheduledResponse<T>>>, ResponseTickError>)
+        ensures
+            self.before_circuit().valid() ==> self.after_circuit().valid(),
+            result.is_ok() <==> old(ledger).valid_delivery(
+                response_keys(self.before_events(), self.target_model()), self.target_model())
+                && input@.len() == self.before_circuit().vm_model().external_count(),
+            result matches Err(ResponseTickError::Delivery(error)) ==> {
+                let keys = response_keys(self.before_events(), self.target_model());
+                exists|i: usize| i < keys.len()
+                    && #[trigger] old(ledger).delivery_issue_at(keys, self.target_model(), i) == Some(error)
+                    && forall|j: usize| j < i ==>
+                        #[trigger] old(ledger).delivery_issue_at(keys, self.target_model(), j).is_none()
+            },
+            result matches Err(ResponseTickError::Input(error)) ==>
+                old(ledger).valid_delivery(response_keys(self.before_events(), self.target_model()), self.target_model())
+                && input@.len() != self.before_circuit().vm_model().external_count()
+                && error == TickInputError::InputCount,
+            match result {
+                Ok(consumed) => {
+                    &&& self.after_circuit().position_model() == self.target_model()
+                    &&& self.after_circuit().vm_model().tick_matches(
+                        &self.before_circuit().vm_model(), input@, self.after_circuit().output_model())
+                    &&& self.after_events() == events_at_tick(self.before_events(), self.target_model(), false)
+                    &&& consumed@ == events_at_tick(self.before_events(), self.target_model(), true)
+                    &&& final(ledger).generation_model() == old(ledger).generation_model()
+                    &&& delivery_matches(old(ledger).requests(), final(ledger).requests(),
+                        response_keys(self.before_events(), self.target_model()), self.target_model())
+                },
+                Err(_) => {
+                    &&& self.after_circuit() == self.before_circuit()
+                    &&& self.after_events() == self.before_events()
+                    &&& *final(ledger) == *old(ledger)
+                },
+            },
+    {
+        let target = self.target();
+        let keys = self.ready_keys();
+        let delivery = match ledger.prepare_delivery(keys.as_slice(), target) {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                self.cancel();
+                return Err(ResponseTickError::Delivery(error));
+            },
+        };
+        match self.commit(input) {
+            Ok(events) => {
+                delivery.commit();
+                Ok(events)
+            },
+            Err(error) => {
+                delivery.cancel();
+                Err(ResponseTickError::Input(error))
+            },
+        }
+    }
+}
 } // verus!

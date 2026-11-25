@@ -11,4 +11,7 @@ pub use ledger::{busy_at, delivery_matches, response_update};
 pub use request_ids::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds};
 
 pub use response::{HostResponseError, ResponseSlot, ResponseStatus};
-pub use scheduling::{ScheduleResponseError, ScheduledResponse};
+pub use scheduling::{ResponseTickError, ScheduleResponseError, ScheduledResponse};
+
+#[cfg(verus_only)]
+pub use scheduling::response_keys;

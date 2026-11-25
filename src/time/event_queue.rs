@@ -37,6 +37,7 @@ pub open spec fn next_event_matches<T>(
     match result {
         Some((index, event)) => {
             &&& from <= index < events.len()
+            &&& index < usize::MAX
             &&& *event == events[index as int]
             &&& event.position == target
             &&& forall|i: int| from <= i < index ==> (#[trigger] events[i]).position != target
