@@ -6,6 +6,8 @@ pub use circuitgame2_device_timing::RequestKey;
 pub use issuance::BatchRegistrationError;
 #[cfg(verus_only)]
 pub use issuance::{first_batch_request_error, issued_rows_match, valid_request_batch};
+#[cfg(verus_only)]
+pub(super) use issuance::batch_request_error;
 
 pub use delivery::{DeliveryError, PendingDelivery, ResponseKey};
 #[cfg(verus_only)]

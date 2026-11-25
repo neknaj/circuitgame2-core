@@ -149,7 +149,7 @@ impl<T> ScheduledEvents<T> {
         PendingEvents { events: self, target }
     }
 
-    fn next_ready(&self, target: TickPosition, from: usize)
+    pub(crate) fn next_ready(&self, target: TickPosition, from: usize)
         -> (result: Option<(usize, &ScheduledEvent<T>)>)
         ensures next_event_matches(self.model(), target, from, result),
     {

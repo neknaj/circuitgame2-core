@@ -4,7 +4,11 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 use crate::time::ScheduledEvent;
-use super::{HostRequestId, IssuedRequestIds, PendingDeviceEvents, QueuedResponse, RequestBatchTickError, RequestKey};
+#[cfg(verus_only)]
+use super::{RequestIds, RequestLedger};
+#[cfg(verus_only)]
+use crate::{netlist::ClockedSession, time::TickPosition};
+use super::{DeviceSession, HostRequestId, IssuedRequestIds, PendingDeviceEvents, QueuedResponse, RequestBatchTickError, RequestKey};
 
 verus! {
 
@@ -248,10 +252,11 @@ fn index_requests<N, R>(source: &[DeviceHostRequest<N, R>])
     Ok((ranks, keys))
 }
 
-impl<'tick, E: QueuedResponse> PendingDeviceEvents<'tick, E> {
+impl<E: QueuedResponse> DeviceSession<E> {
     /// ホスト要求を含む tick の診断が、渡した入力列に対応することを表す。
-    pub open spec fn host_request_commit_error<N, R>(
-        &self, input: Seq<bool>, source: Seq<DeviceHostRequest<N, R>>, error: HostRequestCommitError,
+    pub open spec fn host_request_commit_error_at<N, R>(
+        snapshot: (ClockedSession, RequestLedger, Seq<ScheduledEvent<E>>),
+        ids: RequestIds, target: TickPosition, input: Seq<bool>, source: Seq<DeviceHostRequest<N, R>>, error: HostRequestCommitError,
     ) -> bool {
         match error {
             HostRequestCommitError::InstanceOrder(i) => {
@@ -261,8 +266,20 @@ impl<'tick, E: QueuedResponse> PendingDeviceEvents<'tick, E> {
             },
             HostRequestCommitError::Allocation => true,
             HostRequestCommitError::Tick(reason) =>
-                host_request_order(source) && self.request_batch_error(input, host_request_keys(source), reason),
+                host_request_order(source)
+                    && Self::request_batch_error_at(snapshot, ids, target, input, host_request_keys(source), reason),
         }
+    }
+
+}
+
+impl<'tick, E: QueuedResponse> PendingDeviceEvents<'tick, E> {
+    /// この tick を始めた時点の状態で、渡した入力と要求から診断の根拠を求める。
+    pub open spec fn host_request_commit_error<N, R>(
+        &self, input: Seq<bool>, source: Seq<DeviceHostRequest<N, R>>, error: HostRequestCommitError,
+    ) -> bool {
+        DeviceSession::<E>::host_request_commit_error_at(
+            self.before_model(), self.before_ids(), self.target_model(), input, source, error)
     }
 
     /// 要求と通知の順序を保ち、回路更新が成功したときにだけホストへ渡す。

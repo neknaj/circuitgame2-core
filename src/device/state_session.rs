@@ -14,6 +14,9 @@ use super::{
 #[cfg(verus_only)]
 use super::{host_request_keys, host_request_order, request_ranks_match};
 
+mod owned_tick;
+pub use owned_tick::OwnedDeviceStateTick;
+
 verus! {
 
 type Event<I, R> = ScheduledEvent<DeviceEvent<I, R>>;
@@ -82,7 +85,7 @@ pub struct DeviceStateTickResult<'p, I, R, N, Q> {
 
 /// 設定にないインスタンスを指す、入力順で最初の要求または通知を表す。
 pub open spec fn first_unknown_host_instance<N, Q>(
-    hosts: Seq<DeviceHostRequest<N, Q>>, count: usize, request: usize,
+    hosts: Seq<DeviceHostRequest<N, Q>>, count: nat, request: usize,
 ) -> bool {
     &&& request < hosts.len()
     &&& hosts[request as int].instance >= count
@@ -91,7 +94,7 @@ pub open spec fn first_unknown_host_instance<N, Q>(
 
 fn unknown_host_instance<N, Q>(hosts: &[DeviceHostRequest<N, Q>], count: usize) -> (result: Option<usize>)
     ensures
-        result matches Some(index) ==> first_unknown_host_instance(hosts@, count, index),
+        result matches Some(index) ==> first_unknown_host_instance(hosts@, count as nat, index),
         result.is_none() ==> forall|i: int| 0 <= i < hosts@.len() ==> (#[trigger] hosts@[i]).instance < count,
 {
     let mut i = 0;
@@ -381,7 +384,7 @@ impl<'a, I, R, S> PendingDeviceStateTick<'a, I, R, S> {
             },
             result matches Err(DeviceStateTickError::HostInstance { request, instance }) ==> {
                 &&& next@.len() == self.before_states().len()
-                &&& first_unknown_host_instance(hosts@, next@.len() as usize, request)
+                &&& first_unknown_host_instance(hosts@, next@.len(), request)
                 &&& instance == hosts@[request as int].instance
             },
             result matches Err(DeviceStateTickError::Commit(error)) ==> {
