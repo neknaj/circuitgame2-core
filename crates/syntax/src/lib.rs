@@ -1310,33 +1310,33 @@ proof fn derive_forest_region(
     ensures sexpr_forest(source, forms, pieces, first, limit, lower, upper),
     decreases limit - first,
 {
-    reveal(sexpr_forest);
     if first == limit {
+        reveal(sexpr_forest);
         return;
     }
-    reveal(forest_region);
-    reveal(all_form_pieces_present);
-    reveal(form_spans_valid);
-    reveal(list_source_delimiters);
-    reveal(strict_preorder_ranges);
-    reveal(nested_list_indices);
     let form = forms[first];
     let span = form_span(form);
-    assert(lower <= span.start < span.end <= upper);
-    assert(form_pieces_present(form, pieces));
+    assert(lower <= span.start < span.end <= upper && form_atom_matches(source, form)) by {
+        reveal(forest_region);
+        reveal(form_spans_valid);
+    };
+    assert(form_pieces_present(form, pieces)) by { reveal(all_form_pieces_present); };
     let after = match form {
         Form::Atom { .. } => first + 1,
         Form::List { end, .. } => {
-            assert(first < end <= limit);
-            assert(list_delimited(source.spec_bytes(), form, false));
+            assert(first < end <= limit) by { reveal(forest_region); };
+            assert(list_delimited(source.spec_bytes(), form, false)) by { reveal(list_source_delimiters); };
             assert(span.start + 1 < span.end);
             assert(forest_region(forms, first + 1, end as int, span.start + 1, span.end - 1)) by {
+                reveal(forest_region);
                 assert forall|i: int| first + 1 <= i < end implies {
                     let child = #[trigger] forms[i];
                     &&& span.start + 1 <= form_span(child).start
                     &&& form_span(child).end <= span.end - 1
                     &&& (child is List ==> child->List_end <= end)
                 } by {
+                    reveal(strict_preorder_ranges);
+                    reveal(nested_list_indices);
                     assert(preorder_range_pair(form, forms[i], i));
                 };
             };
@@ -1345,16 +1345,19 @@ proof fn derive_forest_region(
         },
     };
     assert(forest_region(forms, after, limit, span.end as int, upper)) by {
+        reveal(forest_region);
         assert forall|i: int| after <= i < limit implies {
             let sibling = #[trigger] forms[i];
             &&& span.end <= form_span(sibling).start
             &&& form_span(sibling).end <= upper
             &&& (sibling is List ==> sibling->List_end <= limit)
         } by {
+            reveal(strict_preorder_ranges);
             assert(preorder_range_pair(form, forms[i], i));
         };
     };
     derive_forest_region(source, forms, pieces, after, limit, span.end as int, upper);
+    reveal(sexpr_forest);
 }
 
 #[verifier::opaque]

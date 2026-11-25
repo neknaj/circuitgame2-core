@@ -1,8 +1,9 @@
 use circuitgame2_core::project::{
     ObservedCircuitBindingKind, RecoveredDeclarationQuery, SourceKind, SourceSnapshot,
     collect_sources, inspect_circuit_file, inspect_circuit_project, normalize_path,
+    inspect_circuit_project_with_cache,
 };
-use circuitgame2_core::syntax::circuit::{Head, RecoveredNamePosition};
+use circuitgame2_core::syntax::circuit::{CachedCircuitRecovery, Head, RecoveredNamePosition};
 
 #[test]
 fn recovered_declaration_retains_the_collected_file_and_revision() {
@@ -164,4 +165,35 @@ fn fragment_completion_uses_an_original_target_in_its_own_namespace() {
     assert_eq!(observed, ["gate", "gate-next"]);
     assert!(project.module_part_candidates(0, target + 4).is_none());
     assert!(project.module_part_candidates(0, text.len()).is_none());
+}
+
+#[test]
+fn reuses_a_document_recovery_with_the_current_source_identity() {
+    let original = "; 猫 🐈\n(module gate (in x) (out y)) (bad)";
+    let edited = "; 猫 🐈\n(module gait (in x) (out y)) (bad)";
+    let repaired = ") (module gate-next (in x) (out y))";
+    let cached = CachedCircuitRecovery::analyze(original.to_owned());
+    let damaged = CachedCircuitRecovery::analyze(repaired.to_owned());
+    let snapshots = [
+        SourceSnapshot { path: "logic/mod.ncg2", revision: 1, text: edited },
+        SourceSnapshot { path: "logic/./mod.ncg2", revision: 1, text: edited },
+        SourceSnapshot { path: "current.ncg2", revision: 2, text: original },
+        SourceSnapshot { path: "editing.ncg2", revision: 3, text: repaired },
+    ];
+    let sources = collect_sources(&snapshots).unwrap();
+    let project = inspect_circuit_project_with_cache(&sources, &[Some(&cached), None, Some(&cached), Some(&damaged)]);
+    let recovery = |i: usize| project.files()[i].as_ref().unwrap().recovered_names().recovery();
+    assert!(!core::ptr::eq(recovery(0), cached.recovery()));
+    assert!(core::ptr::eq(recovery(1), cached.recovery()));
+    assert!(!core::ptr::eq(recovery(2), damaged.recovery()));
+
+    let candidates = project.query_declarations(RecoveredDeclarationQuery::Prefix {
+        parent: None, prefix: "ga", head: Some(Head::Module),
+    });
+    let expected = ["gait", "gate", "gate-next"];
+    for (i, rows) in candidates.files.iter().enumerate() {
+        let [(_, item)] = rows.as_slice() else { panic!("one module at index {i}"); };
+        assert!(core::ptr::eq(item.location.source, &sources[i]));
+        assert_eq!(&item.location.source.text()[item.location.span.clone()], expected[i]);
+    }
 }

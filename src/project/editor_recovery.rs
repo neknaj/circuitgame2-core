@@ -3,7 +3,7 @@
 mod module_part;
 mod project;
 pub use module_part::ModulePartCandidates;
-pub use project::{CircuitEditorProject, PartialCircuitDeclarations, inspect_circuit_project};
+pub use project::{CircuitEditorProject, PartialCircuitDeclarations, inspect_circuit_project, inspect_circuit_project_with_cache};
 
 use alloc::vec::Vec;
 use super::declarations::defines_binding;
@@ -14,7 +14,9 @@ use super::declarations::named_binding;
 use super::{LocatedName, NameKey, ProjectSource, SourceKind};
 #[cfg(verus_only)]
 use super::source_kind_of;
-use crate::syntax::circuit::{Head, RecoveredNamePosition, RecoveredNames, recover_circuit_names};
+use crate::syntax::circuit::{
+    CachedCircuitRecovery, Head, RecoveredNamePosition, RecoveredNames, recover_circuit_names, recover_circuit_names_with_cache,
+};
 #[cfg(verus_only)]
 use crate::syntax::circuit::RecoveredName;
 use vstd::prelude::*;
@@ -698,12 +700,26 @@ pub fn inspect_circuit_file<'p, 'a>(
         file.is_some() <==> circuit_editor_source(source),
         file matches Some(file) ==> file.valid() && file.source_model() == source,
 {
+    inspect_file(source, None)
+}
+
+fn inspect_file<'p, 'a>(
+    source: &'p ProjectSource<'a>, cached: Option<&'a CachedCircuitRecovery>,
+) -> (file: Option<CircuitEditorFile<'p, 'a>>)
+    ensures
+        file.is_some() <==> circuit_editor_source(source),
+        file matches Some(file) ==> file.valid() && file.source_model() == source,
+{
     if !matches!(source.kind, SourceKind::Circuit)
         || !matches!(source.id.source_kind(), Some(SourceKind::Circuit))
     {
         return None;
     }
-    let names = recover_circuit_names(source.text());
+    let text = source.text();
+    let names = match cached {
+        Some(cached) => recover_circuit_names_with_cache(text, cached),
+        None => recover_circuit_names(text),
+    };
     Some(CircuitEditorFile { source, names })
 }
 

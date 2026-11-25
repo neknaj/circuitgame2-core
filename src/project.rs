@@ -78,7 +78,8 @@ pub use declarations::{
 };
 pub use editor_recovery::{
     CircuitEditorFile, CircuitEditorProject, ObservedCircuitBinding, ObservedCircuitBindingKind,
-    ModulePartCandidates, PartialCircuitDeclarations, RecoveredDeclarationQuery, inspect_circuit_file, inspect_circuit_project,
+    ModulePartCandidates, PartialCircuitDeclarations, RecoveredDeclarationQuery, inspect_circuit_file,
+    inspect_circuit_project, inspect_circuit_project_with_cache,
 };
 pub use exports::{ExportError, ExportTable, index_exports};
 #[cfg(verus_only)]

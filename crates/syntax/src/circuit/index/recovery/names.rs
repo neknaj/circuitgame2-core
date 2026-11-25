@@ -35,7 +35,12 @@ pub struct RecoveredName<'a> {
 /// 名前を読み取るときに使う元ソースと、その回復解析結果。
 pub struct RecoveredNames<'a> {
     source: &'a str,
-    recovery: CircuitRecovery,
+    recovery: RecoveryStorage<'a>,
+}
+
+enum RecoveryStorage<'a> {
+    Owned(CircuitRecovery),
+    Cached(&'a CircuitRecovery),
 }
 
 spec fn shift_site(offset: usize, site: NameSite) -> NameSite {
@@ -320,8 +325,8 @@ impl OriginalCircuitList {
 
 impl<'a> RecoveredNames<'a> {
     /// 回復結果が、名前の読み取りに使う元ソースに対応することを表す。
-    pub closed spec fn valid(&self) -> bool {
-        circuit_recovery_matches(self.source, self.recovery)
+    pub open spec fn valid(&self) -> bool {
+        circuit_recovery_matches(self.source_model(), self.recovery_model())
     }
 
     /// 解析に使ったファイルの本文を表す。
@@ -331,19 +336,25 @@ impl<'a> RecoveredNames<'a> {
 
     /// フォームを選ぶときに参照する回復結果を表す。
     pub closed spec fn recovery_model(&self) -> CircuitRecovery {
-        self.recovery
+        match self.recovery {
+            RecoveryStorage::Owned(recovery) => recovery,
+            RecoveryStorage::Cached(recovery) => *recovery,
+        }
     }
 
     /// 診断と名前の位置を選ぶときに使う回復結果を返す。
     pub fn recovery(&self) -> (result: &CircuitRecovery)
         ensures *result == self.recovery_model(),
     {
-        &self.recovery
+        match &self.recovery {
+            RecoveryStorage::Owned(recovery) => recovery,
+            RecoveryStorage::Cached(recovery) => recovery,
+        }
     }
 
     /// 回復した名前の走査で参照するフォーム群の数を表す。
     pub closed spec fn position_group_count_model(&self) -> nat {
-        match self.recovery {
+        match self.recovery_model() {
             CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => 1,
             CircuitRecovery::WithSyntaxRepairs { original, .. } => original@.len(),
         }
@@ -353,7 +364,7 @@ impl<'a> RecoveredNames<'a> {
     pub fn position_group_count(&self) -> (count: usize)
         ensures count == self.position_group_count_model(),
     {
-        match &self.recovery {
+        match self.recovery() {
             CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => 1,
             CircuitRecovery::WithSyntaxRepairs { original, .. } => original.len(),
         }
@@ -361,7 +372,7 @@ impl<'a> RecoveredNames<'a> {
 
     /// フォーム群の中で選べる検査項目の数を表す。
     pub closed spec fn position_count_model(&self, group: usize) -> nat {
-        match self.recovery {
+        match self.recovery_model() {
             CircuitRecovery::Complete(syntax) => if group == 0 { syntax.entries@.len() } else { 0 },
             CircuitRecovery::Inspected { checked, .. } => if group == 0 { checked@.len() } else { 0 },
             CircuitRecovery::WithSyntaxRepairs { original, .. } => {
@@ -383,7 +394,7 @@ impl<'a> RecoveredNames<'a> {
             count == self.position_count_model(group),
             group >= self.position_group_count_model() ==> count == 0,
     {
-        match &self.recovery {
+        match self.recovery() {
             CircuitRecovery::Complete(syntax) => if group == 0 { syntax.entries.len() } else { 0 },
             CircuitRecovery::Inspected { checked, .. } => if group == 0 { checked.len() } else { 0 },
             CircuitRecovery::WithSyntaxRepairs { original, .. } => match original.get(group) {
@@ -398,7 +409,7 @@ impl<'a> RecoveredNames<'a> {
         if item >= self.position_count_model(group) {
             None
         } else {
-            match self.recovery {
+            match self.recovery_model() {
                 CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => Some(RecoveredNamePosition::File(item)),
                 CircuitRecovery::WithSyntaxRepairs { .. } => Some(RecoveredNamePosition::Original { fragment: group, item }),
             }
@@ -414,7 +425,7 @@ impl<'a> RecoveredNames<'a> {
         if item >= self.position_count(group) {
             return None;
         }
-        Some(match &self.recovery {
+        Some(match self.recovery() {
             CircuitRecovery::Complete(_) | CircuitRecovery::Inspected { .. } => RecoveredNamePosition::File(item),
             CircuitRecovery::WithSyntaxRepairs { .. } => RecoveredNamePosition::Original { fragment: group, item },
         })
@@ -426,7 +437,7 @@ impl<'a> RecoveredNames<'a> {
         let source = self.source;
         &&& (result matches Some(value) ==> absolute_name_span(source, value.name)
             && (value.namespace matches Some(site) ==> absolute_name_span(source, site)))
-        &&& match (&self.recovery, position) {
+        &&& match (self.recovery_model(), position) {
             (CircuitRecovery::Complete(syntax), RecoveredNamePosition::File(index))
                 if index < syntax.entries@.len() =>
                     projected_entry(source, syntax.forms@, syntax.entries@[index as int], 0, result),
@@ -447,7 +458,7 @@ impl<'a> RecoveredNames<'a> {
         ensures recovered_names_agree(left, right),
     {
         let source = self.source;
-        match (self.recovery, position) {
+        match (self.recovery_model(), position) {
             (CircuitRecovery::Complete(syntax), RecoveredNamePosition::File(index))
                 if index < syntax.entries@.len() => {
                     projected_entries_agree(source, source, syntax.forms@, syntax.entries@[index as int], 0, left, right);
@@ -493,7 +504,7 @@ impl<'a> RecoveredNames<'a> {
         }
         let span = 0..len;
         assert(source.spec_bytes().subrange(0, len as int) =~= source.spec_bytes());
-        match (&self.recovery, position) {
+        match (self.recovery(), position) {
             (CircuitRecovery::Complete(syntax), RecoveredNamePosition::File(index)) => {
                 let entry = syntax.entries.get(index)?;
                 proof {
@@ -531,7 +542,7 @@ impl<'a> RecoveredNames<'a> {
                     && recovered.forms@[i] is List && form_span(recovered.forms@[i]) == list.span_model()
             },
     {
-        match self.recovery {
+        match self.recovery_model() {
             CircuitRecovery::WithSyntaxRepairs { recovered, original } => {
                 assert(fragment < original@.len());
                 match original@[fragment as int] {
@@ -572,7 +583,21 @@ impl<'a> RecoveredNames<'a> {
 pub fn recover_circuit_names(source: &str) -> (result: RecoveredNames<'_>)
     ensures result.valid(), result.source_model() == source,
 {
-    RecoveredNames { source, recovery: recover_circuit_forms(source) }
+    RecoveredNames { source, recovery: RecoveryStorage::Owned(recover_circuit_forms(source)) }
+}
+
+/// 本文が一致した場合に回復結果を借り、現在の本文から名前を読み出せる状態にする。
+///
+/// 再利用できない場合は現在の本文を回復解析する。名前と範囲はいずれも `source` を基準にする。
+pub fn recover_circuit_names_with_cache<'a>(
+    source: &'a str, cache: &'a CachedCircuitRecovery,
+) -> (result: RecoveredNames<'a>)
+    ensures result.valid(), result.source_model() == source,
+{
+    match cache.reuse(source) {
+        Some(recovery) => RecoveredNames { source, recovery: RecoveryStorage::Cached(recovery) },
+        None => recover_circuit_names(source),
+    }
 }
 
 } // verus!

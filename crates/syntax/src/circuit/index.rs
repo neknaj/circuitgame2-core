@@ -13,8 +13,9 @@ use crate::{sexpr_form_model, strict_syntax_rejection, strict_token_errors_agree
 pub use recovery::{circuit_recovery_matches, circuit_recovery_results_agree_on_sexpr, circuit_recovery_transfers_on_sexpr_bytes,
     complete_recovery_agrees_with_index};
 pub use recovery::{
-    CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
+    CachedCircuitRecovery, CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
     RecoveredName, RecoveredNamePosition, RecoveredNames, recover_circuit_forms, recover_circuit_names,
+    recover_circuit_names_with_cache,
 };
 
 verus! {
