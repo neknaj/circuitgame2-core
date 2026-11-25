@@ -69,7 +69,8 @@ pub(crate) proof fn bit_atom_has_digits(bytes: Seq<u8>, kind: Option<AtomKind>)
     };
 }
 
-pub(crate) fn classify(atom: &str) -> (result: Option<AtomKind>)
+/// 空白や区切りを含まないアトム全体を、共通の字句規則に従って分類する。
+pub fn classify(atom: &str) -> (result: Option<AtomKind>)
     ensures
         result == bare_atom_kind(atom.spec_bytes()),
         result != Some(AtomKind::String),

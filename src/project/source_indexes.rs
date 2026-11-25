@@ -2,25 +2,31 @@
 
 use alloc::vec::Vec;
 use crate::ncg2m::data_types::{DefnSignature, read_header_signature};
+use crate::ncg2m::defn::DefnHeader;
 #[cfg(verus_only)]
-use crate::ncg2m::data_types::signature_matches_header;
+use crate::ncg2m::data_types::{signature_matches_header, signature_result_origin};
 use crate::ncg2m::expression_types::{ExpressionCheckFailure, check_indexed_meta_defn};
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::{
     DefnBodyError, defn_body_matches, indexed_meta_body_agrees_with_standalone, meta_defn_check_matches, meta_defn_check_origin,
     same_defn_body_outcome,
 };
-use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms};
+use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call};
+use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::named_call::{indexed_call_body_matches, indexed_call_body_origin};
 use crate::syntax::Form;
 #[cfg(verus_only)]
-use crate::ncg2m::file::{meta_ast_matches, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
+use crate::syntax::form_span;
+#[cfg(verus_only)]
+use crate::ncg2m::file::{meta_ast_matches, meta_call_matches, meta_call_form_origin, meta_binding_span_evidence, meta_binding_spans_valid, meta_defn_signature_spans, meta_file_matches, meta_file_results_agree, valid_meta_file};
 use crate::syntax::circuit::{CircuitFormError, NamedBuildCircuit};
-use super::circuits::index_project_circuit;
+use super::circuits::{index_project_circuit, read_source_span};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{circuit_source_error, circuit_source_errors_agree, circuit_source_matches};
-use super::{ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources};
+use super::{MixedUseAliases, ProjectSource, SourceKind, SourceSetError, SourceSnapshot, VirtualPath, collect_sources};
 #[cfg(verus_only)]
-use super::{normalized_path, parsed_circuit_matches, project_sources_match, source_kind_of, valid_source_snapshots};
+use super::{mixed_use_targets_match, prepared_call_site, normalized_path, parsed_circuit_matches, project_sources_match, source_kind_of, valid_source_snapshots};
 #[cfg(verus_only)]
 use super::sources::{
     collected_source_for_input, collected_source_ids_unique, collected_source_origin,
@@ -28,6 +34,8 @@ use super::sources::{
     source_ids_unique, source_set_errors_agree,
 };
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -92,6 +100,13 @@ pub(super) fn count_directive_entries(index: &ProjectSourceIndex) -> (len: usize
     }
 }
 
+/// 補助関数を宣言した名前空間と、別名の有効範囲を識別する位置。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DefnScope<'a> {
+    pub namespace: Option<&'a str>,
+    pub block: Option<usize>,
+}
+
 impl<'a> ParsedProjectSources<'a> {
     /// 正規化済みのファイル識別子でまとめたソースを、初出順に返す。
     pub fn sources(&self) -> (sources: &[ProjectSource<'a>])
@@ -108,6 +123,229 @@ impl<'a> ParsedProjectSources<'a> {
         self.indexes.as_slice()
     }
 
+    pub(super) closed spec fn defn_scope_matches(
+        &self, file: usize, item: usize, scope: Option<DefnScope>,
+    ) -> bool {
+        &&& scope.is_some() == self.indexed_defn(file, item).is_some()
+        &&& scope matches Some(resolved) ==> {
+            &&& file < self.indexes_model().len()
+            &&& self.indexes_model()[file as int] matches ProjectSourceIndex::Functional(items)
+                && item < items@.len()
+                && match (items@[item as int].namespace, resolved.namespace, resolved.block) {
+                    (None, None, None) => true,
+                    (Some(span), Some(word), Some(block)) => block == span.start
+                        && word.spec_bytes() == self.sources_model()[file as int].text_model().spec_bytes()
+                            [span.start as int..span.end as int],
+                    _ => false,
+                }
+        }
+    }
+
+    pub(super) proof fn defn_scope_is_indexed(&self, file: usize, item: usize, scope: Option<DefnScope>)
+        requires self.defn_scope_matches(file, item, scope),
+        ensures scope.is_some() == self.indexed_defn(file, item).is_some(),
+    {}
+
+    /// 索引にある補助関数の宣言位置から、名前解決に使う所属を取り出す。
+    pub(super) fn defn_scope(&self, file: usize, item: usize) -> (scope: Option<DefnScope<'a>>)
+        ensures self.defn_scope_matches(file, item, scope),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() { return None; }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() { return None; }
+        let indexed = &items[item];
+        if !matches!(indexed.kind, MetaItemKind::Defn(_)) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            project_source_index_evidence(*source, *index);
+            meta_binding_span_evidence(source.text, items@, item as int);
+            source.text_model_is_text();
+        }
+        match &indexed.namespace {
+            Some(span) => {
+                let namespace = read_source_span(source.text(), span.start, span.end);
+                Some(DefnScope { namespace: Some(namespace), block: Some(span.start) })
+            }
+            None => Some(DefnScope { namespace: None, block: None }),
+        }
+    }
+
+    pub(super) closed spec fn defn_call_form_matches(
+        &self, file: usize, item: usize, at: usize, call: Option<CallForm>,
+    ) -> bool {
+        match self.indexed_defn(file, item) {
+            None => call.is_none(),
+            Some(_) => {
+                let entries = self.indexes_model()[file as int]->Functional_0@;
+                let text = self.sources_model()[file as int].text_model();
+                self.functional_forms_model(file) matches Some(forms)
+                    && meta_call_matches(text, forms, entries, item, at, call)
+            },
+        }
+    }
+
+    pub(super) proof fn defn_call_file_exists(
+        &self, file: usize, item: usize, at: usize, call: CallForm,
+    )
+        requires self.has_source_indexes(), self.defn_call_form_matches(file, item, at, Some(call)),
+        ensures file < self.sources_model().len(),
+    {}
+
+    /// 指定の NCG2M ファイルについて、解析時に保持した S 式構文木を表す。
+    pub closed spec fn functional_forms_model(&self, file: usize) -> Option<Seq<Form>> {
+        if file < self.meta_asts@.len() {
+            match self.meta_asts@[file as int] {
+                Some(forms) => Some(forms@),
+                None => None,
+            }
+        } else { None }
+    }
+
+    pub(super) proof fn defn_call_form_origin(
+        &self, file: usize, item: usize, at: usize, call: CallForm,
+    )
+        requires self.has_source_indexes(), self.defn_call_form_matches(file, item, at, Some(call)),
+        ensures
+            file < self.sources_model().len(),
+            self.indexed_defn(file, item).is_some(),
+            self.functional_forms_model(file) matches Some(forms) && {
+                &&& at + 1 < forms.len()
+                &&& forms[at as int] is List && forms[at + 1] is Atom
+                &&& call.span == form_span(forms[at as int]) && call.head_span == form_span(forms[at + 1])
+            },
+    {
+        let forms = self.meta_asts@[file as int]->Some_0@;
+        let entries = self.indexes_model()[file as int]->Functional_0@;
+        let source = self.sources_model()[file as int];
+        meta_call_form_origin(source.text_model(), forms, entries, item, at, call);
+    }
+
+    /// 保持している補助関数本体の構文木から、指定した添字にある呼び出し形を読む。
+    pub(super) fn defn_call_form(&self, file: usize, item: usize, at: usize)
+        -> (call: Option<CallForm<'a>>)
+        ensures self.defn_call_form_matches(file, item, at, call),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() { return None; }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() || !matches!(items[item].kind, MetaItemKind::Defn(_)) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            use_type_invariant(self);
+            assert(retained_ast_matches(*source, *index, self.meta_asts@[file as int]));
+            project_source_index_evidence(*source, *index);
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        indexed_meta_call(source.text(), forms, items, item, at)
+    }
+
+    pub(super) closed spec fn named_defn_body_matches<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+        result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+    ) -> bool {
+        &&& *self == aliases.targets_model().project_model()
+        &&& match (self.indexed_defn(file, item), result) {
+            (None, None) => true,
+            (Some(_), Some(outcome)) => {
+                let entries = self.indexes_model()[file as int]->Functional_0@;
+                let text = self.sources_model()[file as int].text_model();
+                self.functional_forms_model(file) matches Some(forms)
+                    && indexed_call_body_matches(aliases, file, item, text, forms, entries, outcome)
+            },
+            _ => false,
+        }
+    }
+
+    pub(super) proof fn named_defn_body_origin<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+        result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+    )
+        requires self.named_defn_body_matches(aliases, file, item, result),
+        ensures
+            result.is_some() == self.indexed_defn(file, item).is_some(),
+            result matches Some(Ok(signature)) ==>
+                self.defn_signature_matches_index(file, item, Some(signature)),
+            result matches Some(Err(DefnBodyCallError::Call(error))) ==> {
+                let site = prepared_call_site(Err(error));
+                &&& *site.source == self.sources_model()[file as int]
+                &&& self.indexed_defn(file, item) matches Some(header) && {
+                    &&& header.body_span.start <= site.span.start
+                    &&& site.span.end <= header.body_span.end
+                }
+                &&& site.span.start <= site.head.start && site.head.end <= site.span.end
+                &&& self.functional_forms_model(file) matches Some(forms)
+                && exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List
+                    && forms[at + 1] is Atom
+                    && site.span == form_span(forms[at as int]) && site.head == form_span(forms[at + 1])
+            },
+    {
+        if let Some(outcome) = result {
+            let entries = self.indexes_model()[file as int]->Functional_0@;
+            let text = self.sources_model()[file as int].text_model();
+            let forms = self.functional_forms_model(file)->Some_0;
+            indexed_call_body_origin(aliases, file, item, text, forms, entries, outcome);
+        }
+    }
+
+    pub(super) fn check_named_defn_body<'p>(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+    ) -> (result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>)
+        requires *self == aliases.targets_model().project_model(),
+            mixed_use_targets_match(self, aliases.targets_model()),
+        ensures self.named_defn_body_matches(aliases, file, item, result),
+    {
+        let indexes = self.indexes();
+        if file >= indexes.len() { return None; }
+        let index = &indexes[file];
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        if item >= items.len() || !matches!(items[item].kind, MetaItemKind::Defn(_)) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            use_type_invariant(self);
+            assert(retained_ast_matches(*source, *index, self.meta_asts@[file as int]));
+            project_source_index_evidence(*source, *index);
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        assert(self.functional_forms_model(file) == Some(forms@));
+        Some(check_indexed_call_body(aliases, file, item, source.text(), forms, items))
+    }
+
+    pub(super) fn defn_header(&self, file: usize, item: usize) -> (result: Option<&DefnHeader>)
+        ensures self.has_source_indexes(),
+            match result {
+                Some(header) => self.indexed_defn(file, item) == Some(*header),
+                None => self.indexed_defn(file, item).is_none(),
+            },
+    {
+        let indexes = self.indexes();
+        let Some(ProjectSourceIndex::Functional(items)) = indexes.get(file) else { return None; };
+        let Some(MetaItem { kind: MetaItemKind::Defn(header), .. }) = items.get(item) else { return None; };
+        Some(header)
+    }
+
+    pub(super) fn defn_signature_from_header(&self, file: usize, _item: usize, header: &DefnHeader)
+        -> (signature: DefnSignature<'a>)
+        requires self.has_source_indexes(), self.indexed_defn(file, _item) == Some(*header),
+        ensures self.defn_signature_matches_index(file, _item, Some(signature)),
+            signature.parameters@.len() == header.parameters@.len(),
+    {
+        let source = &self.sources()[file];
+        proof {
+            let index = self.indexes_model()[file as int];
+            project_source_index_evidence(*source, index);
+            meta_defn_signature_spans(source.text, index->Functional_0@, _item as int);
+            source.text_model_is_text();
+        }
+        let signature = read_header_signature(source.text(), header);
+        proof { signature_result_origin(source.text_model(), *header, signature); }
+        signature
+    }
+
     /// 言語別索引の項目が補助関数宣言なら、本体の型検査に使う署名を返す。
     ///
     /// 添字が範囲外の場合と、項目が別の種類である場合は `None` を返す。
@@ -115,23 +353,8 @@ impl<'a> ParsedProjectSources<'a> {
     pub fn defn_signature(&self, file: usize, item: usize) -> (signature: Option<DefnSignature<'a>>)
         ensures self.defn_signature_matches_index(file, item, signature),
     {
-        let indexes = self.indexes();
-        if file >= indexes.len() {
-            return None;
-        }
-        let index = &indexes[file];
-        let ProjectSourceIndex::Functional(items) = index else { return None; };
-        if item >= items.len() {
-            return None;
-        }
-        let MetaItemKind::Defn(header) = &items[item].kind else { return None; };
-        let source = &self.sources()[file];
-        proof {
-            project_source_index_evidence(*source, *index);
-            meta_defn_signature_spans(source.text, items@, item as int);
-            source.text_model_is_text();
-        }
-        Some(read_header_signature(source.text(), header))
+        let header = self.defn_header(file, item)?;
+        Some(self.defn_signature_from_header(file, item, header))
     }
 
     /// 指定した補助関数の本体を、保持している構文木と署名を使って型検査する。
@@ -240,6 +463,13 @@ impl<'a> ParsedProjectSources<'a> {
             }
         }
     }
+
+    pub(super) proof fn indexed_defn_kind(&self, file: usize, item: usize)
+        requires file < self.indexes_model().len(),
+            self.indexes_model()[file as int] matches ProjectSourceIndex::Functional(items)
+                && item < items@.len() && items@[item as int].kind is Defn,
+        ensures self.indexed_defn(file, item).is_some(),
+    {}
 
     /// 索引から取り出した署名が補助関数宣言に対応することを示す。
     pub proof fn indexed_defn_signature_origin(

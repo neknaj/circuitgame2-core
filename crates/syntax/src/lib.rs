@@ -89,7 +89,7 @@ use alloc::vec::Vec;
 use atom::classify;
 #[cfg(verus_only)]
 pub use atom::{absolute_path_parts, absolute_path_parts_agree, bare_atom_kind, relative_path_parts, relative_path_parts_agree};
-pub use atom::{split_absolute_path, split_relative_path};
+pub use atom::{classify as classify_bare_atom, split_absolute_path, split_relative_path};
 use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
