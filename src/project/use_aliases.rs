@@ -103,6 +103,11 @@ pub use function_wiring::{
 #[cfg(verus_only)]
 pub use port_types::port_types_equal;
 pub use port_types::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
+pub use port_types::{NamedRoutinePort, RoutinePortLookup};
+pub use port_types::{DeviceBindingsError, DevicePortRequest};
+pub use port_types::{DevicePortBinding, DevicePortBindingError, DevicePortType};
+#[cfg(verus_only)]
+pub use port_types::{device_port_types_match, matching_circuit_direction};
 pub use relative::{RelativeResolutionError, RelativeTarget};
 
 #[cfg(verus_only)]
