@@ -5,7 +5,9 @@ use std::{collections::BTreeSet, fmt::Write, num::NonZeroU64};
 use circuitgame2_packed_nor::{PackedClockedNorPlan32, PackedNorGate32};
 
 mod i2c;
+mod spi;
 use i2c::I2c;
+use spi::Spi;
 
 struct Output {
     port: usize,
@@ -17,6 +19,7 @@ enum Input {
     Gpio(u8),
     Uart(usize),
     I2c(usize),
+    Spi(usize),
 }
 
 struct Uart {
@@ -32,6 +35,7 @@ pub(crate) struct Program {
     inputs: Vec<Input>,
     uart: Option<Uart>,
     i2c: Option<I2c>,
+    spi: Option<Spi>,
     gates: Vec<PackedNorGate32>,
     ports: Vec<usize>,
     outputs: Vec<Output>,
@@ -64,10 +68,11 @@ impl Program {
 
     pub(crate) fn parse(text: &str, expected_board: &str) -> Result<Self, String> {
         let mut lines = text.lines();
-        let (has_uart, has_i2c) = match lines.next() {
-            Some("ncg2-rp-gpio-v1") => (false, false),
-            Some("ncg2-rp-uart-v1") => (true, false),
-            Some("ncg2-rp-i2c-v1") => (false, true),
+        let (has_uart, has_i2c, has_spi) = match lines.next() {
+            Some("ncg2-rp-gpio-v1") => (false, false, false),
+            Some("ncg2-rp-uart-v1") => (true, false, false),
+            Some("ncg2-rp-i2c-v1") => (false, true, false),
+            Some("ncg2-rp-spi-v1") => (false, false, true),
             _ => return Err("RP 配線表の形式を識別できない。".into()),
         };
         let board = lines.next().and_then(|line| line.strip_prefix("board "));
@@ -88,6 +93,7 @@ impl Program {
             inputs: Vec::new(),
             uart: None,
             i2c: None,
+            spi: None,
             gates: Vec::new(),
             ports: Vec::new(),
             outputs: Vec::new(),
@@ -138,7 +144,10 @@ impl Program {
         if has_i2c {
             program.i2c = Some(I2c::parse(&mut lines, &mut claimed)?);
         }
-        let first_layout_line = if has_uart || has_i2c { 6 } else { 4 };
+        if has_spi {
+            program.spi = Some(Spi::parse(&mut lines, &mut claimed, expected_board)?);
+        }
+        let first_layout_line = if has_uart || has_i2c || has_spi { 6 } else { 4 };
         for (index, line) in lines.enumerate() {
             let fields: Vec<_> = line.split_ascii_whitespace().collect();
             (|| -> Result<(), String> {
@@ -163,6 +172,17 @@ impl Program {
                             return Err("同じ I²C 信号が複数の回路入力を駆動している。".into());
                         }
                         program.inputs.push(Input::I2c(signal));
+                    }
+                    ["input-spi", signal] if let Some(spi) = &program.spi => {
+                        let signal = number::<usize>(signal)?;
+                        let count = spi.input_count();
+                        if signal >= count {
+                            return Err(format!("SPI の入力信号番号は 0 から {}。", count - 1));
+                        }
+                        if !peripheral_inputs.insert(signal) {
+                            return Err("同じ SPI 信号が複数の回路入力を駆動している。".into());
+                        }
+                        program.inputs.push(Input::Spi(signal));
                     }
                     ["gate", left, right] => program.gates.push(PackedNorGate32 {
                         left: number::<u32>(left)? as usize,
@@ -214,6 +234,15 @@ impl Program {
             }
             i2c.validate_outputs(program.ports.len())?;
         }
+        if let Some(spi) = &program.spi {
+            let count = spi.input_count();
+            if peripheral_inputs.len() != count {
+                return Err(format!(
+                    "SPI の回路入力{count}個を一つずつ指定する必要がある。"
+                ));
+            }
+            spi.validate_outputs(program.ports.len())?;
+        }
         Ok(program)
     }
 
@@ -224,6 +253,11 @@ impl Program {
     /// 配線表が I²C の初期化を必要とするかを返す。
     pub(crate) fn has_i2c(&self) -> bool {
         self.i2c.is_some()
+    }
+
+    /// 配線表で選んだ SPI コントローラーの番号を返す。
+    pub(crate) fn spi_instance(&self) -> Option<u8> {
+        self.spi.as_ref().map(|spi| spi.instance)
     }
 
     pub(crate) fn rust(&self) -> String {
@@ -289,13 +323,14 @@ impl Program {
             i2c.write_constants(&mut result, &self.inputs).unwrap();
         }
 
-        let has_peripheral = self.has_uart() || self.has_i2c();
+        if let Some(spi) = &self.spi {
+            spi.write_constants(&mut result, &self.inputs).unwrap();
+        }
+
+        let has_peripheral = self.has_uart() || self.has_i2c() || self.spi.is_some();
+        let has_fault = self.has_i2c() || self.spi.is_some();
         if has_peripheral {
-            let fault = if self.has_i2c() {
-                ", Output<'static>"
-            } else {
-                ""
-            };
+            let fault = if has_fault { ", Output<'static>" } else { "" };
             writeln!(result, "fn configure_gpio(spawner: Spawner, _pins: embassy_rp::Peripherals) -> Option<([Option<Input<'static>>; INPUT_COUNT], [Output<'static>; OUTPUT_PORTS.len()]{fault})> {{").unwrap();
             if let Some(uart) = &self.uart {
                 writeln!(
@@ -308,6 +343,9 @@ impl Program {
             if let Some(i2c) = &self.i2c {
                 i2c.write_start(&mut result).unwrap();
             }
+            if let Some(spi) = &self.spi {
+                spi.write_start(&mut result).unwrap();
+            }
             writeln!(result, "Some(([").unwrap();
         } else {
             writeln!(result, "fn configure_gpio(_pins: embassy_rp::Peripherals) -> ([Input<'static>; INPUT_COUNT], [Output<'static>; OUTPUT_PORTS.len()]) {{").unwrap();
@@ -315,13 +353,19 @@ impl Program {
         }
         for input in &self.inputs {
             match (input, has_peripheral) {
-                (Input::Gpio(pin), false) => {
-                    writeln!(result, "Input::new(_pins.PIN_{pin}, Pull::Down),").unwrap()
+                (Input::Gpio(pin), false) => writeln!(
+                    result,
+                    "Input::new(_pins.PIN_{pin}, embassy_rp::gpio::Pull::Down),"
+                )
+                .unwrap(),
+                (Input::Gpio(pin), true) => writeln!(
+                    result,
+                    "Some(Input::new(_pins.PIN_{pin}, embassy_rp::gpio::Pull::Down)),"
+                )
+                .unwrap(),
+                (Input::Uart(_) | Input::I2c(_) | Input::Spi(_), _) => {
+                    writeln!(result, "None,").unwrap()
                 }
-                (Input::Gpio(pin), true) => {
-                    writeln!(result, "Some(Input::new(_pins.PIN_{pin}, Pull::Down)),").unwrap()
-                }
-                (Input::Uart(_) | Input::I2c(_), _) => writeln!(result, "None,").unwrap(),
             }
         }
         writeln!(result, "], [").unwrap();
@@ -334,7 +378,7 @@ impl Program {
             )
             .unwrap();
         }
-        if self.has_i2c() {
+        if has_fault {
             writeln!(result, "], Output::new(_pins.PIN_25, Level::Low)))\n}}").unwrap();
         } else {
             writeln!(result, "]){}\n}}", if has_peripheral { ")" } else { "" }).unwrap();

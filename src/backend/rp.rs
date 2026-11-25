@@ -2,6 +2,17 @@
 
 mod image;
 
+pub use circuitgame2_device_timing::SpiBitOrder;
+pub use image::{
+    PeripheralInputSource, SpiCircuitImage, SpiImageError, SpiPortNames, SpiSettingError, SpiSetup,
+    spi_frequency_range,
+};
+#[cfg(verus_only)]
+pub use image::{
+    spi_assignment, spi_frequency_supported, spi_image_ports_match, spi_image_requests,
+    spi_port_capacity, spi_setting_error,
+};
+
 pub use image::{I2cCircuitImage, I2cImageError, I2cInputSource, I2cPortNames, I2cSetup};
 #[cfg(verus_only)]
 pub use image::{i2c_assignment, i2c_image_ports_match, i2c_image_requests, i2c_port_capacity};
