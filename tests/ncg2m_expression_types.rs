@@ -135,6 +135,25 @@ fn let_infers_list_elements_and_if_branches_independently() {
 }
 
 #[test]
+fn checks_let_inside_conditionals_and_lists_without_leaking_its_scope() {
+    let source = "(defn f (as-type (Fn (Bool) (List Bool)) (fn (x)
+        (if (let ((flag true)) flag)
+            (list (let ((x 1)) (let ((n x)) true)) x)
+            (list x)))))";
+    assert!(check_defn_body(source).is_ok());
+
+    let source = "(defn f (as-type (Fn () Bool) (fn ()
+        (if true (let ((local true)) local) local))))";
+    let outside = source.rfind("local").unwrap();
+    assert_eq!(
+        check_defn_body(source).unwrap_err(),
+        DefnBodyError::Body(ExpressionCheckFailure::Deferred(DeferredExpression::Name(
+            outside..outside + "local".len(),
+        ))),
+    );
+}
+
+#[test]
 fn infers_deep_lists_without_using_the_host_call_stack() {
     let depth = 30_000;
     let mut source = "(defn f (as-type (Fn () Bool) (fn () (let ((xs ".to_owned();

@@ -251,7 +251,8 @@ pub(super) fn read_let_structure(source: &str, forms: &[Form], at: usize)
     ensures
         (match result { Ok(header) => Ok((header.bindings@, header.body)), Err(error) => Err(error) })
             == let_structure(source, forms@, at),
-        result matches Ok(header) ==> at < header.body < forms@.len()
+        result matches Ok(header) ==> forms@[at as int] is List
+            && at < header.body < subtree_limit(forms@, at) <= forms@.len()
             && valid_bindings(forms@, header.bindings@, at, header.body),
 {
     let Some((bindings, body)) = tagged(source, forms, at, "let", true) else {

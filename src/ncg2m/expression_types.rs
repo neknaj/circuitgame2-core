@@ -35,6 +35,10 @@ use vstd::string::StringSliceAdditionalSpecFns;
 
 mod inference;
 mod local_scopes;
+mod scoped_check;
+use scoped_check::check_scoped_expression;
+#[cfg(verus_only)]
+use scoped_check::scoped_check;
 use local_scopes::{LocalScopes, Scope};
 use inference::infer_type;
 #[cfg(verus_only)]
@@ -1191,6 +1195,8 @@ fn read_binding_types<'a>(
         Err(error) => binding_types(source, forms@, lexical_view(parameters@, old(locals), outer_scope), rows@,
             0, lexical_view(parameters@, old(locals), outer_scope)) == Err(error),
     },
+    forall|scope: Scope| #[trigger] old(locals).contains(scope) ==>
+        final(locals).contains(scope) && final(locals).local_types(scope) == old(locals).local_types(scope),
 {
     // 各右辺は元の環境で検査する。本体用の環境にだけ、検査済みの束縛を追加する。
     let ghost outer = lexical_view(parameters@, locals, outer_scope);
@@ -1202,6 +1208,8 @@ fn read_binding_types<'a>(
             locals.contains(outer_scope), locals.contains(body_scope),
             outer == lexical_view(parameters@, locals, outer_scope),
             outer == lexical_view(parameters@, old(locals), outer_scope),
+            forall|scope: Scope| #[trigger] old(locals).contains(scope) ==>
+                locals.contains(scope) && locals.local_types(scope) == old(locals).local_types(scope),
             at <= rows@.len(),
             binding_types(source, forms@, outer, rows@, 0, outer)
                 == binding_types(source, forms@, outer, rows@, at as nat, lexical_view(parameters@, locals, body_scope)),
@@ -1214,8 +1222,13 @@ fn read_binding_types<'a>(
         let local = LocalType { name: source_word(source, forms, row.name), ty };
         let ghost before = lexical_view(parameters@, locals, body_scope);
         let ghost saved = locals.local_types(outer_scope);
+        let ghost old_arena = *locals;
         assert(locals.contains(outer_scope));
         body_scope = locals.extend(body_scope, local);
+        assert forall|scope: Scope| #[trigger] old(locals).contains(scope) implies
+            locals.contains(scope) && locals.local_types(scope) == old(locals).local_types(scope) by {
+            assert(old_arena.contains(scope));
+        };
         assert(locals.local_types(outer_scope) == saved);
         assert(lexical_view(parameters@, locals, body_scope)
             =~= Seq::empty().push((local.name.spec_bytes(), local.ty)) + before);
@@ -1224,26 +1237,10 @@ fn read_binding_types<'a>(
     proof { reveal(binding_types); }
     Ok(body_scope)
 }
-#[verifier::opaque]
 spec fn local_body_check<'a>(source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, expected: TypeShape)
     -> BodyVerdict<'a>
-    decreases forms.len() - at,
 {
-    if at < forms.len() && shape(source, forms, at) == Ok(Expression::Let) {
-        match let_structure(source, forms, at) {
-            Err(error) => BodyVerdict::Rejected(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
-            Ok((bindings, body)) => match binding_types(source, forms, env, bindings, 0, env) {
-                Err(error) => BodyVerdict::Rejected(error),
-                Ok(extended) => if at < body < forms.len() {
-                    local_body_check(source, forms, extended, body, expected)
-                } else {
-                    BodyVerdict::Rejected(ExpressionCheckFailure::Deferred(DeferredExpression::Form(0..0)))
-                },
-            },
-        }
-    } else {
-        expression_check(source, forms, env, Request { at, expected, list: None })
-    }
+    scoped_check(source, forms, env, Request { at, expected, list: None })
 }
 
 fn check_body<'a>(
@@ -1253,36 +1250,7 @@ fn check_body<'a>(
     ensures result == local_body_check(source, forms@, environment_view(signature.parameters@),
         body, type_shape(signature.result_type.ty)),
 {
-    let mut locals = LocalScopes::new();
-    let mut scope = None;
-    let parameters = signature.parameters.as_slice();
-    let expected = shape_of_type(signature.result_type.ty);
-    let mut at = body;
-    assert(lexical_view(parameters@, &locals, scope) =~= environment_view(signature.parameters@));
-    loop
-        invariant
-            at < forms@.len(), usable_forms(source, forms@),
-            parameters@ == signature.parameters@, expected == type_shape(signature.result_type.ty),
-            locals.contains(scope),
-            local_body_check(source, forms@, environment_view(signature.parameters@), body, expected)
-                == local_body_check(source, forms@, lexical_view(parameters@, &locals, scope), at, expected),
-        decreases forms@.len() - at,
-    {
-        reveal(local_body_check);
-        if !matches!(read_shape(source, forms, at), Ok(Expression::Let)) {
-            return check_expression(source, forms, parameters, &locals, scope, at, expected);
-        }
-        let header = match read_let_structure(source, forms, at) {
-            Ok(header) => header,
-            Err(error) => return BodyVerdict::Rejected(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
-        };
-        scope = match read_binding_types(source, forms, parameters, &mut locals,
-            scope, header.bindings.as_slice(), at, header.body) {
-            Ok(extended) => extended,
-            Err(error) => return BodyVerdict::Rejected(error),
-        };
-        at = header.body;
-    }
+    check_scoped_expression(source, forms, &signature.parameters, body, shape_of_type(signature.result_type.ty))
 }
 
 spec fn body_witness<'a>(
@@ -1328,9 +1296,10 @@ pub proof fn checked_body_signature_origin(source: &str, signature: DefnSignatur
 /// 真偽値、十進整数、局所名の参照、`as-type`、`if`、`list` を扱う。
 /// `if` は条件、左の分岐、右の分岐の順に検査する。
 /// `list` は期待型の要素型で各要素を左から検査する。空のリストにも同じ期待型を使う。
-/// 関数本体と先行する `let` の本体位置で `let` を扱う。束縛の右辺は外側の型環境で
+/// 署名や周囲の式から期待型が決まる位置で `let` を扱う。束縛の右辺は外側の型環境で
 /// 左から検査し、すべて検査できた後に本体へ束縛を導入する。右辺ではリテラル、局所名の参照、
 /// `as-type`、`if`、空でない `list` の型を求める。各分岐や各要素の型を個別に求め、一致を確かめる。
+/// 束縛の右辺に現れる `let` の型検査は保留する。
 /// 本体が検査を通れば、元ソースの範囲を持つ署名を返す。
 ///
 /// # Errors
