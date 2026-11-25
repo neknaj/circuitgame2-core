@@ -75,8 +75,11 @@ cargo build --workspace --locked --target wasm32-unknown-unknown
 形式検証には [Verus 0.2026.11.02.8bf68ee](https://github.com/verus-lang/verus/releases/tag/release%2F0.2026.11.02.8bf68ee) を使う。配布物を展開し、`cargo-verus` のあるディレクトリを PATH に追加する。
 
 ```sh
-cargo verus verify --workspace --locked
+python3 .github/scripts/check-verus-assumptions.py
+cargo verus verify --workspace --locked --fwd-verus-args-to roots -- --no-cheating
 ```
+
+`--no-cheating` は証明中の `assume` などを拒否する。スクリプトは `#[verifier::external]` や停止性の検査を外す属性も検出する。
 
 各処理で証明する性質は検証設計に、コメントと証明の書き方はコーディング規約に記載している。 [検証設計](https://github.com/neknaj/circuitgame2/blob/main/doc/verification.md) · [コーディング規約](https://github.com/neknaj/circuitgame2/tree/main/doc/coding_standards)
 
