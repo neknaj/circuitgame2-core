@@ -78,6 +78,9 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             self.mixed_checked_call(_at@, *call), old(signatures).matches_mixed(self, limit),
         ensures
             final(signatures).matches_mixed(self, limit),
+            forall|place: (usize, usize)| #[trigger] old(signatures).signatures().contains_key(place) ==>
+                final(signatures).signatures().contains_key(place)
+                    && final(signatures).signatures()[place] == old(signatures).signatures()[place],
             match result {
                 Ok(()) => call.target matches FuncCallTarget::Function { file, entry, arity, .. } ==> {
                     let stored = final(signatures).signatures();

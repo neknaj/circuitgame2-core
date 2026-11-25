@@ -581,6 +581,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 let indexed = parsed.references@[row.references.start + reference];
                 &&& call_shape_matches(call.source.text_model(), parsed.syntax.forms@, row, indexed, Some(call.call))
                 &&& call_arguments_match(parsed.syntax.forms@, call.call)
+                &&& call.call.form + 1 == indexed.form
             }
             &&& call.target matches FuncCallTarget::Function { arity, declaration, file: target_file, entry: target_entry }
                 ==> {

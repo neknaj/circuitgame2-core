@@ -11,9 +11,12 @@ use crate::project::use_aliases::call_arity::{check_leaf, report_call_argument};
 use crate::project::use_aliases::{call_arity::{leaf_result, reported_argument}, function_atoms::signal_type_at};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{BuildDefinition, build_bare_signal_position, call_argument_sequence, direct_call_argument,
-    expression_region, first_call_argument_evidence, following_call_argument};
+    direct_call_argument_bounds, expression_region, first_call_argument_evidence, following_call_argument, indexed_call_region};
 use crate::syntax::circuit::{call_argument_range, indexed_call_signal, next_call_argument};
 use crate::syntax::{AtomKind, Form};
+use vstd::slice::slice_subrange;
+
+mod nested;
 
 verus! {
 
@@ -33,8 +36,9 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     ///
     /// 実引数の型を確定できない場合は、その先頭の位置を `deferred_argument` に返す。
     /// 定数、裸の信号、定義を直接駆動する呼び出しの出力型から信号の型を求める。
-    /// 入れ子の呼び出しの戻り値や他の複合式は未確定として保持する。実引数がすべて確定していても、
-    /// 型が未確定の左辺には `signals` に `None` が残る。
+    /// 通常呼び出しの実引数には、内側の通常呼び出しの単一出力型を使う。
+    /// 選択や連接などの複合式は未確定として保持する。実引数がすべて確定していても、
+    /// 型が未確定の左辺に対応する `signals` の要素には `None` が残る。
     /// 対象外と展開待ちは結線検査から引き継ぐ。
     ///
     /// # Errors
@@ -64,6 +68,33 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// assert_eq!((&design[argument.span], argument.source.revision), ("t", 8));
     /// assert_eq!((&library[required.span], required.source.revision), ("8", 3));
     /// assert!(matches!(actual.ty, ResolvedPortType::Bits(4)));
+    /// ```
+    ///
+    /// 通常呼び出しを実引数に渡すとき、内側の出力ポートに書かれた型を参照する。
+    ///
+    /// ```
+    /// use circuitgame2_core::project::{CallInputError, CallInputReason, MixedFuncTypeError, ResolvedPortType,
+    ///     SourceSnapshot, check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources};
+    ///
+    /// let passing = "(func ok (in (x (bits 8))) (out (y (bits 8))) (def y (::lib::byte (::lib::byte x))))";
+    /// let failing = "(func wrong (in (x (bits 4))) (out (y (bits 8))) (def y (::lib::byte (::lib::nibble x))))";
+    /// let library = "(namespace lib (export byte nibble)
+    ///     (func byte (in (x (bits 8))) (out (x (bits 8))))
+    ///     (func nibble (in (x (bits 4))) (out (x (bits 4)))))";
+    /// let project = parse_project_sources(&[
+    ///     SourceSnapshot { path: "a.ncg2", revision: 9, text: passing },
+    ///     SourceSnapshot { path: "b.ncg2", revision: 8, text: failing },
+    ///     SourceSnapshot { path: "library.ncg2", revision: 3, text: library },
+    /// ]).unwrap();
+    /// let targets = index_mixed_use_targets(&project).unwrap();
+    /// let aliases = check_mixed_use_aliases(&targets).unwrap();
+    /// assert!(aliases.check_mixed_func_input_types(0, 0, 64).unwrap().deferred_argument.is_none());
+    /// let Err(MixedFuncTypeError::Input(CallInputError::Argument {
+    ///     argument, expected: ResolvedPortType::Bits(8), reason: CallInputReason::SignalType(actual), ..
+    /// })) = aliases.check_mixed_func_input_types(1, 0, 64) else { panic!() };
+    /// assert_eq!((&failing[argument.span], argument.source.revision), ("(::lib::nibble x)", 8));
+    /// assert!(matches!(actual.ty, ResolvedPortType::Bits(4)));
+    /// assert_eq!((&library[actual.origin.span], actual.origin.source.revision), ("4", 3));
     /// ```
     pub fn check_mixed_func_input_types(&self, file: usize, entry: usize, limit: u64)
         -> (result: Result<MixedFuncInputTypes<'p, 'a>, MixedFuncTypeError<'p, 'a>>)
@@ -140,14 +171,14 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             Ok(typed) => typed.outputs == outputs
                 && self.mixed_propagation_result(source, parsed, entry, &scope, outputs.literals.widths@,
                     outputs.types@, Ok(typed.signals))
-                && self.retained_mixed_inputs_match(source, parsed, entry, &scope, typed.signals@, calls, limit,
+                && self.retained_mixed_inputs_match(source, parsed, file, entry, &scope, typed.signals@, calls, limit,
                     Ok(typed.deferred_argument)),
             Err(error) => self.mixed_propagation_result(source, parsed, entry, &scope, outputs.literals.widths@,
                 outputs.types@, Err(error))
                 || exists|types: Vec<Option<SignalType>>|
                     #[trigger] self.mixed_propagation_result(source, parsed, entry, &scope, outputs.literals.widths@,
                         outputs.types@, Ok(types))
-                    && self.retained_mixed_inputs_match(source, parsed, entry, &scope, types@, calls, limit, Err(error)),
+                    && self.retained_mixed_inputs_match(source, parsed, file, entry, &scope, types@, calls, limit, Err(error)),
         }
     }
 
@@ -168,9 +199,9 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 Err(error) => result == Err(error),
                 Ok(signals) => match result {
                     Ok(typed) => typed.outputs == outputs && typed.signals == signals
-                        && self.retained_mixed_inputs_match(source, parsed, entry, &scope, signals@, calls, limit,
+                        && self.retained_mixed_inputs_match(source, parsed, file, entry, &scope, signals@, calls, limit,
                             Ok(typed.deferred_argument)),
-                    Err(error) => self.retained_mixed_inputs_match(source, parsed, entry, &scope, signals@, calls, limit,
+                    Err(error) => self.retained_mixed_inputs_match(source, parsed, file, entry, &scope, signals@, calls, limit,
                         Err(error)),
                 },
             }
@@ -183,56 +214,57 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     }
 
     #[verifier::opaque]
-    spec fn retained_mixed_inputs_before(&self, source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize,
+    spec fn retained_mixed_inputs_before(&self, source: &ProjectSource, parsed: &NamedBuildCircuit, file: usize, entry: usize,
         scope: &FuncWiring, types: Seq<Option<SignalType>>, calls: CheckedMixedCalls, limit: u64, outcomes: Seq<Option<LocatedName>>) -> bool {
         forall|d: int, i: int| 0 <= d < calls.definitions@.len()
             && (#[trigger] calls.definitions@[d]).start <= i < calls.definitions@[d].end
             && i < outcomes.len() ==> self.mixed_call_inputs_match(source, parsed,
-                crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, d), entry, scope,
+                crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, d), (file, entry, d as usize), scope,
                 types, calls.positions@[i].1, limit, Ok(#[trigger] outcomes[i]))
     }
 
     #[verifier::opaque]
-    spec fn retained_mixed_inputs_match(&self, source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize,
+    spec fn retained_mixed_inputs_match(&self, source: &ProjectSource, parsed: &NamedBuildCircuit, file: usize, entry: usize,
         scope: &FuncWiring, types: Seq<Option<SignalType>>, calls: CheckedMixedCalls, limit: u64,
         result: Result<Option<LocatedName>, MixedFuncTypeError>) -> bool {
         match result {
             Ok(pending) => exists|outcomes: Seq<Option<LocatedName>>|
                 outcomes.len() == calls.positions@.len()
-                && #[trigger] self.retained_mixed_inputs_before(source, parsed, entry, scope, types, calls, limit, outcomes)
+                && #[trigger] self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types, calls, limit, outcomes)
                 && first_pending_call(outcomes, pending),
             Err(error) => exists|outcomes: Seq<Option<LocatedName>>, definition: int|
                 0 <= definition < calls.definitions@.len()
                 && (#[trigger] calls.definitions@[definition]).start <= outcomes.len() < calls.definitions@[definition].end
-                && #[trigger] self.retained_mixed_inputs_before(source, parsed, entry, scope, types, calls, limit, outcomes)
+                && #[trigger] self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types, calls, limit, outcomes)
                 && self.mixed_call_inputs_match(source, parsed,
-                    crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, definition), entry,
+                    crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, definition), (file, entry, definition as usize),
                     scope, types, calls.positions@[outcomes.len() as int].1, limit, Err(error)),
         }
     }
 
-    proof fn retained_input_at(&self, file: usize, entry: usize, source: &ProjectSource, parsed: &NamedBuildCircuit,
-        scope: &FuncWiring, calls: CheckedMixedCalls, definition: usize, position: usize)
+    proof fn retained_input_at(&self, file: usize, entry: usize, definition: usize, stop: usize,
+        rows: Seq<(usize, FuncCallArity)>, selected: int)
+        requires self.retained_definition_calls(file, entry, definition, stop, rows), 0 <= selected < rows.len(),
+        ensures self.mixed_checked_call(DefinitionPosition { file, entry, definition, reference: rows[selected].0 }, rows[selected].1),
+    {}
+
+    proof fn retained_input_rows(&self, file: usize, entry: usize, source: &ProjectSource, parsed: &NamedBuildCircuit,
+        scope: &FuncWiring, calls: CheckedMixedCalls, definition: usize)
         requires
             self.mixed_output_context(file, entry, source, parsed, &scope.drivers, calls),
             definition < calls.definitions@.len(),
-            calls.definitions@[definition as int].start <= position < calls.definitions@[definition as int].end,
         ensures
-            position < calls.positions@.len(),
-            self.mixed_checked_call(DefinitionPosition { file, entry, definition, reference: calls.positions@[position as int].0 },
-                calls.positions@[position as int].1),
             *source == self.targets_model().project_model().sources_model()[file as int],
             *parsed == self.targets_model().project_model().indexes_model()[file as int]->Circuit_0,
             crate::project::parsed_circuit_matches(*source, *parsed),
+            ({
+                let range = calls.definitions@[definition as int];
+                let row = crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, definition as int);
+                self.retained_definition_calls(file, entry, definition, (row.references.end - row.references.start) as usize,
+                    calls.positions@[range.start as int..range.end as int])
+            }),
     {
         reveal(MixedUseAliases::mixed_output_context);
-        let range = calls.definitions@[definition as int];
-        let rows = calls.positions@[range.start as int..range.end as int];
-        let selected = (position - range.start) as int;
-        assert(0 <= selected < rows.len());
-        assert(rows[selected] == calls.positions@[position as int]);
-        assert(self.mixed_checked_call(DefinitionPosition { file, entry, definition, reference: rows[selected].0 },
-            rows[selected].1));
     }
 
     #[verifier::spinoff_prover]
@@ -243,10 +275,10 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             self.mixed_output_context(file, entry, source, parsed, &scope.drivers, calls),
             definition < calls.definitions@.len(),
             calls.definitions@[definition as int].start <= outcomes.len() < calls.definitions@[definition as int].end,
-            self.retained_mixed_inputs_before(source, parsed, entry, scope, types, calls, limit, outcomes),
+            self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types, calls, limit, outcomes),
             self.mixed_call_inputs_match(source, parsed, crate::project::use_aliases::call_arity::checks::at_definition(
-                parsed, entry as int, definition as int), entry, scope, types, calls.positions@[outcomes.len() as int].1, limit, Ok(found)),
-        ensures self.retained_mixed_inputs_before(source, parsed, entry, scope, types, calls, limit, outcomes.push(found)),
+                parsed, entry as int, definition as int), (file, entry, definition), scope, types, calls.positions@[outcomes.len() as int].1, limit, Ok(found)),
+        ensures self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types, calls, limit, outcomes.push(found)),
     {
         reveal(MixedUseAliases::retained_mixed_inputs_before);
         reveal(MixedUseAliases::mixed_output_context);
@@ -254,7 +286,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         assert forall|d: int, i: int| 0 <= d < calls.definitions@.len()
             && (#[trigger] calls.definitions@[d]).start <= i < calls.definitions@[d].end && i < next.len()
             implies self.mixed_call_inputs_match(source, parsed,
-                crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, d), entry, scope,
+                crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, d), (file, entry, d as usize), scope,
                 types, calls.positions@[i].1, limit, Ok(#[trigger] next[i])) by {
             if i < outcomes.len() {
                 assert(next[i] == outcomes[i]);
@@ -279,7 +311,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             types@.len() == scope.drivers.definitions@.len(), old(signatures).matches_mixed(self, limit),
         ensures
             final(signatures).matches_mixed(self, limit),
-            self.retained_mixed_inputs_match(source, parsed, owner.1, scope, types@, *calls, limit, result),
+            self.retained_mixed_inputs_match(source, parsed, owner.0, owner.1, scope, types@, *calls, limit, result),
     {
         let (file, entry) = owner;
         let mut definition = 0;
@@ -295,7 +327,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 types@.len() == scope.drivers.definitions@.len(), signatures.matches_mixed(self, limit),
                 definition <= calls.definitions@.len(), position <= calls.positions@.len(), outcomes.len() == position,
                 position == if definition == 0 { 0 } else { calls.definitions@[definition - 1].end },
-                self.retained_mixed_inputs_before(source, parsed, entry, scope, types@, *calls, limit, outcomes),
+                self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types@, *calls, limit, outcomes),
                 first_pending_call(outcomes, pending),
             decreases calls.definitions@.len() - definition,
         {
@@ -313,13 +345,21 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     types@.len() == scope.drivers.definitions@.len(), signatures.matches_mixed(self, limit),
                     definition < calls.definitions@.len(), *range == calls.definitions@[definition as int],
                     range.start <= position <= range.end <= calls.positions@.len(), outcomes.len() == position,
-                    self.retained_mixed_inputs_before(source, parsed, entry, scope, types@, *calls, limit, outcomes),
+                    self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types@, *calls, limit, outcomes),
                     first_pending_call(outcomes, pending),
                 decreases range.end - position,
             {
-                proof { self.retained_input_at(file, entry, source, parsed, scope, *calls, definition, position); }
+                let rows = slice_subrange(calls.positions.as_slice(), range.start, range.end);
+                proof {
+                    self.retained_input_rows(file, entry, source, parsed, scope, *calls, definition);
+                    let row = crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, definition as int);
+                    let selected = (position - range.start) as int;
+                    assert(rows@[selected] == calls.positions@[position as int]);
+                    self.retained_input_at(file, entry, definition, (row.references.end - row.references.start) as usize,
+                        rows@, selected);
+                }
                 let observed = self.check_mixed_call_arguments((file, entry, definition), source, parsed, scope,
-                    types, &calls.positions[position], limit, signatures);
+                    types, &calls.positions[position], rows, limit, signatures);
                 let observed = match observed {
                     Ok(observed) => observed,
                     Err(error) => {
@@ -328,9 +368,9 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                             assert(exists|before: Seq<Option<LocatedName>>, d: int|
                                 0 <= d < calls.definitions@.len()
                                 && (#[trigger] calls.definitions@[d]).start <= before.len() < calls.definitions@[d].end
-                                && #[trigger] self.retained_mixed_inputs_before(source, parsed, entry, scope, types@, *calls, limit, before)
+                                && #[trigger] self.retained_mixed_inputs_before(source, parsed, file, entry, scope, types@, *calls, limit, before)
                                 && self.mixed_call_inputs_match(source, parsed,
-                                    crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, d), entry,
+                                    crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, d), (file, entry, d as usize),
                                     scope, types@, calls.positions@[before.len() as int].1, limit, Err(error)));
                         }
                         return Err(error);
@@ -556,20 +596,22 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     }
 
     spec fn mixed_known_argument(
-        &self, parsed: &NamedBuildCircuit, row: BuildDefinition, entry: usize, scope: &FuncWiring,
-        types: Seq<Option<SignalType>>, argument: usize, known: Option<SignalType>,
+        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, caller: (usize, usize, usize), scope: &FuncWiring,
+        types: Seq<Option<SignalType>>, argument: usize, limit: u64, known: Option<SignalType>,
     ) -> bool {
         let forms = parsed.syntax.forms@;
         if forms[argument as int] is Atom && forms[argument as int]->Atom_kind is Name {
-            let start = parsed.entry_ranges@[entry as int].signals.start;
+            let start = parsed.entry_ranges@[caller.1 as int].signals.start;
             exists|p: int| row.signals.start <= p < row.signals.end && #[trigger] parsed.signals@[p] == argument
                 && start <= p < start + scope.signals@.len()
                 && known == signal_type_at(scope, types, scope.signals@[p - start].driver)
+        } else if forms[argument as int] is List {
+            self.mixed_nested_argument(caller, source, parsed, row, argument, limit, known)
         } else { known.is_none() }
     }
 
     spec fn mixed_argument_at(
-        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, entry: usize, scope: &FuncWiring,
+        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, caller: (usize, usize, usize), scope: &FuncWiring,
         types: Seq<Option<SignalType>>, call: FuncCallArity, limit: u64, argument: usize, ordinal: usize,
         result: Result<Option<SignalType>, MixedFuncTypeError>,
     ) -> bool {
@@ -577,7 +619,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         &&& direct_call_argument(parsed.syntax.forms@, call.call, argument as int)
         &&& exists|port: crate::project::CallPortType, known: Option<SignalType>, leaf: Result<Option<SignalType>, crate::project::CallInputReason>| {
             &&& self.mixed_input_port(call, limit, ordinal, port)
-            &&& self.mixed_known_argument(parsed, row, entry, scope, types, argument, known)
+            &&& self.mixed_known_argument(source, parsed, row, caller, scope, types, argument, limit, known)
             &&& #[trigger] leaf_result(source, form, &port, known, limit, leaf)
             &&& match result {
                 Ok(ty) => reported_argument(source, form, ordinal, port, leaf, Ok(ty)),
@@ -599,7 +641,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
 
     #[verifier::opaque]
     spec fn mixed_call_argument_prefix(
-        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, entry: usize, scope: &FuncWiring,
+        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, caller: (usize, usize, usize), scope: &FuncWiring,
         types: Seq<Option<SignalType>>, call: FuncCallArity, limit: u64, arguments: Seq<usize>, values: Seq<Option<SignalType>>,
         next: usize,
     ) -> bool {
@@ -609,21 +651,21 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         &&& forall|i: int| 0 <= i < arguments.len() ==> {
             let root = #[trigger] arguments[i];
             &&& root == if i == 0 { call.call.form + 2 } else { after_argument(forms, arguments[i - 1]) }
-            &&& self.mixed_argument_at(source, parsed, row, entry, scope, types, call, limit, root, i as usize, Ok(values[i]))
+            &&& self.mixed_argument_at(source, parsed, row, caller, scope, types, call, limit, root, i as usize, Ok(values[i]))
         }
     }
 
     proof fn extend_mixed_argument_prefix(
-        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, entry: usize, scope: &FuncWiring,
+        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, caller: (usize, usize, usize), scope: &FuncWiring,
         types: Seq<Option<SignalType>>, call: FuncCallArity, limit: u64, args: Seq<usize>, values: Seq<Option<SignalType>>,
         root: usize, next: usize, value: Option<SignalType>,
     )
         requires
             args.len() <= usize::MAX,
-            self.mixed_call_argument_prefix(source, parsed, row, entry, scope, types, call, limit, args, values, root),
-            self.mixed_argument_at(source, parsed, row, entry, scope, types, call, limit, root, args.len() as usize, Ok(value)),
+            self.mixed_call_argument_prefix(source, parsed, row, caller, scope, types, call, limit, args, values, root),
+            self.mixed_argument_at(source, parsed, row, caller, scope, types, call, limit, root, args.len() as usize, Ok(value)),
             next == after_argument(parsed.syntax.forms@, root),
-        ensures self.mixed_call_argument_prefix(source, parsed, row, entry, scope, types, call, limit,
+        ensures self.mixed_call_argument_prefix(source, parsed, row, caller, scope, types, call, limit,
             args.push(root), values.push(value), next),
     {
         reveal(MixedUseAliases::mixed_call_argument_prefix);
@@ -633,40 +675,40 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         assert forall|i: int| 0 <= i < extended.len() implies {
             let argument = #[trigger] extended[i];
             &&& argument == if i == 0 { call.call.form + 2 } else { after_argument(forms, extended[i - 1]) }
-            &&& self.mixed_argument_at(source, parsed, row, entry, scope, types, call, limit, argument, i as usize, Ok(inferred[i]))
+            &&& self.mixed_argument_at(source, parsed, row, caller, scope, types, call, limit, argument, i as usize, Ok(inferred[i]))
         } by {
             if i < args.len() { assert(extended[i] == args[i] && inferred[i] == values[i]); }
         };
     }
 
     spec fn mixed_call_inputs_match(
-        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, entry: usize, scope: &FuncWiring,
+        &self, source: &ProjectSource, parsed: &NamedBuildCircuit, row: BuildDefinition, caller: (usize, usize, usize), scope: &FuncWiring,
         types: Seq<Option<SignalType>>, call: FuncCallArity, limit: u64, result: Result<Option<LocatedName>, MixedFuncTypeError>,
     ) -> bool {
         let end = parsed.syntax.forms@[call.call.form as int]->List_end;
         match result {
             Ok(pending) => exists|args: Seq<usize>, values: Seq<Option<SignalType>>| {
-                &&& #[trigger] self.mixed_call_argument_prefix(source, parsed, row, entry, scope, types, call, limit, args, values, end)
+                &&& #[trigger] self.mixed_call_argument_prefix(source, parsed, row, caller, scope, types, call, limit, args, values, end)
                 &&& args.len() == call.call.arguments
                 &&& first_mixed_deferred(source, parsed.syntax.forms@, args, values, pending)
             },
             Err(error) => self.mixed_target_signature_failure(call, limit, error)
                 || exists|args: Seq<usize>, values: Seq<Option<SignalType>>, position: usize| {
-                    &&& #[trigger] self.mixed_call_argument_prefix(source, parsed, row, entry, scope, types, call, limit, args, values, position)
+                    &&& #[trigger] self.mixed_call_argument_prefix(source, parsed, row, caller, scope, types, call, limit, args, values, position)
                     &&& args.len() < call.call.arguments
-                    &&& self.mixed_argument_at(source, parsed, row, entry, scope, types, call, limit, position, args.len() as usize, Err(error))
+                    &&& self.mixed_argument_at(source, parsed, row, caller, scope, types, call, limit, position, args.len() as usize, Err(error))
                 },
         }
     }
 
     proof fn record_mixed_argument_failure(&self, source: &ProjectSource, parsed: &NamedBuildCircuit,
-        row: BuildDefinition, entry: usize, scope: &FuncWiring, types: Seq<Option<SignalType>>, call: FuncCallArity,
+        row: BuildDefinition, caller: (usize, usize, usize), scope: &FuncWiring, types: Seq<Option<SignalType>>, call: FuncCallArity,
         limit: u64, args: Seq<usize>, values: Seq<Option<SignalType>>, root: usize, error: MixedFuncTypeError)
         requires
-            self.mixed_call_argument_prefix(source, parsed, row, entry, scope, types, call, limit, args, values, root),
+            self.mixed_call_argument_prefix(source, parsed, row, caller, scope, types, call, limit, args, values, root),
             args.len() < call.call.arguments,
-            self.mixed_argument_at(source, parsed, row, entry, scope, types, call, limit, root, args.len() as usize, Err(error)),
-        ensures self.mixed_call_inputs_match(source, parsed, row, entry, scope, types, call, limit, Err(error)),
+            self.mixed_argument_at(source, parsed, row, caller, scope, types, call, limit, root, args.len() as usize, Err(error)),
+        ensures self.mixed_call_inputs_match(source, parsed, row, caller, scope, types, call, limit, Err(error)),
     {}
 
     #[verifier::spinoff_prover]
@@ -674,7 +716,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     fn check_mixed_call_arguments(
         &self, caller: (usize, usize, usize), source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>,
         scope: &FuncWiring<'p, 'a>, types: &[Option<SignalType<'p, 'a>>], record: &(usize, FuncCallArity<'p, 'a>),
-        limit: u64, signatures: &mut SignatureCache<'p, 'a>,
+        rows: &[(usize, FuncCallArity<'p, 'a>)], limit: u64, signatures: &mut SignatureCache<'p, 'a>,
     ) -> (result: Result<Option<LocatedName<'p, 'a>>, MixedFuncTypeError<'p, 'a>>)
         requires
             mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
@@ -685,6 +727,10 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 &&& *source == project.sources_model()[_file as int]
                 &&& *parsed == project.indexes_model()[_file as int]->Circuit_0
                 &&& self.mixed_checked_call(DefinitionPosition { file: _file, entry, definition, reference: record.0 }, record.1)
+                &&& {
+                    let row = crate::project::use_aliases::call_arity::checks::at_definition(parsed, entry as int, definition as int);
+                    self.retained_definition_calls(_file, entry, definition, (row.references.end - row.references.start) as usize, rows@)
+                }
             }),
             crate::project::parsed_circuit_matches(*source, *parsed),
             types@.len() == scope.drivers.definitions@.len(), old(signatures).matches_mixed(self, limit),
@@ -692,7 +738,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             final(signatures).matches_mixed(self, limit),
             self.mixed_call_inputs_match(source, parsed,
                 crate::project::use_aliases::call_arity::checks::at_definition(parsed, caller.1 as int, caller.2 as int),
-                caller.1, scope, types@, record.1, limit, result),
+                caller, scope, types@, record.1, limit, result),
     {
         let (_file, entry, definition) = caller;
         let reference = record.0;
@@ -711,7 +757,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         let forms = parsed.syntax.forms.as_slice();
         proof { build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int); }
         self.prepare_mixed_call_signature(Ghost(at), call, limit, signatures)?;
-        let signature = cached_signature(signatures, call);
+        let ghost caller_ports = signatures.signatures();
         let mut remaining = call_argument_range(forms, &call.call);
         let mut ordinal = 0;
         let mut deferred = None;
@@ -747,14 +793,14 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 expression_region(forms@, remaining.start as int, remaining.end as int),
                 call_argument_sequence(forms@, remaining, call.call.arguments - ordinal),
                 remaining.start < remaining.end ==> direct_call_argument(forms@, call.call, remaining.start as int),
-                match (call.target, signature) {
-                    (FuncCallTarget::Nor, None) => true,
-                    (FuncCallTarget::Function { file: target_file, entry: target_entry, arity, .. }, Some(signature)) =>
-                        self.mixed_typed_signature_matches(target_file, target_entry, limit, Ok(Some(*signature)))
-                            && signature.inputs@.len() == arity.inputs,
-                    _ => false,
+                self.retained_definition_calls(_file, entry, definition, (row.references.end - row.references.start) as usize, rows@),
+                call.target matches FuncCallTarget::Function { file: target_file, entry: target_entry, arity, .. } ==> {
+                    &&& caller_ports.contains_key((target_file, target_entry))
+                    &&& signatures.signatures().contains_key((target_file, target_entry))
+                    &&& signatures.signatures()[(target_file, target_entry)] == caller_ports[(target_file, target_entry)]
+                    &&& caller_ports[(target_file, target_entry)].inputs@.len() == arity.inputs
                 },
-                self.mixed_call_argument_prefix(source, parsed, *row, entry, scope, types@, *call, limit,
+                self.mixed_call_argument_prefix(source, parsed, *row, caller, scope, types@, *call, limit,
                     arguments, values, remaining.start),
                 first_mixed_deferred(source, forms@, arguments, values, deferred),
             decreases remaining.end - remaining.start,
@@ -764,9 +810,9 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 self.mixed_func_call_arity_origin(_file, entry, definition, reference, *call);
                 source.text_model_is_text();
                 build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, absolute as int);
+                indexed_call_region(source.text, forms@, *row, parsed.references@[ref_pos as int], call.call);
             }
             let Some(argument) = next_call_argument(forms, remaining.start..remaining.end) else { unreachable!() };
-            let Some(port) = signature_port(signature, PortDirection::Input, ordinal) else { unreachable!() };
             let root = argument.start;
             let known = if matches!(forms[root], Form::Atom { kind: AtomKind::Name, .. }) {
                 let position = indexed_call_signal(source.text, forms, row, parsed.references.as_slice(), ref_pos,
@@ -774,17 +820,22 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 proof { self.mixed_wiring_signal_driver(_file, entry, limit, *scope, absolute, position); }
                 let bound = &scope.signals[position - frame.signals.start];
                 let known = inherit_type(scope, types, bound.driver);
-                assert(self.mixed_known_argument(parsed, *row, entry, scope, types@, root, known)) by {
+                assert(self.mixed_known_argument(source, parsed, *row, caller, scope, types@, root, limit, known)) by {
                     assert(parsed.signals@[position as int] == root);
                 };
                 known
+            } else if matches!(forms[root], Form::List { .. }) {
+                proof { direct_call_argument_bounds(forms@, call.call, root as int); }
+                self.nested_mixed_output(caller, source, parsed, row, Ghost(reference), rows, root, limit, signatures)
             } else { None };
+            let signature = cached_signature(signatures, call);
+            let Some(port) = signature_port(signature, PortDirection::Input, ordinal) else { unreachable!() };
             let leaf = check_leaf(source, forms, root, &port, known, limit);
             let ghost model = leaf;
             let result = report_call_argument(source, forms, root, ordinal, &port, leaf);
             proof {
                 assert(self.mixed_input_port(*call, limit, ordinal, port));
-                assert(self.mixed_argument_at(source, parsed, *row, entry, scope, types@, *call, limit, root, ordinal,
+                assert(self.mixed_argument_at(source, parsed, *row, caller, scope, types@, *call, limit, root, ordinal,
                     match result { Ok(typed) => Ok(typed), Err(error) => Err(MixedFuncTypeError::Input(error)) })) by {
                     assert(leaf_result(source, forms@[root as int], &port, known, limit, model));
                 };
@@ -797,13 +848,13 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                         let definition_row = crate::project::use_aliases::call_arity::checks::at_definition(
                             parsed, entry as int, definition as int);
                         assert(*row == definition_row);
-                        assert(self.mixed_argument_at(source, parsed, definition_row, entry, scope, types@, *call, limit,
+                        assert(self.mixed_argument_at(source, parsed, definition_row, caller, scope, types@, *call, limit,
                             root, ordinal, Err(error)));
-                        self.record_mixed_argument_failure(source, parsed, definition_row, entry, scope, types@, *call, limit,
+                        self.record_mixed_argument_failure(source, parsed, definition_row, caller, scope, types@, *call, limit,
                             arguments, values, root, error);
                         assert(self.mixed_call_inputs_match(source, parsed,
                             crate::project::use_aliases::call_arity::checks::at_definition(parsed, caller.1 as int, caller.2 as int),
-                            caller.1, scope, types@, record.1, limit, Err(error)));
+                            caller, scope, types@, record.1, limit, Err(error)));
                     }
                     return Err(error);
                 }
@@ -815,7 +866,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             proof {
                 extend_first_mixed_deferred(source, forms@, arguments, values, root, value, previous, deferred);
                 following_call_argument(forms@, call.call, root as int, argument.end as int);
-                self.extend_mixed_argument_prefix(source, parsed, *row, entry, scope, types@, *call, limit,
+                self.extend_mixed_argument_prefix(source, parsed, *row, caller, scope, types@, *call, limit,
                     arguments, values, root, argument.end, value);
                 arguments = arguments.push(root);
                 values = values.push(value);
