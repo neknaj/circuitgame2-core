@@ -51,7 +51,8 @@ pub use widths::{
 #[cfg(verus_only)]
 pub use analysis::definition_analysis_evidence;
 pub use analysis::{
-    DefinitionAnalysis, DefinitionAnalysisError, UseAliasReport, analyze_definitions,
+    CheckedDefinitionAnalysis, DefinitionAnalysis, DefinitionAnalysisError, PreparedDefinitionAnalysis,
+    PreparedDefinitionError, UseAliasReport, analyze_definitions, prepare_definition_analysis,
 };
 pub use basis::{CircuitBasisError, validate_circuit_basis};
 #[cfg(verus_only)]
