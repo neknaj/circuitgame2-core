@@ -6,6 +6,7 @@
 
 mod clock;
 mod fixed_requests;
+mod i2c_transfer;
 mod period;
 mod request_ids;
 mod response;
@@ -13,6 +14,9 @@ mod response;
 pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
 #[cfg(verus_only)]
 pub use clock::clock_change_matches;
+pub use i2c_transfer::{I2cTransfer, I2cTransferError, I2cTransferKind};
+#[cfg(verus_only)]
+pub use i2c_transfer::{i2c_transfer_error, i2c_transfer_kind};
 pub use period::exact_microseconds;
 pub use request_ids::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds, RequestKey};
 
