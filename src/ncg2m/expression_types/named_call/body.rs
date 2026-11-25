@@ -574,6 +574,17 @@ pub proof fn defn_call_argument_origin(forms: Seq<Form>, at: usize, arguments: S
     },
 {}
 
+pub(in crate::ncg2m) proof fn argument_positions_increase(
+    forms: Seq<Form>, at: usize, arguments: Seq<usize>, slot: int,
+)
+    requires defn_call_arguments(forms, at, arguments), 0 <= slot < arguments.len(),
+    ensures
+        at < arguments[slot],
+        slot + 1 < arguments.len() ==> arguments[slot] < arguments[slot + 1],
+{
+    assert(at < arguments[slot] < subtree_limit(forms, arguments[slot]));
+}
+
 proof fn canonical_call_preserves_arguments(forms: Seq<Form>, entry: CallTypeEntry, arguments: Seq<usize>)
     requires canonical_call(forms, entry), arguments == entry.arguments@.map_values(|arg: super::typing::CallArgument| arg.at),
     ensures defn_call_arguments(forms, entry.at, arguments),

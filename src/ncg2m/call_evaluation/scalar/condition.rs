@@ -45,6 +45,16 @@ pub closed spec fn scalar_condition_matches<'p, 'a>(
     }
 }
 
+pub(super) proof fn conditional_children_follow_parent(
+    body: DefnEvaluationBody, site: ScalarExpressionSite, branch: ScalarCondition,
+)
+    requires scalar_condition_matches(body, site, Some(branch)),
+    ensures {
+        let (at, condition, yes, no) = branch.positions_model();
+        at == site.at && at < condition < yes < no < body.forms@.len()
+    },
+{}
+
 pub(super) proof fn conditional_results_observe_same(
     a: DefnEvaluationBody, b: DefnEvaluationBody, site_a: ScalarExpressionSite, site_b: ScalarExpressionSite,
     first: Option<ScalarCondition>, second: Option<ScalarCondition>,

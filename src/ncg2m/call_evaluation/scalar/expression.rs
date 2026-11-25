@@ -18,6 +18,9 @@ use super::execution::observation::{
     type_spelling_agrees,
 };
 
+#[cfg(verus_only)]
+mod termination;
+
 verus! {
 
 /// 実行中の補助関数と、値を待つ条件式を保持する。

@@ -24,8 +24,10 @@ pub(super) mod observation;
 pub use observation::{scalar_execution_states_observe_same, scalar_execution_steps_observe_same};
 mod slice;
 #[cfg(verus_only)]
+mod termination;
+#[cfg(verus_only)]
 pub use slice::{
-    finite_scalar_executions_agree, resumed_scalar_execution_matches, scalar_execution_slice_matches, scalar_execution_terminal_extends,
+    finite_scalar_execution_from_progress, finite_scalar_executions_agree, resumed_scalar_execution_matches, scalar_execution_slice_matches, scalar_execution_terminal_extends,
 };
 
 verus! {
@@ -396,7 +398,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 let different = candidate && row->Some_0[site as int].at != at;
                 match step {
                     Ok(ScalarExecutionSlice::Suspended(after)) if different =>
-                        after.rank == rank && after.waiting@ == stack
+                        site < usize::MAX && after.rank == rank && after.waiting@ == stack
                             && after.active == (Active::Lookup { parent, site: (site + 1) as usize }),
                     Ok(ScalarExecutionSlice::Suspended(after)) => candidate
                         && exists|args: ScalarArguments<'plan, 'p, 'a>|
