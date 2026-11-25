@@ -19,6 +19,37 @@ pub open spec fn original_list_observations_agree(
     }
 }
 
+// リスト内の構文木と検査順は、そのバイト列だけで決まる。
+pub(super) proof fn original_list_traces_agree(
+    old: &str, new: &str, old_span: Range<usize>, new_span: Range<usize>,
+    earlier: OriginalCircuitList, later: OriginalCircuitList,
+)
+    requires
+        old.spec_bytes()[old_span.start as int..old_span.end as int]
+            == new.spec_bytes()[new_span.start as int..new_span.end as int],
+        one_original_circuit_list(old, old_span, earlier),
+        one_original_circuit_list(new, new_span, later),
+    ensures
+        earlier.forms_model() == later.forms_model(),
+        earlier.checked_model() == later.checked_model(),
+{
+    let bytes = old.spec_bytes()[old_span.start as int..old_span.end as int];
+    let old_text = choose|text: &str| {
+        &&& text.spec_bytes() == bytes
+        &&& sexpr_form_model(text) == Some(earlier.forms@)
+        &&& #[trigger] check_trace(text, earlier.forms@, earlier.checked@, (earlier.forms@.len() as int, None))
+    };
+    let new_text = choose|text: &str| {
+        &&& text.spec_bytes() == bytes
+        &&& sexpr_form_model(text) == Some(later.forms@)
+        &&& #[trigger] check_trace(text, later.forms@, later.checked@, (later.forms@.len() as int, None))
+    };
+    crate::sexpr_models_agree_on_bytes(old_text, new_text);
+    assert(earlier.forms@ == later.forms@);
+    check_trace_transfers_on_bytes(new_text, old_text, later.forms@, later.checked@, (later.forms@.len() as int, None));
+    complete_check_traces_agree(old_text, earlier.forms@, earlier.checked@, later.checked@);
+}
+
 // 同じバイト範囲の厳格構文木と検査列は一意で、診断の基準位置も共通する。
 proof fn original_list_inspections_agree(
     source: &str, span: Range<usize>, left: Option<OriginalCircuitList>, right: Option<OriginalCircuitList>,
@@ -31,21 +62,7 @@ proof fn original_list_inspections_agree(
     ensures original_list_observations_agree(source, span, left, right),
 {
     if let (Some(a), Some(b)) = (left, right) {
-        let bytes = source.spec_bytes()[span.start as int..span.end as int];
-        let a_text = choose|text: &str| {
-            &&& text.spec_bytes() == bytes
-            &&& sexpr_form_model(text) == Some(a.forms@)
-            &&& #[trigger] check_trace(text, a.forms@, a.checked@, (a.forms@.len() as int, None))
-        };
-        let b_text = choose|text: &str| {
-            &&& text.spec_bytes() == bytes
-            &&& sexpr_form_model(text) == Some(b.forms@)
-            &&& #[trigger] check_trace(text, b.forms@, b.checked@, (b.forms@.len() as int, None))
-        };
-        crate::sexpr_models_agree_on_bytes(a_text, b_text);
-        assert(a.forms@ == b.forms@);
-        check_trace_transfers_on_bytes(b_text, a_text, b.forms@, b.checked@, (b.forms@.len() as int, None));
-        complete_check_traces_agree(a_text, a.forms@, a.checked@, b.checked@);
+        original_list_traces_agree(source, source, span, span, a, b);
         let a_diagnostics = a.source_diagnostics_model();
         let b_diagnostics = b.source_diagnostics_model();
         assert(a_diagnostics =~= b_diagnostics) by {

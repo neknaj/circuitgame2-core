@@ -13,8 +13,14 @@ use vstd::utf8::valid_utf8;
 mod agreement;
 #[cfg(verus_only)]
 pub use agreement::{original_list_observations_agree, repaired_circuit_recoveries_agree};
+mod relocation;
+pub use relocation::relocate_circuit_span;
+#[cfg(verus_only)]
+pub use relocation::{original_diagnostic_relocated, original_list_diagnostics_relocate};
 mod cache;
 mod names;
+mod window;
+pub use window::CircuitRecoveryReuseWindow;
 pub use cache::CachedCircuitRecovery;
 #[cfg(verus_only)]
 pub use names::recovered_names_agree;
@@ -317,13 +323,14 @@ pub proof fn circuit_recovery_repair_evidence(source: &str, recovery: &CircuitRe
             &&& original@.len() == recovered.original_lists@.len()
             &&& forall|i: int| 0 <= i < original@.len() ==> {
                 let checked = #[trigger] original@[i];
+                &&& crate::located_span(source, recovered.original_lists@[i])
                 &&& checked.is_some() == original_list_is_inspectable(source, recovered.original_lists@[i])
                 &&& checked matches Some(list) ==> one_original_circuit_list(source, recovered.original_lists@[i], list)
             }
         },
         _ => false,
     },
-{}
+{ reveal(original_list_ranges); }
 
 /// 妥当なソースでは、回復解析と厳格解析の構文木と索引項目が一致する。
 ///

@@ -1,9 +1,15 @@
 //! 文書の回復構文を、同じ本文に対する解析に再利用する。
 
 use alloc::string::String;
+use core::ops::Range;
 use vstd::prelude::*;
 
-use super::{BuildCircuitIndex, CircuitRecovery, NamedBuildCircuit, recover_circuit_build_index, recover_circuit_forms};
+use super::{BuildCircuitIndex, CircuitRecovery, CircuitRecoveryReuseWindow, NamedBuildCircuit, recover_circuit_build_index, recover_circuit_forms};
+use super::window::select_recovery_window;
+#[cfg(verus_only)]
+use super::window::original_lists_ordered;
+#[cfg(verus_only)]
+use crate::{original_list_ranges, recovered_replay_matches};
 use crate::circuit::build::{BuildRows, copy_build_parts};
 use crate::circuit::names::name_build_index;
 #[cfg(verus_only)]
@@ -150,8 +156,20 @@ impl CachedCircuitRecovery {
     /// 解析結果と一緒に保持した本文を返す。
     pub fn text(&self) -> (text: &str)
         ensures text@ == self.source_model(),
+            self.recovery_model() matches CircuitRecovery::WithSyntaxRepairs { recovered, .. }
+                ==> recovered_replay_matches(text, recovered.forms@, recovered.repairs@, recovered.original_lists@),
     {
-        self.source.as_str()
+        let text = self.source.as_str();
+        proof {
+            use_type_invariant(self);
+            let original = choose|old: &str| old@ == self.source@
+                && #[trigger] circuit_recovery_matches(old, self.recovery);
+            if let CircuitRecovery::WithSyntaxRepairs { recovered, .. } = &self.recovery {
+                reveal(circuit_recovery_matches);
+                crate::recovery_replay::recovery_replay_transfers_on_bytes(original, text, recovered);
+            }
+        }
+        text
     }
 
     /// 構築時の回復結果を参照する。
@@ -159,6 +177,47 @@ impl CachedCircuitRecovery {
         ensures *result == self.recovery_model(),
     {
         &self.recovery
+    }
+
+    /// 修復を含む旧本文について、編集区間の外にある元リストの列を選ぶ。
+    ///
+    /// 接頭部は編集開始以前に閉じた最後の元リストまで、接尾部は編集終了以降に閉じた最初の
+    /// 元リストの直後からとする。編集終了が接頭部の終端なら、同じ位置から接尾部を始める。
+    /// 構文の修復がない場合、編集範囲が逆順の場合、必要な閉じ括弧を選べない場合は `None` を返す。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use circuitgame2_syntax::circuit::{CachedCircuitRecovery, CircuitRecoveryReuseWindow};
+    ///
+    /// let old = CachedCircuitRecovery::analyze("(using nor)) (unknown)".to_owned());
+    /// assert_eq!(old.recovery_reuse_window(11..11), Some(CircuitRecoveryReuseWindow {
+    ///     start: 11, join: 11, head_count: 1, first_tail: 1,
+    /// }));
+    /// ```
+    pub fn recovery_reuse_window(&self, edit: Range<usize>) -> (window: Option<CircuitRecoveryReuseWindow>)
+        ensures
+            window.is_some() <==> (match self.recovery_model() {
+                CircuitRecovery::WithSyntaxRepairs { recovered, .. } =>
+                    edit.start <= edit.end && (edit.end == 0 || exists|i: int| 0 <= i < recovered.original_lists@.len()
+                        && edit.end <= (#[trigger] recovered.original_lists@[i]).end),
+                _ => false,
+            }),
+            window matches Some(w) ==> self.recovery_model() matches CircuitRecovery::WithSyntaxRepairs { recovered, .. }
+            && w.matches(recovered.original_lists@, edit),
+    {
+        let CircuitRecovery::WithSyntaxRepairs { recovered, .. } = &self.recovery else { return None; };
+        proof {
+            use_type_invariant(self);
+            let original = choose|text: &str| text@ == self.source@
+                && #[trigger] circuit_recovery_matches(text, self.recovery);
+            reveal(circuit_recovery_matches);
+            assert(original_list_ranges(original, recovered.original_lists@, recovered.repairs@,
+                original.spec_bytes().len() as int));
+            reveal(original_list_ranges);
+            assert(original_lists_ordered(recovered.original_lists@));
+        }
+        select_recovery_window(recovered.original_lists.as_slice(), edit)
     }
 
     /// 同じ UTF-8 本文が S 式として読める場合に、完了した結果を返す。
