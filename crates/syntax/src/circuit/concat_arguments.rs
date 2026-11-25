@@ -5,7 +5,7 @@ use super::*;
 
 #[cfg(verus_only)]
 use super::expression_forest::{
-    direct_name_in_signal_index, expression_forest, expression_region, first_expression_children,
+    direct_argument_selection_has_signal, expression_forest, expression_region, first_expression_children,
     list_child_signals,
 };
 #[cfg(verus_only)]
@@ -211,6 +211,31 @@ pub proof fn indexed_concat_argument_signal(
         row.signals.start <= position < row.signals.end <= index.signals@.len() && index.signals@[position] == name
     }),
 {
+    assert(bit_selection_path(source, index.syntax.forms@, name, Seq::empty(), name));
+    indexed_concat_selected_signal(source, index, entry, definition, arguments, name, Seq::empty(), name)
+}
+
+/// `concat` の引数にある選択の起点を、その定義の信号索引に結び付ける。
+pub proof fn indexed_concat_selected_signal(
+    source: &str, index: &BuildCircuitIndex, entry: int, definition: int, arguments: Range<usize>,
+    argument: usize, steps: Seq<BitSelectionShape>, name: usize,
+) -> (position: int)
+    requires
+        build_index_matches(source, *index),
+        0 <= entry < index.syntax.entries@.len(), entry < index.entry_ranges@.len(),
+        index.entry_ranges@[entry].definitions.start <= definition
+            < index.entry_ranges@[entry].definitions.end <= index.definitions@.len(),
+        complete_list_indices(index.syntax.forms@), nested_list_indices(index.syntax.forms@),
+        concat_arguments_match(source, index.syntax.forms@, index.definitions@[definition].expression.start as int, arguments),
+        direct_form_in_range(index.syntax.forms@, arguments.start as int, arguments.end as int, argument as int),
+        bit_selection_path(source, index.syntax.forms@, argument, steps, name),
+        name < index.syntax.forms@.len(),
+        index.syntax.forms@[name as int] is Atom && index.syntax.forms@[name as int]->Atom_kind is Name,
+    ensures ({
+        let row = index.definitions@[definition];
+        row.signals.start <= position < row.signals.end <= index.signals@.len() && index.signals@[position] == name
+    }),
+{
     build_definition_scope_evidence(source, index, entry, definition);
     vstd::std_specs::vec::axiom_spec_len(&index.syntax.forms);
     let row = index.definitions@[definition];
@@ -223,7 +248,7 @@ pub proof fn indexed_concat_argument_signal(
     concat_arguments_evidence(source, forms, root, end, arguments);
     assert(expression_child_range(source, forms, root, end, first, last));
     list_child_signals(source, forms, root, end, first, last, ExpressionHead::Concat);
-    direct_name_in_signal_index(source, forms, first, last, name);
+    direct_argument_selection_has_signal(source, forms, first, last, argument, steps, name);
     let signals = index.signals@[row.signals.start as int..row.signals.end as int];
     let offset = choose|i: int| 0 <= i < signals.len() && signals[i] == name;
     row.signals.start + offset

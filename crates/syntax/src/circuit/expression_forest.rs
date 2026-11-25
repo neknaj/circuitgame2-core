@@ -568,7 +568,7 @@ pub(super) proof fn call_argument_signal_index(
     call_argument_selected_signal_index(source, forms, first, stop, reference, name, Seq::empty(), name);
 }
 
-proof fn direct_argument_selection_has_signal(
+pub(super) proof fn direct_argument_selection_has_signal(
     source: &str, forms: Seq<Form>, start: int, stop: int,
     argument: usize, steps: Seq<super::BitSelectionShape>, name: usize,
 )
