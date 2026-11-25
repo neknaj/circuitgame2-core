@@ -7,6 +7,9 @@ use super::fold::checked_fold_item;
 #[cfg(verus_only)]
 use super::fold::fold_item_type;
 
+#[cfg(verus_only)]
+pub(super) mod scalar;
+
 verus! {
 
 #[derive(Clone, Copy)]
@@ -2235,6 +2238,52 @@ proof fn inferred_let_body<'a>(
     (extended, body)
 }
 
+#[verifier::spinoff_prover]
+proof fn conditional_inference_keeps_child_types<'a>(
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, ty: TypeShape,
+    condition: usize, yes: usize, no: usize,
+)
+    requires
+        at < forms.len(), inferred_as(source, forms, env, at, ty),
+        shape(source, forms, at) == Ok(Expression::Conditional { condition, yes, no }),
+    ensures
+        at < condition < yes < no < forms.len(),
+        inferred_as(source, forms, env, yes, ty), inferred_as(source, forms, env, no, ty),
+        typed_expression(Seq::empty(), source, forms, env, inferred_request(condition),
+            Goal::Check(scalar_type(BuiltinDataType::Bool))).is_ok(),
+{
+    assert(children3(forms, at) == Some((condition, yes, no)));
+    assert(at < condition < yes < no < forms.len());
+    reveal_with_fuel(typed_expression, 2);
+    let inferred = typed_expression(Seq::empty(), source, forms, env, inferred_request(yes), Goal::Infer);
+    let other = typed_expression(Seq::empty(), source, forms, env, inferred_request(no), Goal::Infer);
+    assert(inferred == Ok(ty));
+    assert(compare_inferred_branch(forms, no, ty, other) == Ok(ty));
+    let actual = other->Ok_0;
+    assert(types_agree(ty, actual, form_span(forms[no as int])) == Ok(()) && ty == actual);
+}
+
+proof fn checked_conditional_returns_branch_results<'a>(
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, ty: TypeShape,
+    condition: usize, yes: usize, no: usize,
+)
+    requires
+        usable_forms(source, forms), at < condition < yes < no < forms.len(),
+        shape(source, forms, at) == Ok(Expression::Conditional { condition, yes, no }),
+        typed_expression(Seq::empty(), source, forms, env, inferred_request(condition),
+            Goal::Check(scalar_type(BuiltinDataType::Bool))).is_ok(),
+    ensures typed_expression(Seq::empty(), source, forms, env, Request { at, expected: ty, list: None }, Goal::Check(ty))
+        == ensure_two_checked(Seq::empty(), source, forms, env,
+            Request { at: yes, expected: ty, list: None }, Request { at: no, expected: ty, list: None }, ty),
+{
+    let request = Request { at, expected: ty, list: None };
+    let step = CheckStep::Three(inferred_request(condition), Request { at: yes, expected: ty, list: None },
+        Request { at: no, expected: ty, list: None });
+    assert(children3(forms, at) == Some((condition, yes, no)));
+    assert(step_children_fit(forms, at, step));
+    plan_check_is_checked(Seq::empty(), source, forms, env, request, Goal::Check(ty), step, ty);
+}
+
 proof fn inferred_branches<'a>(
     source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, ty: TypeShape, condition: usize, yes: usize, no: usize,
 )
@@ -2247,10 +2296,8 @@ proof fn inferred_branches<'a>(
             == ensure_two_checked(Seq::empty(), source, forms, env,
                 Request { at: yes, expected: ty, list: None }, Request { at: no, expected: ty, list: None }, ty),
 {
-    reveal_with_fuel(typed_expression, 2);
-    let actual = typed_expression(Seq::empty(), source, forms, env, inferred_request(no), Goal::Infer)->Ok_0;
-    assert(types_agree(ty, actual, form_span(forms[no as int])) == Ok(()) && ty == actual);
-    assert(children3(forms, at) == Some((condition, yes, no)));
+    conditional_inference_keeps_child_types(source, forms, env, at, ty, condition, yes, no);
+    checked_conditional_returns_branch_results(source, forms, env, at, ty, condition, yes, no);
 }
 
 proof fn inferred_list_elements<'a>(

@@ -38,6 +38,27 @@ pub closed spec fn scalar_execution_slice_matches<'plan, 'p, 'a>(
     exists|path: Seq<ScalarExecution<'plan, 'p, 'a>>| #[trigger] execution_path_result(start, fuel, path, result)
 }
 
+impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
+    /// 予算が一つの実行枠の結果から、実装が行った一遷移を取り出す。
+    pub proof fn one_step_slice_matches(
+        &self, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires scalar_execution_slice_matches(*self, 1, result),
+        ensures self.step_matches(result),
+    {
+        let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+            #[trigger] execution_path_result(*self, 1, path, result);
+        reveal(execution_path);
+        if let Ok(ScalarExecutionSlice::Suspended(next)) = result {
+            assert(path.len() == 2);
+            assert(path[0] == *self && path[1] == next);
+            assert(path[0].step_matches(Ok(ScalarExecutionSlice::Suspended(path[1]))));
+        } else {
+            assert(path.len() == 1 && path.last() == *self);
+        }
+    }
+}
+
 proof fn append_execution_step(
     start: ScalarExecution, path: Seq<ScalarExecution>, next: ScalarExecution,
 )
@@ -88,6 +109,52 @@ pub proof fn resumed_scalar_execution_matches<'plan, 'p, 'a>(
     };
     assert(execution_path(start, joined));
     assert(execution_path_result(start, first + next, joined, result));
+}
+
+/// 次の遷移が存在し、評価を続ける先も条件を満たす状態から、有限の評価軌跡を構成する。
+///
+/// `admissible` は評価の途中で保つ条件を表す。値、診断、未対応フォームを返した時点で軌跡が終わる。
+pub proof fn finite_scalar_execution_from_progress<'plan, 'p, 'a>(
+    start: ScalarExecution<'plan, 'p, 'a>,
+    admissible: spec_fn(ScalarExecution<'plan, 'p, 'a>) -> bool,
+)
+    requires admissible(start),
+        forall|state: ScalarExecution<'plan, 'p, 'a>| #[trigger] admissible(state) ==>
+            exists|result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>|
+                #[trigger] state.step_matches(result) && match result {
+                    Ok(ScalarExecutionSlice::Suspended(next)) => admissible(next),
+                    _ => true,
+                },
+    ensures exists|fuel: nat, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>|
+        #[trigger] scalar_execution_slice_matches(start, fuel, result)
+            && !(result matches Ok(ScalarExecutionSlice::Suspended(_))),
+    decreases start.remaining_work_model().0, start.remaining_work_model().1,
+{
+    let step = choose|result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>|
+        #[trigger] start.step_matches(result) && match result {
+            Ok(ScalarExecutionSlice::Suspended(next)) => admissible(next),
+            _ => true,
+        };
+    let initial = seq![start];
+    reveal(execution_path);
+    assert(execution_path(start, initial));
+    match step {
+        Ok(ScalarExecutionSlice::Suspended(next)) => {
+            start.execution_step_reduces_work(next);
+            finite_scalar_execution_from_progress(next, admissible);
+            let (fuel, result) = choose|fuel: nat, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>|
+                #[trigger] scalar_execution_slice_matches(next, fuel, result)
+                    && !(result matches Ok(ScalarExecutionSlice::Suspended(_)));
+            append_execution_step(start, initial, next);
+            assert(execution_path_result(start, 1, initial.push(next), step));
+            assert(scalar_execution_slice_matches(start, 1, step));
+            resumed_scalar_execution_matches(start, 1, next, fuel, result);
+        },
+        _ => {
+            assert(execution_path_result(start, 1, initial, step));
+            assert(scalar_execution_slice_matches(start, 1, step));
+        },
+    }
 }
 
 /// 値や診断が確定した実行枠は、枠を広げても同じ結果に対応する。

@@ -18,6 +18,11 @@ use super::execution::observation::{
     type_spelling_agrees,
 };
 
+#[cfg(verus_only)]
+mod progress;
+#[cfg(verus_only)]
+mod termination;
+
 verus! {
 
 /// 実行中の補助関数と、値を待つ条件式を保持する。
@@ -108,6 +113,9 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
             state.expression_model().expected == frame.body_model().signature.result_type.ty,
             state.branches_model().len() == 0,
             state.result_type_model() == frame.body_model().signature.result_type.ty,
+            frame.has_locally_checked_site(ScalarExpressionSite {
+                at: frame.body_model().at, expected: frame.body_model().signature.result_type.ty,
+            }) ==> state.is_locally_checked(),
     {
         proof { use_type_invariant(&frame); }
         let body = frame.body();
@@ -120,9 +128,17 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
         requires site.at < frame.body_model().forms@.len(),
         ensures state.frame_model() == frame, state.expression_model() == site,
             state.result_type_model() == site.expected, state.branches_model().len() == 0,
+            frame.has_locally_checked_site(site) ==> state.is_locally_checked(),
     {
+        proof { use_type_invariant(&frame); }
         let origin = Ghost(frame);
-        Self { frame, cursor: ScalarCursor { next: site, branches: Vec::new(), result_type: site.expected, origin } }
+        let state = Self { frame, cursor: ScalarCursor { next: site, branches: Vec::new(), result_type: site.expected, origin } };
+        proof {
+            if frame.has_locally_checked_site(site) {
+                state.starts_at_locally_checked_site();
+            }
+        }
+        state
     }
 
     pub(super) fn into_parts(self) -> (parts: (ScalarCallFrame<'p, 'a>, ScalarCursor<'p, 'a>))
@@ -167,6 +183,7 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
             match (step, value) {
                 (ScalarExpressionStep::Continue(after), ScalarValue::Bool(condition)) =>
                     after.frame_model() == frame
+                    && after.cursor.origin@ == self.cursor.origin@
                     && after.result_type_model() == self.result_type_model()
                     && after.branches_model() == branches.drop_last()
                     && after.expression_model().expected == last.expected_model()
@@ -258,6 +275,7 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
         &&& pending.take(branches.len() as int) == branches
         &&& scalar_condition_matches(self.frame_model().body_model(), self.expression_model(), Some(pending.last()))
         &&& after.frame_model() == self.frame_model()
+        &&& after.cursor.origin@ == self.cursor.origin@
         &&& after.result_type_model() == self.result_type_model()
         &&& after.expression_model().at == pending.last().positions_model().1
         &&& after.expression_model().expected == boolean_type()

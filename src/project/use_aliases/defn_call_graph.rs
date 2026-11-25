@@ -18,7 +18,7 @@ use super::super::exports::mixed_exports_use_project_declarations;
 #[cfg(verus_only)]
 use super::super::mixed_use_targets_match;
 #[cfg(verus_only)]
-use super::call_site::{named_body_matches_project, project_named_defn_body_matches};
+use super::call_site::{named_body_check_belongs_to_project, named_body_matches_project, project_named_defn_body_matches};
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::DefnSignature;
 #[cfg(verus_only)]
@@ -139,6 +139,8 @@ spec fn anchored_arguments(project: &ParsedProjectSources, vertices: Seq<DefnPos
         &&& *edge.call.source == project.sources_model()[edge.from.file as int]
         &&& project.functional_forms_model(edge.from.file) matches Some(forms)
             && defn_call_arguments(forms, edge.at, edge.arguments@)
+        &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(header)
+            && edge.arguments@.len() == header.parameters@.len()
     }
 }
 
@@ -339,6 +341,8 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
                 &&& *edge.call.source == project.sources_model()[edge.from.file as int]
                 &&& project.functional_forms_model(edge.from.file) matches Some(forms)
                     && defn_call_arguments(forms, edge.at, edge.arguments@)
+                &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(header)
+                    && edge.arguments@.len() == header.parameters@.len()
             },
     {
         proof { use_type_invariant(self); }
@@ -648,6 +652,32 @@ pub proof fn defn_call_plan_contains(
             #[trigger] project_named_defn_body_matches(aliases, pos.file, pos.item, Some(Ok(signature))),
 {}
 
+/// 呼び出しを含まない局所スカラー本体について、計画の型検査結果を評価器が使う型判断に結び付ける。
+pub proof fn defn_call_plan_local_scalar_body<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, plan: &DefnCallPlan<'p, 'a>,
+    rank: usize, body: DefnEvaluationBody<'p, 'a>,
+)
+    requires
+        defn_call_plan_matches(aliases, plan), plan.body_matches_at_rank(rank, body),
+        body.signature.result_type.ty.list_depth == 0,
+        body.signature.result_type.ty.atom matches crate::ncg2m::data_types::DataTypeAtom::Builtin(
+            crate::ncg2m::data_types::BuiltinDataType::Bool | crate::ncg2m::data_types::BuiltinDataType::Integer(_)
+        ),
+        crate::ncg2m::expression_types::local_scalar_fragment(body.source.text_model(), body.forms@, body.at),
+    ensures crate::ncg2m::expression_types::local_scalar_site_is_typed(
+        body.source.text_model(), body.forms@, body.signature.parameters@, body.at, body.signature.result_type.ty,
+    ),
+{
+    let defn = plan.order_model()[rank as int];
+    let project = aliases.targets_model().project_model();
+    assert(plan.order_nodes_valid());
+    defn_call_plan_contains(aliases, plan, defn);
+    let signature = choose|signature: DefnSignature|
+        #[trigger] project_named_defn_body_matches(aliases, defn.file, defn.item, Some(Ok(signature)));
+    named_body_check_belongs_to_project(aliases, defn.file, defn.item, Some(Ok(signature)));
+    project.named_defn_local_scalar_type(aliases, defn.file, defn.item, signature, body);
+}
+
 /// 計画で補助関数に割り当てられた順位と、指定した呼び出しでの順位減少を取り出す。
 pub proof fn defn_call_plan_edge_order(
     aliases: &MixedUseAliases, plan: &DefnCallPlan, rank: usize,
@@ -696,10 +726,13 @@ pub proof fn defn_call_plan_site_at_rank(
         let edge = sites[site as int];
         let order = plan.order_model();
         let project = aliases.targets_model().project_model();
+        &&& plan.project_model() == project
         &&& at == edge.at
         &&& edge.from == order[rank as int]
         &&& order.contains(edge.to)
         &&& order.index_of(edge.to) < rank
+        &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(target)
+            && edge.arguments@.len() == target.parameters@.len()
         &&& edge.from.file < project.sources_model().len()
         &&& *edge.call.source == project.sources_model()[edge.from.file as int]
         &&& project.functional_forms_model(edge.from.file) matches Some(forms) && {
@@ -709,6 +742,7 @@ pub proof fn defn_call_plan_site_at_rank(
             &&& edge.call.span == form_span(forms[at as int])
             &&& edge.call.head == form_span(forms[at + 1])
             &&& defn_call_arguments(forms, at, edge.arguments@)
+            &&& crate::ncg2m::expression_types::conditional_positions(edge.call.source.text_model(), forms, at).is_none()
         }
     },
 {
@@ -717,6 +751,48 @@ pub proof fn defn_call_plan_site_at_rank(
     assert(defn_call_edge_matches(aliases, edge));
     reveal(defn_call_edge_matches);
     edge.at
+}
+
+/// 補助関数の本体が宣言呼び出しの場合、型検査が使った戻り型と局所スカラー引数の型を取り出す。
+pub proof fn defn_call_plan_root_scalar_call<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, plan: &DefnCallPlan<'p, 'a>,
+    rank: usize, site: usize, body: DefnEvaluationBody<'p, 'a>, callee: DefnEvaluationBody<'p, 'a>,
+)
+    requires
+        defn_call_plan_matches(aliases, plan), plan.body_matches_at_rank(rank, body),
+        plan.calls_model_at_rank(rank) matches Some(row) && site < row.len() && {
+            let edge = row[site as int];
+            &&& edge.at == body.at
+            &&& plan.order_model().contains(edge.to)
+            &&& plan.body_matches_at_rank(plan.order_model().index_of(edge.to) as usize, callee)
+        },
+        body.signature.result_type.ty.list_depth == 0,
+        body.signature.result_type.ty.atom matches crate::ncg2m::data_types::DataTypeAtom::Builtin(
+            crate::ncg2m::data_types::BuiltinDataType::Bool | crate::ncg2m::data_types::BuiltinDataType::Integer(_)
+        ),
+    ensures
+        body.signature.result_type.ty == callee.signature.result_type.ty,
+        plan.calls_model_at_rank(rank)->Some_0[site as int].arguments@.len() == callee.signature.parameters@.len(),
+        forall|slot: int| 0 <= slot < plan.calls_model_at_rank(rank)->Some_0[site as int].arguments@.len() ==> {
+            let at = #[trigger] plan.calls_model_at_rank(rank)->Some_0[site as int].arguments@[slot];
+            let ty = callee.signature.parameters@[slot].ty.ty;
+            &&& at < body.forms@.len()
+            &&& (crate::ncg2m::expression_types::local_scalar_fragment(body.source.text_model(), body.forms@, at)
+                && ty.list_depth == 0 && (ty.atom matches crate::ncg2m::data_types::DataTypeAtom::Builtin(
+                    crate::ncg2m::data_types::BuiltinDataType::Bool | crate::ncg2m::data_types::BuiltinDataType::Integer(_)
+                )) ==> crate::ncg2m::expression_types::local_scalar_site_is_typed(
+                    body.source.text_model(), body.forms@, body.signature.parameters@, at, ty,
+                ))
+        },
+{
+    defn_call_plan_edge_order(aliases, plan, rank);
+    let row = plan.calls_model_at_rank(rank)->Some_0;
+    let caller = plan.order_model()[rank as int];
+    let edge = row[site as int];
+    assert(plan.order_model()[plan.order_model().index_of(edge.to)] == edge.to);
+    crate::ncg2m::expression_types::named_call::defn_root_call_preserves_scalar_types(
+        aliases, caller, row, site, body, callee,
+    );
 }
 
 proof fn checked_rows_anchor_arguments(
@@ -736,6 +812,8 @@ proof fn checked_rows_anchor_arguments(
         &&& *edge.call.source == project.sources_model()[edge.from.file as int]
         &&& project.functional_forms_model(edge.from.file) matches Some(forms)
             && defn_call_arguments(forms, edge.at, edge.arguments@)
+        &&& project.indexed_defn(edge.to.file, edge.to.item) matches Some(header)
+            && edge.arguments@.len() == header.parameters@.len()
     } by {
         let edge = rows[row]@[site];
         assert(graph_row_matches(aliases, vertices, row as usize, rows[row]@, graph[row]@));

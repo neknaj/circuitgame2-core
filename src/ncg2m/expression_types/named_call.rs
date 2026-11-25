@@ -10,7 +10,9 @@ mod body;
 pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
-pub(crate) use body::{indexed_call_body_matches, indexed_call_body_origin};
+pub(crate) use body::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_root_call_preserves_scalar_types};
+#[cfg(verus_only)]
+pub(in crate::ncg2m) use body::argument_positions_increase;
 #[cfg(verus_only)]
 pub use body::{defn_body_calls_cover_slots, defn_call_argument_origin, defn_call_arguments, defn_call_edge_matches, defn_call_is_expression_slot};
 mod slots;
@@ -104,6 +106,15 @@ pub(in crate::ncg2m) proof fn call_form_origin(source: &str, forms: Seq<Form>, a
         forms[at as int] is List, forms[at + 1] is Atom,
         call.span == form_span(forms[at as int]), call.head_span == form_span(forms[at + 1]),
         call.word.spec_bytes() == spelling(source, forms[at + 1]),
+{}
+
+proof fn declared_head_is_deferred_by_local_typing(source: &str, forms: Seq<Form>, at: usize, call: CallForm)
+    requires call_form_matches(source, forms, at, Some(call)),
+    ensures
+        shape(source, forms, at) == Err(ExpressionCheckFailure::Deferred(
+            DeferredExpression::Form(form_span(forms[at as int])),
+        )),
+        conditional_positions(source, forms, at).is_none(),
 {}
 
 fn count_call_arguments(forms: &[Form], _call: usize, first: usize, end: usize) -> (count: usize)

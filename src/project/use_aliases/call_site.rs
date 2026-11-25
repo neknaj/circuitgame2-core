@@ -199,6 +199,14 @@ pub(super) proof fn named_body_matches_project<'p, 'a>(
     ensures project_named_defn_body_matches(aliases, file, item, result),
 {}
 
+pub(super) proof fn named_body_check_belongs_to_project<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
+    result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
+)
+    requires project_named_defn_body_matches(aliases, file, item, result),
+    ensures aliases.targets_model().project_model().named_defn_body_matches(aliases, file, item, result),
+{}
+
 /// 成功時の署名が索引に対応し、名前や引数個数の診断が指定した本体の範囲内を指すことを示す。
 pub proof fn project_named_defn_body_origin<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
