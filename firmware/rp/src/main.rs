@@ -4,13 +4,16 @@
 #![no_main]
 
 use circuitgame2_device_timing::SimulationClock;
-use circuitgame2_packed_nor::{PackedNorGate32, PackedNorPlan32, read_lane32, replace_lane32};
+use circuitgame2_packed_nor::{
+    PackedClockedNorPlan32, PackedNorGate32, read_lane32, replace_lane32,
+};
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_time::{Duration, Ticker};
 use panic_halt as _;
 
 const LANE: u32 = 0;
+const PORTS: [usize; 1] = [1];
 const GATES: [PackedNorGate32; 1] = [PackedNorGate32 { left: 0, right: 0 }];
 
 #[embassy_executor::main]
@@ -18,7 +21,8 @@ async fn main(_spawner: Spawner) {
     // 端子を設定する前に配線番号を検査する。
     let mut source = [0, 0, 0, u32::MAX];
     let mut next = [0];
-    let Ok(plan) = PackedNorPlan32::new(&GATES, source.len()) else {
+    let mut observed = [0];
+    let Ok(plan) = PackedClockedNorPlan32::new(1, &GATES, &PORTS) else {
         return;
     };
 
@@ -37,17 +41,17 @@ async fn main(_spawner: Spawner) {
             return;
         };
         source[0] = word;
-        if plan.step(&source, &mut next).is_err() {
+        if plan.step(&mut source, &mut next, &mut observed).is_err() {
             return;
         }
-        let Some(level) = read_lane32(next[0], LANE) else {
+        let Some(level) = read_lane32(observed[0], LANE) else {
             return;
         };
         // 同じ tick の計算が成功してから状態を確定し、GPIO に反映する。
         if clock.commit(tick).is_err() {
             return;
         }
-        source[1] = next[0];
+
         output.set_level(if level { Level::High } else { Level::Low });
     }
 }
