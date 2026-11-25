@@ -14,6 +14,14 @@ fn packed_nor_preserves_feedback_and_tick_boundaries() {
         ],
         outputs: vec![Wire::Gate(0), Wire::Gate(1), Wire::Input(0), Wire::Constant(true)],
     }).unwrap();
+    let layout = circuit.packed_layout32().unwrap();
+    assert_eq!((layout.input_count(), layout.source_count()), (1, 5));
+    assert_eq!(layout.outputs(), &[1, 2, 0, 4]);
+    let plan = circuitgame2_core::netlist::PackedNorPlan32::new(
+        layout.gates(),
+        layout.source_count(),
+    ).unwrap();
+    let mut word_states = [[0u32; 2]; 2];
     let mut packed = circuit.reset_packed();
     let mut scalar = circuit.reset();
     let input_word = 1u64 << 63;
@@ -24,6 +32,16 @@ fn packed_nor_preserves_feedback_and_tick_boundaries() {
     let mut scalar_high = circuit.reset();
     for input in [input_word, input_word, 1, 0] {
         packed = circuit.step_packed(&packed.gates, &[input]).unwrap();
+        for (bank, old) in word_states.iter_mut().enumerate() {
+            let mut source = [(input >> (32 * bank)) as u32, old[0], old[1], 0, u32::MAX];
+            let mut next = [0u32; 2];
+            plan.step(&source, &mut next).unwrap();
+            source[1..3].copy_from_slice(&next);
+            for (port, slot) in layout.outputs().iter().enumerate() {
+                assert_eq!(source[*slot], (packed.outputs[port] >> (32 * bank)) as u32);
+            }
+            *old = next;
+        }
         scalar = circuit.step(&scalar.gates, &[input & 1 != 0]).unwrap();
         scalar_high = circuit.step(&scalar_high.gates, &[input >> 63 != 0]).unwrap();
         for (word, (low, high)) in packed.outputs.iter().zip(scalar.outputs.iter().zip(&scalar_high.outputs)) {
