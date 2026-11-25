@@ -3,9 +3,9 @@
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-use super::{ClockedNor, PackedNorGate32, Wire};
+use super::{ClockedNor, NorNetlist, PackedNorGate32, Wire};
 #[cfg(verus_only)]
-use super::{NorNetlist, clocked_gate_updates, clocked_wiring_endpoints, clocked_wiring_valid, gate_value_matches, nor_lane_bit32, output_ports_available, output_values_match, wire_available, wire_value, wires_fit};
+use super::{clocked_gate_updates, clocked_wiring_endpoints, clocked_wiring_valid, gate_value_matches, nor_lane_bit32, output_ports_available, output_values_match, wire_available, wire_value, wires_fit};
 
 verus! {
 
@@ -293,6 +293,18 @@ impl ClockedNor {
                 && wires_fit(layout.gates_model(), layout.source_model() as usize),
     {
         let netlist = self.checked_netlist();
+        PackedNorLayout32::from_valid_wiring(netlist)
+    }
+}
+
+impl PackedNorLayout32 {
+    pub(super) fn from_valid_wiring(netlist: &NorNetlist) -> (result: Option<Self>)
+        requires clocked_wiring_valid(netlist),
+        ensures
+            result.is_some() <==> netlist.input_count as int + netlist.gates@.len() + 2 <= usize::MAX,
+            result matches Some(layout) ==> layout.matches(netlist)
+                && wires_fit(layout.gates_model(), layout.source_model() as usize),
+    {
         let inputs = netlist.input_count;
         let count = netlist.gates.len();
         if inputs > usize::MAX - 2 || count > usize::MAX - 2 - inputs {
@@ -347,6 +359,50 @@ impl ClockedNor {
         }
         assert(wires_fit(gates@, source_count));
         Some(PackedNorLayout32 { input_count: inputs, source_count, gates, outputs })
+    }
+}
+
+
+impl PackedNorLayout32 {
+    pub(super) proof fn gate_route(&self, netlist: &NorNetlist, i: int)
+        requires self.matches(netlist), 0 <= i < netlist.gates@.len(),
+        ensures ({
+            let gate = self.gates_model()[i];
+            let wire = netlist.gates@[i];
+            &&& gate.left == packed_wire_slot(wire.left, self.input_model(), self.gates_model().len())
+            &&& gate.right == packed_wire_slot(wire.right, self.input_model(), self.gates_model().len())
+            &&& gate.left < self.source_model() && gate.right < self.source_model()
+        }),
+    {
+        reveal(PackedNorLayout32::matches);
+    }
+
+    pub(super) proof fn combinational_read_order(&self, netlist: &NorNetlist)
+        requires self.matches(netlist), super::nor_evaluation_ready(netlist, netlist.input_count as nat),
+        ensures ({
+            let gates = self.gates_model();
+            forall|i: int| 0 <= i < gates.len() ==> {
+                let gate = #[trigger] gates[i];
+                super::packed_combinational::before_gate32(gate.left, self.input_model(), gates.len(), i)
+                    && super::packed_combinational::before_gate32(gate.right, self.input_model(), gates.len(), i)
+            }
+        }),
+    {
+        reveal(PackedNorLayout32::matches);
+        let gates = self.gates_model();
+        assert forall|i: int| 0 <= i < gates.len() implies {
+            let gate = #[trigger] gates[i];
+            super::packed_combinational::before_gate32(gate.left, self.input_model(), gates.len(), i)
+                && super::packed_combinational::before_gate32(gate.right, self.input_model(), gates.len(), i)
+        } by {
+            let wire = netlist.gates@[i];
+            let left = wire.left;
+            let right = wire.right;
+            assert(wire_available(left, self.input_model(), i as nat));
+            assert(wire_available(right, self.input_model(), i as nat));
+            match left { Wire::Input(_) | Wire::Gate(_) | Wire::Constant(_) => {} }
+            match right { Wire::Input(_) | Wire::Gate(_) | Wire::Constant(_) => {} }
+        };
     }
 }
 
