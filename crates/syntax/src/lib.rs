@@ -13,6 +13,23 @@ mod boundary;
 pub mod circuit;
 mod digits;
 mod natural;
+mod recovery_boundary;
+mod recovery_update;
+pub use recovery_update::{RecoveryEdges, RecoverySection, ReparsedRecovery, remember_recovery_edges};
+#[cfg(verus_only)]
+mod recovery_replay;
+#[cfg(verus_only)]
+pub use recovery_replay::{
+    recovered_replay_matches, recovered_replays_agree, recovered_suffix_agrees, recovery_suffix_projection,
+};
+#[cfg(verus_only)]
+use recovery_replay::{
+    RecoveryState, ReplayFrame, apply_recovery_segment, close_recovery_at_eof,
+    finish_recovery, record_recovery_frame, replay_checkpoint, seal_recovery, start_recovery,
+};
+pub use recovery_boundary::{RecoveryBoundary, RecoveryWindow, recovery_boundary_at, recovery_window};
+#[cfg(verus_only)]
+pub use recovery_boundary::{recovery_window_allowed, settled_recovery_boundary};
 pub use bit_literal::{BitLiteral, BitLiteralSize, bit_literal_size, read_bit_literal};
 #[cfg(verus_only)]
 pub use bit_literal::{
@@ -577,6 +594,7 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
 /// ```
 pub fn parse_recovering(source: &str) -> (result: Recovered)
     ensures
+        recovered_replay_matches(source, result.forms@, result.repairs@, result.original_lists@),
         well_formed_sexpr(source) ==> result.repairs@.len() == 0
             && sexpr_form_model(source) == Some(result.forms@),
         complete_list_indices(result.forms@),
@@ -605,6 +623,28 @@ pub open spec fn covers(bytes: Seq<u8>, spans: Seq<(int, int)>, end: int) -> boo
         &&& is_char_boundary(bytes, span.1)
         &&& span.0 == if i == 0 { 0 } else { spans[i - 1].1 }
     }
+}
+
+proof fn extend_source_cover(bytes: Seq<u8>, spans: Seq<(int, int)>, start: int, end: int)
+    requires
+        covers(bytes, spans, start),
+        0 <= start < end <= bytes.len(),
+        is_char_boundary(bytes, start),
+        is_char_boundary(bytes, end),
+    ensures covers(bytes, spans.push((start, end)), end),
+{
+    let updated = spans.push((start, end));
+    assert forall|i: int| 0 <= i < updated.len() implies {
+        let part = #[trigger] updated[i];
+        &&& 0 <= part.0 < part.1 <= end
+        &&& is_char_boundary(bytes, part.0)
+        &&& is_char_boundary(bytes, part.1)
+        &&& part.0 == if i == 0 { 0 } else { updated[i - 1].1 }
+    } by {
+        if i < spans.len() {
+            assert(updated[i] == spans[i]);
+        }
+    };
 }
 
 pub open spec fn first_form_piece(form: Form) -> (int, int) {
@@ -2135,11 +2175,14 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 && original_list_roots(forms@, original_lists@)
                 && original_list_ranges(source, original_lists@, repairs@, source.spec_bytes().len() as int)
                 && (!recovering ==> strict_source_covered(source, forms@))
+                && (recovering ==> recovered_replay_matches(source, forms@, repairs@, original_lists@))
                 && (well_formed_sexpr(source) ==> repairs@.len() == 0
                     && sexpr_form_model(source) == Some(forms@)),
             Err(error) => syntax_error_evidence(source, error) && strict_syntax_rejection(source, error),
         },
 {
+    hide(covers);
+    hide(original_list_ranges);
     let mut forms: Vec<Form> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
     let mut repairs: Vec<Repair> = Vec::new();
@@ -2148,10 +2191,12 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     let mut lexer = Lexer::new(source);
     let length = source.as_bytes().len();
     let ghost mut spans: Seq<(int, int)> = Seq::empty();
+    let ghost mut recovery_frames: Seq<ReplayFrame> = Seq::empty();
     let ghost derivation;
     let ghost mut input_prefix;
     proof {
         input_prefix = lexical::empty_scanned_input(source.spec_bytes());
+        start_recovery(source.spec_bytes());
         form_model::model_starts(input_prefix.lexemes, forms@, open@);
         derivation = lexical::choose_input_derivation(source);
         if derivation is Some {
@@ -2160,8 +2205,9 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         }
 
         initialize_parse_invariants(source, forms@, spans, repairs@, recovering);
-        reveal(original_lists_in_prefix);
-        reveal(original_list_ranges);
+        assert(covers(source.spec_bytes(), spans, 0)) by { reveal(covers); };
+        assert(original_lists_in_prefix(forms@, original_lists@, 0)) by { reveal(original_lists_in_prefix); };
+        assert(original_list_ranges(source, original_lists@, repairs@, 0)) by { reveal(original_list_ranges); };
     }
 
     loop
@@ -2178,6 +2224,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             length == source.spec_bytes().len(),
             valid_utf8(source.spec_bytes()),
             covers(source.spec_bytes(), spans, lexer.cursor.position()),
+            recovering ==> replay_checkpoint(source.spec_bytes(), recovery_frames, lexer.cursor.position(), lexer.needs_separator,
+                RecoveryState { forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root }),
             !recovering ==> strict_prefix_evidence(source, forms@, spans,
                 lexer.cursor.position(), lexer.needs_separator),
             !recovering ==> lexical::scanned_input_prefix(source.spec_bytes(), input_prefix,
@@ -2216,6 +2264,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             !recovering && open@.len() == 0 ==> well_formed_sexpr(source),
             original_lists_in_prefix(forms@, original_lists@, settled_form_limit(forms@, open@)),
             original_list_ranges(source, original_lists@, repairs@, length as int),
+            recovering ==> replay_checkpoint(source.spec_bytes(), recovery_frames, length as int, lexer.needs_separator,
+                RecoveryState { forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root }),
         decreases length - lexer.cursor.position(),
     {
         let Some((segment, next)) = lexer.next_segment() else {
@@ -2257,6 +2307,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         let ghost previous_position = lexer.cursor.position();
         let ghost repairs_before = repairs@;
         let ghost old_forms = forms@;
+        // 字句を処理する前の構文と診断の状態を、分岐ごとの回復規則と照合する。
+        let ghost prior_recovery = RecoveryState {
+            forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+        };
         let ghost previous_needs_separator = lexer.needs_separator;
         let kind = segment.kind;
         let span = segment.span;
@@ -2264,18 +2318,8 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         let ghost old_spans = spans;
         let ghost piece = (span.start as int, span.end as int);
         proof {
+            extend_source_cover(source.spec_bytes(), spans, span.start as int, span.end as int);
             spans = spans.push(piece);
-            assert forall|i: int| 0 <= i < spans.len() implies {
-                let part = #[trigger] spans[i];
-                &&& 0 <= part.0 < part.1 <= span.end
-                &&& is_char_boundary(source.spec_bytes(), part.0)
-                &&& is_char_boundary(source.spec_bytes(), part.1)
-                &&& part.0 == if i == 0 { 0 } else { spans[i - 1].1 }
-            } by {
-                if i < old_spans.len() {
-                    assert(spans[i] == old_spans[i]);
-                }
-            };
         }
         lexer = next;
         proof { advance_form_spans(source, forms@, previous_position, lexer.cursor.position()); }
@@ -2311,6 +2355,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
         match kind {
             SegmentKind::Whitespace | SegmentKind::Comment => {
                 proof {
+                    assert(recovering ==> (RecoveryState {
+                        forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                    }) == apply_recovery_segment(prior_recovery, scanned_segment)) by {
+                        reveal(apply_recovery_segment);
+                    };
                     if expected is Some {
                         assert(form_model::apply_lexeme(old_forms, old_open, expected->Some_0)
                             == (forms@, open@)) by { reveal(form_model::apply_lexeme); };
@@ -2326,6 +2375,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     proof { repair_spans_append(source, repairs@, repair, previous_position, lexer.cursor.position()); }
                     repairs.push(repair);
                     proof {
+                    assert(recovering ==> (RecoveryState {
+                        forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                    }) == apply_recovery_segment(prior_recovery, scanned_segment)) by {
+                        reveal(apply_recovery_segment);
+                    };
                         advance_original_lists(source, original_lists@, repairs_before_segment, repairs@,
                             previous_position, lexer.cursor.position());
                     }
@@ -2340,15 +2394,16 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             SegmentKind::Open => {
                 if recovering && open.len() == 0 {
                     proof {
-                        reveal(original_list_ranges);
-                        reveal(repair_input_spans_valid);
                         assert(span.start == previous_position);
                         assert forall|i: int| 0 <= i < original_lists@.len()
                             implies (#[trigger] original_lists@[i]).end <= span.start by {
+                            reveal(original_list_ranges);
                             assert(completed_original_list(source, original_lists@[i], previous_position));
                         };
                         assert forall|i: int| 0 <= i < repairs@.len()
-                            implies repair_precedes(#[trigger] repairs@[i], span.start as int) by {};
+                            implies repair_precedes(#[trigger] repairs@[i], span.start as int) by {
+                            reveal(repair_input_spans_valid);
+                        };
                     }
                     root = Some((span.start, repairs.len()));
                 }
@@ -2374,6 +2429,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                 assert(exists|j: int| 0 <= j < open@.len() && open@[j] == index);
                 assert(open@.contains(index));
                 proof {
+                    assert(recovering ==> (RecoveryState {
+                        forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                    }) == apply_recovery_segment(prior_recovery, scanned_segment)) by {
+                        reveal(apply_recovery_segment);
+                    };
                     assert forall|value: usize| #[trigger] previous.contains(value)
                         implies open@.contains(value) by {
                         let j = choose|j: int| 0 <= j < previous.len() && previous[j] == value;
@@ -2422,6 +2482,12 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         root = None;
                     }
                     proof {
+                        assert(recovering ==> (RecoveryState {
+                            forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                        }) == apply_recovery_segment(prior_recovery, scanned_segment)) by {
+                            assert(forms@ =~= before.update(index as int, forms@[index as int]));
+                            reveal(apply_recovery_segment);
+                        };
                         delimiters_after_close(source, before, forms@, index as int, recovering);
                         nested_after_close(before, forms@, previous, index);
                         indices_after_finish(before, forms@, previous, open@, index);
@@ -2450,6 +2516,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                         }
                         repairs.push(repair);
                         proof {
+                            assert((RecoveryState {
+                                forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                            }) == apply_recovery_segment(prior_recovery, scanned_segment)) by {
+                                reveal(apply_recovery_segment);
+                            };
                             advance_original_lists(source, original_lists@, repairs_before_segment, repairs@,
                                 previous_position, lexer.cursor.position());
                         }
@@ -2473,6 +2544,11 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
                     delimiters_after_append(source, before, added, recovering);
                     nested_after_append(before, added);
                     indices_after_append(before, open@, added, open@);
+                    assert(recovering ==> (RecoveryState {
+                        forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                    }) == apply_recovery_segment(prior_recovery, scanned_segment)) by {
+                        reveal(apply_recovery_segment);
+                    };
                     append_form_span(source, old_forms, added, previous_position, lexer.cursor.position());
                     if expected is Some {
                         assert(form_model::apply_lexeme(old_forms, old_open, expected->Some_0)
@@ -2486,6 +2562,14 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             }
         }
         proof {
+            if recovering {
+                let after = RecoveryState {
+                    forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                };
+                record_recovery_frame(source.spec_bytes(), recovery_frames, previous_position, previous_needs_separator,
+                    scanned_segment, prior_recovery, after);
+                recovery_frames = recovery_frames.push(ReplayFrame { segment: scanned_segment, after });
+            }
             if derivation is Some {
                 assert(expected is Some);
                 form_model::model_advances(derivation->Some_0.lexemes, old_spans.len() as int,
@@ -2508,6 +2592,10 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
 
     proof { is_char_boundary_start_end_of_seq(source.spec_bytes()); }
     proof { no_closes_implies_evidence(source, forms@, repairs@); }
+    let ghost before_eof = RecoveryState {
+        forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+    };
+    let ghost completed_recovery = finish_recovery(before_eof, length as int);
     while open.len() > 0
         invariant
             !recovering ==> strict_source_covered(source, forms@),
@@ -2530,9 +2618,16 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             open_order(open@),
             original_lists_in_prefix(forms@, original_lists@, settled_form_limit(forms@, open@)),
             original_list_ranges(source, original_lists@, repairs@, length as int),
+            recovering ==> completed_recovery == finish_recovery(
+                RecoveryState { forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root },
+                length as int,
+            ),
         decreases open@.len(),
     {
         let ghost previous = open@;
+        let ghost before_close = RecoveryState {
+            forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+        };
         let Some(index) = open.pop() else {
             unreachable!("nonempty list stack");
         };
@@ -2556,6 +2651,14 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
             finish_list(&mut forms, index, length);
             proof { original_lists_after_pop(before, forms@, original_lists@, previous, open@, index); }
             proof {
+                let after = RecoveryState {
+                    forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+                };
+                assert(forms@ =~= before.update(index as int, forms@[index as int]));
+                assert(after == close_recovery_at_eof(before_close, length));
+                assert(finish_recovery(before_close, length as int) == finish_recovery(after, length as int)) by {
+                    reveal(finish_recovery);
+                };
                 record_inserted_close(source, before, forms@, previous_repairs, index, opening_evidence, length);
                 delimiters_after_close(source, before, forms@, index as int, recovering);
                 nested_after_close(before, forms@, previous, index);
@@ -2578,6 +2681,15 @@ fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Ve
     }
 
     assert(open@.len() == 0);
+    proof {
+        if recovering {
+            let after = RecoveryState {
+                forms: forms@, open: open@, repairs: repairs@, original: original_lists@, root,
+            };
+            assert(completed_recovery == after) by { reveal(finish_recovery); };
+            seal_recovery(source, recovery_frames, lexer.needs_separator, before_eof, after);
+        }
+    }
     let _form_count = forms.len();
     assert(_form_count == forms@.len());
     assert forall|i: int| 0 <= i < forms@.len() implies match #[trigger] forms@[i] {

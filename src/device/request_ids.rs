@@ -130,6 +130,18 @@ impl<'a> PendingRequestIds<'a> {
     /// 準備した要求の件数。
     pub closed spec fn count_model(&self) -> u64 { self.count }
 
+    /// 他の検査が終わるまで確定を保留したまま、指定位置の要求 ID を組み立てる。
+    pub(super) fn proposed_id(&self, index: u64, instance: usize) -> (id: HostRequestId)
+        requires index < self.count_model(),
+        ensures
+            id.instance == instance,
+            id.generation == self.before_model().generation_model(),
+            id.serial as int == self.before_model().next_model() + index as int,
+    {
+        proof { use_type_invariant(self); }
+        HostRequestId { instance, generation: self.sequence.generation, serial: (self.sequence.next + index as u128) as u64 }
+    }
+
     /// tick の成功後に要求番号を確定し、発行に使う番号の範囲を返す。
     pub fn commit(self) -> (issued: IssuedRequestIds)
         ensures

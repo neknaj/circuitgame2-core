@@ -1,6 +1,7 @@
 //! 文字列の先頭から規則に従って読み進めたとき、最初に起きる違反を定める。
 
 use super::{Boundary, Error, ErrorKind, boundary, quoted_prefix::quoted_body, string_error_site};
+use crate::recovery_replay::placement::place_error;
 use vstd::prelude::*;
 
 verus! {
@@ -90,6 +91,22 @@ pub(super) proof fn first_string_errors_agree(bytes: Seq<u8>, opening: int, a: E
     invalid_body_stops_agree(bytes, 1, left, right);
     assert(a.kind == b.kind);
     assert(a.span.start == b.span.start && a.span.end == b.span.end);
+}
+
+/// 文字列内部の相対位置と内容が同じなら、最初の診断を新しい絶対位置へ移せる。
+pub(super) proof fn relocate_first_string_error(bytes: Seq<u8>, opening: int, error: Error, shift: int)
+    requires
+        first_string_error(bytes, opening, error),
+        0 <= shift,
+        opening + bytes.len() + shift <= usize::MAX,
+    ensures first_string_error(bytes, opening + shift, place_error(error, shift)),
+{
+    let stop = choose|stop: int| 1 <= stop <= bytes.len() && #[trigger] quoted_body(bytes, 1, stop)
+        && first_error_matches_stop(bytes, opening, stop, error);
+    let placed = place_error(error, shift);
+    assert(string_error_site(bytes, opening + shift, placed));
+    assert(first_error_matches_stop(bytes, opening + shift, stop, placed));
+    record_first_string_error(bytes, opening + shift, stop, placed);
 }
 
 } // verus!

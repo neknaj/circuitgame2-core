@@ -160,6 +160,257 @@ fn event_tick_retries_with_the_same_inputs_and_consumes_once() {
 }
 
 #[test]
+fn scheduled_host_response_is_visible_at_its_delivery_tick() {
+    use circuitgame2_core::device::{DeliveryError, HostResponseError, RequestIds, RequestLedger, ResponseKey, ResponseTickError, ScheduleResponseError};
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::{ScheduledEvents, TickPosition};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+    let mut ids = RequestIds::new(0);
+    let mut ledger = RequestLedger::new(0);
+    let mut events = ScheduledEvents::new();
+    let issued = ids.prepare(3).unwrap().commit();
+    let id = issued.id_at(0, 1).unwrap();
+    let second = issued.id_at(1, 2).unwrap();
+    let later = issued.id_at(2, 3).unwrap();
+    assert!(session.prepare_io_tick(&mut events).unwrap().commit_responses(&mut ledger, &[false]).unwrap().is_empty());
+    ledger.register(id, 9, 1).unwrap();
+    ledger.register(second, 10, 1).unwrap();
+    ledger.register(later, 11, 1).unwrap();
+
+    assert_eq!(session.schedule_response(&mut ledger, &mut events, id, session.position(), "late"),
+        Err(ScheduleResponseError::AlreadyCommitted));
+    let delivery = TickPosition { generation: 0, tick: 2 };
+    session.schedule_response(&mut ledger, &mut events, id, delivery, "data").unwrap();
+    assert_eq!(session.schedule_response(&mut ledger, &mut events, id, delivery, "duplicate"),
+        Err(ScheduleResponseError::Response(HostResponseError::DuplicateResponse)));
+
+    let later_delivery = TickPosition { generation: 0, tick: 3 };
+    session.schedule_response(&mut ledger, &mut events, later, later_delivery, "later").unwrap();
+    session.schedule_response(&mut ledger, &mut events, second, delivery, "second").unwrap();
+    let key = ResponseKey { id, tag: 9 };
+    let wrong_tag = ResponseKey { id: second, tag: 9 };
+    assert!(matches!(ledger.prepare_delivery(&[key, wrong_tag], delivery), Err(DeliveryError::WrongTag(1))));
+    assert!(matches!(ledger.prepare_delivery(&[key, key], delivery), Err(DeliveryError::Duplicate(1))));
+    let mut unrelated = RequestLedger::new(0);
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert!(matches!(pending.commit_responses(&mut unrelated, &[]),
+        Err(ResponseTickError::Delivery(DeliveryError::Unknown(0)))));
+    assert_eq!(session.position().tick, 1);
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(pending.next_event(0).unwrap().1.payload.payload(), &"data");
+    assert!(matches!(pending.commit_responses(&mut ledger, &[]),
+        Err(ResponseTickError::Input(TickInputError::InputCount))));
+    assert_eq!(session.position().tick, 1);
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    let event = &pending.next_event(0).unwrap().1.payload;
+    assert_eq!(event.request_id(), id);
+    assert_eq!(event.tag(), 9);
+    let ready = pending.commit_responses(&mut ledger, &[true]).unwrap();
+    assert_eq!(ready.len(), 2);
+    assert_eq!(ready[1].payload.request_id(), second);
+    assert_eq!(ledger.consume_at(ready[0].payload.request_id(), ready[0].position), None);
+    assert_eq!(ledger.consume_at(ready[1].payload.request_id(), ready[1].position), None);
+
+    let pending = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(pending.next_event(0).unwrap().1.payload.request_id(), later);
+    let ready = pending.commit_responses(&mut ledger, &[false]).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].payload.request_id(), later);
+}
+
+#[test]
+fn owned_device_session_resets_request_identity_together_with_responses() {
+    use circuitgame2_core::device::{
+        DeviceResponseSession, HostResponseError, RegisterRequestError, RequestIssueError, ScheduleResponseError,
+    };
+    use circuitgame2_core::netlist::ClockedVm;
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceResponseSession::new(vm);
+    assert_eq!(session.issue_request(0, 1), Err(RequestIssueError::BeforeFirstTick));
+    assert!(session.prepare_tick().unwrap().commit(&[true]).unwrap().is_empty());
+    let first = session.issue_request(0, 1).unwrap();
+    assert_eq!(first.serial, 0);
+    assert_eq!(session.issue_request(0, 1), Err(RequestIssueError::Registration(RegisterRequestError::TagInUse)));
+    let second = session.issue_request(0, 2).unwrap();
+    assert_eq!(second.serial, 1);
+    let delivery = TickPosition { generation: 0, tick: 2 };
+    session.schedule_response(first, delivery, "first").unwrap();
+    session.schedule_response(second, delivery, "second").unwrap();
+
+    let reset = session.prepare_reset().unwrap();
+    assert_eq!(reset.target(), TickPosition { generation: 1, tick: 0 });
+    reset.cancel();
+    let tick = session.prepare_tick().unwrap();
+    assert_eq!(tick.previous_output(), [true]);
+    assert_eq!(tick.next_response(0).unwrap().1.payload.payload(), &"first");
+    tick.cancel();
+    let removed = session.prepare_reset().unwrap().commit();
+    assert_eq!(removed.len(), 2);
+    assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
+    session.prepare_tick().unwrap().commit(&[false]).unwrap();
+    let replacement = session.issue_request(0, 1).unwrap();
+    assert_eq!((replacement.generation, replacement.serial), (1, 0));
+    let new_delivery = TickPosition { generation: 1, tick: 2 };
+    assert_eq!(session.schedule_response(first, new_delivery, "old"),
+        Err(ScheduleResponseError::Response(HostResponseError::DifferentGeneration)));
+    session.schedule_response(replacement, new_delivery, "new").unwrap();
+    let consumed = session.prepare_tick().unwrap().commit(&[true]).unwrap();
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].payload.payload(), &"new");
+}
+
+#[test]
+fn one_device_tick_commits_requests_only_after_the_circuit_succeeds() {
+    use circuitgame2_core::device::{
+        BatchRegistrationError, DeviceResponseSession, RegisterRequestError, RequestBatchTickError,
+        RequestKey, ResponseTickError,
+    };
+    use circuitgame2_core::netlist::{ClockedVm, TickInputError};
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceResponseSession::new(vm);
+    let first = RequestKey { instance: 0, tag: 7 };
+    let second = RequestKey { instance: 1, tag: 7 };
+    let keys = [first, second];
+    assert!(matches!(session.prepare_tick().unwrap().commit_with_requests(&[], &[first, second, first]),
+        Err(RequestBatchTickError::Registration(BatchRegistrationError::DuplicateTag { first: 0, later: 2 }))));
+    assert!(matches!(session.prepare_tick().unwrap().commit_with_requests(&[], &keys),
+        Err(RequestBatchTickError::Tick(ResponseTickError::Input(TickInputError::InputCount)))));
+    assert_eq!(session.position().tick, 0);
+
+    let (consumed, issued) = session.prepare_tick().unwrap().commit_with_requests(&[false], &keys).unwrap();
+    assert!(consumed.is_empty());
+    let first_id = issued.id_at(0, 0).unwrap();
+    assert_eq!(first_id.serial, 0);
+    assert_eq!(issued.id_at(1, 1).unwrap().serial, 1);
+    session.schedule_response(first_id, TickPosition { generation: 0, tick: 2 }, "answer").unwrap();
+    assert!(matches!(session.prepare_tick().unwrap().commit_with_requests(&[true], &[first]),
+        Err(RequestBatchTickError::Registration(
+            BatchRegistrationError::Registration(0, RegisterRequestError::TagInUse)))));
+    assert_eq!(session.position().tick, 1);
+
+    let consumed = session.prepare_tick().unwrap().commit(&[true]).unwrap();
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].payload.payload(), &"answer");
+    let (_, issued) = session.prepare_tick().unwrap().commit_with_requests(&[true], &[first]).unwrap();
+    assert_eq!(issued.id_at(0, 0).unwrap().serial, 2);
+}
+
+#[test]
+fn typed_host_requests_keep_notifications_in_order_without_using_request_numbers() {
+    use circuitgame2_core::device::{
+        CommittedHostRequest, DeviceHostRequest, DeviceResponseSession, HostRequest, HostRequestCommitError,
+    };
+    use circuitgame2_core::netlist::ClockedVm;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceResponseSession::<()>::new(vm);
+    let notify = |instance| DeviceHostRequest {
+        instance,
+        request: HostRequest::Notify(String::from("notice")),
+    };
+    let request = |instance, tag, payload| DeviceHostRequest {
+        instance,
+        request: HostRequest::Request { tag, payload },
+    };
+    let wrong_order = [notify(1), request(0, 3, vec![5])];
+    assert!(matches!(
+        session.prepare_tick().unwrap().commit_host_requests(&[false], &wrong_order),
+        Err(HostRequestCommitError::InstanceOrder(1)),
+    ));
+    assert_eq!(session.position().tick, 0);
+
+    let source = [request(0, 3, vec![5]), notify(0), request(1, 3, vec![6])];
+    let (consumed, committed) = session
+        .prepare_tick().unwrap()
+        .commit_host_requests(&[false], &source).unwrap();
+    assert!(consumed.is_empty());
+    assert_eq!(committed.len(), 3);
+    assert!(matches!(committed.get(0), Some(CommittedHostRequest::Request { id, tag: 3, payload })
+        if id.instance == 0 && id.serial == 0 && payload == &[5]));
+    assert!(matches!(committed.get(1), Some(CommittedHostRequest::Notify { instance: 0, notification })
+        if notification == "notice"));
+    assert!(matches!(committed.get(2), Some(CommittedHostRequest::Request { id, tag: 3, payload })
+        if id.instance == 1 && id.serial == 1 && payload == &[6]));
+    assert!(committed.get(3).is_none());
+}
+
+#[test]
+fn mixed_device_events_keep_arrival_order_after_a_cancelled_update() {
+    use circuitgame2_core::device::{
+        DeviceEvent, HostRequestId, RequestLedger, ResponseTickError, ScheduleInputError,
+    };
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::{ScheduledEvents, TickPosition};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+    let mut ledger = RequestLedger::new(0);
+    let mut events = ScheduledEvents::new();
+    let id = HostRequestId { instance: 1, generation: 0, serial: 0 };
+    let target = TickPosition { generation: 0, tick: 1 };
+    let later = TickPosition { generation: 0, tick: 2 };
+    ledger.register(id, 7, 0).unwrap();
+    assert_eq!(session.schedule_device_input(&mut events, 0, session.position(), 9),
+        Err(ScheduleInputError::AlreadyCommitted));
+    session.schedule_device_input(&mut events, 0, target, 10).unwrap();
+    session.schedule_device_input(&mut events, 0, later, 20).unwrap();
+    session.schedule_device_response(&mut ledger, &mut events, id, target, "answer").unwrap();
+    session.schedule_device_input(&mut events, 1, target, 30).unwrap();
+
+    let prepared = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(prepared.next_event(1).map(|(index, _)| index), Some(2));
+    assert!(matches!(prepared.commit_device_events(&mut ledger, &[]),
+        Err(ResponseTickError::Input(TickInputError::InputCount))));
+    assert_eq!(session.position().tick, 0);
+
+    let ready = session.prepare_io_tick(&mut events).unwrap()
+        .commit_device_events(&mut ledger, &[true]).unwrap();
+    assert_eq!(ready.len(), 3);
+    assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 10 }));
+    assert!(matches!(&ready[1].payload, DeviceEvent::Response(response)
+        if response.request_id() == id && response.tag() == 7 && response.payload() == &"answer"));
+    assert!(matches!(ready[2].payload, DeviceEvent::Input { instance: 1, payload: 30 }));
+
+    let ready = session.prepare_io_tick(&mut events).unwrap()
+        .commit_device_events(&mut ledger, &[false]).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 20 }));
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,

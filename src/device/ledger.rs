@@ -1,5 +1,15 @@
 //! 要求 ID とデバイス内タグを対応付け、応答の配送まで追跡する。
 
+mod delivery;
+mod issuance;
+pub use issuance::{BatchRegistrationError, RequestKey};
+#[cfg(verus_only)]
+pub use issuance::{first_batch_request_error, issued_rows_match, valid_request_batch};
+
+pub use delivery::{DeliveryError, PendingDelivery, ResponseKey};
+#[cfg(verus_only)]
+pub use delivery::delivery_matches;
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
@@ -32,6 +42,15 @@ struct RequestEntry {
 pub struct RequestLedger {
     generation: u64,
     entries: Vec<RequestEntry>,
+}
+
+/// 指定 ID が最初に現れる要求行を表す。
+pub open spec fn request_row_matches(
+    rows: Seq<(HostRequestId, u64, ResponseSlot)>, id: HostRequestId, i: int,
+) -> bool {
+    &&& 0 <= i < rows.len()
+    &&& rows[i].0 == id
+    &&& forall|j: int| 0 <= j < i ==> (#[trigger] rows[j]).0 != id
 }
 
 impl RequestLedger {
@@ -119,6 +138,18 @@ impl RequestLedger {
                 Err(error) => old(self).registration_error(id, tag, tick) == Some(error) && *final(self) == *old(self),
             },
     {
+        self.check_registration(id, tag, tick)?;
+        self.entries.push(RequestEntry { tag, response: ResponseSlot::new(id, tick) });
+        assert(self.requests().drop_last() =~= old(self).requests());
+        Ok(())
+    }
+
+    fn check_registration(&self, id: HostRequestId, tag: u64, tick: u64)
+        -> (result: Result<(), RegisterRequestError>)
+        ensures
+            result.is_ok() <==> self.registration_error(id, tag, tick).is_none(),
+            result matches Err(error) ==> self.registration_error(id, tag, tick) == Some(error),
+    {
         if id.generation != self.generation {
             return Err(RegisterRequestError::DifferentGeneration);
         }
@@ -128,16 +159,44 @@ impl RequestLedger {
         if self.has_busy_tag(id.instance, tag, tick) {
             return Err(RegisterRequestError::TagInUse);
         }
-        self.entries.push(RequestEntry { tag, response: ResponseSlot::new(id, tick) });
-        assert(self.requests().drop_last() =~= old(self).requests());
         Ok(())
     }
 
     /// 最初に登録した指定 ID の行を表す。
     pub open spec fn found_request(&self, id: HostRequestId, i: int) -> bool {
-        &&& 0 <= i < self.requests().len()
-        &&& self.requests()[i].0 == id
-        &&& forall|j: int| 0 <= j < i ==> (#[trigger] self.requests()[j]).0 != id
+        request_row_matches(self.requests(), id, i)
+    }
+
+    /// 配送予定の応答を受理できることを表す。
+    pub open spec fn accepts_response(&self, id: HostRequestId, position: TickPosition) -> bool {
+        &&& id.generation == self.generation_model() == position.generation
+        &&& exists|i: int| #[trigger] self.found_request(id, i)
+            && self.requests()[i].2.response_error(id, position).is_none()
+    }
+
+    /// 応答の受理を拒否する理由を表す。
+    pub open spec fn rejects_response(
+        &self, id: HostRequestId, position: TickPosition, error: HostResponseError,
+    ) -> bool {
+        let generation_matches = id.generation == self.generation_model() == position.generation;
+        match error {
+            HostResponseError::DifferentGeneration => !generation_matches,
+            HostResponseError::UnknownRequest => generation_matches
+                && forall|i: int| 0 <= i < self.requests().len() ==> (#[trigger] self.requests()[i]).0 != id,
+            _ => generation_matches && exists|i: int| #[trigger] self.found_request(id, i)
+                && self.requests()[i].2.response_error(id, position) == Some(error),
+        }
+    }
+
+    proof fn found_request_is_unique(&self, id: HostRequestId, left: int, right: int)
+        requires self.found_request(id, left), self.found_request(id, right),
+        ensures left == right,
+    {
+        if left < right {
+            assert(self.requests()[left].0 != id);
+        } else if right < left {
+            assert(self.requests()[right].0 != id);
+        }
     }
 
     /// 応答を保留し、デバイスへ渡すタグ番号を返す。
@@ -153,8 +212,7 @@ impl RequestLedger {
         ensures
             final(self).generation_model() == old(self).generation_model(),
             result.is_err() ==> *final(self) == *old(self),
-            result == Err(HostResponseError::DifferentGeneration) <==>
-                id.generation != old(self).generation_model() || position.generation != old(self).generation_model(),
+            result.is_ok() <==> old(self).accepts_response(id, position),
             match result {
                 Ok(tag) => {
                     &&& id.generation == old(self).generation_model() == position.generation
@@ -165,12 +223,7 @@ impl RequestLedger {
                         )
                         && old(self).requests()[i].2.issued_model() < position.tick
                 },
-                Err(HostResponseError::DifferentGeneration) =>
-                    id.generation != old(self).generation_model() || position.generation != old(self).generation_model(),
-                Err(HostResponseError::UnknownRequest) => forall|i: int| 0 <= i < old(self).requests().len()
-                    ==> (#[trigger] old(self).requests()[i]).0 != id,
-                Err(error) => exists|i: int| old(self).found_request(id, i)
-                    && old(self).requests()[i].2.response_error(id, position) == Some(error),
+                Err(error) => old(self).rejects_response(id, position, error),
             },
     {
         if id.generation != self.generation || position.generation != self.generation {
@@ -180,7 +233,16 @@ impl RequestLedger {
         let ghost before = self.entries@;
         let mut entry = self.entries[index];
         assert(old(self).found_request(id, index as int));
-        entry.response.receive(id, position)?;
+        let result = entry.response.receive(id, position);
+        if let Err(error) = result {
+            proof {
+                assert forall|i: int| #[trigger] old(self).found_request(id, i)
+                    implies old(self).requests()[i].2.response_error(id, position) == Some(error) by {
+                    old(self).found_request_is_unique(id, index as int, i);
+                }
+            }
+            return Err(error);
+        }
         self.entries.set(index, entry);
         proof { self.updated_response(before, index as int); }
         assert(response_update(old(self).requests(), self.requests(), index as int,
