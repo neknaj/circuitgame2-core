@@ -348,6 +348,7 @@ pub(super) proof fn record_scanned_input(
         scanned_input_prefix(bytes, next, lexeme.end, lexeme.kind is Atom,
             old_depth + parenthesis_delta(lexeme.kind)),
         next.lexemes == prefix.lexemes.push(lexeme),
+        next.depths == prefix.depths.push(old_depth + parenthesis_delta(lexeme.kind)),
 {
     reveal(scanned_input_prefix);
     let count = prefix.lexemes.len() as int;

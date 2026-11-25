@@ -12,6 +12,7 @@ mod bit_literal;
 mod boundary;
 pub mod circuit;
 mod digits;
+pub mod formatting;
 mod natural;
 mod recovery_boundary;
 mod recovery_update;
