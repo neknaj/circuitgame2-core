@@ -1,6 +1,8 @@
 //! 回復後も確認できる宣言と名前空間を、元のソースに結び付ける。
 
+mod module_part;
 mod project;
+pub use module_part::ModulePartCandidates;
 pub use project::{CircuitEditorProject, PartialCircuitDeclarations, inspect_circuit_project};
 
 use alloc::vec::Vec;
@@ -230,7 +232,18 @@ pub enum RecoveredDeclarationQuery<'a> {
         parent: Option<&'a str>,
         /// 宣言名の先頭と照合する文字列。空文字列なら名前の絞り込みを行わない。
         prefix: &'a str,
+        /// 宣言の種別。指定を省くと、どの独立宣言も対象とする。
+        head: Option<Head>,
     },
+}
+
+fn match_head(wanted: Option<Head>, observed: Head) -> (matches: bool)
+    ensures matches == (wanted.is_none() || wanted == Some(observed)),
+{
+    match (wanted, observed) {
+        (None, _) => true,
+        (Some(wanted), observed) => wanted as u8 == observed as u8,
+    }
 }
 
 impl ObservedCircuitBinding<'_, '_> {
@@ -238,10 +251,11 @@ impl ObservedCircuitBinding<'_, '_> {
     pub open spec fn matches_declaration_query(&self, query: RecoveredDeclarationQuery) -> bool {
         match query {
             RecoveredDeclarationQuery::Exact(key) => self.has_declaration_key(key),
-            RecoveredDeclarationQuery::Prefix { parent, prefix } => match self.kind {
-                ObservedCircuitBindingKind::Declaration { key, .. } => {
+            RecoveredDeclarationQuery::Prefix { parent, prefix, head } => match self.kind {
+                ObservedCircuitBindingKind::Declaration { key, head: declared_head } => {
                     let wanted = key_bytes(NameKey { parent, name: prefix });
                     let actual = key_bytes(key);
+                    &&& (head.is_none() || head == Some(declared_head))
                     &&& actual.0 == wanted.0
                     &&& wanted.1.len() <= actual.1.len()
                     &&& actual.1.take(wanted.1.len() as int) == wanted.1
@@ -254,13 +268,14 @@ impl ObservedCircuitBinding<'_, '_> {
     fn declaration_matches(&self, query: RecoveredDeclarationQuery) -> (matches: bool)
         ensures matches == self.matches_declaration_query(query),
     {
-        let ObservedCircuitBindingKind::Declaration { key: declaration, .. } = self.kind else {
+        let ObservedCircuitBindingKind::Declaration { key: declaration, head: declared_head } = self.kind else {
             return false;
         };
         match query {
             RecoveredDeclarationQuery::Exact(key) => declaration.same_name(key),
-            RecoveredDeclarationQuery::Prefix { parent, prefix } =>
-                declaration.matches_name_prefix(NameKey { parent, name: prefix }),
+            RecoveredDeclarationQuery::Prefix { parent, prefix, head } =>
+                match_head(head, declared_head)
+                    && declaration.matches_name_prefix(NameKey { parent, name: prefix }),
         }
     }
 }
