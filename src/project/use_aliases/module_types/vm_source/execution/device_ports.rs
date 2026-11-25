@@ -1,5 +1,10 @@
 //! 実行設定のポート接続を、同じルート回路の VM 上のビット範囲へ変換する。
 
+mod frames;
+pub use frames::{DevicePortIoError, DevicePortMap};
+#[cfg(verus_only)]
+use frames::ports_fit;
+
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
@@ -52,6 +57,14 @@ pub enum ClockedDeviceVmError<'p, 'a, 'n> {
 }
 
 impl ClockedDeviceVm {
+    #[verifier::type_invariant]
+    spec fn ready(&self) -> bool {
+        &&& self.module.vm.valid()
+        &&& ports_fit(self.ports@, self.module.inputs.total_bits_model(), self.module.outputs.total_bits_model())
+        &&& self.module.vm.external_count() == self.module.inputs.total_bits_model()
+        &&& self.module.vm.netlist_model().outputs@.len() == self.module.outputs.total_bits_model()
+    }
+
     /// 入出力のビット配置と、初期化済みの VM。
     pub closed spec fn module_model(&self) -> ClockedModuleVm { self.module }
 

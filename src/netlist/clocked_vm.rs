@@ -899,6 +899,14 @@ impl ClockedVm {
             (#[trigger] self.storage@[i]).wiring_model() == previous.storage@[i].wiring_model()
     }
 
+    /// 配線が同じ VM では、入出力フレームの幅も同じになる。
+    pub proof fn same_layout_frame_widths(&self, previous: &Self)
+        requires self.same_layout(previous),
+        ensures self.external_count() == previous.external_count(),
+            self.netlist_model().outputs@.len() == previous.netlist_model().outputs@.len(),
+    {
+    }
+
     /// VM の配線を、展開時に渡したネットリストと状態素子の並びに対応付ける。
     pub open spec fn layout_matches(&self, netlist: NorNetlist, external: usize, wiring: Seq<ClockedStorageInputs>) -> bool {
         &&& self.valid()
