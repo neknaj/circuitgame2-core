@@ -310,7 +310,17 @@ fn prepare_bound_invocation<'plan, 'p, 'a>(
     let edge = edges.get(site)?;
     if edge.at != caller.body().at { return None; }
     let Some(args) = prepare_scalar_arguments(plan, caller_rank, site) else { return None; };
-    proof { assert(args.model().0 == *edge); }
+    proof {
+        assert(args.model().0 == *edge);
+        let project = plan.project_model();
+        let target = args.model().2;
+        let rank = args.ranks_model().1;
+        assert(plan.order_model()[rank as int] == edge.to);
+        project.indexed_defn_signature_origin(edge.to.file, edge.to.item, Some(target.signature));
+        let header = project.indexed_defn(edge.to.file, edge.to.item)->Some_0;
+        crate::ncg2m::data_types::signature_result_origin(target.source.text_model(), header, target.signature);
+        assert(scalar_invocation_applicable(plan, caller_rank, site, caller.body_model()));
+    }
     let (callee_rank, callee, waiting) = args.into_parts();
     #[cfg(verus_only)]
     let _argument_count = edge.arguments.len();
