@@ -1,5 +1,11 @@
 //! NCG2M の厳格索引と、編集中の元入力から確認できた断片を返す。
 
+mod provisional;
+
+pub use provisional::{ProvisionalMetaDeclaration, recover_meta_file_with_provisional};
+#[cfg(verus_only)]
+pub use provisional::provisional_meta_matches;
+
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -7,10 +13,12 @@ use crate::project::read_source_span;
 use crate::syntax::{Recovered, parse_recovering};
 #[cfg(verus_only)]
 use crate::syntax::{
-    located_span, original_list_ranges, original_list_roots, original_list_source_bounds,
+    inserted_closes_match, located_span, original_list_ranges, original_list_roots, original_list_source_bounds,
     recovered_replay_matches,
 };
 use super::{MetaFileError, MetaItem, index_meta_file};
+#[cfg(verus_only)]
+use super::super::defn::usable_forms;
 #[cfg(verus_only)]
 use super::{meta_binding_spans_valid, meta_file_matches, meta_file_results_agree, same_meta_item, valid_meta_file};
 use vstd::prelude::*;
@@ -72,6 +80,8 @@ pub closed spec fn meta_file_recovery_matches(source: &str, recovery: MetaFileRe
         MetaFileRecovery::Incomplete { first, syntax, lists } =>
             !valid_meta_file(source) && meta_file_matches(source, Err(first))
                 && recovered_replay_matches(source, syntax.forms@, syntax.repairs@, syntax.original_lists@)
+                && usable_forms(source, syntax.forms@)
+                && inserted_closes_match(source, syntax.forms@, syntax.repairs@)
                 && original_list_ranges(source, syntax.original_lists@, syntax.repairs@,
                     source.spec_bytes().len() as int)
                 && original_list_roots(syntax.forms@, syntax.original_lists@)
