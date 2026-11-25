@@ -32,6 +32,14 @@ pub struct ExpressionReference {
     pub span: Range<usize>,
 }
 
+impl Clone for ExpressionReference {
+    fn clone(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        Self { kind: self.kind, form: self.form, span: self.span.start..self.span.end }
+    }
+}
+
 /// 参照が構文木内の名前かパスを指し、範囲の両端が UTF-8 文字境界にあることを表す。
 pub open spec fn expression_reference_in_source(
     source: &str, forms: Seq<Form>, item: ExpressionReference,
@@ -969,6 +977,85 @@ pub(super) proof fn expression_forest_agrees_on_bytes(
     }
     reveal(expression_forest);
     reveal(expression_forest_error);
+}
+
+/// 同じ本文の同じ式列からは、参照と信号が同じ順序で得られる。
+pub(super) proof fn expression_collections_agree_on_bytes(
+    left: &str, right: &str, forms: Seq<Form>, start: int, stop: int,
+)
+    requires left.spec_bytes() == right.spec_bytes(),
+    ensures
+        expression_references(left, forms, start, stop) == expression_references(right, forms, start, stop),
+        expression_signals(left, forms, start, stop) == expression_signals(right, forms, start, stop),
+    decreases stop - start,
+{
+    reveal(expression_references);
+    reveal(expression_signals);
+    if 0 <= start < stop <= forms.len() {
+        match forms[start] {
+            Form::Atom { .. } => {
+                expression_collections_agree_on_bytes(left, right, forms, start + 1, stop);
+            },
+            Form::List { end, .. } => {
+                let next = end as int;
+                if start < next <= stop {
+                    let head_left = |head: Option<ExpressionHead>| list_head_matches(left, forms, start + 1, head);
+                    let head_right = |head: Option<ExpressionHead>| list_head_matches(right, forms, start + 1, head);
+                    assert(head_left =~= head_right);
+                    assert forall|i: int, j: int|
+                        #![trigger expression_child_range(left, forms, start, next, i, j)]
+                        #![trigger expression_child_range(right, forms, start, next, i, j)]
+                        expression_child_range(left, forms, start, next, i, j)
+                        == expression_child_range(right, forms, start, next, i, j) by {
+                        if expression_child_range(left, forms, start, next, i, j) {
+                            let head = choose|head: Option<ExpressionHead>|
+                                #[trigger] list_head_matches(left, forms, start + 1, head)
+                                && arguments_match(forms, start + 2, next, head, i, j);
+                            assert(list_head_matches(right, forms, start + 1, head));
+                        }
+                        if expression_child_range(right, forms, start, next, i, j) {
+                            let head = choose|head: Option<ExpressionHead>|
+                                #[trigger] list_head_matches(right, forms, start + 1, head)
+                                && arguments_match(forms, start + 2, next, head, i, j);
+                            assert(list_head_matches(left, forms, start + 1, head));
+                        }
+                    };
+                    let available_left = exists|i: int, j: int| start < i <= j <= next
+                        && #[trigger] expression_child_range(left, forms, start, next, i, j);
+                    let available_right = exists|i: int, j: int| start < i <= j <= next
+                        && #[trigger] expression_child_range(right, forms, start, next, i, j);
+                    assert(available_left == available_right) by {
+                        if available_left {
+                            let (i, j) = choose|i: int, j: int| start < i <= j <= next
+                                && #[trigger] expression_child_range(left, forms, start, next, i, j);
+                            assert(expression_child_range(right, forms, start, next, i, j));
+                        }
+                        if available_right {
+                            let (i, j) = choose|i: int, j: int| start < i <= j <= next
+                                && #[trigger] expression_child_range(right, forms, start, next, i, j);
+                            assert(expression_child_range(left, forms, start, next, i, j));
+                        }
+                    };
+                    if available_left {
+                        let (first, last) = choose|i: int, j: int| start < i <= j <= next
+                            && #[trigger] expression_child_range(left, forms, start, next, i, j);
+                        let (other_first, other_last) = choose|i: int, j: int| start < i <= j <= next
+                            && #[trigger] expression_child_range(right, forms, start, next, i, j);
+                        assert(expression_child_range(left, forms, start, next, other_first, other_last));
+                        same_child_interval(left, forms, start, next, first, last, other_first, other_last);
+                        let head = choose|head: Option<ExpressionHead>|
+                            #[trigger] list_head_matches(left, forms, start + 1, head);
+                        let other_head = choose|head: Option<ExpressionHead>|
+                            #[trigger] list_head_matches(right, forms, start + 1, head);
+                        assert(list_head_matches(left, forms, start + 1, other_head));
+                        same_expression_head(left, forms, start + 1, head, other_head);
+                        expression_collections_agree_on_bytes(left, right, forms, first, last);
+                        expression_collections_agree_on_bytes(left, right, forms, next, stop);
+                    }
+                }
+            },
+        }
+    }
 }
 
 /// 文法に適合する式列には、式列の診断が成立しない。

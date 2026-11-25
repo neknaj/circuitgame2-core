@@ -104,7 +104,7 @@ pub use expression_forest::{expression_forest, expression_region};
 pub use expression_forest::{ordinary_call_at, ordinary_call_excludes_special_forms};
 pub use index::{
     CachedCircuitRecovery, CircuitRecovery, OriginalCircuitList, RecoveredCircuitForm, RecoveredFormOutcome,
-    RecoveredName, RecoveredNamePosition, RecoveredNames, index_headers, recover_circuit_forms,
+    RecoveredName, RecoveredNamePosition, RecoveredNames, index_headers, recover_circuit_build_index, recover_circuit_forms,
     recover_circuit_names, recover_circuit_names_with_cache,
 };
 #[cfg(verus_only)]
@@ -212,7 +212,7 @@ pub enum Head {
 
 /// 回路フォームと、それを含む名前空間の位置。
 #[verifier::allow(autoderive_clone_without_spec)]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Entry {
     /// フォームの種別。
     pub head: Head,
@@ -220,6 +220,14 @@ pub struct Entry {
     pub form: usize,
     /// 囲んでいる名前空間フォームの添字。トップレベルのフォームでは `None`。
     pub namespace: Option<usize>,
+}
+
+impl Clone for Entry {
+    fn clone(&self) -> (copy: Self)
+        ensures copy == *self,
+    {
+        Self { head: self.head, form: self.form, namespace: self.namespace }
+    }
 }
 
 /// 回路文法に従う構文木と、回路フォームを参照するための索引。

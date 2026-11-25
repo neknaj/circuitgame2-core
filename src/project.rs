@@ -59,7 +59,7 @@ pub use basis::{CircuitBasisError, validate_circuit_basis};
 pub use basis::{basis_result_evidence, circuit_basis_valid};
 pub use circuits::{
     CircuitProject, CircuitProjectError, CircuitProjectFailure, parse_circuit_project,
-    parse_circuit_project_with_recovery,
+    parse_circuit_project_with_cached_indexes, parse_circuit_project_with_recovery,
 };
 pub(crate) use circuits::read_source_span;
 #[cfg(verus_only)]
