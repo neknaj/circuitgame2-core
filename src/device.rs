@@ -31,4 +31,4 @@ pub use scheduling::{queued_response_keys, response_keys};
 
 pub use session::{DeviceEventSession, DeviceResponseSession, DeviceSession, PendingDeviceEvents, PendingDeviceEventsReset, PendingDeviceReset, PendingDeviceTick, RequestBatchTickError, RequestIssueError};
 
-pub use state_session::{DeviceStateSession, DeviceStateCountError, DeviceStateTickError, DeviceStateTickResult, PendingDeviceStateTick, PendingDeviceStateReset, StatefulInputError};
+pub use state_session::{DeviceStateSession, DeviceStateCountError, DeviceStateTickError, DeviceStateTickResult, OwnedDeviceStateTick, PendingDeviceStateTick, PendingDeviceStateReset, StatefulInputError};

@@ -128,6 +128,44 @@ impl<E: QueuedResponse> DeviceSession<E> {
         self.circuit.output()
     }
 
+    /// 指定した論理位置に適用するイベントを、到着順で借りる。
+    pub(super) fn next_event_at(&self, target: TickPosition, from: usize)
+        -> (result: Option<(usize, &SessionEvent<E>)>)
+        ensures next_event_matches(self.model().2, target, from, result),
+    {
+        self.events.next_ready(target, from)
+    }
+
+    /// 要求を含む tick を確定できない場合に、入力から決まる診断を表す。
+    ///
+    /// メモリの確保に失敗する場合は、採番の検査まで成功している。
+    pub open spec fn request_batch_error_at(
+        snapshot: (ClockedSession, RequestLedger, Seq<SessionEvent<E>>), ids: RequestIds,
+        target: TickPosition, input: Seq<bool>, requests: Seq<RequestKey>, error: RequestBatchTickError,
+    ) -> bool {
+        let (before, ledger, events) = snapshot;
+        let keys = queued_response_keys(events, target);
+        match error {
+            RequestBatchTickError::Number(reason) =>
+                reason == RequestIdError::SerialOutOfRange && !ids.fits(requests.len() as u64),
+            RequestBatchTickError::Registration(reason) =>
+                ids.fits(requests.len() as u64)
+                && (reason == BatchRegistrationError::Allocation || first_batch_request_error(
+                    &ledger, requests, ids.generation_model(), ids.next_model(), target.tick, reason,
+                )),
+            RequestBatchTickError::Tick(reason) => {
+                &&& ids.fits(requests.len() as u64)
+                &&& valid_request_batch(&ledger, requests, ids.generation_model(), ids.next_model(), target.tick)
+                &&& match reason {
+                    ResponseTickError::Delivery(reason) => ledger.first_delivery_error(keys, target, reason),
+                    ResponseTickError::Input(reason) => ledger.valid_delivery(keys, target)
+                        && input.len() != before.vm_model().external_count()
+                        && reason == crate::netlist::TickInputError::InputCount,
+                }
+            },
+        }
+    }
+
     /// 確定した tick で発行する要求を、同じ実行の台帳に登録する。
     ///
     /// 採番や台帳の検査に失敗した場合は、次の番号と台帳を保持する。
@@ -453,35 +491,12 @@ impl<'a, E: QueuedResponse> PendingDeviceEvents<'a, E> {
         commit_queued_events(tick, ledger, input)
     }
 
-    /// 要求を含む tick を確定できない場合に、入力から決まる診断を表す。
-    ///
-    /// メモリの確保に失敗する場合は、採番の検査まで成功している。
+    /// 準備済み tick の確定エラーを、開始時の回路、台帳、イベント、採番と照合する。
     pub open spec fn request_batch_error(
         &self, input: Seq<bool>, requests: Seq<RequestKey>, error: RequestBatchTickError,
     ) -> bool {
-        let ids = self.before_ids();
-        let (before, ledger, events) = self.before_model();
-        let target = self.target_model();
-        let keys = queued_response_keys(events, target);
-        match error {
-            RequestBatchTickError::Number(reason) =>
-                reason == RequestIdError::SerialOutOfRange && !ids.fits(requests.len() as u64),
-            RequestBatchTickError::Registration(reason) =>
-                ids.fits(requests.len() as u64)
-                && (reason == BatchRegistrationError::Allocation || first_batch_request_error(
-                    &ledger, requests, ids.generation_model(), ids.next_model(), target.tick, reason,
-                )),
-            RequestBatchTickError::Tick(reason) => {
-                &&& ids.fits(requests.len() as u64)
-                &&& valid_request_batch(&ledger, requests, ids.generation_model(), ids.next_model(), target.tick)
-                &&& match reason {
-                    ResponseTickError::Delivery(reason) => ledger.first_delivery_error(keys, target, reason),
-                    ResponseTickError::Input(reason) => ledger.valid_delivery(keys, target)
-                        && input.len() != before.vm_model().external_count()
-                        && reason == crate::netlist::TickInputError::InputCount,
-                }
-            },
-        }
+        DeviceSession::<E>::request_batch_error_at(
+            self.before_model(), self.before_ids(), self.target_model(), input, requests, error)
     }
 
     /// 回路の更新、応答の消費、新規要求の登録と採番が同じ tick に確定したことを表す。

@@ -167,6 +167,21 @@ impl RequestLedger {
         delivery_rows_first_error(self.requests(), keys, target, error)
     }
 
+    /// 妥当な応答列からは、最初の配送エラーが見つからない。
+    pub(crate) proof fn valid_delivery_excludes_error(
+        &self, keys: Seq<ResponseKey>, target: TickPosition, error: DeliveryError,
+    )
+        requires self.valid_delivery(keys, target),
+        ensures !self.first_delivery_error(keys, target, error),
+    {
+        if self.first_delivery_error(keys, target, error) {
+            let rows = self.requests();
+            let i = choose|i: usize| i < keys.len()
+                && #[trigger] issue_at_row(rows, keys, target, i) == Some(error);
+            assert(issue_at_row(rows, keys, target, i).is_some());
+        }
+    }
+
     proof fn prior_keys_use_index(
         &self, updates: Seq<Update>, keys: Seq<ResponseKey>, key: ResponseKey, index: int,
     )
