@@ -155,7 +155,7 @@ impl<'p, 'a> CircuitEditorFile<'p, 'a> {
         let names = self.recovered_names();
         let Some(hit) = part_name(names, offset) else { return None; };
         let ghost chosen = hit;
-        let (_, _, position, name) = hit;
+        let (_, _, _position, name) = hit;
         let span = name.name.span.start..name.name.span.end;
         let namespace = match &name.namespace {
             Some(site) => Some(site.word),
@@ -164,7 +164,7 @@ impl<'p, 'a> CircuitEditorFile<'p, 'a> {
         proof {
             assert(located_part(names, offset, Some(chosen)));
             assert(part_name_at(names, offset, chosen));
-            names.name_uses_source_ranges(position, name);
+            names.name_uses_source_ranges(_position, name);
         }
         let prefix = if span.start == offset {
             proof {
