@@ -18,8 +18,14 @@ name = "ncg2-rp-i2c"
 path = "src/i2c_demo.rs"
 required-features = ["i2c"]
 
+[[bin]]
+name = "ncg2-rp-spi"
+path = "src/spi_demo.rs"
+required-features = ["spi"]
+
 [features]
-i2c = ["dep:embassy-sync", "embassy-rp/unstable-pac"]
+spi = ["dep:embassy-futures", "dep:embassy-sync", "embassy-rp/unstable-pac"]
+i2c = ["dep:embassy-futures", "dep:embassy-sync", "embassy-rp/unstable-pac"]
 uart = [
     "dep:embassy-futures",
     "dep:embassy-sync",

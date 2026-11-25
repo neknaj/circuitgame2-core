@@ -28,6 +28,8 @@ jobs:
           rustup target add thumbv6m-none-eabi thumbv8m.main-none-eabihf
           cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico
           cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2
+          cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,spi --bin ncg2-rp-spi
+          cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2,spi --bin ncg2-rp-spi
           cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,i2c --bin ncg2-rp-i2c
           cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2,i2c --bin ncg2-rp-i2c
 

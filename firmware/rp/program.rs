@@ -208,7 +208,9 @@ impl Program {
         if let Some(i2c) = &program.i2c {
             let count = i2c.input_count();
             if peripheral_inputs.len() != count {
-                return Err(format!("I²C の回路入力{count}個を一つずつ指定する必要がある。"));
+                return Err(format!(
+                    "I²C の回路入力{count}個を一つずつ指定する必要がある。"
+                ));
             }
             i2c.validate_outputs(program.ports.len())?;
         }
@@ -289,7 +291,12 @@ impl Program {
 
         let has_peripheral = self.has_uart() || self.has_i2c();
         if has_peripheral {
-            writeln!(result, "fn configure_gpio(spawner: Spawner, _pins: embassy_rp::Peripherals) -> Option<([Option<Input<'static>>; INPUT_COUNT], [Output<'static>; OUTPUT_PORTS.len()])> {{").unwrap();
+            let fault = if self.has_i2c() {
+                ", Output<'static>"
+            } else {
+                ""
+            };
+            writeln!(result, "fn configure_gpio(spawner: Spawner, _pins: embassy_rp::Peripherals) -> Option<([Option<Input<'static>>; INPUT_COUNT], [Output<'static>; OUTPUT_PORTS.len()]{fault})> {{").unwrap();
             if let Some(uart) = &self.uart {
                 writeln!(
                     result,
@@ -327,7 +334,11 @@ impl Program {
             )
             .unwrap();
         }
-        writeln!(result, "]){}\n}}", if has_peripheral { ")" } else { "" }).unwrap();
+        if self.has_i2c() {
+            writeln!(result, "], Output::new(_pins.PIN_25, Level::Low)))\n}}").unwrap();
+        } else {
+            writeln!(result, "]){}\n}}", if has_peripheral { ")" } else { "" }).unwrap();
+        }
         result
     }
 }
