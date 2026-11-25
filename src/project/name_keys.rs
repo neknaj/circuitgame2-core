@@ -63,6 +63,22 @@ impl NameKey<'_> {
             _ => false,
         }
     }
+
+    /// 親の名前空間をそろえ、宣言名の先頭を文字列と照合する。
+    pub(super) fn matches_name_prefix(self, prefix: NameKey) -> (matches: bool)
+        ensures matches == ({
+            let actual = key_bytes(self);
+            let wanted = key_bytes(prefix);
+            &&& actual.0 == wanted.0
+            &&& wanted.1.len() <= actual.1.len()
+            &&& actual.1.take(wanted.1.len() as int) == wanted.1
+        }),
+    {
+        let actual_parent = NameKey { parent: self.parent, name: "" };
+        let wanted_parent = NameKey { parent: prefix.parent, name: "" };
+        actual_parent.same_name(wanted_parent)
+            && has_bytes_at(self.name.as_bytes(), 0, prefix.name.as_bytes())
+    }
 }
 
 pub(super) proof fn namespace_component_agrees_on_bytes(

@@ -1,6 +1,6 @@
 //! 正規化済みのソースを検査し、回復した宣言をファイル順に検索する。
 
-use super::{CircuitEditorFile, PositionedBinding, inspect_circuit_file};
+use super::{CircuitEditorFile, PositionedBinding, RecoveredDeclarationQuery, inspect_circuit_file};
 #[cfg(verus_only)]
 use super::circuit_editor_source;
 use crate::project::{NameKey, ProjectSource};
@@ -15,7 +15,7 @@ pub struct CircuitEditorProject<'p, 'a> {
     files: Vec<Option<CircuitEditorFile<'p, 'a>>>,
 }
 
-/// 回復で確認できた同名宣言の候補。
+/// 回復で確認でき、名前の検索条件に合う宣言の候補。
 ///
 /// 名前解決や可視性を確定する前の結果。未確認の断片に宣言が残っている場合がある。
 pub struct PartialCircuitDeclarations<'p, 'a> {
@@ -83,19 +83,86 @@ impl<'p, 'a> CircuitEditorProject<'p, 'a> {
     }
 
 
-    /// プロジェクト内の各ファイルについて、回復で確認できた同名宣言の列であることを表す。
-    pub open spec fn candidates_match(
-        &self, key: NameKey, result: Seq<Vec<PositionedBinding<'p, 'a>>>,
+    /// プロジェクト内の各ファイルについて、回復で確認でき、検索条件に合う宣言の列であることを表す。
+    pub open spec fn query_matches(
+        &self, query: RecoveredDeclarationQuery, result: Seq<Vec<PositionedBinding<'p, 'a>>>,
     ) -> bool {
         let files = self.files_model();
         &&& result.len() == files.len()
         &&& forall|i: int| 0 <= i < files.len() ==> match files[i] {
-            Some(file) => file.file_candidates_match(key, (#[trigger] result[i])@),
+            Some(file) => file.file_query_matches(query, (#[trigger] result[i])@),
             None => (#[trigger] result[i])@.len() == 0,
         }
     }
 
     /// 候補が照会時のファイルと、そのファイルの検査項目を指すことを示す。
+    pub proof fn query_candidate_origin(
+        &self, query: RecoveredDeclarationQuery, result: Seq<Vec<PositionedBinding<'p, 'a>>>, index: int, row: int,
+    ) -> (position: (usize, usize))
+        requires
+            self.matches_sources(self.sources_model()),
+            self.query_matches(query, result),
+            0 <= index < result.len(),
+            0 <= row < result[index]@.len(),
+        ensures
+            self.files_model()[index] matches Some(file) && {
+                let names = file.recovered_names_model();
+                let entry = result[index]@[row];
+                &&& position.0 < names.position_group_count_model()
+                &&& position.1 < names.position_count_model(position.0)
+                &&& names.position_model(position.0, position.1) == Some(entry.0)
+                &&& file.binding_matches(entry.0, Some(entry.1))
+                &&& entry.1.location.source == &self.sources_model()@[index]
+                &&& entry.1.matches_declaration_query(query)
+            },
+    {
+        self.file_source_evidence(index);
+        assert(self.files_model()[index] is Some);
+        let file = self.files_model()[index]->Some_0;
+        let rows = result[index]@;
+        let position = file.file_query_origin(query, rows, row);
+        file.observed_binding_origin(rows[row].0, rows[row].1);
+        position
+    }
+
+
+    /// プロジェクトの回復結果から検索条件に合う宣言を集める。
+    ///
+    /// 条件に合う宣言が複数あればすべて返す。未確認の断片に宣言が残っている場合がある。
+    pub fn query_declarations(&self, query: RecoveredDeclarationQuery) -> (result: PartialCircuitDeclarations<'p, 'a>)
+        ensures self.query_matches(query, result.files@),
+    {
+        let files = self.files();
+        let mut result: Vec<Vec<PositionedBinding<'p, 'a>>> = Vec::new();
+        let mut i = 0usize;
+        while i < files.len()
+            invariant
+                files@ == self.files_model(),
+                i <= files@.len(),
+                result@.len() == i,
+                forall|j: int| 0 <= j < i ==> match files@[j] {
+                    Some(file) => file.file_query_matches(query, (#[trigger] result@[j])@),
+                    None => (#[trigger] result@[j])@.len() == 0,
+                },
+            decreases files@.len() - i,
+        {
+            let rows = match &files[i] {
+                Some(file) => file.query_declarations(query),
+                None => Vec::new(),
+            };
+            result.push(rows);
+            i += 1;
+        }
+        PartialCircuitDeclarations { files: result }
+    }
+    /// プロジェクト内の各ファイルにある同名宣言と候補列の対応を表す。
+    pub open spec fn candidates_match(
+        &self, key: NameKey, result: Seq<Vec<PositionedBinding<'p, 'a>>>,
+    ) -> bool {
+        self.query_matches(RecoveredDeclarationQuery::Exact(key), result)
+    }
+
+    /// 同名宣言の候補が現れたファイル内の検査項目を特定する。
     pub proof fn candidate_origin(
         &self, key: NameKey, result: Seq<Vec<PositionedBinding<'p, 'a>>>, index: int, row: int,
     ) -> (position: (usize, usize))
@@ -116,44 +183,16 @@ impl<'p, 'a> CircuitEditorProject<'p, 'a> {
                 &&& entry.1.has_declaration_key(key)
             },
     {
-        self.file_source_evidence(index);
-        assert(self.files_model()[index] is Some);
-        let file = self.files_model()[index]->Some_0;
-        let rows = result[index]@;
-        let position = file.file_candidate_origin(key, rows, row);
-        file.observed_binding_origin(rows[row].0, rows[row].1);
-        position
+        self.query_candidate_origin(RecoveredDeclarationQuery::Exact(key), result, index, row)
     }
-
 
     /// プロジェクトの回復結果から同じ完全修飾名の宣言を集める。
     ///
-    /// 同名の宣言があればすべて残す。候補が空の場合も、未確認の断片での宣言の有無は確定しない。
+    /// 同名の宣言はすべて返す。未確認の断片に宣言があるかどうかは結果から判断できない。
     pub fn declaration_candidates(&self, key: NameKey) -> (result: PartialCircuitDeclarations<'p, 'a>)
         ensures self.candidates_match(key, result.files@),
     {
-        let files = self.files();
-        let mut result: Vec<Vec<PositionedBinding<'p, 'a>>> = Vec::new();
-        let mut i = 0usize;
-        while i < files.len()
-            invariant
-                files@ == self.files_model(),
-                i <= files@.len(),
-                result@.len() == i,
-                forall|j: int| 0 <= j < i ==> match files@[j] {
-                    Some(file) => file.file_candidates_match(key, (#[trigger] result@[j])@),
-                    None => (#[trigger] result@[j])@.len() == 0,
-                },
-            decreases files@.len() - i,
-        {
-            let rows = match &files[i] {
-                Some(file) => file.declaration_candidates(key),
-                None => Vec::new(),
-            };
-            result.push(rows);
-            i += 1;
-        }
-        PartialCircuitDeclarations { files: result }
+        self.query_declarations(RecoveredDeclarationQuery::Exact(key))
     }
 }
 
