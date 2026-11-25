@@ -10,6 +10,8 @@ use super::{
     form_spans_valid, located_name_evidence, location_in_source, routine_signature_evidence,
     typed_name_sites,
 };
+#[cfg(verus_only)]
+use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -140,6 +142,49 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 }
             },
         }
+    }
+
+    /// 型を解決したポートの名前が書かれたソースと UTF-8 バイト範囲を表す。
+    pub closed spec fn routine_port_declaration_site(&self, file: usize, port: TypedPort)
+        -> (ProjectSource<'a>, Range<usize>)
+    {
+        let project = self.targets.project_model();
+        let forms = project.circuits_model()[file as int].syntax.forms@;
+        (project.sources_model()[file as int], form_span(forms[port.declared.site.name as int]))
+    }
+
+    // 照会時の署名と、同じ宣言を別の段階で検査した署名を照合する。
+    pub(in crate::project::use_aliases) proof fn found_port_in_signature(
+        &self, file: usize, entry: usize, limit: u64, direction: PortDirection,
+        word: &str, port: NamedRoutinePort, signature: TypedRoutineSignature,
+    )
+        requires
+            self.can_resolve(),
+            self.routine_port_lookup_matches(file, entry, limit, direction, word, Ok(RoutinePortLookup::Found(port))),
+            self.typed_signature_evidence(file, entry, limit, Ok(Some(signature))),
+        ensures ({
+            let ports = match direction {
+                PortDirection::Input => signature.inputs@,
+                PortDirection::Output => signature.outputs@,
+            };
+            &&& port.index < ports.len()
+            &&& port.ty == ports[port.index as int].ty
+            &&& location_in_source(port.name)
+            &&& (*port.name.source, port.name.span) == self.routine_port_declaration_site(file, ports[port.index as int])
+        }),
+    {
+        reveal(UseAliases::routine_port_lookup_matches);
+        let project = self.targets.project_model();
+        let source = &project.sources_model()[file as int];
+        let forms = project.circuits_model()[file as int].syntax.forms@;
+        let found = choose|found: TypedRoutineSignature| {
+            &&& #[trigger] self.typed_signature_evidence(file, entry, limit, Ok(Some(found)))
+            &&& port_search(source, forms, match direction {
+                PortDirection::Input => found.inputs@,
+                PortDirection::Output => found.outputs@,
+            }, word, Some(port))
+        };
+        self.typed_routine_signatures_agree(file, entry, limit, found, signature);
     }
 
     /// 回路の署名から、方向と名前で指定したポートの型と位置を得る。

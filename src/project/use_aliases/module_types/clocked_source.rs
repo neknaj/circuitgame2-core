@@ -28,7 +28,8 @@ use crate::syntax::{AtomKind, Form, read_bit_literal};
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
-use crate::project::{DefinitionPosition, ModuleDrivers, circuits::is_form_location};
+use crate::project::{DefinitionPosition, ModuleDrivers, PortDirection, NamedRoutinePort, RoutinePortLookup,
+    TypedRoutineSignature, circuits::is_form_location};
 #[cfg(verus_only)]
 use crate::netlist::{builtin_nor_template, instance_gates_at, instance_gates_in_extension, wire_available};
 #[cfg(verus_only)]
@@ -571,6 +572,90 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& self.routine_bit_layout_failure(checked.module.expressions.typed.sources.roots.wiring.drivers.signature,
                 width, bits, direction, site, layout)
         }
+    }
+
+    /// 名前で照会したポートが、順序 NOR 回路と32レーン配線配置の同じ宣言順を指すことを示す。
+    ///
+    /// 入力は同じ添字の外部入力配線を使う。出力の配線番号は同じ添字のソース上の公開出力から決まる。
+    /// デバイスの接続結果からは [Self::device_binding_details] で名前照会の根拠を取り出せる。
+    pub proof fn clocked_module_port_in_layout(
+        &self, owner: ModuleBodyPosition, limit: u64, netlist: &NorNetlist,
+        layout: &crate::netlist::PackedNorLayout32, direction: PortDirection,
+        word: &str, port: NamedRoutinePort<'p, 'a>,
+    ) -> (signature: TypedRoutineSignature<'p, 'a>)
+        requires
+            self.can_resolve(),
+            self.clocked_module_ports_match(owner, limit, netlist),
+            self.clocked_module_source_layout(owner, limit, netlist), layout.matches(netlist),
+            self.routine_port_lookup_matches(owner.file, owner.entry, limit, direction, word,
+                Ok(RoutinePortLookup::Found(port))),
+        ensures
+            self.typed_signature_evidence(owner.file, owner.entry, limit, Ok(Some(signature))),
+            ({
+                let ports = match direction {
+                    PortDirection::Input => signature.inputs@,
+                    PortDirection::Output => signature.outputs@,
+                };
+                let i = port.index as int;
+                &&& 0 <= i < ports.len()
+                &&& port.ty == ports[i].ty
+                &&& port.ty == crate::project::ResolvedPortType::Bits(1)
+                &&& crate::project::location_in_source(port.name)
+                &&& (*port.name.source, port.name.span) == self.routine_port_declaration_site(owner.file, ports[i])
+                &&& match direction {
+                    PortDirection::Input => {
+                        &&& ports.len() == netlist.input_count == layout.input_model()
+                        &&& port.index < layout.source_model()
+                        &&& crate::netlist::packed_wire_slot(Wire::Input(port.index),
+                            layout.input_model(), netlist.gates@.len()) == i
+                    },
+                    PortDirection::Output => {
+                        &&& ports.len() == netlist.outputs@.len() == layout.outputs_model().len()
+                        &&& layout.outputs_model()[i] < layout.source_model()
+                        &&& layout.outputs_model()[i] == crate::netlist::packed_wire_slot(
+                            netlist.outputs@[i], layout.input_model(), netlist.gates@.len())
+                        &&& exists|source: crate::netlist::SourceTickCircuit, order: Seq<crate::netlist::SourceGateId>,
+                            index: Map<crate::netlist::SourceGateId, int>|
+                            #[trigger] crate::netlist::source_clocked_layout(&source, netlist, order, index)
+                            && self.clocked_module_source(owner, limit, &source)
+                            && i < source.outputs.len()
+                            && match source.outputs[i] {
+                                crate::netlist::SourceWire::Input(input) => layout.outputs_model()[i] == input,
+                                crate::netlist::SourceWire::Constant(value) => layout.outputs_model()[i]
+                                    == layout.input_model() + netlist.gates@.len() + if value { 1nat } else { 0nat },
+                                crate::netlist::SourceWire::Gate(site) => exists|gate: usize|
+                                    gate < order.len() && #[trigger] order[gate as int] == site
+                                    && layout.outputs_model()[i] == layout.input_model() + gate,
+                            }
+                    },
+                }
+            }),
+    {
+        let checked = choose|checked: ModuleCalls| #[trigger] self.module_calls_result(owner, limit, Ok(Some(checked))) && {
+            let signature = checked.module.expressions.typed.sources.roots.wiring.drivers.signature;
+            &&& netlist.input_count == signature.inputs@.len()
+            &&& netlist.outputs@.len() == signature.outputs@.len()
+            &&& super::primitive_nor::one_bit_ports(signature.inputs@, signature.inputs@.len() as int)
+            &&& super::primitive_nor::one_bit_ports(signature.outputs@, signature.outputs@.len() as int)
+        };
+        self.module_calls_type_evidence(owner, limit, &checked);
+        self.module_output_types_evidence(owner, limit, checked.module);
+        self.module_selections_evidence(owner, limit, checked.module.expressions);
+        let drivers = checked.module.expressions.typed.sources.roots.wiring.drivers;
+        self.module_output_driver(owner, limit, drivers, 0);
+        let signature = drivers.signature;
+        self.found_port_in_signature(owner.file, owner.entry, limit, direction, word, port, signature);
+        layout.port_slots(netlist);
+        if direction == PortDirection::Output {
+            use crate::netlist::{SourceWire, source_output_wiring_pair};
+            let (source, order, index) = self.root_source_layout(owner, limit, netlist);
+            let i = port.index as int;
+            source_output_wiring_pair(&source, netlist, order, index, i);
+            if let (SourceWire::Gate(site), Wire::Gate(gate)) = (source.outputs[i], netlist.outputs@[i]) {
+                assert(gate < order.len() && order[gate as int] == site);
+            }
+        }
+        signature
     }
 
     /// 変換後の入出力ビット数が、検査済みの親モジュールのポート宣言と対応する。

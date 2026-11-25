@@ -82,6 +82,21 @@ impl PackedNorLayout32 {
         }
     }
 
+    pub(crate) proof fn port_slots(&self, netlist: &NorNetlist)
+        requires self.matches(netlist),
+        ensures
+            self.input_model() == netlist.input_count,
+            self.source_model() == netlist.input_count + netlist.gates@.len() + 2,
+            self.outputs_model().len() == netlist.outputs@.len(),
+            forall|i: int| 0 <= i < self.outputs_model().len() ==> {
+                let slot = #[trigger] self.outputs_model()[i];
+                slot < self.source_model()
+                    && slot == packed_wire_slot(netlist.outputs@[i], self.input_model(), netlist.gates@.len())
+            },
+    {
+        reveal(PackedNorLayout32::matches);
+    }
+
     /// 元のネットリストにある外部入力の数。
     pub closed spec fn input_model(&self) -> nat { self.input_count as nat }
     /// ワードを並べる配列の長さ。
