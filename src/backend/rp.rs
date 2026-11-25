@@ -2,6 +2,10 @@
 
 mod image;
 
+pub use image::{I2cCircuitImage, I2cImageError, I2cInputSource, I2cPortNames, I2cSetup};
+#[cfg(verus_only)]
+pub use image::{i2c_assignment, i2c_image_ports_match, i2c_image_requests, i2c_port_capacity};
+
 pub use image::{
     GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin, RpInputSource, UartCircuitImage,
     UartImageError, UartInputSignal, UartOutputPorts, UartPortNames, UartSetup,

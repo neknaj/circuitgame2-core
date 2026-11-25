@@ -3,9 +3,14 @@
 #![no_std]
 #![no_main]
 
-#[cfg(not(rp_uart_program))]
+#[cfg(not(any(rp_uart_program, rp_i2c_program)))]
 use circuitgame2_device_timing::SimulationClock;
 
+#[cfg(rp_i2c_program)]
+#[path = "i2c_program.rs"]
+mod i2c;
+#[cfg(rp_i2c_program)]
+mod i2c_transport;
 #[cfg(rp_uart_program)]
 #[path = "uart_program.rs"]
 mod uart;
@@ -24,7 +29,7 @@ include!(concat!(env!("OUT_DIR"), "/program.rs"));
 const LANE: u32 = 0;
 const SOURCE_COUNT: usize = INPUT_COUNT + GATES.len() + 2;
 
-#[cfg(not(rp_uart_program))]
+#[cfg(not(any(rp_uart_program, rp_i2c_program)))]
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     // 端子を設定する前に配線番号を検査する。
@@ -81,4 +86,10 @@ async fn main(_spawner: Spawner) {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let _ = uart::run(spawner).await;
+}
+
+#[cfg(rp_i2c_program)]
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let _ = i2c::run(spawner).await;
 }
