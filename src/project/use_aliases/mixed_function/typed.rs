@@ -1,11 +1,15 @@
 //! 混在索引の署名からポート型を解決する。
 
+mod wiring;
+pub use wiring::MixedFuncWiringError;
+
 use super::*;
 use crate::project::{DeclaredPortType, FuncDriverError, FuncDriverResult, PortDirection, ResolvedPortType, RoutineSignatureError, TypedPort,
     TypedRoutineSignature, TypedSignatureError};
 use crate::project::use_aliases::function_drivers::prepare_indexed_func_drivers;
 #[cfg(verus_only)]
-use crate::project::use_aliases::function_drivers::indexed_func_driver_evidence;
+use crate::project::use_aliases::function_drivers::{indexed_func_driver_evidence, local_names_indexed, names_match_ports};
+use crate::project::use_aliases::local_signal_index::LocalSignalIndex;
 use crate::project::use_aliases::port_types::check_shared_types;
 #[cfg(verus_only)]
 use crate::project::use_aliases::port_types::{first_shared_type_mismatch, shared_input_bounds, shared_types_before};
@@ -16,7 +20,7 @@ use alloc::vec::Vec;
 #[cfg(verus_only)]
 use crate::project::widths::checked_name_sites;
 #[cfg(verus_only)]
-use crate::project::parsed_circuit_matches;
+use crate::project::{circuits::name_in_source, parsed_circuit_matches};
 use crate::project::CheckedPort;
 #[cfg(verus_only)]
 use crate::project::CheckedRoutineSignature;
@@ -471,14 +475,40 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
         ensures self.mixed_func_driver_matches(file, entry, max_width, result),
     {
+        match self.prepare_mixed_func_drivers(file, entry, max_width) {
+            Ok((drivers, _, _)) => Ok(drivers),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn prepare_mixed_func_drivers(&self, file: usize, entry: usize, max_width: u64)
+        -> (prepared: Result<(FuncDriverResult<'p, 'a>, Vec<NameSite<'a>>, Option<LocalSignalIndex>), MixedFuncDriverError<'p, 'a>>)
+        requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures match prepared {
+            Ok((result, inputs, index)) => self.mixed_func_driver_matches(file, entry, max_width, Ok(result))
+                && (result matches FuncDriverResult::Checked(drivers) ==> {
+                    let project = self.targets_model().project_model();
+                    let source = &project.sources_model()[file as int];
+                    let parsed = &project.indexes_model()[file as int]->Circuit_0;
+                    &&& has_mixed_func(&project, file, entry)
+                    &&& inputs@.len() == drivers.signature.inputs@.len()
+                    &&& names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs@)
+                    &&& forall|i: int| 0 <= i < drivers.definitions@.len() ==>
+                        name_in_source(source.text, (#[trigger] drivers.definitions@[i]).name)
+                    &&& (index matches Some(names) ==> local_names_indexed(
+                        &names, inputs@, inputs@.len() as int, drivers.definitions@, drivers.definitions@.len() as int))
+                }),
+            Err(error) => self.mixed_func_driver_matches(file, entry, max_width, Err(error)),
+        },
+    {
         let project = self.targets().project();
         let sources = project.sources();
         let indexes = project.indexes();
-        if file >= sources.len() { return Ok(FuncDriverResult::NotFunc); }
+        if file >= sources.len() { return Ok((FuncDriverResult::NotFunc, Vec::new(), None)); }
         let index = &indexes[file];
-        let ProjectSourceIndex::Circuit(parsed) = index else { return Ok(FuncDriverResult::NotFunc); };
+        let ProjectSourceIndex::Circuit(parsed) = index else { return Ok((FuncDriverResult::NotFunc, Vec::new(), None)); };
         if entry >= parsed.syntax.entries.len() || !matches!(parsed.syntax.entries[entry].head, Head::Func) {
-            return Ok(FuncDriverResult::NotFunc);
+            return Ok((FuncDriverResult::NotFunc, Vec::new(), None));
         }
         assert(has_mixed_func(project, file, entry));
         let signature = match self.resolve_mixed_routine_signature(file, entry, max_width) {
@@ -492,7 +522,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             self.mixed_typed_signature_ports(file, entry, max_width, signature);
         }
         match prepare_indexed_func_drivers(source, parsed, entry, signature, None) {
-            Ok((drivers, _, _)) => Ok(drivers),
+            Ok(prepared) => Ok(prepared),
             Err(error) => Err(MixedFuncDriverError::Driver(error)),
         }
     }

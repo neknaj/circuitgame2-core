@@ -1,7 +1,7 @@
 //! 混在ソース集合の厳格索引から、関数の呼び出し位置を確定する。
 
 mod typed;
-pub use typed::{MixedFuncDriverError, MixedTypedSignatureError};
+pub use typed::{MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 
 use super::{MixedUseAliases, call_arity::{FuncCallArity, FuncCallTarget}, definitions::DefinitionReferenceSite,
     find_namespace, relative::destination_parent};

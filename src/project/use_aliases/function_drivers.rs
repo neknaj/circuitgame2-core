@@ -1194,6 +1194,8 @@ pub(super) fn prepare_indexed_func_drivers<'p, 'a>(
             && (result matches FuncDriverResult::Checked(drivers) ==> {
                 &&& inputs@.len() == drivers.signature.inputs@.len()
                 &&& names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs@)
+                &&& forall|i: int| 0 <= i < drivers.definitions@.len() ==>
+                    name_in_source(source.text, (#[trigger] drivers.definitions@[i]).name)
                 &&& (index matches Some(names) ==> local_names_indexed(
                     &names, inputs@, inputs@.len() as int, drivers.definitions@, drivers.definitions@.len() as int))
             }),

@@ -94,7 +94,7 @@ pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 pub use use_aliases::{MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
-    MixedFuncDriverError, MixedTypedSignatureError};
+    MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 #[cfg(verus_only)]
 pub(crate) use use_aliases::call_arity_matches;
 #[cfg(verus_only)]
@@ -209,6 +209,8 @@ pub use use_aliases::{
 pub use use_aliases::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
+#[cfg(verus_only)]
+pub use use_aliases::indexed_signal_driver_matches;
 pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
 pub use use_aliases::{NamedRoutinePort, RoutinePortLookup};
 pub use use_aliases::{DeviceBindingsError, DevicePortRequest};
