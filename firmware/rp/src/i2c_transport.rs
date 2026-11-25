@@ -25,6 +25,7 @@ pub(crate) enum TransferFailure {
 }
 
 /// 読み出したバイト列。書き込みのみの場合は空になる。
+#[derive(Clone, Copy)]
 pub(crate) struct Readback<const N: usize> {
     bytes: [u8; N],
     len: usize,
