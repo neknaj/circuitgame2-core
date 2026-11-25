@@ -196,7 +196,14 @@ impl CachedCircuitRecovery {
     /// }));
     /// ```
     pub fn recovery_reuse_window(&self, edit: Range<usize>) -> (window: Option<CircuitRecoveryReuseWindow>)
-        ensures window matches Some(w) ==> self.recovery_model() matches CircuitRecovery::WithSyntaxRepairs { recovered, .. }
+        ensures
+            window.is_some() <==> (match self.recovery_model() {
+                CircuitRecovery::WithSyntaxRepairs { recovered, .. } =>
+                    edit.start <= edit.end && (edit.end == 0 || exists|i: int| 0 <= i < recovered.original_lists@.len()
+                        && edit.end <= (#[trigger] recovered.original_lists@[i]).end),
+                _ => false,
+            }),
+            window matches Some(w) ==> self.recovery_model() matches CircuitRecovery::WithSyntaxRepairs { recovered, .. }
             && w.matches(recovered.original_lists@, edit),
     {
         let CircuitRecovery::WithSyntaxRepairs { recovered, .. } = &self.recovery else { return None; };
