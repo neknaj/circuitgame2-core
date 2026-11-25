@@ -1,8 +1,9 @@
 //! 混在ソース集合の厳格索引から、関数の呼び出し位置を確定する。
 
-use super::{MixedUseAliases, definitions::DefinitionReferenceSite, find_namespace, relative::destination_parent};
+use super::{MixedUseAliases, call_arity::{FuncCallArity, FuncCallTarget}, definitions::DefinitionReferenceSite,
+    find_namespace, relative::destination_parent};
 #[cfg(verus_only)]
-use super::{defn_name::scoped_binding, is_namespace_block, relative::parent_spelling};
+use super::{defn_name::{absolute_name_declares, scoped_binding}, is_namespace_block, relative::parent_spelling};
 use crate::project::circuits::read_indexed_atom;
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
@@ -12,15 +13,16 @@ use crate::project::source_indexes::DefnScope;
 use crate::project::{AbsoluteResolutionError, LocatedName, MixedAbsoluteTarget, NameKey, ParsedProjectSources,
     ProjectDeclaration, ProjectDeclarationKind, ProjectSourceIndex};
 #[cfg(verus_only)]
-use crate::project::{mixed_absolute_resolution_evidence, mixed_key_resolution};
+use crate::project::{exports::mixed_exports_use_project_declarations, mixed_absolute_resolution_evidence,
+    mixed_declaration_origin, mixed_key_resolution, mixed_use_targets_match};
 use crate::syntax::{AtomKind, classify_bare_atom, split_relative_path};
 #[cfg(verus_only)]
 use crate::syntax::{bare_atom_kind, relative_path_parts};
-use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite};
+use crate::syntax::circuit::{CallShape, ExpressionReferenceKind, Head, NameSite, indexed_call_shape, named_build_entry, routine_arity};
 #[cfg(verus_only)]
 use crate::syntax::circuit::{
-    NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence, expression_reference_in_source,
-    namespace_name_evidence, reference_atom,
+    NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence, call_shape_matches,
+    expression_reference_in_source, namespace_name_evidence, reference_atom, routine_arity_matches,
 };
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -98,6 +100,15 @@ pub struct MixedFuncCalleeResolution<'p, 'a> {
     pub target: Result<MixedFuncCallee<'p, 'a>, MixedFuncCalleeError<'p, 'a>>,
 }
 
+/// 混在プロジェクトの関数呼び出しで名前を解決できなかった理由と元の位置。
+#[derive(Debug)]
+pub struct MixedFuncCallError<'p, 'a> {
+    /// 呼び出し名の範囲と元の文書版。
+    pub site: DefinitionReferenceSite<'p, 'a>,
+    /// 参照先を選べなかった理由。
+    pub reason: MixedFuncCalleeError<'p, 'a>,
+}
+
 spec fn unqualified_func_target(
     word: &str, binding: Option<MixedAbsoluteTarget>,
     result: Result<MixedFuncCallee, MixedFuncCalleeError>,
@@ -146,6 +157,22 @@ spec fn func_scope_path(parsed: &NamedBuildCircuit, block: Option<usize>, namesp
         Some(block) => exists|i: int| 0 <= i < parsed.names@.len()
             && #[trigger] is_namespace_block(parsed.names@[i], block)
             && namespace == Some(parsed.names@[i].name.word),
+    }
+}
+
+spec fn selected_func_arity_matches(project: &ParsedProjectSources, target: MixedFuncCallee, found: FuncCallTarget) -> bool {
+    match (target, found) {
+        (MixedFuncCallee::Nor, FuncCallTarget::Nor) => true,
+        (MixedFuncCallee::Function(selected), FuncCallTarget::Function { arity, declaration, file, entry }) => {
+            &&& file == selected.file && declaration == selected.name
+            &&& file < project.indexes_model().len()
+            &&& project.indexes_model()[file as int] matches ProjectSourceIndex::Circuit(parsed)
+            &&& entry < parsed.syntax.entries@.len() && selected.item < parsed.names@.len()
+            &&& parsed.syntax.entries@[entry as int].head is Func
+            &&& parsed.syntax.entries@[entry as int].form == parsed.names@[selected.item as int].form
+            &&& routine_arity_matches(declaration.source.text_model(), &parsed.syntax, entry as int, Some(arity))
+        },
+        _ => false,
     }
 }
 
@@ -269,9 +296,187 @@ impl<'a> ParsedProjectSources<'a> {
             block: item.namespace,
         })
     }
+
+    spec fn indexed_func_shape_matches(&self, file: usize, entry: usize, definition: usize, reference: usize, call: CallShape) -> bool {
+        let parsed = self.indexes_model()[file as int]->Circuit_0;
+        let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+        let row = parsed.definitions@[def];
+        let indexed = parsed.references@[row.references.start + reference];
+        &&& self.has_func_callee(file, entry, definition, reference)
+        &&& call_shape_matches(self.sources_model()[file as int].text_model(), parsed.syntax.forms@, row, indexed, Some(call))
+    }
+
+    fn indexed_func_shape(&self, file: usize, entry: usize, definition: usize, reference: usize) -> (call: CallShape)
+        requires self.has_func_callee(file, entry, definition, reference),
+        ensures self.indexed_func_shape_matches(file, entry, definition, reference, call),
+    {
+        let source = &self.sources()[file];
+        let index = &self.indexes()[file];
+        let ProjectSourceIndex::Circuit(parsed) = index else {
+            proof { assert(false); }
+            unreachable!()
+        };
+        let ghost model = parsed.build_model();
+        proof {
+            source.text_model_is_text();
+            project_source_index_evidence(*source, *index);
+            parsed_index_evidence(*source, *parsed);
+            build_entry_ranges_evidence(source.text, &model, entry as int);
+        }
+        let def = parsed.entry_ranges[entry].definitions.start + definition;
+        let row = &parsed.definitions[def];
+        proof { build_definition_scope_evidence(source.text, &model, entry as int, def as int); }
+        let shape = indexed_call_shape(source.text, &parsed.syntax.forms, row, &parsed.references, row.references.start + reference);
+        let Some(call) = shape else { proof { assert(false); } unreachable!() };
+        call
+    }
 }
 
 impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
+    /// 関数の呼び出し名を解決し、直接の実引数数と参照先の入出力ポート数を返す。
+    ///
+    /// 添字は [`Self::resolve_mixed_func_callee`] と同じ。対象の呼び出しがない場合は `None` を返す。
+    /// 入出力の型は後段で検査する。
+    ///
+    /// # Errors
+    ///
+    /// 名前解決の違反には呼び出し名の範囲が付く。参照先が特定できた場合は、その位置も返す。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use circuitgame2_core::project::{
+    ///     FuncCallTarget, ProjectSourceIndex, SourceSnapshot, check_mixed_use_aliases,
+    ///     index_mixed_use_targets, parse_project_sources,
+    /// };
+    ///
+    /// let circuit = "(using nor)
+    ///     (func invert (in x) (out y) (def y (nor x x)))
+    ///     (func caller (in a) (out z) (def z (::invert (nor a a))))";
+    /// let project = parse_project_sources(&[
+    ///     SourceSnapshot { path: "helpers.ncg2m", revision: 1, text: "" },
+    ///     SourceSnapshot { path: "design.ncg2", revision: 3, text: circuit },
+    /// ]).unwrap();
+    /// let targets = index_mixed_use_targets(&project).unwrap();
+    /// let aliases = check_mixed_use_aliases(&targets).unwrap();
+    /// let ProjectSourceIndex::Circuit(index) = &project.indexes()[1] else { panic!() };
+    /// let caller = index.names.iter().find(|site| site.name.word == "caller").unwrap();
+    /// let entry = index.syntax.entries.iter().position(|item| item.form == caller.form).unwrap();
+    /// let call = aliases.resolve_mixed_func_call_arity(1, entry, 0, 0).unwrap().unwrap();
+    /// let FuncCallTarget::Function { arity, declaration, file, .. } = call.target else { panic!() };
+    /// assert_eq!(&circuit[declaration.span], "invert");
+    /// assert_eq!((file, arity.inputs, arity.outputs), (1, 1, 1));
+    /// assert_eq!(call.call.arguments, 1);
+    /// assert_eq!(&circuit[call.call.span], "(::invert (nor a a))");
+    /// let nested = aliases.resolve_mixed_func_call_arity(1, entry, 0, 1).unwrap().unwrap();
+    /// assert!(matches!(nested.target, FuncCallTarget::Nor));
+    /// assert_eq!(nested.call.arguments, 2);
+    /// ```
+    pub fn resolve_mixed_func_call_arity(&self, file: usize, entry: usize, definition: usize, reference: usize)
+        -> (result: Option<Result<FuncCallArity<'p, 'a>, MixedFuncCallError<'p, 'a>>>)
+        requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures
+            result.is_some() <==> self.targets_model().project_model().has_func_callee(file, entry, definition, reference),
+            self.mixed_func_call_arity_matches(file, entry, definition, reference, result),
+    {
+        let Some(resolved) = self.resolve_mixed_func_callee(file, entry, definition, reference) else { return None; };
+        let ghost named = resolved;
+        let MixedFuncCalleeResolution { site, target } = resolved;
+        let project = self.targets().project();
+        let selected = match target {
+            Ok(selected) => selected,
+            Err(reason) => return Some(Err(MixedFuncCallError { site, reason })),
+        };
+        let call = project.indexed_func_shape(file, entry, definition, reference);
+        let ghost before = selected;
+        let target = match selected {
+            MixedFuncCallee::Nor => FuncCallTarget::Nor,
+            MixedFuncCallee::Function(declaration) => {
+                proof { self.mixed_function_callee_origin(file, entry, definition, reference, named, declaration); }
+                let index = &project.indexes()[declaration.file];
+                let ProjectSourceIndex::Circuit(parsed) = index else { proof { assert(false); } unreachable!() };
+                let source = declaration.name.source;
+                proof {
+                    source.text_model_is_text();
+                    project_source_index_evidence(*source, *index);
+                    parsed_index_evidence(*source, *parsed);
+                }
+                let entry = named_build_entry(source.text, parsed, declaration.item);
+                let Some(arity) = routine_arity(source.text, &parsed.syntax, entry) else { proof { assert(false); } unreachable!() };
+                FuncCallTarget::Function { arity, declaration: declaration.name, file: declaration.file, entry }
+            },
+        };
+        assert(selected_func_arity_matches(project, before, target));
+        Some(Ok(FuncCallArity { source: site.source, call, target }))
+    }
+
+    /// 個数が元の呼び出し構文と名前解決で選ばれた宣言の署名に対応することを表す。
+    pub closed spec fn mixed_func_call_arity_matches(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        result: Option<Result<FuncCallArity, MixedFuncCallError>>,
+    ) -> bool {
+        let project = self.targets_model().project_model();
+        match result {
+            None => !project.has_func_callee(file, entry, definition, reference),
+            Some(Err(error)) => self.mixed_func_callee_matches(file, entry, definition, reference,
+                Some(MixedFuncCalleeResolution { site: error.site, target: Err(error.reason) })),
+            Some(Ok(call)) => project.indexed_func_shape_matches(file, entry, definition, reference, call.call)
+                && exists|resolved: MixedFuncCalleeResolution| {
+                    &&& #[trigger] self.mixed_func_callee_matches(file, entry, definition, reference, Some(resolved))
+                    &&& *call.source == *resolved.site.source
+                    &&& resolved.target matches Ok(target)
+                    &&& selected_func_arity_matches(&project, target, call.target)
+                },
+        }
+    }
+
+    /// 実引数数とポート数が由来する、呼び出し元と宣言先の厳格索引を示す。
+    #[verifier::spinoff_prover]
+    pub proof fn mixed_func_call_arity_origin(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, call: FuncCallArity<'p, 'a>,
+    )
+        requires
+            self.mixed_func_call_arity_matches(file, entry, definition, reference, Some(Ok(call))),
+            mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures ({
+            let project = self.targets_model().project_model();
+            &&& project.has_func_callee(file, entry, definition, reference)
+            &&& *call.source == project.sources_model()[file as int]
+            &&& {
+                let parsed = project.indexes_model()[file as int]->Circuit_0;
+                let def = parsed.entry_ranges@[entry as int].definitions.start + definition;
+                let row = parsed.definitions@[def];
+                let indexed = parsed.references@[row.references.start + reference];
+                call_shape_matches(call.source.text_model(), parsed.syntax.forms@, row, indexed, Some(call.call))
+            }
+            &&& call.target matches FuncCallTarget::Function { arity, declaration, file: target_file, entry: target_entry }
+                ==> {
+                    &&& target_file < project.sources_model().len()
+                    &&& *declaration.source == project.sources_model()[target_file as int]
+                    &&& project.indexes_model()[target_file as int] matches ProjectSourceIndex::Circuit(parsed)
+                    &&& target_entry < parsed.syntax.entries@.len()
+                    &&& parsed.syntax.entries@[target_entry as int].head is Func
+                    &&& routine_arity_matches(declaration.source.text_model(), &parsed.syntax, target_entry as int, Some(arity))
+                    &&& exists|i: int| 0 <= i < parsed.names@.len() && {
+                        let named = #[trigger] parsed.names@[i];
+                        &&& named.head is Func
+                        &&& named.form == parsed.syntax.entries@[target_entry as int].form
+                        &&& named.name.span == declaration.span
+                    }
+                }
+        }),
+    {
+        let resolved = choose|resolved: MixedFuncCalleeResolution| {
+            &&& #[trigger] self.mixed_func_callee_matches(file, entry, definition, reference, Some(resolved))
+            &&& *call.source == *resolved.site.source
+            &&& resolved.target matches Ok(target)
+            &&& selected_func_arity_matches(&self.targets_model().project_model(), target, call.target)
+        };
+        if let FuncCallTarget::Function { .. } = call.target {
+            self.mixed_function_callee_origin(file, entry, definition, reference, resolved, resolved.target->Ok_0->Function_0);
+        }
+    }
+
     /// 混在ソース集合の `func` 本体から、呼び出し名を解決する。
     ///
     /// 無修飾名は呼び出し元のブロックの別名、同じ名前空間の宣言の順に探す。
@@ -419,6 +624,92 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 }
             }
         }
+    }
+
+    /// 解決した関数が同じソース集合の宣言を指し、宣言名が厳格索引にあることを示す。
+    #[verifier::spinoff_prover]
+    pub proof fn mixed_function_callee_origin(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+        resolved: MixedFuncCalleeResolution<'p, 'a>, declaration: ProjectDeclaration<'p, 'a>,
+    )
+        requires
+            self.mixed_func_callee_matches(file, entry, definition, reference, Some(resolved)),
+            resolved.target == Ok(MixedFuncCallee::Function(declaration)),
+            mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
+        ensures
+            declaration.kind == ProjectDeclarationKind::Circuit(Head::Func),
+            ({
+                let project = self.targets_model().project_model();
+                &&& declaration.file < project.sources_model().len()
+                &&& declaration.file < project.indexes_model().len()
+                &&& *declaration.name.source == project.sources_model()[declaration.file as int]
+                &&& project.indexes_model()[declaration.file as int] matches ProjectSourceIndex::Circuit(circuit)
+                &&& declaration.item < circuit.names@.len()
+                &&& circuit.names@[declaration.item as int].head is Func
+                &&& declaration.name.span == circuit.names@[declaration.item as int].name.span
+            }),
+    {
+        let targets = self.targets_model();
+        let project = targets.project_model();
+        let exports = targets.exports_model();
+        let declarations = exports.declarations_model();
+        let site = resolved.site;
+        let word = site.name.word;
+        let parsed = project.indexes_model()[file as int]->Circuit_0;
+        let namespace = choose|namespace: Option<&str>| func_scope_path(&parsed, site.block, namespace)
+            && #[trigger] func_target_in_scope(self, file, DefnScope { block: site.block, namespace }, word, resolved.target);
+        let scope = DefnScope { block: site.block, namespace };
+        let target = Ok(MixedAbsoluteTarget::Declaration(declaration));
+        match bare_atom_kind(word.spec_bytes()) {
+            Some(AtomKind::Name) => {
+                let binding = choose|binding: Option<MixedAbsoluteTarget>|
+                    #[trigger] scoped_binding(self, file, scope, word, binding)
+                        && unqualified_func_target(word, binding, resolved.target);
+                assert(binding == Some(MixedAbsoluteTarget::Declaration(declaration)));
+                if self.first_alias_matches(file, site.block, word, None) {
+                    assert(declarations.declaration_at(NameKey { parent: namespace, name: word }, declaration));
+                } else {
+                    let rows = targets.directives_model();
+                    let rank = choose|rank: usize| #[trigger] self.first_alias_matches(file, site.block, word, Some(rank))
+                        && rank < rows.len() && binding == Some(rows[rank as int].target);
+                    targets.directive_origin(rank as int);
+                    let row = rows[rank as int];
+                    absolute_name_declares(&exports, row.site.reference.word, row.site.namespace, declaration);
+                }
+            },
+            Some(AtomKind::AbsolutePath) => {
+                let absolute = choose|absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
+                    #[trigger] mixed_absolute_resolution_evidence(&exports, word, namespace, absolute)
+                        && qualified_func_target(absolute, resolved.target);
+                assert(absolute == target);
+                absolute_name_declares(&exports, word, namespace, declaration);
+            },
+            Some(AtomKind::RelativePath) => {
+                let (head, middle, last, binding) = choose|head: &str, middle: Option<&str>, last: &str, binding: Option<MixedAbsoluteTarget>|
+                    #[trigger] relative_path_parts(word, head, middle, last)
+                        && #[trigger] scoped_binding(self, file, scope, head, binding)
+                        && match binding {
+                            Some(MixedAbsoluteTarget::Namespace { key, .. }) =>
+                                exists|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
+                                    parent@ == parent_spelling(key, middle)
+                                        && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, namespace, absolute)
+                                        && qualified_func_target(absolute, resolved.target),
+                            _ => false,
+                        };
+                let key = binding->Some_0->Namespace_key;
+                let (parent, absolute) = choose|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
+                    parent@ == parent_spelling(key, middle)
+                        && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, namespace, absolute)
+                        && qualified_func_target(absolute, resolved.target);
+                assert(absolute == target);
+                assert(declarations.declaration_at(NameKey { parent: Some(parent), name: last }, declaration));
+            },
+            _ => assert(false),
+        }
+        let key = choose|key: NameKey| #[trigger] declarations.declaration_at(key, declaration);
+        targets.mixed_use_exports_match(&project);
+        mixed_exports_use_project_declarations(&project, &exports);
+        mixed_declaration_origin(&project, &declarations, key, declaration);
     }
 
     /// 基底 NOR が無修飾の `nor` で、参照元に同名の束縛がないことを示す。

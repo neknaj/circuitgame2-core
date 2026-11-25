@@ -93,7 +93,7 @@ pub use exports::{
 pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
-pub use use_aliases::{MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution};
+pub use use_aliases::{MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution};
 #[cfg(verus_only)]
 pub(crate) use use_aliases::call_arity_matches;
 #[cfg(verus_only)]

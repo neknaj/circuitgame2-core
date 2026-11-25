@@ -184,7 +184,7 @@ spec fn name_in_scope(
     }
 }
 
-proof fn absolute_name_declares(
+pub(super) proof fn absolute_name_declares(
     exports: &MixedExportTable, name: &str, from: Option<&str>,
     declaration: ProjectDeclaration,
 )
