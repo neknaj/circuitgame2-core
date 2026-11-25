@@ -235,6 +235,15 @@ fn name_in_original<'a>(
     value
 }
 
+impl OriginalCircuitList {
+    /// リストが占める元ファイルの UTF-8 バイト範囲を返す。
+    pub fn source_span(&self) -> (span: Range<usize>)
+        ensures span == self.span_model(),
+    {
+        self.span.start..self.span.end
+    }
+}
+
 impl<'a> RecoveredNames<'a> {
     /// 回復結果が、名前の読み取りに使う元ソースに対応することを表す。
     pub closed spec fn valid(&self) -> bool {
