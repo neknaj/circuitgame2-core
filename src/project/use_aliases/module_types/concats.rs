@@ -1,9 +1,9 @@
 //! 連接の引数をソース順で型検査し、合計のビット幅を求める。
 
 use super::{ModuleAliasTypes, ModuleAliasTypesError, UseAliases, aliases::find_member, selections::read_bound_type};
-use crate::project::use_aliases::function_atoms::copy_signal_type;
-use crate::project::{CircuitLiteralWidthError, ConcatResultWidthError, LocatedName, ModuleBodyPosition, OutputDriver,
-    ProjectSource, ResolvedPortType, SignalType, check_circuit_literal_width, check_concat_result_width,
+use crate::project::use_aliases::{function_atoms::copy_signal_type, selection_arguments::check_selection_chain};
+use crate::project::{CheckedBitSelection, CircuitLiteralWidthError, ConcatResultWidthError, LocatedName, ModuleBodyPosition, OutputDriver,
+    ProjectSource, ResolvedPortType, SelectionArgumentError, SignalType, check_circuit_literal_width, check_concat_result_width,
     circuits::{form_location, read_indexed_atom}};
 #[cfg(verus_only)]
 use crate::project::{circuit_literal_width_matches, concat_result_width_matches, location_in_source,
@@ -11,18 +11,19 @@ use crate::project::{circuit_literal_width_matches, concat_result_width_matches,
 #[cfg(verus_only)]
 use super::{propagation::type_sites_valid, selections::bound_type};
 #[cfg(verus_only)]
-use crate::project::use_aliases::selection_arguments::selection_parameters_match;
+use crate::project::use_aliases::selection_arguments::{selection_chain_arguments_match, selection_parameters_match,
+    successful_selection_chain_counts_agree};
 #[cfg(verus_only)]
 use crate::project::{concat_result_widths_agree, literal_width::successful_literal_widths_agree};
-use crate::syntax::{AtomKind, Form, circuit::{NamedBuildCircuit, concat_argument_range,
+use crate::syntax::{AtomKind, Form, circuit::{NamedBuildCircuit, bit_selection_chain, concat_argument_range,
     definition_target_atoms, next_call_argument}};
 #[cfg(verus_only)]
 use crate::syntax::{complete_list_indices, form_span, form_spans_valid, nested_list_indices, circuit::{build_definition_scope_evidence,
-    bit_selection_shape_matches, bit_selection_shape_positions, BitSelectionShape,
+    bit_selection_path, bit_selection_paths_agree, bit_selection_shape_matches, bit_selection_shape_positions, BitSelectionShape,
     concat_argument_ranges_agree, concat_arguments_evidence, concat_arguments_match, concat_excludes_other_shapes,
     definition_signal_positions_agree, definition_signal_positions_in_order, definition_target_range,
     ordinary_call_at, ordinary_call_excludes_special_forms,
-    direct_form_in_range, expression_region, following_concat_argument, indexed_concat_argument_signal}};
+    direct_form_in_range, expression_region, following_concat_argument, indexed_concat_selected_signal}};
 use alloc::vec::Vec;
 use core::ops::Range;
 use vstd::prelude::*;
@@ -36,8 +37,10 @@ verus! {
 pub struct ModuleConcatOperand {
     /// 引数の先頭を指す構文木の添字。
     pub form: usize,
-    /// 信号の場合は駆動元。リテラルの場合は `None`。
+    /// 信号とその選択の駆動元。リテラルの場合は `None`。
     pub driver: Option<OutputDriver>,
+    /// ビット選択の場合に、駆動元のビット列から引数への射影を表す。
+    pub selection: Option<CheckedBitSelection>,
     /// 引数のビット幅。
     pub width: u64,
 }
@@ -90,6 +93,8 @@ pub enum ModuleConcatsError<'p, 'a> {
         /// 幅の違反の理由。
         error: CircuitLiteralWidthError,
     },
+    /// 引数のビット選択が、選択元の幅または引数の条件を満たさない。
+    Selection(SelectionArgumentError<'p, 'a>),
     /// 合計幅を表せないか、設定した上限を超えた。
     Width {
         /// 連接式全体のソース範囲。
@@ -149,40 +154,131 @@ spec fn argument_end(forms: Seq<Form>, root: int) -> int {
     if forms[root] is List { forms[root]->List_end as int } else { root + 1 }
 }
 
+spec fn concat_named_operand(
+    context: &ConcatContext, form: usize, steps: Seq<BitSelectionShape>, leaf: usize,
+    result: Result<Option<ModuleConcatOperand>, ModuleConcatsError>,
+) -> bool {
+    let forms = context.parsed.syntax.forms@;
+    let wiring = &context.typed.sources.roots.wiring;
+    let row = context.parsed.definitions@[context.definition as int];
+    let frame = context.parsed.entry_ranges@[context.body.entry as int].signals;
+    exists|i: int| row.signals.start <= i < row.signals.end && (#[trigger] context.parsed.signals@[i]) == leaf
+        && {
+            let bound = wiring.signals@[context.member as int]@[i - frame.start];
+            &&& bound.form == leaf
+            &&& concat_bound_operand(context.source, forms, form, steps, leaf, bound.driver,
+                bound_type(context.typed, context.types@, bound.driver), result)
+        }
+}
+
+spec fn concat_bound_operand(
+    source: &ProjectSource, forms: Seq<Form>, form: usize, steps: Seq<BitSelectionShape>, leaf: usize,
+    driver: OutputDriver, base: Option<SignalType>, result: Result<Option<ModuleConcatOperand>, ModuleConcatsError>,
+) -> bool {
+    match base {
+        None => result == Ok(None),
+        Some(ty) => match ty.ty {
+            ResolvedPortType::Bits(width) => {
+                if steps.len() == 0 {
+                    result matches Ok(Some(item)) && item.form == form
+                        && item.driver == Some(driver) && item.width == width && item.selection.is_none()
+                } else {
+                    match result {
+                        Ok(Some(item)) => item.selection matches Some(selection)
+                            && item.form == form && item.driver == Some(driver)
+                            && item.width == selection.count && selection.fits(width)
+                            && selection_chain_arguments_match(source, forms, steps, width, ty.origin, Ok(selection)),
+                        Err(ModuleConcatsError::Selection(error)) =>
+                            selection_chain_arguments_match(source, forms, steps, width, ty.origin, Err(error)),
+                        _ => false,
+                    }
+                }
+            },
+            ResolvedPortType::Struct { .. } => result matches Err(ModuleConcatsError::InputType { argument, actual })
+                && is_form_location(source, forms[leaf as int], argument) && actual == ty,
+        },
+    }
+}
+
+#[verifier::opaque]
 spec fn concat_operand(
     context: &ConcatContext, form: usize, limit: u64, result: Result<Option<ModuleConcatOperand>, ModuleConcatsError>,
 ) -> bool {
     let forms = context.parsed.syntax.forms@;
     let atom = forms[form as int];
-    if atom is Atom && atom->Atom_kind is Name {
-        let wiring = &context.typed.sources.roots.wiring;
-        let row = context.parsed.definitions@[context.definition as int];
-        let frame = context.parsed.entry_ranges@[context.body.entry as int].signals;
-        exists|i: int| row.signals.start <= i < row.signals.end && (#[trigger] context.parsed.signals@[i]) == form
-            && {
-                let bound = wiring.signals@[context.member as int]@[i - frame.start];
-                &&& bound.form == form
-                &&& match bound_type(context.typed, context.types@, bound.driver) {
-                    None => result == Ok(None),
-                    Some(ty) => match ty.ty {
-                        ResolvedPortType::Bits(width) => result matches Ok(Some(item))
-                            && item.form == form && item.driver == Some(bound.driver) && item.width == width,
-                        ResolvedPortType::Struct { .. } => result matches Err(ModuleConcatsError::InputType { argument, actual })
-                            && is_form_location(context.source, atom, argument) && actual == ty,
-                    },
-                }
-            }
-    } else if atom is Atom && (atom->Atom_kind is Natural || atom->Atom_kind is Binary || atom->Atom_kind is Hexadecimal) {
+    let literal = atom is Atom && (atom->Atom_kind is Natural || atom->Atom_kind is Binary || atom->Atom_kind is Hexadecimal);
+    &&& result matches Ok(Some(item)) ==> item.form == form && item.driver.is_none() == literal
+    &&& if literal {
         let span = form_span(atom);
         let bytes = context.source.text.spec_bytes()[span.start as int..span.end as int];
         match result {
             Ok(Some(item)) => item.form == form && item.driver.is_none()
+                && item.selection.is_none()
                 && circuit_literal_width_matches(bytes, None, limit, Ok(item.width)),
             Err(ModuleConcatsError::Literal { literal, error }) => is_form_location(context.source, atom, literal)
                 && circuit_literal_width_matches(bytes, None, limit, Err(error)),
             _ => false,
         }
-    } else { result == Ok(None) }
+    } else {
+        exists|steps: Seq<BitSelectionShape>, leaf: usize|
+            #[trigger] bit_selection_path(context.source.text, forms, form, steps, leaf)
+                && !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(context.source.text, forms, leaf as int, shape))
+                && if leaf < forms.len() && forms[leaf as int] is Atom && forms[leaf as int]->Atom_kind is Name {
+                    concat_named_operand(context, form, steps, leaf, result)
+                } else { result == Ok(None) }
+    }
+}
+
+proof fn concat_operand_signal<'p, 'a>(
+    context: &ConcatContext<'_, 'p, 'a>, form: usize, limit: u64, item: ModuleConcatOperand,
+) -> (evidence: (Seq<BitSelectionShape>, usize, int, SignalType<'p, 'a>))
+    requires
+        form < context.parsed.syntax.forms@.len(),
+        item.driver.is_some(),
+        concat_operand(context, form, limit, Ok(Some(item))),
+    ensures ({
+        let (steps, leaf, position, base) = evidence;
+        let parsed = context.parsed;
+        let forms = parsed.syntax.forms@;
+        let row = parsed.definitions@[context.definition as int];
+        let frame = parsed.entry_ranges@[context.body.entry as int].signals;
+        let bound = context.typed.sources.roots.wiring.signals@[context.member as int]@[position - frame.start];
+        &&& bit_selection_path(context.source.text, forms, form, steps, leaf)
+        &&& !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(context.source.text, forms, leaf as int, shape))
+        &&& leaf < forms.len()
+        &&& forms[leaf as int] is Atom && forms[leaf as int]->Atom_kind is Name
+        &&& row.signals.start <= position < row.signals.end && parsed.signals@[position] == leaf
+        &&& bound.form == leaf && item.driver == Some(bound.driver)
+        &&& bound_type(context.typed, context.types@, bound.driver) == Some(base)
+        &&& base.ty is Bits
+        &&& item.form == form
+        &&& match item.selection {
+            Some(selection) => steps.len() > 0 && selection.count == item.width && selection.fits(base.ty->Bits_0)
+                && selection_chain_arguments_match(context.source, forms, steps, base.ty->Bits_0, base.origin, Ok(selection)),
+            None => steps.len() == 0 && base.ty == ResolvedPortType::Bits(item.width),
+        }
+    }),
+{
+    reveal(concat_operand);
+    let parsed = context.parsed;
+    let forms = parsed.syntax.forms@;
+    let (steps, leaf) = choose|steps: Seq<BitSelectionShape>, leaf: usize|
+        #[trigger] bit_selection_path(context.source.text, forms, form, steps, leaf)
+        && !(exists|shape: BitSelectionShape| #[trigger] bit_selection_shape_matches(context.source.text, forms, leaf as int, shape))
+        && leaf < forms.len() && forms[leaf as int] is Atom && forms[leaf as int]->Atom_kind is Name
+        && concat_named_operand(context, form, steps, leaf, Ok(Some(item)));
+    let wiring = context.typed.sources.roots.wiring;
+    let row = parsed.definitions@[context.definition as int];
+    let frame = parsed.entry_ranges@[context.body.entry as int].signals;
+    let position = choose|i: int| row.signals.start <= i < row.signals.end && (#[trigger] parsed.signals@[i]) == leaf
+        && {
+            let bound = wiring.signals@[context.member as int]@[i - frame.start];
+            &&& bound.form == leaf
+            &&& concat_bound_operand(context.source, forms, form, steps, leaf, bound.driver,
+                bound_type(context.typed, context.types@, bound.driver), Ok(Some(item)))
+        };
+    let bound = wiring.signals@[context.member as int]@[position - frame.start];
+    (steps, leaf, position, bound_type(context.typed, context.types@, bound.driver)->Some_0)
 }
 
 #[verifier::opaque]
@@ -199,36 +295,50 @@ spec fn operand_prefix(context: &ConcatContext, arguments: Range<usize>, cursor:
     }
 }
 
-/// 成功した最初の引数から指定した位置まで、一つずつアトムが並ぶことを示す。
-proof fn concat_atomic_operand(
-    context: &ConcatContext, arguments: Range<usize>, cursor: usize, limit: u64,
-    operands: Seq<ModuleConcatOperand>, index: int,
+/// 同じ構文範囲を読む二つの検査では、指定した引数が同じフォームから始まる。
+proof fn concat_operand_roots_agree(
+    before: &ConcatContext, after: &ConcatContext, arguments: Range<usize>, limit: u64,
+    left: Seq<ModuleConcatOperand>, right: Seq<ModuleConcatOperand>, index: int,
 )
-    requires operand_prefix(context, arguments, cursor, limit, operands),
-        arguments.end <= context.parsed.syntax.forms@.len(), 0 <= index < operands.len(),
-    ensures
-        operands[index].form == arguments.start + index,
-        context.parsed.syntax.forms@[operands[index].form as int] is Atom,
+    requires
+        before.parsed == after.parsed,
+        operand_prefix(before, arguments, arguments.end, limit, left),
+        operand_prefix(after, arguments, arguments.end, limit, right),
+        0 <= index < left.len(), index < right.len(),
+    ensures left[index].form == right[index].form,
     decreases index,
 {
     reveal(operand_prefix);
-    let item = operands[index];
-    assert(concat_operand(context, item.form, limit, Ok(Some(item))));
+    assert(left[index].form >= arguments.start && right[index].form >= arguments.start);
     if index > 0 {
-        concat_atomic_operand(context, arguments, cursor, limit, operands, index - 1);
+        concat_operand_roots_agree(before, after, arguments, limit, left, right, index - 1);
+        assert(left[index].form == argument_end(before.parsed.syntax.forms@, left[index - 1].form as int));
+        assert(right[index].form == argument_end(after.parsed.syntax.forms@, right[index - 1].form as int));
     }
 }
 
-proof fn concat_atomic_prefix_len(
-    context: &ConcatContext, arguments: Range<usize>, cursor: usize, limit: u64, operands: Seq<ModuleConcatOperand>,
+proof fn concat_operand_count_agrees(
+    before: &ConcatContext, after: &ConcatContext, arguments: Range<usize>, limit: u64,
+    left: Seq<ModuleConcatOperand>, right: Seq<ModuleConcatOperand>,
 )
-    requires operand_prefix(context, arguments, cursor, limit, operands),
-        arguments.end <= context.parsed.syntax.forms@.len(),
-    ensures cursor == arguments.start + operands.len(),
+    requires
+        before.parsed == after.parsed,
+        arguments.start < arguments.end,
+        operand_prefix(before, arguments, arguments.end, limit, left),
+        operand_prefix(after, arguments, arguments.end, limit, right),
+    ensures left.len() == right.len(),
 {
     reveal(operand_prefix);
-    if operands.len() > 0 {
-        concat_atomic_operand(context, arguments, cursor, limit, operands, operands.len() - 1);
+    if left.len() != right.len() {
+        let i = if left.len() < right.len() { left.len() as int - 1 } else { right.len() as int - 1 };
+        concat_operand_roots_agree(before, after, arguments, limit, left, right, i);
+        if left.len() < right.len() {
+            assert(right[i + 1].form == arguments.end);
+            assert(right[i + 1].form < arguments.end);
+        } else {
+            assert(left[i + 1].form == arguments.end);
+            assert(left[i + 1].form < arguments.end);
+        }
     }
 }
 
@@ -256,49 +366,63 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     ) -> (result: Result<Option<ModuleConcatOperand>, ModuleConcatsError<'p, 'a>>)
         requires
             self.concat_context(_owner, limit, context), at < context.parsed.syntax.forms@.len(),
+            type_sites_valid(context.types@),
             concat_arguments_match(context.source.text, context.parsed.syntax.forms@,
                 context.parsed.definitions@[context.definition as int].expression.start as int, arguments),
             direct_form_in_range(context.parsed.syntax.forms@, arguments.start as int, arguments.end as int, at as int),
-        ensures concat_operand(context, at, limit, result),
+        ensures
+            concat_operand(context, at, limit, result),
+            result matches Ok(Some(item)) ==> item.form == at,
+            result matches Err(error) ==> !(error is Types),
     {
         let source = context.source;
         let parsed = context.parsed;
         let forms = parsed.syntax.forms.as_slice();
         let row = &parsed.definitions[context.definition];
-        proof { parsed_index_evidence(*source, *parsed); }
-        match forms[at] {
-            Form::Atom { kind: AtomKind::Name, .. } => {
-                let ghost model = parsed.build_model();
-                proof {
-                    indexed_concat_argument_signal(source.text, &model, context.body.entry as int, context.definition as int, arguments, at);
-                    definition_signal_positions_in_order(source.text, &model, context.body.entry as int, context.definition as int);
-                    build_definition_scope_evidence(source.text, &model, context.body.entry as int, context.definition as int);
-                }
-                let Some(position) = find_signal(parsed.signals.as_slice(), row.signals.start, row.signals.end, at) else {
-                    unreachable!()
-                };
-                let wiring = &context.typed.sources.roots.wiring;
-                let frame = &parsed.entry_ranges[context.body.entry].signals;
-                proof {
-                    self.module_alias_types_evidence(_owner, limit, *context.typed);
-                    self.module_signal_index_item(_owner, limit, *wiring, context.member as int, position as int);
-                }
-                let bound = &wiring.signals[context.member][position - frame.start];
-                let Some(actual) = read_bound_type(context.typed, context.types.as_slice(), bound.driver) else { return Ok(None); };
-                let ResolvedPortType::Bits(width) = actual.ty else {
-                    return Err(ModuleConcatsError::InputType { argument: form_location(source, forms, at), actual });
-                };
-                Ok(Some(ModuleConcatOperand { form: at, driver: Some(bound.driver), width }))
-            },
-            Form::Atom { kind: AtomKind::Natural | AtomKind::Binary | AtomKind::Hexadecimal, .. } => {
-                let (word, _) = read_indexed_atom(source.text, forms, at);
-                match check_circuit_literal_width(word, None, limit) {
-                    Ok(width) => Ok(Some(ModuleConcatOperand { form: at, driver: None, width })),
-                    Err(error) => Err(ModuleConcatsError::Literal { literal: form_location(source, forms, at), error }),
-                }
-            },
-            _ => Ok(None),
+        proof { parsed_index_evidence(*source, *parsed); reveal(concat_operand); }
+        if matches!(forms[at], Form::Atom { kind: AtomKind::Natural | AtomKind::Binary | AtomKind::Hexadecimal, .. }) {
+            let (word, _) = read_indexed_atom(source.text, forms, at);
+            return match check_circuit_literal_width(word, None, limit) {
+                Ok(width) => Ok(Some(ModuleConcatOperand { form: at, driver: None, selection: None, width })),
+                Err(error) => Err(ModuleConcatsError::Literal { literal: form_location(source, forms, at), error }),
+            };
         }
+        let (steps, leaf) = bit_selection_chain(source.text, forms, at);
+        if leaf >= forms.len() || !matches!(forms[leaf], Form::Atom { kind: AtomKind::Name, .. }) {
+            return Ok(None);
+        }
+        let ghost model = parsed.build_model();
+        proof {
+            indexed_concat_selected_signal(source.text, &model, context.body.entry as int, context.definition as int,
+                arguments, at, steps@, leaf);
+            definition_signal_positions_in_order(source.text, &model, context.body.entry as int, context.definition as int);
+            build_definition_scope_evidence(source.text, &model, context.body.entry as int, context.definition as int);
+        }
+        let Some(position) = find_signal(parsed.signals.as_slice(), row.signals.start, row.signals.end, leaf) else {
+            unreachable!()
+        };
+        let wiring = &context.typed.sources.roots.wiring;
+        let frame = &parsed.entry_ranges[context.body.entry].signals;
+        proof {
+            self.module_alias_types_evidence(_owner, limit, *context.typed);
+            self.module_signal_index_item(_owner, limit, *wiring, context.member as int, position as int);
+            self.module_wiring_keeps_drivers(_owner, limit, *wiring);
+            self.module_input_sites(_owner, limit, wiring.drivers);
+        }
+        let bound = &wiring.signals[context.member][position - frame.start];
+        let Some(actual) = read_bound_type(context.typed, context.types.as_slice(), bound.driver) else { return Ok(None); };
+        let ResolvedPortType::Bits(width) = actual.ty else {
+            return Err(ModuleConcatsError::InputType { argument: form_location(source, forms, leaf), actual });
+        };
+        let (width, selection) = if steps.is_empty() {
+            (width, None)
+        } else {
+            match check_selection_chain(source, forms, at, steps.as_slice(), leaf, width, &actual.origin) {
+                Ok(selection) => (selection.count, Some(selection)),
+                Err(error) => return Err(ModuleConcatsError::Selection(error)),
+            }
+        };
+        Ok(Some(ModuleConcatOperand { form: at, driver: Some(bound.driver), selection, width }))
     }
 
     spec fn concat_result(&self, context: &ConcatContext, root: usize, arguments: Range<usize>, limit: u64,
@@ -338,10 +462,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     fn check_concat_arguments(&self, _owner: ModuleBodyPosition, limit: u64, context: &ConcatContext<'_, 'p, 'a>, arguments: Range<usize>)
         -> (result: Result<Option<ModuleConcat<'p, 'a>>, ModuleConcatsError<'p, 'a>>)
         requires
-            self.concat_context(_owner, limit, context),
+            self.concat_context(_owner, limit, context), type_sites_valid(context.types@),
             concat_arguments_match(context.source.text, context.parsed.syntax.forms@,
                 context.parsed.definitions@[context.definition as int].expression.start as int, arguments),
-        ensures self.concat_result(context, context.parsed.definitions@[context.definition as int].expression.start, arguments, limit, result),
+        ensures
+            self.concat_result(context, context.parsed.definitions@[context.definition as int].expression.start, arguments, limit, result),
+            result matches Err(error) ==> !(error is Types),
     {
         let source = context.source;
         let parsed = context.parsed;
@@ -365,7 +491,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(operand_prefix(context, arguments, cursor, limit, operands@)) by { reveal(operand_prefix); };
         while cursor < arguments.end
             invariant
-                self.concat_context(_owner, limit, context), *source == *context.source, forms@ == context.parsed.syntax.forms@,
+                self.concat_context(_owner, limit, context), type_sites_valid(context.types@),
+                *source == *context.source, forms@ == context.parsed.syntax.forms@,
                 *row == context.parsed.definitions@[context.definition as int], root == row.expression.start,
                 root < forms@.len(), complete_list_indices(forms@), nested_list_indices(forms@),
                 targets.end - targets.start == 1,
@@ -430,8 +557,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         -> (result: Result<Option<ModuleConcat<'p, 'a>>, ModuleConcatsError<'p, 'a>>)
         requires self.can_resolve(), self.module_alias_types_result(_owner, limit, Ok(Some(*typed))),
             i < typed.sources.roots.wiring.drivers.definitions@.len(),
-            types@.len() == typed.sources.roots.wiring.drivers.definitions@.len(),
+            types@.len() == typed.sources.roots.wiring.drivers.definitions@.len(), type_sites_valid(types@),
         ensures self.concat_at(typed, types, i as int, limit, result),
+            result matches Err(error) ==> !(error is Types),
             result matches Ok(Some(concat)) ==> location_in_source(concat.result.origin),
     {
         let wiring = &typed.sources.roots.wiring;
@@ -740,7 +868,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& self.concat_context(owner, limit, &context)
             &&& form_spans_valid(context.source.text, forms, context.source.text.spec_bytes().len() as int)
             &&& concat_arguments_match(context.source.text, forms, row.expression.start as int, arguments)
-            &&& arguments.end <= forms.len()
+            &&& arguments.start < arguments.end <= forms.len()
             &&& self.concat_result(&context, row.expression.start, arguments, limit, Ok(checked.concats@[slot as int]))
         }),
     {
@@ -880,13 +1008,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(self.concat_context(owner, limit, &before));
         assert(operand_prefix(&before, arguments, arguments.end, limit, old.operands@));
         assert(operand_prefix(&context, arguments, arguments.end, limit, concat.operands@));
-        concat_atomic_prefix_len(&before, arguments, arguments.end, limit, old.operands@);
-        concat_atomic_prefix_len(&context, arguments, arguments.end, limit, concat.operands@);
+        concat_operand_count_agrees(&before, &context, arguments, limit, old.operands@, concat.operands@);
         let old_widths = old.operands@.map_values(|item: ModuleConcatOperand| item.width);
         let widths = concat.operands@.map_values(|item: ModuleConcatOperand| item.width);
         assert forall|i: int| 0 <= i < widths.len() implies widths[i] == old_widths[i] by {
-            concat_atomic_operand(&before, arguments, arguments.end, limit, old.operands@, i);
-            concat_atomic_operand(&context, arguments, arguments.end, limit, concat.operands@, i);
+            concat_operand_roots_agree(&before, &context, arguments, limit, old.operands@, concat.operands@, i);
             let earlier = old.operands@[i];
             let current = concat.operands@[i];
             reveal(operand_prefix);
@@ -915,25 +1041,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let item = concat.operands@[index as int];
         let parsed = context.parsed;
         let source = context.source;
-        let row = parsed.definitions@[context.definition as int];
         let forms = parsed.syntax.forms@;
         assert(operand_prefix(&context, arguments, arguments.end, limit, concat.operands@));
         reveal(operand_prefix);
         assert(concat_operand(&context, item.form, limit, Ok(Some(item))));
         assert(arguments.start <= item.form < arguments.end);
         assert(item.form < forms.len());
-        let atom = forms[item.form as int];
-        assert(atom is Atom);
-        if atom->Atom_kind is Name {
+        if item.driver.is_some() {
+            let (steps, leaf, position, base) = concat_operand_signal(&context, item.form, limit, item);
             let frame = parsed.entry_ranges@[context.body.entry as int].signals;
-            let position = choose|i: int| row.signals.start <= i < row.signals.end
-                && (#[trigger] parsed.signals@[i]) == item.form
-                && {
-                    let bound = wiring.signals@[context.member as int]@[i - frame.start];
-                    &&& bound.form == item.form && item.driver == Some(bound.driver)
-                    &&& bound_type(&checked.typed, checked.types@, bound.driver) matches Some(ty)
-                    &&& ty.ty == ResolvedPortType::Bits(item.width)
-                };
             parsed_index_evidence(*source, *parsed);
             build_definition_scope_evidence(source.text, &parsed.build_model(),
                 context.body.entry as int, context.definition as int);
@@ -945,7 +1061,17 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 OutputDriver::Input(index) => index < wiring.drivers.signature.inputs@.len(),
                 OutputDriver::Definition(index) => index < wiring.drivers.definitions@.len(),
             });
+            if let Some(selection) = item.selection {
+                assert(exists|path: Seq<BitSelectionShape>, name: usize|
+                    #[trigger] bit_selection_path(source.text, forms, item.form, path, name)
+                    && path.len() > 0 && name < forms.len() && forms[name as int] is Atom
+                    && forms[name as int]->Atom_kind is Name
+                    && selection_chain_arguments_match(source, forms, path, base.ty->Bits_0, base.origin, Ok(selection))) by {
+                    assert(bit_selection_path(source.text, forms, item.form, steps, leaf));
+                };
+            }
         } else {
+            reveal(concat_operand);
             assert(item.driver.is_none());
         }
     }
@@ -1013,31 +1139,24 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 ==> after.types@[i] == before.types@[i],
         ensures known.width == other.width,
     {
+        reveal(concat_operand);
         let forms = before.parsed.syntax.forms@;
-        let form = forms[form as int];
-        if form->Atom_kind is Name {
+        if known.driver.is_some() {
+            assert(other.driver.is_some());
+            let (a_steps, a_leaf, left, a) = concat_operand_signal(before, form, limit, known);
+            let (b_steps, b_leaf, right, b) = concat_operand_signal(after, form, limit, other);
+            bit_selection_paths_agree(before.source.text, forms, form, a_steps, a_leaf, b_steps, b_leaf);
+            if let Some(selection) = known.selection {
+                assert(other.selection.is_some());
+                successful_selection_chain_counts_agree(before.source, forms, a_steps, a.ty->Bits_0,
+                    a.origin, selection, b.ty->Bits_0, b.origin, other.selection->Some_0);
+                return;
+            }
             self.module_alias_types_evidence(owner, limit, *before.typed);
             let wiring = before.typed.sources.roots.wiring;
             let parsed = before.parsed;
             let source = before.source;
-            let row = parsed.definitions@[before.definition as int];
             let frame = parsed.entry_ranges@[before.body.entry as int].signals;
-            let left = choose|i: int| row.signals.start <= i < row.signals.end
-                && (#[trigger] parsed.signals@[i]) == known.form
-                && {
-                    let bound = wiring.signals@[before.member as int]@[i - frame.start];
-                    &&& bound.form == known.form && known.driver == Some(bound.driver)
-                    &&& bound_type(before.typed, before.types@, bound.driver) matches Some(ty)
-                    &&& ty.ty == ResolvedPortType::Bits(known.width)
-                };
-            let right = choose|i: int| row.signals.start <= i < row.signals.end
-                && (#[trigger] parsed.signals@[i]) == known.form
-                && {
-                    let bound = wiring.signals@[before.member as int]@[i - frame.start];
-                    &&& bound.form == other.form && other.driver == Some(bound.driver)
-                    &&& bound_type(after.typed, after.types@, bound.driver) matches Some(ty)
-                    &&& ty.ty == ResolvedPortType::Bits(other.width)
-                };
             parsed_index_evidence(*source, *parsed);
             build_definition_scope_evidence(source.text, &parsed.build_model(), before.body.entry as int, before.definition as int);
             definition_signal_positions_agree(source.text, &parsed.build_model(), before.body.entry as int,
@@ -1049,7 +1168,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 assert(after.types@[index as int] == before.types@[index as int]);
             }
         } else {
-            let span = form_span(form);
+            let span = form_span(forms[form as int]);
             let bytes = before.source.text.spec_bytes()[span.start as int..span.end as int];
             successful_literal_widths_agree(bytes, None, limit, known.width, other.width);
         }
@@ -1066,20 +1185,31 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let forms = parsed.syntax.forms@;
         let atom = forms[item.form as int];
         &&& at.file < project.sources_model().len() && at.file < project.circuits_model().len()
-        &&& item.form < forms.len() && atom is Atom
+        &&& item.form < forms.len()
         &&& form_spans_valid(source.text, forms, source.text.spec_bytes().len() as int)
         &&& match item.driver {
             Some(driver) => {
-                &&& atom->Atom_kind is Name
                 &&& match driver {
                     OutputDriver::Input(index) => index < drivers.signature.inputs@.len(),
                     OutputDriver::Definition(index) => index < drivers.definitions@.len(),
                 }
                 &&& bound_type(typed, types, driver) matches Some(ty)
-                &&& ty.ty == ResolvedPortType::Bits(item.width)
+                &&& match item.selection {
+                    Some(selection) => {
+                        &&& ty.ty is Bits
+                        &&& selection.count == item.width && selection.fits(ty.ty->Bits_0)
+                        &&& exists|path: Seq<BitSelectionShape>, name: usize|
+                            #[trigger] bit_selection_path(source.text, forms, item.form, path, name)
+                            && path.len() > 0 && name < forms.len() && forms[name as int] is Atom
+                            && forms[name as int]->Atom_kind is Name
+                            && selection_chain_arguments_match(source, forms, path, ty.ty->Bits_0, ty.origin, Ok(selection))
+                    },
+                    None => atom is Atom && atom->Atom_kind is Name && ty.ty == ResolvedPortType::Bits(item.width),
+                }
             },
             None => {
                 let span = form_span(atom);
+                &&& atom is Atom && item.selection.is_none()
                 &&& atom->Atom_kind is Natural || atom->Atom_kind is Binary || atom->Atom_kind is Hexadecimal
                 &&& circuit_literal_width_matches(source.text.spec_bytes()[span.start as int..span.end as int],
                     None, limit, Ok(item.width))
@@ -1320,7 +1450,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 右辺全体を占める連接の幅を、型が分かった信号名とリテラルから求める。
     ///
     /// 連接の幅を別名や別の連接へ伝え、追加の型が得られなくなったときの結果を返す。
-    /// 型が未確定の子式や信号を含む場合は、その引数から先を保留する。
+    /// ビット列の信号とリテラル、信号を起点にした `bit`・`slice` の幅を求める。
+    /// 幅が未確定の引数があれば、その引数から先を保留する。
     ///
     /// # Errors
     ///
