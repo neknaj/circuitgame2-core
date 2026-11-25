@@ -130,7 +130,7 @@ fn event_tick_retries_with_the_same_inputs_and_consumes_once() {
     let (index, future) = pending.next_event(0).unwrap();
     assert_eq!(future.payload, "future");
     assert!(pending.next_event(index + 1).is_none());
-    assert_eq!(pending.commit(&[false]).unwrap().len(), 1);
+    assert_eq!(pending.commit(&[true]).unwrap().len(), 1);
 
     for (generation, tick, payload) in [
         (1, 1, "new first"),
@@ -141,13 +141,20 @@ fn event_tick_retries_with_the_same_inputs_and_consumes_once() {
     ] {
         events.enqueue(ScheduledEvent { position: TickPosition { generation, tick }, payload });
     }
-    let removed = session.reset_io(&mut events).unwrap();
+    let reset = session.prepare_io_reset(&mut events).unwrap();
+    assert_eq!(reset.target(), TickPosition { generation: 1, tick: 0 });
+    reset.cancel();
+    assert_eq!(session.position(), TickPosition { generation: 0, tick: 2 });
+    assert_eq!(session.output(), [true]);
+
+    let removed = session.prepare_io_reset(&mut events).unwrap().commit();
     assert_eq!(removed.iter().map(|event| event.payload).collect::<Vec<_>>(), ["old future", "old missed"]);
     assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
+    assert_eq!(session.output(), [false]);
     let first_in_new_generation = session.prepare_io_tick(&mut events).unwrap();
     let consumed = first_in_new_generation.commit(&[true]).unwrap();
     assert_eq!(consumed.iter().map(|event| event.payload).collect::<Vec<_>>(), ["new first", "new second"]);
-    assert!(session.reset_io(&mut events).unwrap().is_empty());
+    assert!(session.prepare_io_reset(&mut events).unwrap().commit().is_empty());
     let first_in_following_generation = session.prepare_io_tick(&mut events).unwrap();
     assert_eq!(first_in_following_generation.next_event(0).unwrap().1.payload, "following generation");
 }

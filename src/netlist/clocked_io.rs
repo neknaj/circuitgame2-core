@@ -6,7 +6,7 @@ use vstd::prelude::*;
 use super::{ClockedSession, PendingVmTick, TickInputError};
 use crate::time::{ClockError, PendingEvents, ScheduledEvent, ScheduledEvents, TickPosition};
 #[cfg(verus_only)]
-use crate::time::{events_at_tick, events_by_reset_generation, next_event_matches};
+use crate::time::{events_at_tick, next_event_matches};
 
 verus! {
 
@@ -48,38 +48,6 @@ impl ClockedSession {
         let circuit = self.prepare_tick()?;
         let target = circuit.target();
         Ok(PendingIoTick { circuit, events: events.prepare(target) })
-    }
-
-    /// 回路を新しい世代の tick 0 に戻し、旧世代の待ちイベントを取り出す。
-    ///
-    /// デバイスの初期化がすべて成功した後に呼び出す。評価中の tick は先に取り消す。
-    /// 新しい世代以降に指定されたイベントを到着順のまま保持する。
-    ///
-    /// # Errors
-    ///
-    /// 世代番号が上限に達していれば、回路とイベント列を保持してエラーを返す。
-    pub fn reset_io<T>(&mut self, events: &mut ScheduledEvents<T>)
-        -> (result: Result<Vec<ScheduledEvent<T>>, ClockError>)
-        requires old(self).valid(),
-        ensures
-            final(self).valid(),
-            result.is_ok() <==> old(self).position_model().generation < u64::MAX,
-            match result {
-                Ok(removed) => {
-                    let generation = final(self).position_model().generation;
-                    &&& generation as int == old(self).position_model().generation as int + 1
-                    &&& final(self).position_model().tick == 0
-                    &&& final(self).vm_model().same_layout(&old(self).vm_model())
-                    &&& final(self).vm_model().reset_matches(final(self).output_model())
-                    &&& final(events).model() == events_by_reset_generation(old(events).model(), generation, false)
-                    &&& removed@ == events_by_reset_generation(old(events).model(), generation, true)
-                },
-                Err(error) => error == ClockError::GenerationOutOfRange
-                    && *final(self) == *old(self) && final(events).model() == old(events).model(),
-            },
-    {
-        self.reset()?;
-        Ok(events.take_older_generations(self.position().generation))
     }
 }
 

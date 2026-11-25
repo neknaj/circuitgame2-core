@@ -42,7 +42,7 @@ pub use clocked_storage::{ClockedStorage, ClockedStorageError, ClockedStorageInp
 pub use clocked_storage::{clocked_storage_memory_width, clocked_storage_pin_values, clocked_storage_result, clocked_storage_steps_agree,
     clocked_storage_value_transition};
 pub use clocked_io::PendingIoTick;
-pub use clocked_session::{ClockedSession, PendingVmTick};
+pub use clocked_session::{ClockedSession, PendingIoReset, PendingVmTick};
 pub use clocked_vm::{ClockedVm, ClockedVmError};
 #[cfg(verus_only)]
 pub use clocked_vm::{clocked_storage_output_width, clocked_storage_width_concat, clocked_storage_width_push, clocked_storage_widths_agree,
