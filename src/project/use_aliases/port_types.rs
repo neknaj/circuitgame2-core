@@ -41,6 +41,8 @@ use vstd::string::StringSliceAdditionalSpecFns;
 use vstd::utf8::encode_utf8_decode_utf8;
 
 mod storage;
+mod lookup;
+pub use lookup::{NamedRoutinePort, RoutinePortLookup};
 pub use storage::{StorageSignature, StorageSignatureError};
 
 verus! {

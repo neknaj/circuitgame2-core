@@ -193,6 +193,7 @@ pub use use_aliases::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
 pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
+pub use use_aliases::{NamedRoutinePort, RoutinePortLookup};
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, alias_conflicts_agree, use_alias_dispositions_agree, use_aliases_acceptable, use_aliases_match};
 pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};
