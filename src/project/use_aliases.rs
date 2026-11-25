@@ -57,6 +57,10 @@ mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
 mod reference_cursor;
+mod mixed;
+pub use mixed::{MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
+#[cfg(verus_only)]
+pub use mixed::{mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixed_alias_dispositions_agree, mixed_use_aliases_acceptable, mixed_use_aliases_match};
 mod relative;
 mod selection_arguments;
 mod signature_cache;

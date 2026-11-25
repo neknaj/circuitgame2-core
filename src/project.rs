@@ -71,9 +71,9 @@ pub use declarations::{
 };
 #[cfg(verus_only)]
 pub use declarations::{
-    declaration_table_matches, location_in_source, mixed_declaration_origin, mixed_declaration_table_matches,
+    declaration_table_matches, location_in_source, mixed_declaration_lookup_agrees, mixed_declaration_origin, mixed_declaration_table_matches, mixed_declarations_agree,
     mixed_name_conflict_evidence, mixed_name_conflicts_agree,
-    mixed_project_names_conflict, name_conflict_evidence, project_declares,
+    mixed_project_declares, mixed_project_names_conflict, name_conflict_evidence, project_declares,
     project_names_conflict,
 };
 pub use editor_recovery::{
@@ -81,13 +81,19 @@ pub use editor_recovery::{
     ModulePartCandidates, PartialCircuitDeclarations, RecoveredDeclarationQuery, inspect_circuit_file,
     inspect_circuit_project, inspect_circuit_project_with_cache,
 };
-pub use exports::{ExportError, ExportTable, index_exports};
+pub use exports::{ExportError, ExportTable, MixedExportError, MixedExportTable, index_exports, index_mixed_exports};
 #[cfg(verus_only)]
 pub use editor_recovery::circuit_editor_source;
 #[cfg(verus_only)]
-pub use exports::{export_error_evidence, export_table_matches, project_exports_valid};
+pub use exports::{
+    export_error_evidence, export_table_matches, mixed_export_error_evidence, mixed_export_errors_agree,
+    mixed_export_table_matches, mixed_project_exports_valid, mixed_publication_agrees, mixed_publication_requested, project_exports_valid,
+};
 pub use name_keys::NameKey;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
+pub use use_aliases::{MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
+#[cfg(verus_only)]
+pub use use_aliases::{mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixed_alias_dispositions_agree, mixed_use_aliases_acceptable, mixed_use_aliases_match};
 pub use use_aliases::{ModuleDriverError, ModuleDrivers};
 pub use use_aliases::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 pub use use_aliases::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes, ModuleAliasTypesError,
@@ -114,10 +120,11 @@ pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, 
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
-pub use resolution::{AbsoluteResolutionError, AbsoluteTarget};
+pub use resolution::{AbsoluteResolutionError, AbsoluteTarget, MixedAbsoluteTarget};
 #[cfg(verus_only)]
 pub use resolution::{
-    absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
+    absolute_resolution_evidence, declaration_visible_from, direct_target_matches, mixed_absolute_resolution_evidence,
+    mixed_declaration_visible_from, mixed_key_resolution, same_mixed_target, same_target,
 };
 pub use source_indexes::{
     ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,
@@ -201,6 +208,9 @@ pub use use_aliases::{DevicePortBinding, DevicePortBindingError, DevicePortType}
 pub use use_aliases::{device_port_types_match, matching_circuit_direction};
 #[cfg(verus_only)]
 pub use use_aliases::{alias_conflict_evidence, alias_conflicts_agree, use_alias_dispositions_agree, use_aliases_acceptable, use_aliases_match};
-pub use use_targets::{ResolvedUse, UseSite, UseTargetError, UseTargets, index_use_targets};
+pub use use_targets::{
+    MixedResolvedUse, MixedUseTargets, ResolvedUse, UseSite, UseTargetError, UseTargets,
+    index_mixed_use_targets, index_use_targets,
+};
 #[cfg(verus_only)]
-pub use use_targets::{use_target_error_evidence, use_targets_match};
+pub use use_targets::{indexed_mixed_use_at, mixed_use_site_at, mixed_use_target_error_matches, mixed_use_targets_match, use_target_error_evidence, use_targets_match};
