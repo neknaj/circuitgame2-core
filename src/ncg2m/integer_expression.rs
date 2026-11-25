@@ -2,8 +2,10 @@
 
 use core::ops::Range;
 use alloc::vec::Vec;
-use crate::project::read_source_span;
 use crate::syntax::{self, AtomKind, Form};
+use super::forms::{is_spelling, source_word, subtree_end};
+#[cfg(verus_only)]
+use super::forms::{spelling, subtree_limit};
 use super::integers::{
     IntegerLiteralError, IntegerOperation, IntegerType, IntegerValue,
     evaluate_int, evaluate_nat, int_to_nat, nat_to_int, read_integer_literal,
@@ -17,8 +19,6 @@ use super::integers::{
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
-#[cfg(verus_only)]
-use vstd::utf8::encode_utf8_decode_utf8;
 
 verus! {
 
@@ -115,11 +115,6 @@ pub struct CheckedIntegerExpression {
     ty: IntegerType,
 }
 
-spec fn spelling(source: &str, form: Form) -> Seq<u8> {
-    let span = form_span(form);
-    source.spec_bytes()[span.start as int..span.end as int]
-}
-
 spec fn literal_model(form: Form, index: usize) -> Option<Literal> {
     match form {
         Form::Atom { kind: AtomKind::Natural, .. } => Some(Literal { index, negative: false }),
@@ -154,30 +149,6 @@ fn literal(form: &Form, index: usize) -> (result: Option<Literal>)
     }
 }
 
-fn source_word<'a>(source: &'a str, forms: &[Form], index: usize) -> (word: &'a str)
-    requires index < forms@.len(), form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-    ensures word.spec_bytes() == spelling(source, forms@[index as int]),
-{
-    let span = match &forms[index] {
-        Form::Atom { span, .. } | Form::List { span, .. } => span,
-    };
-    proof {
-        reveal(form_spans_valid);
-        assert(*span == form_span(forms@[index as int]));
-    }
-    read_source_span(source, span.start, span.end)
-}
-
-fn is_spelling(word: &str, name: &str) -> (matches: bool)
-    ensures matches == (word.spec_bytes() == name.spec_bytes()),
-{
-    proof {
-        encode_utf8_decode_utf8(word@);
-        encode_utf8_decode_utf8(name@);
-    }
-    word == name
-}
-
 fn builtin(word: &str) -> (head: Option<Builtin>)
     ensures head == builtin_model(word.spec_bytes()),
 {
@@ -196,25 +167,6 @@ fn integer_type(word: &str) -> (ty: Option<IntegerType>)
     if is_spelling(word, "Nat") { Some(IntegerType::Nat) }
     else if is_spelling(word, "Int") { Some(IntegerType::Int) }
     else { None }
-}
-
-spec fn subtree_limit(forms: Seq<Form>, at: usize) -> usize
-    recommends at < forms.len(),
-{
-    match forms[at as int] {
-        Form::Atom { .. } => (at + 1) as usize,
-        Form::List { end, .. } => end,
-    }
-}
-
-fn subtree_end(forms: &[Form], at: usize) -> (end: usize)
-    requires at < forms@.len(),
-    ensures end == subtree_limit(forms@, at),
-{
-    match &forms[at] {
-        Form::Atom { .. } => at + 1,
-        Form::List { end, .. } => *end,
-    }
 }
 
 spec fn direct_node_model(source: &str, forms: Seq<Form>, at: usize) -> Option<Node>
