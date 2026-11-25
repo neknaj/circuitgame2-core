@@ -319,6 +319,50 @@ fn one_device_tick_commits_requests_only_after_the_circuit_succeeds() {
 }
 
 #[test]
+fn typed_host_requests_keep_notifications_in_order_without_using_request_numbers() {
+    use circuitgame2_core::device::{
+        CommittedHostRequest, DeviceHostRequest, DeviceResponseSession, HostRequest, HostRequestCommitError,
+    };
+    use circuitgame2_core::netlist::ClockedVm;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceResponseSession::<()>::new(vm);
+    let notify = |instance| DeviceHostRequest {
+        instance,
+        request: HostRequest::Notify(String::from("notice")),
+    };
+    let request = |instance, tag, payload| DeviceHostRequest {
+        instance,
+        request: HostRequest::Request { tag, payload },
+    };
+    let wrong_order = [notify(1), request(0, 3, vec![5])];
+    assert!(matches!(
+        session.prepare_tick().unwrap().commit_host_requests(&[false], &wrong_order),
+        Err(HostRequestCommitError::InstanceOrder(1)),
+    ));
+    assert_eq!(session.position().tick, 0);
+
+    let source = [request(0, 3, vec![5]), notify(0), request(1, 3, vec![6])];
+    let (consumed, committed) = session
+        .prepare_tick().unwrap()
+        .commit_host_requests(&[false], &source).unwrap();
+    assert!(consumed.is_empty());
+    assert_eq!(committed.len(), 3);
+    assert!(matches!(committed.get(0), Some(CommittedHostRequest::Request { id, tag: 3, payload })
+        if id.instance == 0 && id.serial == 0 && payload == &[5]));
+    assert!(matches!(committed.get(1), Some(CommittedHostRequest::Notify { instance: 0, notification })
+        if notification == "notice"));
+    assert!(matches!(committed.get(2), Some(CommittedHostRequest::Request { id, tag: 3, payload })
+        if id.instance == 1 && id.serial == 1 && payload == &[6]));
+    assert!(committed.get(3).is_none());
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,
