@@ -363,6 +363,54 @@ fn typed_host_requests_keep_notifications_in_order_without_using_request_numbers
 }
 
 #[test]
+fn mixed_device_events_keep_arrival_order_after_a_cancelled_update() {
+    use circuitgame2_core::device::{
+        DeviceEvent, HostRequestId, RequestLedger, ResponseTickError, ScheduleInputError,
+    };
+    use circuitgame2_core::netlist::{ClockedSession, ClockedVm, TickInputError};
+    use circuitgame2_core::time::{ScheduledEvents, TickPosition};
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = ClockedSession::new(vm);
+    let mut ledger = RequestLedger::new(0);
+    let mut events = ScheduledEvents::new();
+    let id = HostRequestId { instance: 1, generation: 0, serial: 0 };
+    let target = TickPosition { generation: 0, tick: 1 };
+    let later = TickPosition { generation: 0, tick: 2 };
+    ledger.register(id, 7, 0).unwrap();
+    assert_eq!(session.schedule_device_input(&mut events, 0, session.position(), 9),
+        Err(ScheduleInputError::AlreadyCommitted));
+    session.schedule_device_input(&mut events, 0, target, 10).unwrap();
+    session.schedule_device_input(&mut events, 0, later, 20).unwrap();
+    session.schedule_device_response(&mut ledger, &mut events, id, target, "answer").unwrap();
+    session.schedule_device_input(&mut events, 1, target, 30).unwrap();
+
+    let prepared = session.prepare_io_tick(&mut events).unwrap();
+    assert_eq!(prepared.next_event(1).map(|(index, _)| index), Some(2));
+    assert!(matches!(prepared.commit_device_events(&mut ledger, &[]),
+        Err(ResponseTickError::Input(TickInputError::InputCount))));
+    assert_eq!(session.position().tick, 0);
+
+    let ready = session.prepare_io_tick(&mut events).unwrap()
+        .commit_device_events(&mut ledger, &[true]).unwrap();
+    assert_eq!(ready.len(), 3);
+    assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 10 }));
+    assert!(matches!(&ready[1].payload, DeviceEvent::Response(response)
+        if response.request_id() == id && response.tag() == 7 && response.payload() == &"answer"));
+    assert!(matches!(ready[2].payload, DeviceEvent::Input { instance: 1, payload: 30 }));
+
+    let ready = session.prepare_io_tick(&mut events).unwrap()
+        .commit_device_events(&mut ledger, &[false]).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 20 }));
+}
+
+#[test]
 fn cross_coupled_nor_updates_from_the_same_old_state() {
     let circuit = ClockedNor::check(NorNetlist {
         input_count: 2,
