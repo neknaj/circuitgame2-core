@@ -13,6 +13,8 @@ use super::{
 };
 use alloc::vec::Vec;
 use vstd::prelude::*;
+#[cfg(verus_only)]
+use vstd::string::StringSliceAdditionalSpecFns;
 
 verus! {
 
@@ -38,7 +40,7 @@ pub struct IndexedDefinitionBinding<'p, 'a> {
     pub resolved: ResolvedDefinitionReference<'p, 'a>,
 }
 
-/// 全定義の参照を調べた際に最初に見つかった診断。
+/// 定義内の参照を解決できなかった理由と位置。
 #[derive(Debug)]
 pub struct DefinitionBatchError<'p, 'a> {
     /// 元の参照を構文木上でたどるための位置。
@@ -47,6 +49,15 @@ pub struct DefinitionBatchError<'p, 'a> {
     pub site: DefinitionReferenceSite<'p, 'a>,
     /// 解決できなかった理由と関連箇所。
     pub reason: DefinitionReferenceReason<'p, 'a>,
+}
+
+/// 構文が確定したプロジェクトの定義参照を調べた結果。
+#[derive(Debug)]
+pub struct DefinitionReferences<'p, 'a> {
+    /// 解決できた参照。正規化済みソース一覧と各ファイルの元ソース順。
+    pub bindings: Vec<IndexedDefinitionBinding<'p, 'a>>,
+    /// 解決できなかった参照の診断。解決できた参照と同じ基準で並べる。
+    pub diagnostics: Vec<DefinitionBatchError<'p, 'a>>,
 }
 
 spec fn before(a: DefinitionPosition, b: DefinitionPosition) -> bool {
@@ -68,9 +79,13 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, result)
     }
 
+    spec fn rejection_at(&self, item: DefinitionBatchError) -> bool {
+        self.resolution_at(item.position, Err(DefinitionReferenceError::Rejected { site: item.site, reason: item.reason }))
+    }
+
     #[verifier::opaque]
     spec fn resolutions_before(
-        &self, stop: DefinitionPosition, found: Seq<IndexedDefinitionBinding>,
+        &self, stop: DefinitionPosition, found: Seq<IndexedDefinitionBinding>, errors: Seq<DefinitionBatchError>,
     ) -> bool {
         &&& forall|i: int| 0 <= i < found.len() ==> {
             let item = #[trigger] found[i];
@@ -78,44 +93,60 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             &&& before(item.position, stop)
             &&& self.resolution_at(item.position, Ok(item.resolved))
         }
-        &&& forall|at: DefinitionPosition| #[trigger] self.valid_reference(at) && before(at, stop)
-            ==> exists|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == at
+        &&& forall|i: int| 0 <= i < errors.len() ==> {
+            let item = #[trigger] errors[i];
+            &&& self.valid_reference(item.position)
+            &&& before(item.position, stop)
+            &&& self.rejection_at(item)
+        }
+        &&& forall|at: DefinitionPosition| #[trigger] self.valid_reference(at) && before(at, stop) ==> (
+            (exists|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == at)
+            || (exists|i: int| 0 <= i < errors.len() && (#[trigger] errors[i]).position == at)
+        )
         &&& forall|i: int, j: int| 0 <= i < j < found.len()
             ==> before((#[trigger] found[i]).position, (#[trigger] found[j]).position)
+        &&& forall|i: int, j: int| 0 <= i < j < errors.len()
+            ==> before((#[trigger] errors[i]).position, (#[trigger] errors[j]).position)
+        &&& forall|i: int, j: int| 0 <= i < found.len() && 0 <= j < errors.len()
+            ==> (#[trigger] found[i]).position != (#[trigger] errors[j]).position
     }
 
     proof fn advance_empty(
-        &self, at: DefinitionPosition, next: DefinitionPosition, found: Seq<IndexedDefinitionBinding>,
+        &self, at: DefinitionPosition, next: DefinitionPosition,
+        found: Seq<IndexedDefinitionBinding>, errors: Seq<DefinitionBatchError>,
     )
         requires
-            self.resolutions_before(at, found),
+            self.resolutions_before(at, found, errors),
             before(at, next),
             forall|p: DefinitionPosition| #[trigger] self.valid_reference(p) && before(p, next) ==> before(p, at),
-        ensures self.resolutions_before(next, found),
+        ensures self.resolutions_before(next, found, errors),
     {
         reveal(UseAliases::resolutions_before);
     }
 
     proof fn record(
         &self, at: DefinitionPosition, next: DefinitionPosition, found: Seq<IndexedDefinitionBinding>,
-        item: IndexedDefinitionBinding,
+        errors: Seq<DefinitionBatchError>, item: IndexedDefinitionBinding,
     )
         requires
-            self.resolutions_before(at, found),
+            self.resolutions_before(at, found, errors),
             self.valid_reference(at),
             item.position == at,
             self.resolution_at(at, Ok(item.resolved)),
             next == (DefinitionPosition { reference: (at.reference + 1) as usize, ..at }),
             at.reference < usize::MAX,
-        ensures self.resolutions_before(next, found.push(item)),
+        ensures self.resolutions_before(next, found.push(item), errors),
     {
         reveal(UseAliases::resolutions_before);
         let extended = found.push(item);
         assert forall|p: DefinitionPosition| #[trigger] self.valid_reference(p) && before(p, next)
-            implies exists|i: int| 0 <= i < extended.len() && (#[trigger] extended[i]).position == p by {
+            implies (exists|i: int| 0 <= i < extended.len() && (#[trigger] extended[i]).position == p)
+                || (exists|i: int| 0 <= i < errors.len() && (#[trigger] errors[i]).position == p) by {
             if before(p, at) {
-                let i = choose|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == p;
-                assert(extended[i] == found[i]);
+                if exists|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == p {
+                    let i = choose|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == p;
+                    assert(extended[i] == found[i]);
+                }
             } else {
                 assert(p == at);
                 assert(extended[found.len() as int].position == p);
@@ -123,10 +154,40 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         };
     }
 
+    proof fn record_rejection(
+        &self, at: DefinitionPosition, next: DefinitionPosition, found: Seq<IndexedDefinitionBinding>,
+        errors: Seq<DefinitionBatchError>, item: DefinitionBatchError,
+    )
+        requires
+            self.resolutions_before(at, found, errors),
+            self.valid_reference(at),
+            item.position == at,
+            self.rejection_at(item),
+            next == (DefinitionPosition { reference: (at.reference + 1) as usize, ..at }),
+            at.reference < usize::MAX,
+        ensures self.resolutions_before(next, found, errors.push(item)),
+    {
+        reveal(UseAliases::resolutions_before);
+        let extended = errors.push(item);
+        assert forall|p: DefinitionPosition| #[trigger] self.valid_reference(p) && before(p, next)
+            implies (exists|i: int| 0 <= i < found.len() && (#[trigger] found[i]).position == p)
+                || (exists|i: int| 0 <= i < extended.len() && (#[trigger] extended[i]).position == p) by {
+            if before(p, at) {
+                if exists|i: int| 0 <= i < errors.len() && (#[trigger] errors[i]).position == p {
+                    let i = choose|i: int| 0 <= i < errors.len() && (#[trigger] errors[i]).position == p;
+                    assert(extended[i] == errors[i]);
+                }
+            } else {
+                assert(p == at);
+                assert(extended[errors.len() as int].position == p);
+            }
+        };
+    }
+
     /// 解決結果が、構文済みプロジェクトの全定義参照に元ソース順で対応することを表す。
     pub closed spec fn definition_bindings_match(&self, found: Seq<IndexedDefinitionBinding>) -> bool {
         let file = self.targets.project_model().circuits_model().len() as usize;
-        self.resolutions_before(DefinitionPosition { file, entry: 0, definition: 0, reference: 0 }, found)
+        self.resolutions_before(DefinitionPosition { file, entry: 0, definition: 0, reference: 0 }, found, Seq::empty())
     }
 
     pub(super) proof fn definition_binding_at(&self, found: Seq<IndexedDefinitionBinding>, i: int)
@@ -158,8 +219,48 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 診断が、先行する参照をすべて解決した後の最初の違反に対応することを表す。
     pub closed spec fn definition_batch_error_evidence(&self, error: DefinitionBatchError) -> bool {
         &&& self.valid_reference(error.position)
-        &&& self.resolution_at(error.position, Err(DefinitionReferenceError::Rejected { site: error.site, reason: error.reason }))
-        &&& exists|prefix: Seq<IndexedDefinitionBinding>| #[trigger] self.resolutions_before(error.position, prefix)
+        &&& self.rejection_at(error)
+        &&& exists|prefix: Seq<IndexedDefinitionBinding>| #[trigger] self.resolutions_before(error.position, prefix, Seq::empty())
+    }
+
+    /// 全参照がソース順の解決結果または根拠付きの診断に一度ずつ現れることを表す。
+    pub closed spec fn definition_references_match(&self, result: DefinitionReferences) -> bool {
+        let file = self.targets.project_model().circuits_model().len() as usize;
+        self.resolutions_before(
+            DefinitionPosition { file, entry: 0, definition: 0, reference: 0 },
+            result.bindings@, result.diagnostics@,
+        )
+    }
+
+    /// 診断の根拠と、主範囲が解析時のファイルと版に属することを示す。
+    pub proof fn definition_reference_diagnostic_at(
+        &self, project: &crate::project::CircuitProject, targets: &super::UseTargets,
+        result: DefinitionReferences, index: int,
+    )
+        requires
+            crate::project::use_targets_match(project, *targets),
+            super::use_aliases_match(targets, *self),
+            self.definition_references_match(result),
+            0 <= index < result.diagnostics@.len(),
+        ensures ({
+            let item = result.diagnostics@[index];
+            let at = item.position;
+            let span = item.site.name.span;
+            let text = item.site.source.text_model().spec_bytes();
+            &&& self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference,
+                Err(DefinitionReferenceError::Rejected { site: item.site, reason: item.reason }))
+            &&& at.file < project.sources_model().len()
+            &&& *item.site.source == project.sources_model()[at.file as int]
+            &&& span.start < span.end <= text.len()
+            &&& vstd::utf8::is_char_boundary(text, span.start as int)
+            &&& vstd::utf8::is_char_boundary(text, span.end as int)
+        }),
+    {
+        reveal(UseAliases::resolutions_before);
+        let item = result.diagnostics@[index];
+        targets.matched_project(project);
+        self.rejected_reference_location(item.position, item.site, item.reason);
+        item.site.source.text_model_is_text();
     }
 
     /// 構文済みプロジェクトの全 `def` の右辺にある回路名と型名を解決する。
@@ -177,11 +278,42 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => self.definition_batch_error_evidence(error),
         },
     {
+        match self.scan_definitions(false) {
+            Ok(result) => Ok(result.bindings),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// 構文が確定したプロジェクトの各定義参照を解決する。
+    ///
+    /// 一つの参照を解決できなくても後続を調べる。返す診断の主範囲と関連箇所は
+    /// 解析に使ったソースの版を指す。[`crate::project::check_use_aliases`]
+    /// が返した別名表を使う。
+    pub fn resolve_definitions_with_diagnostics(&self) -> (result: DefinitionReferences<'p, 'a>)
+        requires self.can_resolve(),
+        ensures self.definition_references_match(result),
+    {
+        match self.scan_definitions(true) {
+            Ok(result) => result,
+            Err(_) => unreachable!(),
+        }
+    }
+
+    fn scan_definitions(&self, keep_going: bool)
+        -> (result: Result<DefinitionReferences<'p, 'a>, DefinitionBatchError<'p, 'a>>)
+        requires self.can_resolve(),
+        ensures match result {
+            Ok(result) => self.definition_references_match(result)
+                && (!keep_going ==> self.definition_bindings_match(result.bindings@)),
+            Err(error) => !keep_going && self.definition_batch_error_evidence(error),
+        },
+    {
         let project = self.targets.project();
         let circuits = project.circuits();
         let mut found = Vec::new();
+        let mut errors = Vec::new();
         let mut at = DefinitionPosition { file: 0, entry: 0, definition: 0, reference: 0 };
-        assert(self.resolutions_before(at, found@)) by { reveal(UseAliases::resolutions_before); }
+        assert(self.resolutions_before(at, found@, errors@)) by { reveal(UseAliases::resolutions_before); }
         while at.file < circuits.len()
             invariant
                 self.can_resolve(),
@@ -190,7 +322,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 project.has_parsed_sources(),
                 at.file <= circuits@.len(),
                 at.file == circuits@.len() ==> at.entry == 0 && at.definition == 0 && at.reference == 0,
-                self.resolutions_before(at, found@),
+                !keep_going ==> errors@ == Seq::<DefinitionBatchError>::empty(),
+                self.resolutions_before(at, found@, errors@),
             decreases
                 circuits@.len() - at.file,
                 if at.file < circuits@.len() { circuits@[at.file as int].entry_ranges@.len() - at.entry } else { 0 },
@@ -204,7 +337,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let parsed = &circuits[at.file];
             if at.entry >= parsed.entry_ranges.len() {
                 let next = DefinitionPosition { file: at.file + 1, entry: 0, definition: 0, reference: 0 };
-                proof { self.advance_empty(at, next, found@); }
+                proof { self.advance_empty(at, next, found@, errors@); }
                 at = next;
                 continue;
             }
@@ -216,7 +349,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             let definitions = &parsed.entry_ranges[at.entry].definitions;
             if at.definition >= definitions.end - definitions.start {
                 let next = DefinitionPosition { entry: at.entry + 1, definition: 0, reference: 0, ..at };
-                proof { self.advance_empty(at, next, found@); }
+                proof { self.advance_empty(at, next, found@, errors@); }
                 at = next;
                 continue;
             }
@@ -227,34 +360,39 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             proof { build_definition_scope_evidence(source.text, &parsed.build_model(), at.entry as int, position as int); }
             if at.reference >= references.end - references.start {
                 let next = DefinitionPosition { definition: at.definition + 1, reference: 0, ..at };
-                proof { self.advance_empty(at, next, found@); }
+                proof { self.advance_empty(at, next, found@, errors@); }
                 at = next;
                 continue;
             }
             assert(self.valid_reference(at));
             let result = self.resolve_definition_reference(at.file, at.entry, at.definition, at.reference);
-            let resolved = match result {
-                Ok(resolved) => resolved,
+            let next = DefinitionPosition { reference: at.reference + 1, ..at };
+            match result {
+                Ok(resolved) => {
+                    let item = IndexedDefinitionBinding { position: at, resolved };
+                    proof { self.record(at, next, found@, errors@, item); }
+                    found.push(item);
+                },
                 Err(DefinitionReferenceError::Rejected { site, reason }) => {
                     let error = DefinitionBatchError { position: at, site, reason };
-                    assert(self.definition_batch_error_evidence(error)) by {
-                        assert(self.resolution_at(at, Err(DefinitionReferenceError::Rejected { site, reason })));
-                        assert(self.resolutions_before(at, found@));
-                    };
-                    return Err(error);
+                    if !keep_going {
+                        assert(self.definition_batch_error_evidence(error)) by {
+                            assert(self.rejection_at(error));
+                            assert(self.resolutions_before(at, found@, Seq::empty()));
+                        };
+                        return Err(error);
+                    }
+                    proof { self.record_rejection(at, next, found@, errors@, error); }
+                    errors.push(error);
                 },
                 Err(DefinitionReferenceError::UnknownPosition) => {
                     proof { self.valid_position_is_not_unknown(at.file, at.entry, at.definition, at.reference); }
                     unreachable!();
                 },
-            };
-            let next = DefinitionPosition { reference: at.reference + 1, ..at };
-            let item = IndexedDefinitionBinding { position: at, resolved };
-            proof { self.record(at, next, found@, item); }
-            found.push(item);
+            }
             at = next;
         }
-        Ok(found)
+        Ok(DefinitionReferences { bindings: found, diagnostics: errors })
     }
 }
 

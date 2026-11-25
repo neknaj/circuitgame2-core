@@ -66,7 +66,7 @@ pub use structure_types::{
     StructureFieldType, StructureIndexError, StructureLayout, StructureLayoutError, StructureLayoutField, StructureLayouts,
     StructurePlacementError, StructurePosition, StructureResolutionError, StructureTypeError, StructureTypeReference, StructureOperation, StructureOperationError, TypedStructureOperation,
 };
-pub use batch::{DefinitionBatchError, DefinitionPosition, IndexedDefinitionBinding};
+pub use batch::{DefinitionBatchError, DefinitionPosition, DefinitionReferences, IndexedDefinitionBinding};
 pub use call_dependencies::{FunctionCallSite, FunctionExpansionError, FunctionExpansionOrder};
 pub use call_arity::{
     CallInputError, CallInputReason, CallPortType, CheckedCallInputs, FuncArityError, FuncCallArity, FuncCallInputsError, FuncCallSignature, FuncCallSignatureError,
