@@ -22,6 +22,25 @@ cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target t
 
 組み込み例を確認するときは GND を共通にし、GP2 に 3.3 V ロジックの信号を入れる。GP2 と GP3 をロジックアナライザーで観測すると、次の tick で反転値が現れる設計になっている。端子の位置は、使用するボードのピン配置図で確認する。 [Pico シリーズのピン配置](https://www.raspberrypi.com/documentation/microcontrollers/pico-series.html)
 
+## 名前付き回路を UART につなぐ
+
+`ncg2 rp-plan` に UART と GPIO の設定を渡すと、ファームウェアで使う配線表を生成できる。
+UART の回路ポートには単一ビットの名前を指定し、`rx-data` と `tx-data` は最下位ビットから8個並べる。回路の各入力に割り当てる駆動元は一つ。GPIO と UART の両方に同じ入力を指定すると、`rp-plan` が重複を報告する。
+UART0 と UART1 のいずれか1系統を選び、TX/RX を指定する。GPIO のみの設定は従来の `ncg2-rp-gpio-v1` を使う。
+
+```sh
+ncg2 rp-plan --project circuitgame2.toml --board board.toml > board.rp
+NCG2_RP_PROGRAM="$PWD/board.rp" cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,uart --bin ncg2-rp
+```
+
+Pico 2 では `--target thumbv8m.main-none-eabihf --features pico2,uart` を使う。配線表には UTF-8 のテキストを指定する。ボーレートがボードの周辺クロックと Embassy の分周値で設定できない場合、ファームウェアは UART を起動せずに停止する。回線は 8N1 で、ハードウェアによるフロー制御は使わない。
+
+tick の開始時に、直前に確定した回路出力と今回のデバイス入力を照合する。`rx-valid` と `rx-ready` がともに1なら、今回の受信イベントを回路に渡す。回路が受け取るまで受信データと異常フラグを保持する。フレーミング等の異常は `rx-framing`、受信列のあふれは `rx-overrun` で示す。受信列のあふれはまとめて通知する。
+
+`tx-valid` と `tx-ready` がともに1の tick が確定すると、送信要求を通信タスクへ渡す。一度に1件を処理し、完了通知を要求 ID と世代で照合する。届いた結果は `tx-done` と `tx-ok` で示し、回路が `tx-done-ready` を1にするまで保持する。異常終了した送信は自動で再試行しない。
+
+tick の期限を超えた場合、候補の回路状態と要求を確定せずに実行を止める。同じ tick を再実行する入口は設けていない。生成したファームウェアはボードの reset で、UART、待ち行列、台帳を初期化する。通信ピンで既にやり取りされたデータは、ボードの状態と別に扱う。
+
 ## UART の折り返し例
 
 `ncg2-rp-uart` は UART0 で受信した1バイトを、組み込みの回路のビット入出力を通して送り返す。この実行例では組み込みの配線を使う。Pico と Pico 2 のどちらも 115200 baud、8N1、フロー制御なしで動作する。

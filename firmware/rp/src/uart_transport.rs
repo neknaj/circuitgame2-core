@@ -64,7 +64,7 @@ type RawMutex = CriticalSectionRawMutex;
 static GENERATION: Mutex<RawMutex, Cell<u64>> = Mutex::new(Cell::new(0));
 static GENERATION_CHANGED: Signal<RawMutex, ()> = Signal::new();
 static RX: Channel<RawMutex, (u64, InputEvent), 16> = Channel::new();
-static RX_OVERFLOW: Signal<RawMutex, u64> = Signal::new();
+static RX_OVERFLOW: Mutex<RawMutex, Cell<Option<u64>>> = Mutex::new(Cell::new(None));
 static TX: Channel<RawMutex, TxCommand, 1> = Channel::new();
 static COMPLETIONS: Channel<RawMutex, Completion, 1> = Channel::new();
 
@@ -110,16 +110,29 @@ fn generation() -> u64 {
 
 /// 現在の世代でソフトウェア受信列があふれたことを、次の tick に伝える。
 pub(super) fn take_overflow(current: u64) -> bool {
-    RX_OVERFLOW.try_take() == Some(current)
+    RX_OVERFLOW.lock(|at| at.take() == Some(current))
+}
+
+/// 現在の世代のあふれ通知を、その通知を残したまま確認する。
+#[cfg(rp_uart_program)]
+pub(super) fn has_overflow(current: u64) -> bool {
+    RX_OVERFLOW.lock(|at| at.get() == Some(current))
 }
 
 /// 読み取りを待たずに、現在の世代が受け付けた次の受信イベントを得る。
 pub(super) fn take_input(current: u64) -> Option<InputEvent> {
-    // executor の同じターンでは生産側が進まない。古いイベントの走査は固定容量で終わる。
-    while let Ok((at, event)) = RX.try_receive() {
+    pending_input(current)?;
+    RX.try_receive().ok().map(|(_, event)| event)
+}
+
+/// 現在の世代の先頭イベントを、候補 tick に載せるために借りる。
+pub(super) fn pending_input(current: u64) -> Option<InputEvent> {
+    // 同じ executor ターンで稼働する唯一の読み手。旧世代のイベントだけをここで破棄する。
+    while let Ok((at, event)) = RX.try_peek() {
         if at == current {
             return Some(event);
         }
+        let _ = RX.try_receive();
     }
     None
 }
@@ -162,7 +175,7 @@ async fn receive(mut rx: BufferedUartRx) {
         // バッファーから取り出した時点でホストの受信イベントとして記録する。
         let at = generation();
         if RX.try_send((at, event)).is_err() {
-            RX_OVERFLOW.signal(at);
+            RX_OVERFLOW.lock(|value| value.set(Some(at)));
         }
         // バッファーに連続してデータがある場合も tick に実行機会を渡す。
         embassy_futures::yield_now().await;

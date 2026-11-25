@@ -1,5 +1,11 @@
 //! 一つのルート回路と GPIO 接続を、RP 向けの配線配置にまとめる。
 
+mod uart;
+
+pub use uart::{RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartOutputPorts, UartPortNames, UartSetup};
+#[cfg(verus_only)]
+pub use uart::{uart_assignment, uart_image_ports_match, uart_image_requests, uart_output_indices_fit};
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -183,13 +189,13 @@ spec fn input_at(bindings: Seq<GpioBinding>, ports: Seq<usize>, port: usize) -> 
 }
 
 fn input_pin(bindings: &[GpioBinding], ports: &[usize], port: usize) -> (pin: Option<u8>)
-    requires bindings@.len() == ports@.len(),
+    requires bindings@.len() <= ports@.len(),
     ensures pin == input_at(bindings@, ports@, port),
 {
     let mut i = 0;
     while i < bindings.len()
         invariant
-            i <= bindings@.len() == ports@.len(),
+            i <= bindings@.len() <= ports@.len(),
             forall|j: int| 0 <= j < i ==> !#[trigger] is_input_at(bindings@[j], ports@[j], port),
         decreases bindings.len() - i,
     {
@@ -241,7 +247,7 @@ spec fn outputs_before(bindings: Seq<GpioBinding>, ports: Seq<usize>, end: nat) 
 }
 
 fn append_outputs(bindings: &[GpioBinding], ports: &[usize], port: usize, output: &mut Vec<GpioOutputPin>)
-    requires bindings@.len() == ports@.len(),
+    requires bindings@.len() <= ports@.len(),
     ensures final(output)@ == old(output)@ + outputs_at(bindings@, ports@, port),
 {
     let ghost rows = Seq::new(bindings@.len(), |i: int| output_for_port(bindings@[i], ports@[i], port));
@@ -251,7 +257,7 @@ fn append_outputs(bindings: &[GpioBinding], ports: &[usize], port: usize, output
     let mut i = 0;
     while i < bindings.len()
         invariant
-            i <= bindings@.len() == ports@.len() == rows.len(),
+            i <= bindings@.len() == rows.len() <= ports@.len(),
             forall|j: int| 0 <= j < rows.len() ==> #[trigger] rows[j] == output_for_port(bindings@[j], ports@[j], port),
             forall|entry: Option<GpioOutputPin>| #[trigger] some(entry) == entry.is_some(),
             forall|entry: Option<GpioOutputPin>| entry.is_some() ==> #[trigger] unwrap(entry) == entry.unwrap(),

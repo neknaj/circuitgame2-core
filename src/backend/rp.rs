@@ -2,9 +2,15 @@
 
 mod image;
 
-pub use image::{GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin};
+pub use image::{
+    GpioBinding, GpioCircuitImage, GpioImageError, GpioOutputPin, RpInputSource, UartCircuitImage,
+    UartImageError, UartInputSignal, UartOutputPorts, UartPortNames, UartSetup,
+};
 #[cfg(verus_only)]
-pub use image::{gpio_assignment, gpio_binding_indices_match, gpio_image_ports_match, gpio_request};
+pub use image::{
+    gpio_assignment, gpio_binding_indices_match, gpio_image_ports_match, gpio_request,
+    uart_assignment, uart_image_ports_match, uart_image_requests, uart_output_indices_fit,
+};
 
 use vstd::prelude::*;
 
