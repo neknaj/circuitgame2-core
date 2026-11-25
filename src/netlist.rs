@@ -34,6 +34,11 @@ pub use source_vm_trace::{
 };
 
 pub use bit_sliced::PackedNorFrame;
+pub use circuitgame2_packed_nor::{
+    PackedNorGate32, PackedNorPlan32, PackedNorSizeError, PackedNorWireError, nor_word32,
+};
+#[cfg(verus_only)]
+pub use circuitgame2_packed_nor::{gate_value_matches, nor_lane_bit32, wires_fit};
 #[cfg(verus_only)]
 pub use bit_sliced::{
     nor_lane, nor_lane_bit, packed_nor_reset_agrees, packed_nor_reset_matches, packed_nor_step_agrees,
