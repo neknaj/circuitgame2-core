@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::ncg2m::call_evaluation::DefnEvaluationBody;
-use super::super::super::typing::scalar::checked_if_keeps_child_types;
+use super::super::fragment::declared_call_syntax_uses_signature;
+use super::super::super::typing::scalar::{accepted_call_has_entry, checked_if_keeps_child_types};
 
 verus! {
 
@@ -89,6 +90,53 @@ pub(crate) proof fn defn_checked_if_child_sites<'p, 'a>(
     assert(at < condition < yes < no < subtree_limit(forms, at));
     checked_if_keeps_child_types(calls, body.source.text_model(), forms, body.signature.parameters@,
         at, expected, condition, yes, no);
+}
+
+// 型検査で使った署名から、同じ宣言を指す元の式位置の辺を取り出す。
+#[verifier::spinoff_prover]
+pub(crate) proof fn defn_checked_call_has_edge<'p, 'a>(
+    aliases: &MixedUseAliases<'_, 'p, 'a>, caller: DefnPosition, row: Seq<DefnCallEdge<'p, 'a>>,
+    body: DefnEvaluationBody<'p, 'a>, at: usize, expected: DataType,
+) -> (site: int)
+    requires
+        defn_checked_expression_site(aliases, caller, row, body, at, expected),
+        expression_slot(body.source.text_model(), body.forms@, body.at, at),
+        scalar_call_syntax_at(body.source.text_model(), body.forms@, at),
+    ensures
+        0 <= site < row.len(),
+        row[site].at == at,
+        row[site].from == caller,
+        *row[site].call.source == *body.source,
+        row[site].call.span == form_span(body.forms@[at as int]),
+        row[site].call.head == form_span(body.forms@[at + 1]),
+{
+    recorded_call_typing_matches(aliases, caller, row);
+    let (root, start, signature, outcomes, calls, issues, trace) = recorded_call_typing(aliases, caller, row);
+    let source = body.source.text_model();
+    let forms = body.forms@;
+    declared_call_syntax_uses_signature(source, forms, at);
+    let index = accepted_call_has_entry(calls, source, forms, body.signature.parameters@, at, expected);
+    let entry = calls[index as int];
+    assert(entry_witness(entry, outcomes, start)) by { reveal(call_inputs_match); };
+    reveal(entry_witness);
+    assert(start <= at < start + outcomes.len());
+    let result = outcomes[at - start]->Some_0->Ok_0;
+    let declaration = result->Declared_declaration;
+    let target = DefnPosition { file: declaration.file, item: declaration.item };
+    reveal(all_slots_projected);
+    assert(exists|i: int| 0 <= i < row.len() && {
+        let edge = #[trigger] row[i];
+        &&& edge.from == caller && edge.at == at && edge.to == target
+        &&& edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
+    });
+    let site = choose|i: int| 0 <= i < row.len() && {
+        let edge = #[trigger] row[i];
+        &&& edge.from == caller && edge.at == at && edge.to == target
+        &&& edge.call.span == form_span(forms[at as int]) && edge.call.head == form_span(forms[at + 1])
+    };
+    trace_entry_in_range(calls, trace, start, forms.len(), site);
+    assert(edge_projects(body.source, forms, calls[trace[site] as int], row[site]));
+    site
 }
 
 // 同じ型検査の記録から、選んだ呼び出しとその引数の型を取り出す。

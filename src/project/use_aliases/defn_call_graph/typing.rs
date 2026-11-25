@@ -3,9 +3,9 @@
 use super::*;
 use crate::ncg2m::call_evaluation::scalar::ScalarExpressionSite;
 use crate::ncg2m::data_types::{BuiltinDataType, DataType, DataTypeAtom};
-use crate::ncg2m::expression_types::conditional_positions;
+use crate::ncg2m::expression_types::{conditional_positions, expression_slot, scalar_call_syntax_at};
 use crate::ncg2m::expression_types::named_call::{
-    defn_checked_call_arguments, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
+    defn_checked_call_arguments, defn_checked_call_has_edge, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root,
 };
 
 verus! {
@@ -61,6 +61,40 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         let row = self.calls_model_at_rank(rank)->Some_0;
         defn_checked_if_child_sites(aliases, self.order_model()[rank as int], row, body, site.at,
             site.expected, condition, yes, no);
+    }
+
+    /// 型検査済みの宣言呼び出しの、元の構文位置と呼び出し先の順位を計画から得る。
+    pub proof fn checked_call_site_at_rank(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize,
+        body: DefnEvaluationBody<'p, 'a>, position: ScalarExpressionSite<'a>,
+    ) -> (site: usize)
+        requires
+            defn_call_plan_matches(aliases, self), self.scalar_site_is_checked(aliases, rank, body, position),
+            expression_slot(body.source.text_model(), body.forms@, body.at, position.at),
+            scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at),
+        ensures self.calls_model_at_rank(rank) matches Some(row) && site < row.len() && {
+            let edge = row[site as int];
+            let order = self.order_model();
+            &&& edge.at == position.at
+            &&& edge.from == order[rank as int]
+            &&& *edge.call.source == *body.source
+            &&& edge.call.span == form_span(body.forms@[position.at as int])
+            &&& edge.call.head == form_span(body.forms@[position.at + 1])
+            &&& defn_call_arguments(body.forms@, position.at, edge.arguments@)
+            &&& order.contains(edge.to)
+            &&& order.index_of(edge.to) < rank
+        },
+    {
+        defn_call_plan_edge_order(aliases, self, rank);
+        let row = self.calls_model_at_rank(rank)->Some_0;
+        let decl = self.order_model()[rank as int];
+        let site = defn_checked_call_has_edge(aliases, decl, row, body, position.at, position.expected);
+        let storage = self.edges@[self.order@[rank as int] as int];
+        assert(storage.len() == row.len());
+        let site = site as usize;
+        let at = defn_call_plan_site_at_rank(aliases, self, rank, site);
+        assert(at == position.at);
+        site
     }
 
     /// 型検査済みの宣言呼び出しについて、戻り型の一致と呼び出し元の環境における引数の型判断を示す。

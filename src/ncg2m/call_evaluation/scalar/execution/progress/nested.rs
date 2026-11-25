@@ -1,7 +1,9 @@
 //! 呼び出しの探索から、同じ型検査を根拠に引数や呼び出し先の本体へ進む。
 
 use super::*;
-use crate::ncg2m::expression_types::conditional_positions;
+use crate::ncg2m::expression_types::{
+    conditional_positions, expression_slot, expression_slot_at_root, scalar_call_syntax_at,
+};
 
 mod resume;
 mod returning;
@@ -41,6 +43,57 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             &&& self.plan.calls_model_at_rank(self.rank) matches Some(row) && candidate < row.len()
                 && row[candidate as int].at == position.at
         }
+    }
+
+    /// 評価位置が元の本体の式で、スカラーを返す宣言呼び出しの構文を持つことを表す。
+    pub closed spec fn evaluates_declared_scalar_call(&self) -> bool {
+        self.active matches Active::Expression(expr) && {
+            let body = expr.frame_model().body_model();
+            let position = expr.expression_model();
+            &&& expression_slot(body.source.text_model(), body.forms@, body.at, position.at)
+            &&& scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at)
+            &&& position.expected.list_depth == 0
+            &&& (position.expected.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
+        }
+    }
+
+    /// 評価中の型付き宣言呼び出しに対応する辺が、同じ計画から得られることを示す。
+    pub proof fn checked_expression_finds_call_site(&self, aliases: &MixedUseAliases<'_, 'p, 'a>)
+        -> (site: usize)
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()),
+            self.evaluates_checked_expression(aliases), self.evaluates_declared_scalar_call(),
+        ensures self.evaluates_indexed_scalar_call(aliases, site),
+    {
+        let expr = self.active->Expression_0;
+        self.plan.checked_call_site_at_rank(aliases, self.rank, expr.frame_model().body_model(), expr.expression_model())
+    }
+
+    /// 開始状態の本体がスカラーを返す宣言呼び出しなら、計画から辺を得て探索を始める。
+    pub proof fn checked_root_call_starts_lookup(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, rank: usize, frame: ScalarCallFrame<'p, 'a>,
+        result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()),
+            self.starts_with(self.plan_model(), rank, frame),
+            self.plan_model().body_matches_at_rank(rank, frame.body_model()),
+            self.step_matches(result),
+            ({
+                let body = frame.body_model();
+                &&& scalar_call_syntax_at(body.source.text_model(), body.forms@, body.at)
+                &&& body.signature.result_type.ty.list_depth == 0
+                &&& (body.signature.result_type.ty.atom matches DataTypeAtom::Builtin(
+                    BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
+            }),
+        ensures result matches Ok(ScalarExecutionSlice::Suspended(after)) && after.searches_checked_scalar_call(aliases),
+    {
+        reveal(ScalarExecution::starts_with);
+        let body = frame.body_model();
+        expression_slot_at_root(body.source.text_model(), body.forms@, body.at);
+        self.plan.scalar_body_site_is_checked(aliases, rank, body);
+        let site = self.checked_expression_finds_call_site(aliases);
+        self.checked_call_expression_starts_lookup(aliases, site, result);
     }
 
     /// 型検査済みの式に対応する宣言呼び出しの探索を、同じ仮引数環境で始める。

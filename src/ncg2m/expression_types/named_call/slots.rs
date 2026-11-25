@@ -164,7 +164,7 @@ fn read_expression_child(source: &str, forms: &[Form], owner: usize, at: usize) 
 /// 本体の根から式の位置だけをたどって到達できることを表す。
 ///
 /// 型注釈、束縛名、構文テンプレートの内部は式としてたどらない。
-pub(in crate::ncg2m) closed spec fn expression_slot(source: &str, forms: Seq<Form>, root: usize, at: usize) -> bool
+pub closed spec fn expression_slot(source: &str, forms: Seq<Form>, root: usize, at: usize) -> bool
     decreases at - root,
 {
     if root > at || at >= forms.len() {
@@ -178,6 +178,12 @@ pub(in crate::ncg2m) closed spec fn expression_slot(source: &str, forms: Seq<For
         }
     }
 }
+
+/// 本体の根は式の位置である。
+pub proof fn expression_slot_at_root(source: &str, forms: Seq<Form>, root: usize)
+    requires root < forms.len(),
+    ensures expression_slot(source, forms, root, root),
+{}
 
 pub(in crate::ncg2m) proof fn expression_slot_bounds(source: &str, forms: Seq<Form>, root: usize, at: usize)
     requires expression_slot(source, forms, root, at),
