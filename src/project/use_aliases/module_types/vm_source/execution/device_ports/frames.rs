@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use vstd::prelude::*;
 use vstd::slice::slice_subrange;
+use crate::device::DeviceStateSession;
 #[cfg(verus_only)]
 use crate::netlist::ClockedVm;
 
@@ -48,6 +49,10 @@ impl ClockedDeviceVm {
     pub fn into_device_session<I, R>(self) -> (result: (crate::device::DeviceEventSession<I, R>, DevicePortMap))
         ensures
             result.0.valid(),
+            result.0.model().0.position_model() == (crate::time::TickPosition { generation: 0, tick: 0 }),
+            result.0.model().1.requests().len() == 0,
+            result.0.model().2.len() == 0,
+            result.0.ids_model().next_model() == 0,
             result.1.ports_model() == self.ports_model(),
             result.1.frame_width(PortDirection::Input) == self.module_model().inputs.total_bits_model(),
             result.1.frame_width(PortDirection::Output) == self.module_model().outputs.total_bits_model(),
@@ -68,6 +73,22 @@ impl ClockedDeviceVm {
             vm.reset_snapshot(circuit.output_model());
         }
         (session, ports)
+    }
+
+    /// 初期化済みの状態を設定順に受け取り、同じ VM のポート配置と実行を返す。
+    pub fn into_device_state_session<I, R, S>(self, initial: Vec<S>)
+        -> (result: (DeviceStateSession<I, R, S>, DevicePortMap))
+        ensures
+            result.0.execution_model().valid(),
+            result.0.states_model() == initial@,
+            result.0.execution_model().model().0.position_model() ==
+                (crate::time::TickPosition { generation: 0, tick: 0 }),
+            result.1.ports_model() == self.ports_model(),
+            result.1.fits_vm(&result.0.execution_model().model().0.vm_model()),
+            result.1.frame_width(PortDirection::Output) == result.0.execution_model().model().0.output_model().len(),
+    {
+        let (execution, ports) = self.into_device_session();
+        (DeviceStateSession::from_initial_execution(execution, initial), ports)
     }
 }
 

@@ -920,7 +920,7 @@ fn device_port_configuration_uses_the_compiled_vm_bit_ranges() {
     assert_eq!(lowered.port(3).unwrap().bits, 0..1);
     assert!(lowered.port(4).is_none());
 
-    let (mut session, ports) = lowered.into_device_session::<(), ()>();
+    let (mut session, ports) = lowered.into_device_state_session::<(), (), u32>(vec![0]);
     let mut input = vec![false; ports.frame_len(PortDirection::Input)];
     ports.write_input(1, &mut input, &[true]).unwrap();
     assert_eq!(input, [false, false, false, false, true]);
@@ -931,7 +931,8 @@ fn device_port_configuration_uses_the_compiled_vm_bit_ranges() {
     assert_eq!(input, [false, false, false, false, true]);
 
     ports.write_input(2, &mut input, &[false, false, true, false]).unwrap();
-    session.prepare_tick().unwrap().commit(&input).unwrap();
+    session.prepare_tick().unwrap().commit::<(), ()>(vec![1], &input, &[]).unwrap();
+    assert_eq!(session.states(), &[1]);
     let next = session.prepare_tick().unwrap();
     assert_eq!(next.previous_output().len(), ports.frame_len(PortDirection::Output));
     assert_eq!(ports.read_output(0, next.previous_output()).unwrap(), &[true]);
