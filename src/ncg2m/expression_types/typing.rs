@@ -2,6 +2,9 @@
 
 use super::*;
 use super::super::let_syntax::LetHeader;
+use super::fold::checked_fold_item;
+#[cfg(verus_only)]
+use super::fold::fold_item_type;
 
 verus! {
 
@@ -42,6 +45,8 @@ spec fn typed_expression<'a>(
             },
             Ok(_) => unknown_form(span),
         }
+    } else if let Ok(Expression::Fold(header)) = shape(source, forms, at) {
+        typed_fold(source, forms, env, at, header, goal)
     } else {
         match goal {
             Goal::Check(expected) => match step_model(source, forms, env, Request { expected, ..request }) {
@@ -97,6 +102,57 @@ spec fn typed_expression<'a>(
                 Ok(_) => Ok(ty),
             },
         },
+    }
+}
+
+spec fn fold_input_request(header: FoldHeader) -> (Request, Goal) {
+    match header.kind {
+        FoldKind::Nat => {
+            let nat_type = scalar_type(BuiltinDataType::Integer(IntegerType::Nat));
+            (Request { at: header.input, expected: nat_type, list: None }, Goal::Check(nat_type))
+        }
+        FoldKind::List => (inferred_request(header.input), Goal::Infer),
+    }
+}
+
+spec fn fold_initial_request(header: FoldHeader, goal: Goal) -> Request {
+    match goal {
+        Goal::Check(ty) => Request { at: header.initial, expected: ty, list: None },
+        Goal::Infer => inferred_request(header.initial),
+    }
+}
+
+spec fn fold_environment(
+    source: &str, forms: Seq<Form>, env: Seq<TypeBinding>, header: FoldHeader, item: TypeShape, accumulator: TypeShape,
+) -> Seq<TypeBinding> {
+    seq![(spelling(source, forms[header.accumulator as int]), accumulator)]
+        + (seq![(spelling(source, forms[header.item as int]), item)] + env)
+}
+
+#[verifier::opaque]
+spec fn typed_fold<'a>(
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, header: FoldHeader, goal: Goal,
+) -> Result<TypeShape, ExpressionCheckFailure<'a>>
+    decreases forms.len() - at, 1nat, 0nat,
+{
+    if fold_positions(forms, at, header) {
+        let (input, goal_for_input) = fold_input_request(header);
+        match typed_expression(source, forms, env, input, goal_for_input) {
+            Err(error) => Err(error),
+            Ok(ty) => match fold_item_type(header.kind, ty, form_span(forms[header.input as int])) {
+                Err(error) => Err(error),
+                Ok(item_type) => match typed_expression(source, forms, env, fold_initial_request(header, goal), goal) {
+                    Err(error) => Err(error),
+                    Ok(accumulator) => {
+                        let body = Request { at: header.body, expected: accumulator, list: None };
+                        typed_expression(source, forms, fold_environment(source, forms, env, header, item_type, accumulator),
+                            body, Goal::Check(accumulator))
+                    }
+                },
+            },
+        }
+    } else {
+        unknown_form(form_span(forms[at as int]))
     }
 }
 
@@ -174,6 +230,7 @@ enum FormPlan {
     InferConditional { condition: usize, yes: usize, no: usize },
     InferList { first: usize },
     Let(LetHeader),
+    Fold(FoldHeader),
 }
 
 #[cfg(verus_only)]
@@ -182,6 +239,7 @@ enum PlanModel {
     InferConditional { condition: usize, yes: usize, no: usize },
     InferList { first: usize },
     Let { rows: Seq<LocalBinding>, body: usize },
+    Fold(FoldHeader),
 }
 
 spec fn project_plan(plan: FormPlan) -> PlanModel {
@@ -190,6 +248,7 @@ spec fn project_plan(plan: FormPlan) -> PlanModel {
         FormPlan::InferConditional { condition, yes, no } => PlanModel::InferConditional { condition, yes, no },
         FormPlan::InferList { first } => PlanModel::InferList { first },
         FormPlan::Let(header) => PlanModel::Let { rows: header.bindings@, body: header.body },
+        FormPlan::Fold(header) => PlanModel::Fold(header),
     }
 }
 
@@ -212,6 +271,7 @@ spec fn form_plan<'a>(
             Err(error) => Err(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
             Ok((rows, body)) => Ok(PlanModel::Let { rows, body }),
         },
+        Ok(Expression::Fold(header)) => Ok(PlanModel::Fold(header)),
         Ok(expr) => match goal {
             Goal::Check(ty) => checked_plan(source, forms, env, request, ty),
             Goal::Infer => match expr {
@@ -234,6 +294,7 @@ spec fn planned_children_fit(forms: Seq<Form>, parent: usize, plan: FormPlan) ->
             &&& parent < header.body < subtree_limit(forms, parent) <= forms.len()
             &&& valid_bindings(forms, header.bindings@, parent, header.body)
         }
+        FormPlan::Fold(header) => fold_positions(forms, parent, header),
         FormPlan::Check(step, _) => step_children_fit(forms, parent, step),
         FormPlan::InferList { first } => {
             &&& forms[parent as int] is List
@@ -259,6 +320,9 @@ fn read_form_plan<'a>(
 {
     let at = request.at;
     let expr = read_shape(source, forms, at)?;
+    if let Expression::Fold(header) = expr {
+        return Ok(FormPlan::Fold(header));
+    }
     if matches!(expr, Expression::Let) {
         let header = match read_let_structure(source, forms, at) {
             Ok(header) => header,
@@ -319,6 +383,8 @@ enum Await {
     InferredNo { no: usize, expected: TypeShape },
     Element { at: usize, owner: usize, element: Option<TypeShape>, scope: Scope },
     Binding { header: LetHeader, binding_owner: Job, index: usize, body_scope: Scope },
+    FoldInput { fold: FoldHeader, goal: Goal, scope: Scope },
+    FoldInitial { fold: FoldHeader, item_type: TypeShape, scope: Scope },
 }
 
 enum Action {
@@ -348,6 +414,7 @@ spec fn wait_in_bounds(forms: Seq<Form>, awaiting: Await) -> bool {
             &&& owner.request.at < header.body < forms.len()
             &&& valid_bindings(forms, header.bindings@, owner.request.at, header.body)
         }
+        Await::FoldInput { fold, .. } | Await::FoldInitial { fold, .. } => fold_positions(forms, fold._at, fold),
     }
 }
 
@@ -356,7 +423,8 @@ spec fn wait_has_scopes(locals: &LocalScopes, awaiting: Await) -> bool {
         Await::Peer(job) => locals.contains(job.scope),
         Await::CheckedCondition { scope, .. } | Await::CheckedYes { scope, .. }
         | Await::InferredCondition { scope, .. } | Await::InferredYes { scope, .. }
-        | Await::Element { scope, .. } => locals.contains(scope),
+        | Await::Element { scope, .. } | Await::FoldInput { scope, .. }
+        | Await::FoldInitial { scope, .. } => locals.contains(scope),
         Await::Binding { binding_owner, body_scope, .. } =>
             locals.contains(binding_owner.scope) && locals.contains(body_scope),
         _ => true,
@@ -382,6 +450,7 @@ spec fn wait_limit(forms: Seq<Form>, waiting: Await, child: Job) -> usize {
         Await::InferredCondition { no, .. } | Await::InferredYes { no, .. } => subtree_limit(forms, no),
         Await::Element { owner, .. } => subtree_limit(forms, owner),
         Await::Binding { header, .. } => subtree_limit(forms, header.body),
+        Await::FoldInput { fold, .. } | Await::FoldInitial { fold, .. } => subtree_limit(forms, fold.body),
     }
 }
 
@@ -400,6 +469,8 @@ spec fn wait_follows(forms: Seq<Form>, waiting: Await, child: Job) -> bool {
             && forms[owner as int] is List,
         Await::Binding { header, index, .. } => index < header.bindings@.len()
             && child.request.at == header.bindings@[index as int].value && child.request.list.is_none(),
+        Await::FoldInput { fold, .. } => child.request.at == fold.input && child.request.list.is_none(),
+        Await::FoldInitial { fold, .. } => child.request.at == fold.initial && child.request.list.is_none(),
     }
 }
 
@@ -480,6 +551,23 @@ spec fn resumed_type<'a>(
             let extended = seq![typed] + lexical_view(parameters, locals, body_scope);
             continue_bindings(source, forms, env, owner, header, (index + 1) as nat, extended)
         }
+        Await::FoldInput { fold, goal, scope } => {
+            let env = lexical_view(parameters, locals, scope);
+            match fold_item_type(fold.kind, ty, form_span(forms[fold.input as int])) {
+                Err(error) => Err(error),
+                Ok(item) => match typed_expression(source, forms, env, fold_initial_request(fold, goal), goal) {
+                    Err(error) => Err(error),
+                    Ok(accumulator) => typed_expression(source, forms,
+                        fold_environment(source, forms, env, fold, item, accumulator),
+                        Request { at: fold.body, expected: accumulator, list: None }, Goal::Check(accumulator)),
+                },
+            }
+        }
+        Await::FoldInitial { fold, item_type, scope } => {
+            let env = lexical_view(parameters, locals, scope);
+            typed_expression(source, forms, fold_environment(source, forms, env, fold, item_type, ty),
+                Request { at: fold.body, expected: ty, list: None }, Goal::Check(ty))
+        }
     }
 }
 
@@ -537,6 +625,18 @@ proof fn checked_answer_is_expected<'a>(
         let body_request = Request { at: body, list: None, ..request };
         assert(typed_expression(source, forms, extended, body_request, Goal::Check(expected)) == Ok(actual));
         checked_answer_is_expected(source, forms, extended, body_request, expected, actual);
+    } else if let Ok(Expression::Fold(fold)) = shape(source, forms, request.at) {
+        reveal(typed_fold);
+        let goal = Goal::Check(expected);
+        let initial = fold_initial_request(fold, goal);
+        let (input, input_goal) = fold_input_request(fold);
+        let input_ty = typed_expression(source, forms, env, input, input_goal)->Ok_0;
+        let item = fold_item_type(fold.kind, input_ty, form_span(forms[fold.input as int]))->Ok_0;
+        let accumulator = typed_expression(source, forms, env, initial, goal)->Ok_0;
+        assert(fold_positions(forms, request.at, fold));
+        checked_answer_is_expected(source, forms, env, initial, expected, accumulator);
+        checked_answer_is_expected(source, forms, fold_environment(source, forms, env, fold, item, accumulator),
+            Request { at: fold.body, expected: accumulator, list: None }, accumulator, actual);
     }
 }
 
@@ -675,6 +775,32 @@ proof fn let_plan_type<'a>(
     }
 }
 
+fn start_fold_action<'a>(
+    _source: &'a str, _forms: &[Form], _parameters: &[SignatureParameter<'a>], _locals: &LocalScopes<'a>,
+    job: Job, fold: FoldHeader,
+) -> (result: Action)
+    requires usable_forms(_source, _forms@), job.request.list.is_none(), _locals.contains(job.scope),
+        fold_positions(_forms@, job.request.at, fold),
+        form_plan(_source, _forms@, lexical_view(_parameters@, _locals, job.scope), job.request, job.goal)
+            == Ok(PlanModel::Fold(fold)),
+    ensures
+        action_valid(_forms@, _locals, result),
+        action_advances(_forms@, result, (job.request.at + 1) as usize),
+        action_limit(_forms@, result) <= subtree_limit(_forms@, job.request.at),
+        action_type(_source, _forms@, _parameters@, _locals, Ok(result)) == job_type(_source, _forms@, _parameters@, _locals, job),
+{
+    let input = match fold.kind {
+        FoldKind::Nat => {
+            let nat_type = scalar(BuiltinDataType::Integer(IntegerType::Nat));
+            check_job(Request { at: fold.input, expected: nat_type, list: None }, job.scope)
+        }
+        FoldKind::List => infer_job(fold.input, job.scope),
+    };
+    reveal_with_fuel(typed_expression, 2);
+    reveal_with_fuel(typed_fold, 2);
+    Action::Visit(input, Some(Await::FoldInput { fold, goal: job.goal, scope: job.scope }))
+}
+
 fn start_action<'a>(
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], locals: &LocalScopes<'a>, job: Job,
 ) -> (result: Result<Action, ExpressionCheckFailure<'a>>)
@@ -696,6 +822,7 @@ fn start_action<'a>(
         }
     };
     match plan {
+        FormPlan::Fold(fold) => Ok(start_fold_action(source, forms, parameters, locals, job, fold)),
         FormPlan::Check(step, ty) => {
             proof { plan_check_is_checked(source, forms@, env, req, job.goal, step, ty); }
             match step {
@@ -740,6 +867,57 @@ fn start_action<'a>(
             }
         }
     }
+}
+
+fn accept_fold_input<'a>(
+    _source: &'a str, forms: &[Form], _parameters: &[SignatureParameter<'a>], _locals: &LocalScopes<'a>,
+    fold: FoldHeader, goal: Goal, scope: Scope, ty: TypeShape, Ghost(child): Ghost<Job>,
+) -> (result: Result<Action, ExpressionCheckFailure<'a>>)
+    requires usable_forms(_source, forms@), _locals.contains(scope), fold_positions(forms@, fold._at, fold),
+        wait_follows(forms@, Await::FoldInput { fold, goal, scope }, child),
+    ensures result matches Ok(action) ==> action_valid(forms@, _locals, action)
+        && action_advances(forms@, action, request_limit(forms@, child.request))
+        && action_limit(forms@, action) <= wait_limit(forms@, Await::FoldInput { fold, goal, scope }, child),
+    action_type(_source, forms@, _parameters@, _locals, result)
+        == resumed_type(_source, forms@, _parameters@, _locals, Await::FoldInput { fold, goal, scope }, ty),
+{
+    let item_type = checked_fold_item(fold.kind, ty, span_of(&forms[fold.input]))?;
+    let seed = match goal {
+        Goal::Infer => infer_job(fold.initial, scope),
+        Goal::Check(expected) => check_job(Request { at: fold.initial, expected, list: None }, scope),
+    };
+    Ok(Action::Visit(seed, Some(Await::FoldInitial { fold, item_type, scope })))
+}
+
+fn accept_fold_initial<'a>(
+    source: &'a str, forms: &[Form], _parameters: &[SignatureParameter<'a>], locals: &mut LocalScopes<'a>,
+    fold: FoldHeader, item_type: TypeShape, scope: Scope, ty: TypeShape, Ghost(child): Ghost<Job>,
+) -> (result: Action)
+    requires usable_forms(source, forms@), old(locals).contains(scope), fold_positions(forms@, fold._at, fold),
+        wait_follows(forms@, Await::FoldInitial { fold, item_type, scope }, child),
+    ensures action_valid(forms@, final(locals), result)
+        && action_advances(forms@, result, request_limit(forms@, child.request))
+        && action_limit(forms@, result) <= wait_limit(forms@, Await::FoldInitial { fold, item_type, scope }, child),
+    action_type(source, forms@, _parameters@, final(locals), Ok(result))
+        == resumed_type(source, forms@, _parameters@, old(locals), Await::FoldInitial { fold, item_type, scope }, ty),
+    forall|older: Scope| #[trigger] old(locals).contains(older) ==> final(locals).contains(older)
+        && final(locals).local_types(older) == old(locals).local_types(older),
+{
+    let item = LocalType { name: source_word(source, forms, fold.item), ty: item_type };
+    let accumulator = LocalType { name: source_word(source, forms, fold.accumulator), ty };
+    let ghost before = *locals;
+    let item_scope = locals.extend(scope, item);
+    let ghost intermediate = *locals;
+    let body_scope = locals.extend(item_scope, accumulator);
+    proof {
+        assert forall|older: Scope| #[trigger] before.contains(older) implies
+            locals.contains(older) && locals.local_types(older) == before.local_types(older) by {
+            assert(intermediate.contains(older));
+        };
+        assert(lexical_view(_parameters@, locals, body_scope) =~= fold_environment(source, forms@,
+            lexical_view(_parameters@, &before, scope), fold, item_type, ty));
+    }
+    Action::Visit(check_job(Request { at: fold.body, expected: ty, list: None }, body_scope), None)
 }
 
 
@@ -971,6 +1149,10 @@ fn accept_result<'a>(
             accept_element(source, forms, _parameters, locals, at, owner, element, scope, ty, Ghost(child)),
         Await::Binding { header, binding_owner: owner, index, body_scope } =>
             accept_binding(source, forms, _parameters, locals, header, owner, index, body_scope, ty, Ghost(child)),
+        Await::FoldInput { fold, goal, scope } =>
+            accept_fold_input(source, forms, _parameters, locals, fold, goal, scope, ty, Ghost(child)),
+        Await::FoldInitial { fold, item_type, scope } =>
+            Ok(accept_fold_initial(source, forms, _parameters, locals, fold, item_type, scope, ty, Ghost(child))),
 
     }
 }
@@ -1376,6 +1558,10 @@ proof fn verify_inferred_context<'a>(
             let (extended, body) = inferred_let_body(source, forms, env, at, ty);
             verify_inferred_context(source, forms, extended, body, ty);
         }
+        Ok(Expression::Fold(fold)) => {
+            inferred_fold_initial(source, forms, env, at, fold, ty);
+            verify_inferred_context(source, forms, env, fold.initial, ty);
+        }
         Ok(Expression::Conditional { condition, yes, no }) => {
             inferred_branches(source, forms, env, at, ty, condition, yes, no);
             verify_inferred_context(source, forms, env, yes, ty);
@@ -1392,6 +1578,25 @@ proof fn verify_inferred_context<'a>(
             reveal_with_fuel(typed_expression, 2);
         }
     }
+}
+
+proof fn inferred_fold_initial<'a>(
+    source: &'a str, forms: Seq<Form>, env: Seq<TypeBinding>, at: usize, fold: FoldHeader, ty: TypeShape,
+)
+    requires at < forms.len(), inferred_as(source, forms, env, at, ty),
+        shape(source, forms, at) == Ok(Expression::Fold(fold)),
+    ensures at < fold.initial < forms.len(), inferred_as(source, forms, env, fold.initial, ty),
+        typed_expression(source, forms, env, Request { at: fold.initial, expected: ty, list: None }, Goal::Check(ty)) == Ok(ty)
+            ==> typed_expression(source, forms, env, Request { at, expected: ty, list: None }, Goal::Check(ty)) == Ok(ty),
+{
+    reveal_with_fuel(typed_expression, 2);
+    reveal_with_fuel(typed_fold, 2);
+    let (input, input_goal) = fold_input_request(fold);
+    let input_ty = typed_expression(source, forms, env, input, input_goal)->Ok_0;
+    let item = fold_item_type(fold.kind, input_ty, form_span(forms[fold.input as int]))->Ok_0;
+    let accumulator = typed_expression(source, forms, env, fold_initial_request(fold, Goal::Infer), Goal::Infer)->Ok_0;
+    let body = Request { at: fold.body, expected: accumulator, list: None };
+    checked_answer_is_expected(source, forms, fold_environment(source, forms, env, fold, item, accumulator), body, accumulator, ty);
 }
 
 proof fn inferred_let_body<'a>(

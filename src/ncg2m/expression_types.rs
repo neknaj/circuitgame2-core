@@ -33,8 +33,13 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+mod fold;
 mod local_scopes;
 mod typing;
+pub use fold::FoldSyntaxError;
+use fold::{FoldHeader, FoldKind, read_fold_header};
+#[cfg(verus_only)]
+use fold::{fold_header, fold_positions};
 use local_scopes::{LocalScopes, Scope};
 use typing::check_typed_body;
 #[cfg(verus_only)]
@@ -60,6 +65,10 @@ pub enum ExpressionTypeError<'a> {
     ListNeedsAnnotation(Range<usize>),
     /// 局所束縛の外形か束縛名に違反がある。
     Let(LetSyntaxError),
+    /// 反復式の束縛名に違反がある。
+    Fold(FoldSyntaxError),
+    /// `fold-list` の入力にリスト型を要求する範囲。
+    FoldListInput(Range<usize>),
     /// `as-type` の型として読めない。
     Annotation(DefnHeaderError),
     /// 期待型と式の型で `List` の深さが異なる。
@@ -127,6 +136,7 @@ enum FormTag {
     FunctionLiteral,
     List,
     Let,
+    Fold(FoldKind),
 }
 
 #[derive(Clone, Copy)]
@@ -138,6 +148,7 @@ enum Expression {
     Conditional { condition: usize, yes: usize, no: usize },
     List,
     Let,
+    Fold(FoldHeader),
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +211,8 @@ spec fn keyword(word: Seq<u8>) -> Option<FormTag> {
     else if word == "fn".spec_bytes() { Some(FormTag::FunctionLiteral) }
     else if word == "list".spec_bytes() { Some(FormTag::List) }
     else if word == "let".spec_bytes() { Some(FormTag::Let) }
+    else if word == "fold-nat".spec_bytes() { Some(FormTag::Fold(FoldKind::Nat)) }
+    else if word == "fold-list".spec_bytes() { Some(FormTag::Fold(FoldKind::List)) }
     else { None }
 }
 
@@ -211,6 +224,8 @@ fn read_keyword(word: &str) -> (tag: Option<FormTag>)
     else if is_spelling(word, "fn") { Some(FormTag::FunctionLiteral) }
     else if is_spelling(word, "list") { Some(FormTag::List) }
     else if is_spelling(word, "let") { Some(FormTag::Let) }
+    else if is_spelling(word, "fold-nat") { Some(FormTag::Fold(FoldKind::Nat)) }
+    else if is_spelling(word, "fold-list") { Some(FormTag::Fold(FoldKind::List)) }
     else { None }
 }
 
@@ -284,6 +299,10 @@ spec fn shape(source: &str, forms: Seq<Form>, at: usize) -> Result<Expression, E
                     Err(ExpressionCheckFailure::Type(ExpressionTypeError::FunctionLiteral(span))),
                 Some(FormTag::List) => Ok(Expression::List),
                 Some(FormTag::Let) => Ok(Expression::Let),
+                Some(FormTag::Fold(kind)) => match fold_header(source, forms, at, kind) {
+                    Ok(header) => Ok(Expression::Fold(header)),
+                    Err(error) => Err(error),
+                },
                 None => deferred,
             },
         _ => deferred,
@@ -293,6 +312,7 @@ spec fn shape(source: &str, forms: Seq<Form>, at: usize) -> Result<Expression, E
 fn read_shape<'a>(source: &'a str, forms: &[Form], at: usize) -> (result: Result<Expression, ExpressionCheckFailure<'a>>)
     requires usable_forms(source, forms@), at < forms@.len(),
     ensures result == shape(source, forms@, at),
+        result matches Ok(Expression::Fold(header)) ==> fold_positions(forms@, at, header),
 {
     match &forms[at] {
         Form::Atom { kind: AtomKind::Natural, .. } => return Ok(Expression::Integer { negative: false }),
@@ -327,6 +347,10 @@ fn read_shape<'a>(source: &'a str, forms: &[Form], at: usize) -> (result: Result
                     }
                     Some(FormTag::List) => return Ok(Expression::List),
                     Some(FormTag::Let) => return Ok(Expression::Let),
+                    Some(FormTag::Fold(kind)) => {
+                        let header = read_fold_header(source, forms, at, kind)?;
+                        return Ok(Expression::Fold(header));
+                    }
                     None => {},
                 }
             }
@@ -583,6 +607,7 @@ spec fn step_model<'a>(
             Err(error) => Err(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
             Ok(_) => Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(span))),
         },
+        Ok(Expression::Fold(_)) => Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(span))),
         Ok(Expression::Annotated { annotation, value }) =>
             match type_at(source, forms, annotation, annotation, 0) {
                 Err(error) => Err(ExpressionCheckFailure::Type(ExpressionTypeError::Annotation(error))),
@@ -725,6 +750,7 @@ fn read_check_step<'a>(
             Err(error) => Err(ExpressionCheckFailure::Type(ExpressionTypeError::Let(error))),
             Ok(_) => Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(span_of(&forms[at])))),
         },
+        Expression::Fold(_) => Err(ExpressionCheckFailure::Deferred(DeferredExpression::Form(span_of(&forms[at])))),
         Expression::Annotated { annotation, value } => {
             let syntax = match read_type(source, forms, annotation) {
                 Ok(syntax) => syntax,
@@ -891,12 +917,16 @@ pub proof fn checked_body_signature_origin(source: &str, signature: DefnSignatur
 /// `let` の右辺と本体は、他の式に入れ子にしても同じ規則で検査する。右辺は外側の型環境で
 /// 左から検査し、すべて検査できた後に本体へ束縛を導入する。右辺ではリテラル、局所名の参照、
 /// `as-type`、`if`、空でない `list` の型を求める。各分岐や各要素の型を個別に求め、一致を確かめる。
+/// `fold-nat` の添字は `Nat`、`fold-list` の要素は入力リストの要素型とする。両方の反復で
+/// 本体を初期値と同じ型で検査する。反復回数が0の場合も本体を検査する。
+/// `fold-list` の入力に空のリストを書く場合は、型注釈で要素型を指定する。
 /// 本体が検査を通れば、元ソースの範囲を持つ署名を返す。
 ///
 /// # Errors
 ///
 /// 検査順で最初に見つかった違反、または保留の理由を返す。
 /// `let` は束縛列の文法と名前の重複を検査してから、右辺と本体の型を検査する。
+/// 反復式は引数の個数、束縛名、入力、初期値、本体の順に検査する。
 /// 後段で扱うフォーム、現在の環境に束縛されていない名前、段階固有の型、真偽値と束縛名の
 /// 綴りが重なる箇所は保留する。
 ///
