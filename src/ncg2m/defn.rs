@@ -375,7 +375,8 @@ spec fn span_bytes(source: &str, span: Range<usize>) -> Seq<u8> {
     source.spec_bytes()[span.start as int..span.end as int]
 }
 
-pub(crate) open spec fn readable_span(source: &str, span: Range<usize>) -> bool {
+/// 空でない範囲の両端が元ソースの UTF-8 文字境界にある。
+pub open spec fn readable_span(source: &str, span: Range<usize>) -> bool {
     let bytes = source.spec_bytes();
     span.start < span.end <= bytes.len()
         && vstd::utf8::is_char_boundary(bytes, span.start as int)
