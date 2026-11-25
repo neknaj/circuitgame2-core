@@ -28,12 +28,13 @@ pub enum ResponseStatus {
     /// 受理済みの応答を指定した tick まで保持している。
     Held(TickPosition),
     /// 応答を回路とデバイスの更新と一緒に消費した。
-    Consumed,
+    Consumed(TickPosition),
 }
 
 /// 1件の要求に対応する応答の受理と消費を管理する。
 ///
 /// payload の型はデバイスの記述に従って別途検査し、応答が受理されたときに保留する。
+#[derive(Clone, Copy)]
 pub struct ResponseSlot {
     id: HostRequestId,
     issued_tick: u64,
@@ -49,6 +50,20 @@ impl ResponseSlot {
 
     /// 応答の受理・配送状態。
     pub closed spec fn status_model(&self) -> ResponseStatus { self.status }
+
+    /// 応答を待つ要求の ID を返す。
+    pub fn id(&self) -> (id: HostRequestId)
+        ensures id == self.id_model(),
+    {
+        self.id
+    }
+
+    /// 応答の受理・配送状態を返す。
+    pub fn status(&self) -> (status: ResponseStatus)
+        ensures status == self.status_model(),
+    {
+        self.status
+    }
 
     /// 指定の要求を、応答待ちの状態で登録する。
     pub fn new(id: HostRequestId, issued_tick: u64) -> (slot: Self)
@@ -146,7 +161,7 @@ impl ResponseSlot {
     pub fn consume_at(&mut self, position: TickPosition) -> (consumed: bool)
         ensures
             consumed <==> old(self).status_model() == ResponseStatus::Held(position),
-            consumed ==> final(self).status_model() == ResponseStatus::Consumed
+            consumed ==> final(self).status_model() == ResponseStatus::Consumed(position)
                 && final(self).id_model() == old(self).id_model()
                 && final(self).issued_model() == old(self).issued_model(),
             !consumed ==> *final(self) == *old(self),
@@ -156,7 +171,7 @@ impl ResponseSlot {
             return false;
         }
         assert(expected == position);
-        self.status = ResponseStatus::Consumed;
+        self.status = ResponseStatus::Consumed(position);
         true
     }
 }
