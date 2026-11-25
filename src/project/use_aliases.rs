@@ -54,6 +54,7 @@ pub use module_types::{clocked_link_plan_result, clocked_regions_cover, clocked_
 mod module_wiring;
 pub use module_wiring::{BoundModuleSignal, ModuleWiring, ModuleWiringError};
 mod port_types;
+mod reference_cursor;
 mod relative;
 mod selection_arguments;
 mod signature_cache;

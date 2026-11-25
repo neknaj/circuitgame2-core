@@ -1,5 +1,7 @@
 //! 厳格構文木を使って基底、別名、定義の参照を検査する。
 
+mod definition_lookup;
+
 use super::use_aliases::own_conflict;
 #[cfg(verus_only)]
 use super::use_aliases::owned_conflict_matches;
