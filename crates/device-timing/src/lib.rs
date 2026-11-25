@@ -16,7 +16,10 @@ pub use clock::clock_change_matches;
 pub use period::exact_microseconds;
 pub use request_ids::{HostRequestId, IssuedRequestIds, PendingRequestIds, RequestIdError, RequestIds, RequestKey};
 
-pub use fixed_requests::{FixedIssueError, FixedReceiveError, FixedRequestLedger, FixedRequestRow, FixedTickError};
+pub use fixed_requests::{
+    CommittedFixedTick, FixedIssueError, FixedPrepareError, FixedReceiveError, FixedRequestLedger,
+    FixedRequestRow, FixedTickError, PreparedFixedTick,
+};
 #[cfg(verus_only)]
 pub use fixed_requests::delivery_due_at;
 pub use response::{HostResponseError, ResponseSlot, ResponseStatus};

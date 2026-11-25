@@ -106,6 +106,13 @@ impl SimulationClock {
         self.position
     }
 
+    // 更新候補を別に保持する間、現在の時刻を複製する。
+    pub(crate) fn snapshot(&self) -> (snapshot: Self)
+        ensures snapshot == *self,
+    {
+        Self { position: self.position }
+    }
+
     /// 同じ reset 世代の次の tick を準備する。
     ///
     /// # Errors

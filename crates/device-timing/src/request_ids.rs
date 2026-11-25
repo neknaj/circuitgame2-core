@@ -77,6 +77,14 @@ impl RequestIds {
         (serial as u128) < self.next
     }
 
+    // 確定前の候補にだけ通し番号を割り当てられるように現在の状態を複製する。
+    pub(crate) fn snapshot(&self) -> (snapshot: Self)
+        ensures snapshot == *self,
+    {
+        proof { use_type_invariant(self); }
+        Self { generation: self.generation, next: self.next }
+    }
+
     // 台帳に書き込む準備が済むまで、現在の採番状態を保持して次の状態だけを作る。
     pub(crate) fn next_request(&self, instance: usize) -> (result: Result<(Self, HostRequestId), RequestIdError>)
         ensures
@@ -90,8 +98,7 @@ impl RequestIds {
             },
             result matches Err(error) ==> error == RequestIdError::SerialOutOfRange,
     {
-        proof { use_type_invariant(self); }
-        let mut next = Self { generation: self.generation, next: self.next };
+        let mut next = self.snapshot();
         let pending = next.prepare(1)?;
         let Some(id) = pending.proposed_id(0, instance) else { unreachable!() };
         pending.commit();

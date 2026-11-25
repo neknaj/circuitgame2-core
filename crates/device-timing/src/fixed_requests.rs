@@ -1,5 +1,9 @@
 //! 固定容量のスロットで要求と応答を対応付ける。
 
+mod batch;
+
+pub use batch::{CommittedFixedTick, FixedPrepareError, PreparedFixedTick};
+
 #[cfg(not(verus_only))]
 use verus_builtin_macros::verus;
 #[cfg(verus_only)]
