@@ -200,7 +200,7 @@ proof fn representative_serial_boundaries() {
     assert(last.fits(1)) by (compute);
     assert(!last.fits(2)) by (compute);
 
-    let exhausted = RequestIds { generation: 0, next: u64::MAX as u128 + 1 };
+    let exhausted = RequestIds { generation: 0, next: (u64::MAX as int + 1) as u128 };
     assert(exhausted.fits(0)) by (compute);
     assert(!exhausted.fits(1)) by (compute);
 }
