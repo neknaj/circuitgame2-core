@@ -84,6 +84,55 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         }
     }
 
+    /// 一時停止した実行枠では、使った予算の分だけ残りの一時停止遷移の上限が減る。
+    pub proof fn suspended_slice_consumes_continuation_bound(&self, fuel: nat, after: Self)
+        requires scalar_execution_slice_matches(*self, fuel, Ok(ScalarExecutionSlice::Suspended(after))),
+        ensures after.remaining_continuations_bound() + fuel <= self.remaining_continuations_bound(),
+    {
+        let result = Ok(ScalarExecutionSlice::Suspended(after));
+        let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+            #[trigger] execution_path_result(*self, fuel, path, result);
+        reveal(execution_path);
+        continuation_bound_after_steps(*self, path, path.len() - 1);
+        assert(path[path.len() - 1] == after);
+    }
+
+    /// 対応断片の実行は、残りの一時停止回数の上限を超える予算で値か整数の診断を返す。
+    ///
+    /// 複数の正の実行枠を使う場合は、[resumed_scalar_execution_matches] で予算を合成できる。
+    pub proof fn supported_slice_finishes_by_continuation_bound(
+        &self, aliases: &MixedUseAliases<'_, 'p, 'a>, fuel: nat,
+        result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires
+            defn_call_plan_matches(aliases, self.plan_model()), self.preserves_supported_fragment(aliases),
+            self.remaining_continuations_bound() < fuel,
+            scalar_execution_slice_matches(*self, fuel, result),
+        ensures (result matches Ok(ScalarExecutionSlice::Complete(_))) || (result matches Err(ScalarExecutionError::Literal(_))),
+    {
+        self.supported_slice_does_not_defer(aliases, fuel, result);
+        if let Ok(ScalarExecutionSlice::Suspended(after)) = result {
+            self.suspended_slice_consumes_continuation_bound(fuel, after);
+            assert(false);
+        }
+    }
+
+    /// 一時停止した回数の上限に最後の一遷移を足せば、既に得た終端の結果まで届く。
+    pub proof fn terminal_slice_fits_continuation_bound(
+        &self, fuel: nat, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
+    )
+        requires scalar_execution_slice_matches(*self, fuel, result),
+            !(result matches Ok(ScalarExecutionSlice::Suspended(_))),
+        ensures scalar_execution_slice_matches(*self, self.remaining_continuations_bound() + 1, result),
+    {
+        let path = choose|path: Seq<ScalarExecution<'plan, 'p, 'a>>|
+            #[trigger] execution_path_result(*self, fuel, path, result);
+        reveal(execution_path);
+        continuation_bound_after_steps(*self, path, path.len() - 1);
+        assert(path.len() <= self.remaining_continuations_bound() + 1);
+        assert(execution_path_result(*self, self.remaining_continuations_bound() + 1, path, result));
+    }
+
     /// 予算が一つの実行枠の結果から、実装が行った一遷移を取り出す。
     pub proof fn one_step_slice_matches(
         &self, result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>,
@@ -101,6 +150,71 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         } else {
             assert(path.len() == 1 && path.last() == *self);
         }
+    }
+}
+
+// 正の実行枠を繰り返し与えたとき、途中で中断しなければ実際の評価が終端に達することを示す。
+#[cfg(verus_only)]
+#[allow(dead_code)]
+#[verifier::spinoff_prover]
+fn run_supported_slices_until_terminal<'plan, 'p, 'a>(
+    start: ScalarExecution<'plan, 'p, 'a>, fuel: NonZeroUsize, Ghost(aliases): Ghost<&MixedUseAliases<'_, 'p, 'a>>,
+) -> (result: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>)
+    requires defn_call_plan_matches(aliases, start.plan_model()), start.preserves_supported_fragment(aliases),
+    ensures
+        (result matches Ok(ScalarExecutionSlice::Complete(_))) || (result matches Err(ScalarExecutionError::Literal(_))),
+        scalar_execution_slice_matches(start, start.remaining_continuations_bound() + 1, result),
+{
+    let mut state = start;
+    let ghost mut spent: nat = 0;
+    loop
+        invariant
+            0 < fuel@,
+            state.plan_model() == start.plan_model(),
+            defn_call_plan_matches(aliases, state.plan_model()),
+            state.preserves_supported_fragment(aliases),
+            spent == 0 ==> state == start,
+            spent > 0 ==> scalar_execution_slice_matches(start, spent, Ok(ScalarExecutionSlice::Suspended(state))),
+        decreases state.remaining_continuations_bound(),
+    {
+        let ghost before = state;
+        let result = state.run_slice(fuel);
+        let ghost budget = spent + fuel@ as nat;
+        proof {
+            before.supported_slice_does_not_defer(aliases, fuel@ as nat, result);
+            if spent > 0 {
+                resumed_scalar_execution_matches(start, spent, before, fuel@ as nat, result);
+            }
+            assert(scalar_execution_slice_matches(start, budget, result));
+        }
+        match result {
+            Ok(ScalarExecutionSlice::Suspended(after)) => {
+                proof {
+                    before.suspended_slice_consumes_continuation_bound(fuel@ as nat, after);
+                    spent = budget;
+                }
+                state = after;
+            },
+            terminal => {
+                proof { start.terminal_slice_fits_continuation_bound(budget, terminal); }
+                return terminal;
+            },
+        }
+    }
+}
+
+proof fn continuation_bound_after_steps(start: ScalarExecution, path: Seq<ScalarExecution>, step: int)
+    requires execution_path(start, path), 0 <= step < path.len(),
+    ensures path[step].remaining_continuations_bound() + step <= start.remaining_continuations_bound(),
+    decreases step,
+{
+    reveal(execution_path);
+    if step > 0 {
+        continuation_bound_after_steps(start, path, step - 1);
+        let previous = path[step - 1];
+        let next = path[step];
+        assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(next))));
+        previous.execution_step_reduces_continuation_bound(next);
     }
 }
 
