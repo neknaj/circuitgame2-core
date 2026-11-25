@@ -881,9 +881,8 @@ fn reports_selection_in_a_call_at_the_argument_and_input_declaration() {
 
 #[test]
 fn device_port_configuration_uses_the_compiled_vm_bit_ranges() {
-    use circuitgame2_core::device::DeviceEventSession;
     use circuitgame2_core::project::{
-        ClockedDeviceVmError, ClockedModuleVmLimits, DeviceBindingsError, DevicePortRequest, DevicePortType,
+        ClockedDeviceVmError, ClockedModuleVmLimits, DeviceBindingsError, DevicePortIoError, DevicePortRequest, DevicePortType,
         PortDirection,
     };
 
@@ -921,14 +920,21 @@ fn device_port_configuration_uses_the_compiled_vm_bit_ranges() {
     assert_eq!(lowered.port(3).unwrap().bits, 0..1);
     assert!(lowered.port(4).is_none());
 
-    let (module, ports) = lowered.into_parts();
-    let mut session = DeviceEventSession::<(), ()>::new(module.vm);
-    let mut input = [false; 5];
-    input[ports[1].bits.clone()].copy_from_slice(&[true]);
-    input[ports[2].bits.clone()].copy_from_slice(&[false, false, true, false]);
+    let (mut session, ports) = lowered.into_device_session::<(), ()>();
+    let mut input = vec![false; ports.frame_len(PortDirection::Input)];
+    ports.write_input(1, &mut input, &[true]).unwrap();
+    assert_eq!(input, [false, false, false, false, true]);
+    assert!(matches!(
+        ports.write_input(2, &mut input, &[true]),
+        Err(DevicePortIoError::ValueWidth { request: 2, expected: 4, actual: 1 }),
+    ));
+    assert_eq!(input, [false, false, false, false, true]);
+
+    ports.write_input(2, &mut input, &[false, false, true, false]).unwrap();
     session.prepare_tick().unwrap().commit(&input).unwrap();
     let next = session.prepare_tick().unwrap();
-    assert_eq!(&next.previous_output()[ports[0].bits.clone()], &[true]);
-    assert_eq!(&next.previous_output()[ports[3].bits.clone()], &[true]);
+    assert_eq!(next.previous_output().len(), ports.frame_len(PortDirection::Output));
+    assert_eq!(ports.read_output(0, next.previous_output()).unwrap(), &[true]);
+    assert_eq!(ports.read_output(3, next.previous_output()).unwrap(), &[true]);
     next.cancel();
 }

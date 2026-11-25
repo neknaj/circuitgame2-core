@@ -4,7 +4,7 @@ mod concat;
 mod execution;
 mod vram;
 pub use execution::{ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
-pub use execution::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits};
+pub use execution::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits, DevicePortIoError, DevicePortMap};
 pub use execution::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 pub use vram::{VramOutputError, VramTarget};
 #[cfg(verus_only)]

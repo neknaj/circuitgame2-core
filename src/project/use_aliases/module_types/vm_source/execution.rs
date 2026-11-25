@@ -10,7 +10,7 @@ mod root_storage;
 #[cfg(verus_only)]
 mod source_links;
 mod vram_binding;
-pub use device_ports::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits};
+pub use device_ports::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits, DevicePortIoError, DevicePortMap};
 pub use vram_binding::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use hierarchy::ClockedModuleObservation;

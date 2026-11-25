@@ -10,7 +10,7 @@ mod source_arguments;
 mod vm_source;
 pub use vm_source::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
 pub use vm_source::{VramOutputError, VramTarget};
-pub use vm_source::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits};
+pub use vm_source::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits, DevicePortIoError, DevicePortMap};
 pub use vm_source::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use vm_source::ClockedModuleObservation;
