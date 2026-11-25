@@ -325,6 +325,13 @@ impl ClockedNor {
         &self.netlist
     }
 
+    /// 回路が出力するビットの数を返す。
+    pub(crate) fn output_count(&self) -> (count: usize)
+        ensures count == self.netlist_model().outputs@.len(),
+    {
+        self.netlist.outputs.len()
+    }
+
     /// 配線の仕様から参照する、検査済みのネットリスト。
     pub closed spec fn netlist_model(&self) -> NorNetlist {
         self.netlist
