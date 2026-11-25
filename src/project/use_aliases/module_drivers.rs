@@ -341,6 +341,18 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.typed_signature_sites(owner.file, owner.entry, limit, drivers.signature);
     }
 
+    /// 定義列と出典列が同じ長さであることを示す。
+    pub(super) proof fn module_driver_origin_count(
+        &self, owner: ModuleBodyPosition, limit: u64, drivers: ModuleDrivers,
+    )
+        requires self.module_drivers_result(owner, limit, Ok(Some(drivers))),
+        ensures drivers.origins@.len() == drivers.definitions@.len(),
+    {
+        let project = self.targets.project_model();
+        assert(target_origins_match(project.sources_model(), project.circuits_model(), drivers.definitions@, drivers.origins@));
+        reveal(target_origins_match);
+    }
+
     /// 各駆動元が、元の本体にある定義と左辺の出力順に対応することを取り出す。
     pub(super) proof fn module_driver_sites(
         &self, owner: ModuleBodyPosition, max_width: u64, drivers: ModuleDrivers, index: int,

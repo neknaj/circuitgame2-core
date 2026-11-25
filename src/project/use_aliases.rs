@@ -79,6 +79,10 @@ pub use mixed::{mixed_alias_conflict_evidence, mixed_alias_conflicts_agree, mixe
 mod relative;
 mod selection_arguments;
 mod signature_cache;
+mod signal_observations;
+pub use signal_observations::{SignalOccurrence, SignalOccurrenceKind, SignalRole};
+#[cfg(verus_only)]
+pub use signal_observations::{signal_occurrence_valid, signal_occurrences_in_document};
 mod single_bit_func;
 mod structure_types;
 pub use structure_types::{

@@ -263,6 +263,19 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         self.module_wiring_keeps_drivers(owner, limit, checked.typed.sources.roots.wiring);
     }
 
+    /// エディタが観測する型表と、元の結線・駆動元の検査結果を取り出す。
+    pub(in crate::project::use_aliases) proof fn observed_module_selection_tables(
+        &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections,
+    )
+        requires self.module_selections_result(owner, limit, Ok(Some(checked))),
+        ensures
+            self.module_wiring_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring))),
+            self.module_drivers_result(owner, limit, Ok(Some(checked.typed.sources.roots.wiring.drivers))),
+            checked.types@.len() == checked.typed.sources.roots.wiring.drivers.definitions@.len(),
+    {
+        self.module_selections_evidence(owner, limit, checked);
+    }
+
     /// 連接の定義に記録された引数順と結果幅の契約を取り出す。
     pub(super) proof fn module_concat_slot(
         &self, owner: ModuleBodyPosition, limit: u64, checked: ModuleSelections, slot: usize,

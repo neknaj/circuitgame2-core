@@ -480,6 +480,35 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             bound.definition as int, position as int);
     }
 
+    /// 右辺の名前と駆動元が、関数の元の文書と結線表に含まれることを示す。
+    pub(super) proof fn observed_func_reference(
+        &self, file: usize, entry: usize, limit: u64, wiring: FuncWiring, index: int,
+    )
+        requires self.func_wiring_evidence(file, entry, limit, Ok(FuncWiringResult::Checked(wiring))),
+            0 <= index < wiring.signals@.len(),
+        ensures ({
+            let bound = wiring.signals@[index];
+            &&& *bound.site.source == self.targets.project_model().sources_model()[file as int]
+            &&& location_in_source(bound.site)
+            &&& match bound.driver {
+                OutputDriver::Input(i) => i < wiring.drivers.signature.inputs@.len(),
+                OutputDriver::Definition(i) => i < wiring.drivers.definitions@.len(),
+            }
+        }),
+    {
+        let inputs = self.checked_wiring_input_names(file, entry, limit, wiring);
+        let project = self.targets.project_model();
+        let parsed = &project.circuits_model()[file as int];
+        let source = &project.sources_model()[file as int];
+        let bound = wiring.signals@[index];
+        let at = parsed.entry_ranges@[entry as int].signals.start + index;
+        reveal(bound_prefix);
+        let name = choose|name: NameSite|
+            #[trigger] signal_site(source, parsed, entry as int, at, bound.definition, name)
+            && is_location(source, name, bound.site)
+            && local_binding(inputs, wiring.drivers.definitions@, bound.definition, name, bound.driver);
+    }
+
     pub(super) proof fn checked_wiring_is_func(
         &self, file: usize, entry: usize, max_width: u64, wiring: FuncWiring,
     )
