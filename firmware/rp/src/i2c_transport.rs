@@ -3,11 +3,12 @@
 #[cfg(rp_i2c_program)]
 use circuitgame2_device_timing::I2cTransferError;
 use circuitgame2_device_timing::{HostRequestId, I2cTransfer, I2cTransferKind};
+use embassy_futures::select::{Either, select};
 use embassy_rp::{
     i2c::{AbortReason, Async, Error, I2c, Instance},
     pac::i2c::regs::IcTxAbrtSource,
 };
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Instant, Timer};
 
 /// I²C コントローラーが要求を完了できなかった理由。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,8 +98,14 @@ impl<'d, T: Instance> Controller<'d, T> {
         // Embassy 0.10 は Future を破棄した場合にバスの停止を保証しない。
         // FIFO 排出中の異常は STOP の確認前に返る場合もあるため、成功したときだけ通信を再開する。
         self.available = false;
-        let result = with_timeout(self.timeout, async {
-            match kind {
+        let deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or(TransferFailure::Timeout)?;
+        let transfer = async {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            Some(match kind {
                 I2cTransferKind::Read => self.bus.read_async(address, read).await,
                 I2cTransferKind::Write => {
                     self.bus.write_async(address, write.iter().copied()).await
@@ -108,10 +115,13 @@ impl<'d, T: Instance> Controller<'d, T> {
                         .write_read_async(address, write.iter().copied(), read)
                         .await
                 }
-            }
-        })
-        .await
-        .map_err(|_| TransferFailure::Timeout)?;
+            })
+        };
+        // 同時に観測した期限と完了では、期限を優先する。
+        let result = match select(Timer::at(deadline), transfer).await {
+            Either::Second(Some(result)) if Instant::now() < deadline => result,
+            _ => return Err(TransferFailure::Timeout),
+        };
 
         result.map_err(failure)?;
         self.available = true;
