@@ -92,9 +92,8 @@ pub(crate) open spec fn call_arity_matches(
         Err(DefnCallError::Arity { site, declaration, expected, found }) => {
             &&& site_matches(source, call, site)
             &&& defn_name_resolution(aliases, file, item, call.word, Ok(ResolvedDefnName::Declaration(declaration)))
-            &&& exists|signature: DefnSignature|
-                #[trigger] project.defn_signature_matches_index(declaration.file, declaration.item, Some(signature))
-                && expected == signature.parameters@.len()
+            &&& project.indexed_defn(declaration.file, declaration.item) matches Some(header)
+                && expected == header.parameters@.len()
             &&& found == call.arguments && found != expected
         }
     }
@@ -147,10 +146,9 @@ pub proof fn prepared_defn_call_origin(
         &&& match result {
             Ok(PreparedDefnCall::Declared { declaration, signature, .. }) =>
                 project.defn_signature_matches_index(declaration.file, declaration.item, Some(signature)),
-            Err(DefnCallError::Arity { declaration, expected, found, .. }) => found != expected &&
-                (exists|signature: DefnSignature| #[trigger]
-                    project.defn_signature_matches_index(declaration.file, declaration.item, Some(signature))
-                    && expected == signature.parameters@.len()),
+            Err(DefnCallError::Arity { declaration, expected, found, .. }) => found != expected
+                && (project.indexed_defn(declaration.file, declaration.item) matches Some(header)
+                    && expected == header.parameters@.len()),
             _ => true,
         }
     },
@@ -169,7 +167,7 @@ pub closed spec fn project_named_defn_body_matches<'p, 'a>(
     aliases.targets_model().project_model().named_defn_body_matches(aliases, file, item, result)
 }
 
-/// 成功時の署名と、名前や引数個数の診断が、元の索引と構文木に由来することを示す。
+/// 成功時の署名が索引に対応し、名前や引数個数の診断が指定した本体の範囲内を指すことを示す。
 pub proof fn project_named_defn_body_origin<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize,
     result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>,
@@ -183,6 +181,11 @@ pub proof fn project_named_defn_body_origin<'p, 'a>(
         &&& result matches Some(Err(DefnBodyCallError::Call(error))) ==> {
             let site = prepared_call_site(Err(error));
             &&& *site.source == project.sources_model()[file as int]
+            &&& project.indexed_defn(file, item) matches Some(header) && {
+                &&& header.body_span.start <= site.span.start
+                &&& site.span.end <= header.body_span.end
+            }
+            &&& site.span.start <= site.head.start && site.head.end <= site.span.end
             &&& project.functional_forms_model(file) matches Some(forms)
             && exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List
                 && forms[at + 1] is Atom
@@ -242,6 +245,8 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// })) = got else { panic!("{got:?}") };
     /// assert_eq!(&source[site.head], "::missing");
     /// assert_eq!(site.source.revision, 1);
+    /// let body = project.defn_signature(0, 6).unwrap().body_span;
+    /// assert!(body.start <= site.span.start && site.span.end <= body.end);
     /// ```
     pub fn check_defn_body_with_calls(&self, file: usize, item: usize)
         -> (result: Option<Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>>)
@@ -316,13 +321,12 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         let found = match self.resolve_defn_name(file, item, form.word) {
             Ok(ResolvedDefnName::Declaration(declaration)) => {
                 proof { resolved_defn_name_origin(self, file, item, form.word, declaration); }
-                let signature = project.defn_signature(declaration.file, declaration.item);
-                proof { project.indexed_defn_signature_origin(declaration.file, declaration.item, signature); }
-                let Some(signature) = signature else { unreachable!() };
-                let expected = signature.parameters.len();
+                let Some(header) = project.defn_header(declaration.file, declaration.item) else { unreachable!() };
+                let expected = header.parameters.len();
                 if expected != form.arguments {
                     Err(DefnCallError::Arity { site, declaration, expected, found: form.arguments })
                 } else {
+                    let signature = project.defn_signature_from_header(declaration.file, declaration.item, header);
                     Ok(PreparedDefnCall::Declared { site, declaration, signature })
                 }
             }

@@ -2,8 +2,9 @@
 
 use alloc::vec::Vec;
 use crate::ncg2m::data_types::{DefnSignature, read_header_signature};
+use crate::ncg2m::defn::DefnHeader;
 #[cfg(verus_only)]
-use crate::ncg2m::data_types::signature_matches_header;
+use crate::ncg2m::data_types::{signature_matches_header, signature_result_origin};
 use crate::ncg2m::expression_types::{ExpressionCheckFailure, check_indexed_meta_defn};
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::{
@@ -271,6 +272,11 @@ impl<'a> ParsedProjectSources<'a> {
             result matches Some(Err(DefnBodyCallError::Call(error))) ==> {
                 let site = prepared_call_site(Err(error));
                 &&& *site.source == self.sources_model()[file as int]
+                &&& self.indexed_defn(file, item) matches Some(header) && {
+                    &&& header.body_span.start <= site.span.start
+                    &&& site.span.end <= header.body_span.end
+                }
+                &&& site.span.start <= site.head.start && site.head.end <= site.span.end
                 &&& self.functional_forms_model(file) matches Some(forms)
                 && exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List
                     && forms[at + 1] is Atom
@@ -309,6 +315,37 @@ impl<'a> ParsedProjectSources<'a> {
         Some(check_indexed_call_body(aliases, file, item, source.text(), forms, items))
     }
 
+    pub(super) fn defn_header(&self, file: usize, item: usize) -> (result: Option<&DefnHeader>)
+        ensures self.has_source_indexes(),
+            match result {
+                Some(header) => self.indexed_defn(file, item) == Some(*header),
+                None => self.indexed_defn(file, item).is_none(),
+            },
+    {
+        let indexes = self.indexes();
+        let Some(ProjectSourceIndex::Functional(items)) = indexes.get(file) else { return None; };
+        let Some(MetaItem { kind: MetaItemKind::Defn(header), .. }) = items.get(item) else { return None; };
+        Some(header)
+    }
+
+    pub(super) fn defn_signature_from_header(&self, file: usize, _item: usize, header: &DefnHeader)
+        -> (signature: DefnSignature<'a>)
+        requires self.has_source_indexes(), self.indexed_defn(file, _item) == Some(*header),
+        ensures self.defn_signature_matches_index(file, _item, Some(signature)),
+            signature.parameters@.len() == header.parameters@.len(),
+    {
+        let source = &self.sources()[file];
+        proof {
+            let index = self.indexes_model()[file as int];
+            project_source_index_evidence(*source, index);
+            meta_defn_signature_spans(source.text, index->Functional_0@, _item as int);
+            source.text_model_is_text();
+        }
+        let signature = read_header_signature(source.text(), header);
+        proof { signature_result_origin(source.text_model(), *header, signature); }
+        signature
+    }
+
     /// 言語別索引の項目が補助関数宣言なら、本体の型検査に使う署名を返す。
     ///
     /// 添字が範囲外の場合と、項目が別の種類である場合は `None` を返す。
@@ -316,23 +353,8 @@ impl<'a> ParsedProjectSources<'a> {
     pub fn defn_signature(&self, file: usize, item: usize) -> (signature: Option<DefnSignature<'a>>)
         ensures self.defn_signature_matches_index(file, item, signature),
     {
-        let indexes = self.indexes();
-        if file >= indexes.len() {
-            return None;
-        }
-        let index = &indexes[file];
-        let ProjectSourceIndex::Functional(items) = index else { return None; };
-        if item >= items.len() {
-            return None;
-        }
-        let MetaItemKind::Defn(header) = &items[item].kind else { return None; };
-        let source = &self.sources()[file];
-        proof {
-            project_source_index_evidence(*source, *index);
-            meta_defn_signature_spans(source.text, items@, item as int);
-            source.text_model_is_text();
-        }
-        Some(read_header_signature(source.text(), header))
+        let header = self.defn_header(file, item)?;
+        Some(self.defn_signature_from_header(file, item, header))
     }
 
     /// 指定した補助関数の本体を、保持している構文木と署名を使って型検査する。

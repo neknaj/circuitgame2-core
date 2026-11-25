@@ -97,7 +97,7 @@ pub(in crate::ncg2m) closed spec fn call_form_matches(
 pub(in crate::ncg2m) proof fn call_form_origin(source: &str, forms: Seq<Form>, at: usize, call: CallForm)
     requires call_form_matches(source, forms, at, Some(call)),
     ensures
-        at + 1 < forms.len(),
+        at + 1 < subtree_limit(forms, at) <= forms.len(),
         forms[at as int] is List, forms[at + 1] is Atom,
         call.span == form_span(forms[at as int]), call.head_span == form_span(forms[at + 1]),
 {}

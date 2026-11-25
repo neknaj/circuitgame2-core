@@ -10,6 +10,8 @@ use super::named_call::{call_form_matches, call_form_origin, call_signature_type
 use crate::project::{DefnCallError, MixedUseAliases, PreparedDefnCall};
 #[cfg(verus_only)]
 use crate::project::{call_arity_matches, mixed_use_targets_match, prepared_call_site};
+#[cfg(verus_only)]
+use crate::syntax::{preorder_range_pair, strict_preorder_ranges};
 
 verus! {
 
@@ -444,6 +446,7 @@ pub(crate) closed spec fn indexed_call_body_matches<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, source: &'a str, forms: Seq<Form>,
     entries: Seq<MetaItem>, result: Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>,
 ) -> bool {
+    &&& meta_ast_matches(source, forms, entries)
     &&& item < entries.len()
     &&& entries[item as int].kind is Defn
     &&& {
@@ -458,6 +461,18 @@ pub(crate) closed spec fn indexed_call_body_matches<'p, 'a>(
     }
 }
 
+proof fn span_within_subtree(forms: Seq<Form>, root: usize, at: usize)
+    requires strict_preorder_ranges(forms), root <= at < subtree_limit(forms, root) <= forms.len(),
+    ensures form_span(forms[root as int]).start <= form_span(forms[at as int]).start
+        && form_span(forms[at as int]).end <= form_span(forms[root as int]).end,
+{
+    if root < at {
+        assert(forms[root as int] is List);
+        reveal(strict_preorder_ranges);
+        assert(preorder_range_pair(forms[root as int], forms[at as int], at as int));
+    }
+}
+
 pub(crate) proof fn indexed_call_body_origin<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, source: &'a str, forms: Seq<Form>,
     entries: Seq<MetaItem>, outcome: Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>,
@@ -469,6 +484,11 @@ pub(crate) proof fn indexed_call_body_origin<'p, 'a>(
         outcome matches Err(DefnBodyCallError::Call(error)) ==> {
             let site = prepared_call_site(Err(error));
             &&& *site.source == aliases.targets_model().project_model().sources_model()[file as int]
+            &&& entries[item as int].kind matches MetaItemKind::Defn(header) && {
+                &&& header.body_span.start <= site.span.start
+                &&& site.span.end <= header.body_span.end
+            }
+            &&& site.span.start <= site.head.start && site.head.end <= site.span.end
             &&& exists|at: usize| at + 1 < forms.len() && (#[trigger] forms[at as int]) is List
                 && forms[at + 1] is Atom
                 && site.span == form_span(forms[at as int]) && site.head == form_span(forms[at + 1])
@@ -502,6 +522,10 @@ pub(crate) proof fn indexed_call_body_origin<'p, 'a>(
         ) && decoded.is_some() && call_arity_matches(aliases, file, item, decoded->Some_0, Err(error));
         call_form_origin(aliases.targets_model().project_model().sources_model()[file as int].text_model(),
             forms, at, call->Some_0);
+        meta_ast_body_origin(source, forms, entries, item as int);
+        assert(body <= at < subtree_limit(forms, body) <= forms.len());
+        span_within_subtree(forms, body, at);
+        span_within_subtree(forms, at, (at + 1) as usize);
     }
 }
 
