@@ -10,4 +10,5 @@ pub mod editor;
 pub mod ncg2m;
 pub mod netlist;
 pub mod project;
+pub mod time;
 pub use circuitgame2_syntax as syntax;
