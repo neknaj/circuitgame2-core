@@ -10,7 +10,8 @@ mod body;
 pub use body::DefnBodyCallError;
 pub(crate) use body::check_indexed_call_body;
 #[cfg(verus_only)]
-pub(crate) use body::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_root_call_preserves_scalar_types};
+pub(crate) use body::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin, defn_root_call_preserves_scalar_types,
+    defn_checked_call_arguments, defn_checked_expression_site, defn_checked_if_child_sites, defn_checked_site_at_body_root};
 #[cfg(verus_only)]
 pub(in crate::ncg2m) use body::argument_positions_increase;
 #[cfg(verus_only)]

@@ -69,6 +69,62 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
         a_list_has_no_scalar_atom(&frame, site.at, site.expected, atom);
     }
 
+    pub(in crate::ncg2m::call_evaluation::scalar) proof fn an_if_starts_with_its_condition(
+        &self, condition: usize, yes: usize, no: usize,
+        result: Result<ScalarExpressionStep<'p, 'a>, ScalarLiteralError<'p, 'a>>,
+    )
+        requires self.expression_step_matches(result), {
+            let body = self.frame_model().body_model();
+            conditional_positions(body.source.text_model(), body.forms@, self.expression_model().at)
+                == Some((condition, yes, no))
+        },
+        ensures result matches Ok(ScalarExpressionStep::Continue(next))
+            && next.frame_model() == self.frame_model()
+            && next.branches_model().len() == self.branches_model().len() + 1
+            && next.branches_model().last().positions_model() == (self.expression_model().at, condition, yes, no)
+            && next.branches_model().last().expected_model() == self.expression_model().expected
+            && next.expression_model() == (ScalarExpressionSite {
+                at: condition, expected: DataType { atom: DataTypeAtom::Builtin(BuiltinDataType::Bool), list_depth: 0 },
+            }),
+    {
+        reveal(ScalarExpression::expression_step_matches);
+        let body = self.frame_model().body_model();
+        let site = self.expression_model();
+        if scalar_condition_matches(body, site, None) {
+            conditional_match_has_positions(body, site, None);
+            assert(false);
+        }
+        let next = result->Ok_0->Continue_0;
+        let branch = next.branches_model().last();
+        conditional_match_has_positions(body, site, Some(branch));
+        conditional_children_follow_parent(body, site, branch);
+    }
+
+    pub(in crate::ncg2m::call_evaluation::scalar) proof fn restored_cursor_positions_agree(&self)
+        ensures self.expression_model() == self.cursor_model().position_model(),
+            self.branches_model() == self.cursor_model().branches_model(),
+    {}
+
+    pub(in crate::ncg2m::call_evaluation::scalar) proof fn received_value_resumes_branch(
+        &self, value: ScalarValue, step: ScalarExpressionStep<'p, 'a>,
+    )
+        requires self.receive_matches(value, step),
+        ensures
+            if self.branches_model().len() == 0 {
+                step matches ScalarExpressionStep::Complete { value: out, frame }
+                    && out == value && frame == self.frame_model()
+            } else {
+                let branch = self.branches_model().last();
+                &&& value is Bool
+                &&& step matches ScalarExpressionStep::Continue(after)
+                    && after.frame_model() == self.frame_model()
+                    && after.branches_model() == self.branches_model().drop_last()
+                    && after.expression_model().expected == branch.expected_model()
+                    && after.expression_model().at ==
+                        if value->Bool_0 { branch.positions_model().2 } else { branch.positions_model().3 }
+            },
+    {}
+
     /// 評価中の式と保留中の条件式が、同じ仮引数環境で型検査を通った局所スカラー式であることを表す。
     pub closed spec fn is_locally_checked(&self) -> bool {
         let frame = self.frame_model();

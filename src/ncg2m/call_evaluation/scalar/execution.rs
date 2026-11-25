@@ -419,8 +419,9 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 step matches Ok(ScalarExecutionSlice::Complete(out)) && out == value
             } else {
                 step matches Ok(ScalarExecutionSlice::Suspended(after)) && match stack.last() {
-                    Waiting::Argument { parent, pending, rank: from, .. } => {
+                    Waiting::Argument { parent, caller, pending, rank: from } => {
                         let (edge, values, target) = pending.model();
+                        &&& frame == caller@
                         &&& parent.fits(&frame)
                         &&& edge.arguments@.len() == target.signature.parameters@.len()
                         &&& exists|expr: ScalarExpression<'p, 'a>| #[trigger] expr.cursor_model() == parent
@@ -430,6 +431,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                     },
                     Waiting::Return { parent, rank: from, .. } => {
                         &&& after.rank == from && after.waiting@ == stack.drop_last()
+                        &&& (after.active is Value ==> scalar_fits(value, parent.result_type_model()))
                         &&& exists|inner: ScalarExpressionStep<'p, 'a>| #[trigger] parent.receive_matches(value, inner)
                             && next_expression_at(after.active, parent.result_type_model(), inner)
                     },
@@ -513,13 +515,17 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                     },
                     Waiting::Return { parent, rank, .. } => {
                         let ty = Ghost(parent.result_type_model());
+                        let ghost saved = parent;
                         let inner = parent.receive(value);
+                        proof { saved.received_value_resumes_branch(value, inner); }
                         let active = match inner {
                             ScalarExpressionStep::Continue(expr) => Active::Expression(expr),
                             ScalarExpressionStep::Complete { frame, value } => Active::Value { frame, value, _ty: ty },
                             ScalarExpressionStep::NeedsForm(_) => unreachable!(),
                         };
-                        Self { plan, rank, active, waiting, result_type }
+                        let after = Self { plan, rank, active, waiting, result_type };
+                        assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
+                        after
                     },
                 }
             },
