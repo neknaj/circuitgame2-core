@@ -6,6 +6,7 @@ use circuitgame2_device_timing::{
 };
 use embassy_rp::{
     Peri, bind_interrupts,
+    gpio::Output,
     i2c::{Async, Config, I2c, Instance, InterruptHandler, SclPin, SdaPin},
     peripherals::{I2C0, I2C1},
 };
@@ -140,10 +141,17 @@ fn request(port: impl Fn(usize) -> bool) -> Request {
     I2cTransfer::from_port_bits(&address, &bytes, write_len.into(), read_len.into())
 }
 
+async fn deadline_fault(fault: &mut Output<'_>) -> Option<()> {
+    // Pico と Pico 2 の基板 LED で、通常の GPIO 出力とは別に停止を知らせる。
+    fault.set_high();
+    core::future::pending().await
+}
+
 /// 配線表から作った回路を進め、応答を回路が取り込むまで保持する。
 pub(super) async fn run(spawner: Spawner) -> Option<()> {
     let plan = PackedClockedNorPlan32::new(INPUT_COUNT, &GATES, &PORTS).ok()?;
-    let (inputs, mut outputs) = configure_gpio(spawner, embassy_rp::init(Default::default()))?;
+    let (inputs, mut outputs, mut fault) =
+        configure_gpio(spawner, embassy_rp::init(Default::default()))?;
     let mut ledger = FixedRequestLedger::<Response, 1>::new();
     let mut awaiting = None;
     let mut held = None;
@@ -153,14 +161,20 @@ pub(super) async fn run(spawner: Spawner) -> Option<()> {
     let mut candidate_source = [0; SOURCE_COUNT];
     let mut candidate_observed = [0; PORTS.len()];
     let mut next = [0; GATES.len()];
-    let period = Duration::from_micros(PERIOD_US);
-    let mut deadline = Instant::now().checked_add(period)?;
+    let Some(period) = Duration::try_from_micros(PERIOD_US) else {
+        return deadline_fault(&mut fault).await;
+    };
+    let Some(mut deadline) = Instant::now().checked_add(period) else {
+        return deadline_fault(&mut fault).await;
+    };
     loop {
-        let following = deadline.checked_add(period)?;
+        let Some(following) = deadline.checked_add(period) else {
+            return deadline_fault(&mut fault).await;
+        };
         Timer::at(deadline).await;
         if Instant::now() >= following {
             // 候補を確定せず、GPIO を保持して最後に確定した出力を残す。
-            return core::future::pending().await;
+            return deadline_fault(&mut fault).await;
         }
         let current = ledger.position();
         let target = TickPosition {
@@ -209,7 +223,7 @@ pub(super) async fn run(spawner: Spawner) -> Option<()> {
             .ok()?;
         if Instant::now() >= following {
             // 候補を確定せず、GPIO を保持して最後に確定した出力を残す。
-            return core::future::pending().await;
+            return deadline_fault(&mut fault).await;
         }
         let committed = pending.commit();
         core::mem::swap(&mut source, &mut candidate_source);
@@ -230,6 +244,10 @@ pub(super) async fn run(spawner: Spawner) -> Option<()> {
             } else {
                 Level::Low
             });
+        }
+        // 確定後の割り込みなどで出力反映が期限を越えた場合も、次の tick に進まない。
+        if Instant::now() >= following {
+            return deadline_fault(&mut fault).await;
         }
         deadline = following;
     }

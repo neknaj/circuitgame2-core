@@ -65,6 +65,32 @@ tick は到着済みのイベントだけを確認する。送信タスクは ti
 
 論理 reset は取り込み済みの旧世代のイベントと完了通知を破棄し、旧世代の送信データを追加でキューに入れる処理を打ち切る。UART の送信レジスタや割り込みバッファーに渡したバイトは物理ポートから送信され得る。受信バイトの世代は、受信タスクが UART バッファーから取り出した時点で付ける。
 
+## SPI の折り返し例
+
+`ncg2-rp-spi` は SPI0 の MOSI と MISO をつないで、送信したデータを同じ転送で受信する組み込み例である。クロックは 1 MHz を指定する。モード3では、クロックが待機中に High となり、2番目のエッジでデータを取り込む。GPIO の CS は取引中だけ Low にする。RP のハードウェアは MSB-first 固定なので、この例では送信前と受信後に各バイトのビットを反転して LSB-first に対応する。 [Pico SDK の SPI 設定](https://github.com/raspberrypi/pico-sdk/blob/master/src/rp2_common/hardware_spi/include/hardware/spi.h#L247)
+
+| Pico・Pico 2 | 接続または観測 |
+| --- | --- |
+| GP2 | SCK |
+| GP3、GP4 | MOSI と MISO をジャンパーでつなぐ |
+| GP5 | CS。正常な取引中は Low。期限超過を検出すると High |
+| GP6 | 転送または tick が失敗すると High |
+| GP7 | 1 ms 周期の tick が確定するたびに反転 |
+| GP8 | `0x12 0x80` の折り返しを受け取ると High |
+
+以前の手順で環境変数 `NCG2_RP_PROGRAM` を設定した場合は、解除してからビルドする。
+
+```sh
+cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv6m-none-eabi --features pico,spi --bin ncg2-rp-spi
+cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target thumbv8m.main-none-eabihf --features pico2,spi --bin ncg2-rp-spi
+```
+
+出力 ELF は `ncg2-rp-spi`。UF2 への変換は対象ボードの手順に従う。 [ビルド](#ビルド)
+
+回路は 250 tick ごとに要求信号を立てる。次の tick が確定すると、通信タスクが2バイトを同時に送受信する。完了は要求 ID と reset 世代を照合して次の入力に載せる。
+
+通信タスクは要求を受け取った時点から 20 ms の期限を設ける。DMA を始める前と、最後のクロックを確認して CS を解除した後に期限を検査する。期限に達した場合は CS を解除してタイムアウトを返す。開始済みの DMA とバッファーはワーカーが保持し、DMA が終わるまで待つ。折り返しデータの不一致やタイムアウトの後は新しい取引を止め、ボードの reset で再開できる。 [RP2350 データシートの DMA エラッタ](https://datasheets.raspberrypi.com/rp2350/rp2350-datasheet.pdf)
+
 ## I²C で LM75B の設定を読む
 
 `ncg2-rp-i2c` は I²C0 を 100 kHz で使う組み込み例。LM75B のアドレス端子 A2〜A0 を Low にすると、7ビットアドレスは `0x48` になる。LM75B を 3.3 V で動かし、SDA と SCL を 3.3 V にプルアップする。基板側の内部プルアップは無効にしている。 [LM75B データシート](https://www.nxp.com/docs/en/data-sheet/LM75B.pdf)
@@ -90,5 +116,11 @@ cargo build --manifest-path firmware/rp/Cargo.toml --locked --release --target t
 回路は 250 tick ごとに要求信号を立てる。次の tick が確定すると、通信タスクがポインター `0x01` を送り、反復 START で1バイト読む。完了は要求 ID と世代を照合して回路に渡す。tick の確定後に GP5 に値が出る。LM75B の設定が初期値なら GP5 は Low になる。
 
 通信エラーや 20 ms のタイムアウトが起きると GP3 は High になり、新規の読み出しは停止する。GP4 が反転を続けていれば回路の tick は進んでいる。配線を確認してからボードを reset すると、通信を再開できる。
+
+## 名前付き回路を I²C につなぐ
+
+`ncg2 rp-plan --project circuitgame2.toml --board board.toml` で配線表を作る。ボード設定の `[i2c]` にピンと回路ポートを指定する。配線表を UTF-8 で保存し、その絶対パスを `NCG2_RP_PROGRAM` に指定して `ncg2-rp` をビルドする。Pico の機能指定は `pico,i2c`、Pico 2 は `pico2,i2c`。 [回路・設定・実行手順](https://github.com/neknaj/circuitgame2/tree/main/examples/rp-i2c-lm75b)
+
+次の tick の開始時刻までに処理が終わらないと、基板の LED が点灯して実行が止まる。周期をタイマーで表せない場合も同じように停止する。次の出力を確定する前に期限を検出した場合、GPIO は直前の確定値を保持する。確定後に GPIO への反映が遅れた場合は、その tick の値を保持して停止する。I²C の通信エラーは回路の応答状態に返す。
 
 SPI と I²C の接続仕様を参照する。 [GPU と RP マイコンの実行バックエンド](https://neknaj.github.io/circuitgame2/docs/backends.html)

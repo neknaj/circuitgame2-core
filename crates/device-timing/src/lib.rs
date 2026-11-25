@@ -11,6 +11,7 @@ mod i2c_transfer;
 mod period;
 mod request_ids;
 mod response;
+mod spi_transfer;
 
 pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
 #[cfg(verus_only)]
@@ -33,3 +34,6 @@ pub use fixed_requests::delivery_due_at;
 pub use response::{HostResponseError, ResponseSlot, ResponseStatus};
 #[cfg(verus_only)]
 pub use response::busy_at;
+pub use spi_transfer::{SpiBitOrder, SpiTransfer, SpiTransferError};
+#[cfg(verus_only)]
+pub use spi_transfer::{spi_byte_bit, spi_transfer_error, spi_wire_byte_matches};
