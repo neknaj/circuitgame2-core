@@ -12,8 +12,16 @@ use crate::ncg2m::integers::{IntegerType, IntegerValue};
 use vstd::prelude::*;
 use super::DefnEvaluationBody;
 
+mod arguments;
 mod atom;
+mod condition;
+mod expression;
 mod invocation;
+pub use arguments::{PendingScalarArgument, ScalarArguments, ScalarArgumentsStep, prepare_scalar_arguments};
+pub use condition::{ScalarCondition, ScalarExpressionSite};
+pub use expression::{ScalarExpression, ScalarExpressionStep};
+#[cfg(verus_only)]
+pub use condition::scalar_condition_matches;
 pub use invocation::{
     ScalarInvocation, ScalarInvocationError, ScalarInvocationSlice, ScalarInvocationStep,
     prepare_scalar_invocation,

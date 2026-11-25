@@ -1,7 +1,8 @@
 use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{
-    ScalarBindingError, ScalarInvocationError, ScalarInvocationSlice, ScalarValue, bind_scalar_call,
-    prepare_scalar_invocation,
+    ScalarArgumentsStep, ScalarBindingError, ScalarExpression, ScalarExpressionStep, ScalarInvocationError,
+    ScalarInvocationSlice, ScalarValue, bind_scalar_call,
+    prepare_scalar_arguments, prepare_scalar_invocation,
 };
 use circuitgame2_core::ncg2m::expression_types::{DefnBodyCallError, ExpressionCheckFailure};
 use circuitgame2_core::ncg2m::integers::IntegerValue;
@@ -27,6 +28,12 @@ fn call_order_keeps_isolated_definitions_and_visits_both_branches() {
     assert_eq!(order.len(), 3);
     assert!(rank(2) < rank(0));
     assert!(plan.at_rank(3).is_none());
+    let caller_frame = bind_scalar_call(&plan, rank(0), Vec::new()).unwrap();
+    let state = ScalarExpression::start(caller_frame);
+    let ScalarExpressionStep::Continue(condition) = state.advance().unwrap() else { panic!() };
+    let ScalarExpressionStep::Continue(selected) = condition.advance().unwrap() else { panic!() };
+    assert!(matches!(selected.advance().unwrap(), ScalarExpressionStep::Complete(ScalarValue::Bool(true))));
+
     let frame = bind_scalar_call(&plan, rank(2), Vec::new()).unwrap();
     assert!(frame.parameters().is_empty());
     assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(ScalarValue::Bool(true)));
@@ -137,4 +144,16 @@ fn scalar_invocation_uses_argument_order_and_the_callee_frame() {
     else { panic!() };
     assert_eq!(error_source.revision, 31);
     assert_eq!(&source[span], "(forward x)");
+
+    let outer = prepare_scalar_arguments(&plan, rank(2), 0).unwrap();
+    let ScalarArgumentsStep::Argument(first) = outer.next() else { panic!() };
+    assert_eq!(first.source().revision, 31);
+    assert_eq!(first.expression().at, plan.calls_at_rank(rank(2)).unwrap()[1].at);
+    let Err(first) = first.resume(ScalarValue::Bool(true)) else { panic!() };
+    let Ok(outer) = first.resume(value) else { panic!() };
+    let ScalarArgumentsStep::Argument(second) = outer.next() else { panic!() };
+    let Ok(outer) = second.resume(ScalarValue::Integer(IntegerValue::Int(-2))) else { panic!() };
+    let ScalarArgumentsStep::Enter { rank: callee, frame } = outer.next() else { panic!() };
+    assert_eq!(callee, rank(1));
+    assert_eq!(frame.evaluate_atomic_body().unwrap(), Some(value));
 }

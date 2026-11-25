@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use crate::syntax::{AtomKind, Form};
 #[cfg(verus_only)]
-use crate::syntax::{complete_list_indices, form_span, nested_list_indices, sexpr_form_model};
+use crate::syntax::{complete_list_indices, form_span, form_spans_valid, nested_list_indices, sexpr_form_model};
 use super::data_types::{
     BuiltinDataType, DataType, DataTypeAtom, DefnSignature, SignatureParameter, read_header_signature,
     read_type_value,
@@ -275,6 +275,38 @@ fn read_children3(forms: &[Form], at: usize) -> (children: Option<(usize, usize,
         return None;
     }
     Some((first, second, third))
+}
+
+pub(super) closed spec fn conditional_positions(
+    source: &str, forms: Seq<Form>, at: usize,
+) -> Option<(usize, usize, usize)> {
+    if at < forms.len() {
+        match forms[at as int] {
+            Form::List { end, .. } if at + 1 < end <= forms.len() && plain_name(forms[at + 1])
+                && spelling(source, forms[at + 1]) == "if".spec_bytes() =>
+                    children3(forms, at),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+// 型検査と同じ兄弟の境界から、条件と二つの分岐の位置を得る。
+pub(super) fn read_conditional_positions(
+    source: &str, forms: &[Form], at: usize,
+) -> (children: Option<(usize, usize, usize)>)
+    requires form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures children == conditional_positions(source, forms@, at),
+        children matches Some((condition, yes, no)) ==> at < condition < yes < no < forms@.len(),
+{
+    let Some(Form::List { end, .. }) = forms.get(at) else { return None; };
+    if *end <= at || *end - at <= 1 || *end > forms.len() { return None; }
+    let head = at + 1;
+    if !is_name(&forms[head]) || !is_spelling(source_word(source, forms, head), "if") {
+        return None;
+    }
+    read_children3(forms, at)
 }
 
 spec fn shape(source: &str, forms: Seq<Form>, at: usize) -> Result<Expression, ExpressionCheckFailure> {

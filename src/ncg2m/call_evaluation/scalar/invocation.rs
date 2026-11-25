@@ -6,9 +6,7 @@ use super::super::{CallArgumentStep, CallArguments};
 use super::atom::{scalar_atom_matches, scalar_atom_results_agree};
 use crate::ncg2m::defn::span_of;
 #[cfg(verus_only)]
-use crate::project::{DefnCallEdge, defn_call_argument_origin};
-#[cfg(verus_only)]
-use crate::ncg2m::data_types::signature_result_origin;
+use crate::project::{DefnCallEdge, defn_call_argument_origin, defn_call_arguments};
 
 mod slice;
 pub use slice::ScalarInvocationSlice;
@@ -311,20 +309,16 @@ fn prepare_bound_invocation<'plan, 'p, 'a>(
     let edges = plan.calls_at_rank(caller_rank)?;
     let edge = edges.get(site)?;
     if edge.at != caller.body().at { return None; }
-    let callee_rank = plan.rank_of(edge.to)?;
-    if callee_rank >= caller_rank { return None; }
-    let callee = plan.body_at_rank(callee_rank)?;
-    proof {
-        let project = plan.project_model();
-        project.indexed_defn_signature_origin(edge.to.file, edge.to.item, Some(callee.signature));
-        let header = project.indexed_defn(edge.to.file, edge.to.item)->Some_0;
-        signature_result_origin(callee.source.text_model(), header, callee.signature);
-    }
-    if callee.signature.parameters.len() != edge.arguments.len() { return None; }
-    let Some(waiting) = plan.call_arguments(caller_rank, site) else { unreachable!() };
+    let Some(args) = prepare_scalar_arguments(plan, caller_rank, site) else { return None; };
+    proof { assert(args.model().0 == *edge); }
+    let (callee_rank, callee, waiting) = args.into_parts();
+    #[cfg(verus_only)]
+    let _argument_count = edge.arguments.len();
     proof {
         let forms = caller.body_model().forms@;
+        assert(defn_call_arguments(forms, edge.at, edge.arguments@));
         assert forall|i: int| 0 <= i < edge.arguments@.len() implies (#[trigger] edge.arguments@[i]) < forms.len() by {
+            assert(i < _argument_count);
             defn_call_argument_origin(forms, edge.at, edge.arguments@, i as usize);
         };
     }
