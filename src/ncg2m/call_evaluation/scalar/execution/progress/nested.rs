@@ -53,6 +53,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             let position = expr.expression_model();
             &&& expression_slot(body.source.text_model(), body.forms@, body.at, position.at)
             &&& scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at)
+            &&& self.plan.scalar_site_has_declared_edge(self.rank, position.at)
             &&& position.expected.list_depth == 0
             &&& (position.expected.atom matches DataTypeAtom::Builtin(BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
         }
@@ -83,6 +84,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             ({
                 let body = frame.body_model();
                 &&& scalar_call_syntax_at(body.source.text_model(), body.forms@, body.at)
+                &&& self.plan_model().scalar_site_has_declared_edge(rank, body.at)
                 &&& body.signature.result_type.ty.list_depth == 0
                 &&& (body.signature.result_type.ty.atom matches DataTypeAtom::Builtin(
                     BuiltinDataType::Bool | BuiltinDataType::Integer(_)))
@@ -145,6 +147,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         let position = parent.expression_model();
         let row = self.plan.calls_model_at_rank(self.rank)->Some_0;
         let found = choose|found: int| site <= found < row.len() && (#[trigger] row[found]).at == position.at;
+        self.checked_declaration_lookup_excludes_arithmetic(aliases);
         let edge = row[site as int];
         if edge.at != position.at {
             assert(site + 1 <= found);
@@ -171,6 +174,21 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                     assert(false);
                 },
                 _ => { assert(false); },
+            }
+        }
+    }
+
+    proof fn checked_declaration_lookup_excludes_arithmetic(&self, aliases: &MixedUseAliases<'_, 'p, 'a>)
+        requires defn_call_plan_matches(aliases, self.plan_model()), self.searches_checked_scalar_call(aliases),
+        ensures self.plan.arithmetic_site_model(self.rank, self.active->Lookup_parent.expression_model().at).is_none(),
+    {
+        let parent = self.active->Lookup_parent;
+        let position = parent.expression_model();
+        if self.plan.arithmetic_site_model(self.rank, position.at).is_some() {
+            let selected = self.plan.checked_named_target_at_rank(aliases, self.rank, parent.frame_model().body_model(), position);
+            match selected {
+                crate::ncg2m::expression_types::named_call::CheckedNamedTarget::Declaration(_) => assert(false),
+                crate::ncg2m::expression_types::named_call::CheckedNamedTarget::Arithmetic(_, _) => assert(false),
             }
         }
     }

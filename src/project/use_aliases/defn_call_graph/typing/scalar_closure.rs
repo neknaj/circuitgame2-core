@@ -124,6 +124,7 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
             scalar_evaluator_syntax(body.source.text_model(), body.forms@, position.at),
             expression_slot(body.source.text_model(), body.forms@, body.at, position.at),
             scalar_call_syntax_at(body.source.text_model(), body.forms@, position.at),
+            self.scalar_site_has_declared_edge(rank, position.at),
         ensures self.calls_model_at_rank(rank) matches Some(row) && parts.0 < row.len() && {
             let edge = row[parts.0 as int];
             let target = parts.2;

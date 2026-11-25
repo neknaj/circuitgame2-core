@@ -10,8 +10,10 @@ verus! {
 #[verifier::opaque]
 pub(super) open spec fn call_trace_covers_slots(
     source: &str, forms: Seq<Form>, calls: Seq<CallTypeEntry>, trace: Seq<usize>, body: usize,
+    arithmetic: bool,
 ) -> bool {
-    forall|i: usize| i < calls.len() && #[trigger] expression_slot(source, forms, body, calls[i as int].at)
+    forall|i: usize| i < calls.len() && (calls[i as int].target is Arithmetic) == arithmetic
+        && #[trigger] expression_slot(source, forms, body, calls[i as int].at)
         ==> trace.contains(i)
 }
 
@@ -68,23 +70,27 @@ fn visited_entries(trace: &[usize], count: usize) -> (seen: Vec<bool>)
 
 pub(super) fn first_unvisited_expression_entry(
     source: &str, forms: &[Form], calls: &[CallTypeEntry], trace: &[usize], body: usize,
+    arithmetic: bool,
 ) -> (missing: Option<usize>)
     requires
         usable_forms(source, forms@), body < forms@.len(),
-        call_trace_fits(calls@, trace@, body, forms@.len()),
+        if arithmetic { arithmetic_trace_fits(calls@, trace@, body, forms@.len()) }
+            else { call_trace_fits(calls@, trace@, body, forms@.len()) },
     ensures
-        missing.is_none() <==> call_trace_covers_slots(source, forms@, calls@, trace@, body),
+        missing.is_none() <==> call_trace_covers_slots(source, forms@, calls@, trace@, body, arithmetic),
         missing matches Some(i) ==> i < calls@.len()
+            && (calls@[i as int].target is Arithmetic) == arithmetic
             && expression_slot(source, forms@, body, calls@[i as int].at) && !trace@.contains(i),
 {
     let count = calls.len();
     proof {
+        reveal(arithmetic_trace_fits);
         assert forall|i: int| 0 <= i < trace@.len() implies (#[trigger] trace@[i]) < count by {
-            trace_entry_in_range(calls@, trace@, body, forms@.len(), i);
+            if !arithmetic { trace_entry_in_range(calls@, trace@, body, forms@.len(), i); }
         };
     }
     if count == 0 {
-        assert(call_trace_covers_slots(source, forms@, calls@, trace@, body)) by { reveal(call_trace_covers_slots); };
+        assert(call_trace_covers_slots(source, forms@, calls@, trace@, body, arithmetic)) by { reveal(call_trace_covers_slots); };
         return None;
     }
     let seen = visited_entries(trace, count);
@@ -97,15 +103,17 @@ pub(super) fn first_unvisited_expression_entry(
             usable_forms(source, forms@), body < forms@.len(),
             forall|at: usize| #[trigger] expression_slot(source, forms@, body, at) ==> slot_marked(mask@, body, at),
             forall|j: usize| j < count ==> (#[trigger] seen@[j as int]) == trace@.contains(j),
-            forall|j: usize| j < i && #[trigger] expression_slot(source, forms@, body, calls@[j as int].at)
+            forall|j: usize| j < i && (calls@[j as int].target is Arithmetic) == arithmetic
+                && #[trigger] expression_slot(source, forms@, body, calls@[j as int].at)
                 ==> trace@.contains(j),
         decreases count - i,
     {
         let at = calls[i].at;
-        if !seen[i] && at >= body && at - body < mask.len() && mask[at - body] {
+        if matches!(calls[i].target, CallTypeTarget::Arithmetic(_)) == arithmetic
+            && !seen[i] && at >= body && at - body < mask.len() && mask[at - body] {
             // 食い違いの候補だけを元の式位置の照会で確かめ、呼び出しを示す。
             if is_expression_slot(source, forms, body, at) {
-                assert(!call_trace_covers_slots(source, forms@, calls@, trace@, body)) by {
+                assert(!call_trace_covers_slots(source, forms@, calls@, trace@, body, arithmetic)) by {
                     reveal(call_trace_covers_slots);
                     assert(calls@[i as int].at == at && i < calls@.len());
                     assert(!trace@.contains(i));
@@ -116,7 +124,7 @@ pub(super) fn first_unvisited_expression_entry(
         }
         i += 1;
     }
-    assert(call_trace_covers_slots(source, forms@, calls@, trace@, body)) by { reveal(call_trace_covers_slots); };
+    assert(call_trace_covers_slots(source, forms@, calls@, trace@, body, arithmetic)) by { reveal(call_trace_covers_slots); };
     None
 }
 
