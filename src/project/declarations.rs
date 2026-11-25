@@ -5,8 +5,8 @@ mod mixed;
 pub(super) mod path_index;
 pub use mixed::{MixedDeclarationTable, ProjectDeclaration, ProjectDeclarationKind, index_mixed_declarations};
 #[cfg(verus_only)]
-pub use mixed::{mixed_declaration_origin, mixed_declaration_table_matches, mixed_name_conflict_evidence,
-    mixed_name_conflicts_agree, mixed_project_names_conflict};
+pub use mixed::{mixed_declaration_lookup_agrees, mixed_declaration_origin, mixed_declaration_table_matches, mixed_declarations_agree, mixed_name_conflict_evidence,
+    mixed_name_conflicts_agree, mixed_project_declares, mixed_project_name_equivalence, mixed_project_names_conflict};
 
 #[cfg(verus_only)]
 use super::circuits::{name_in_source, parsed_name_span};
