@@ -1,6 +1,11 @@
 //! 一つのルート回路と GPIO 接続を、RP 向けの配線配置にまとめる。
 
+mod i2c;
 mod uart;
+
+pub use i2c::{I2cCircuitImage, I2cImageError, I2cInputSource, I2cPortNames, I2cSetup};
+#[cfg(verus_only)]
+pub use i2c::{i2c_assignment, i2c_image_ports_match, i2c_image_requests, i2c_port_capacity};
 
 pub use uart::{RpInputSource, UartCircuitImage, UartImageError, UartInputSignal, UartOutputPorts, UartPortNames, UartSetup};
 #[cfg(verus_only)]
@@ -401,7 +406,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                     ==> (#[trigger] indices@[i]) != (#[trigger] indices@[j])
             },
             Err(GpioImageError::Binding(error)) => self.device_bindings_match(owner, width_limit, requests@, Err(error)),
-            Err(error) => !(error is ZeroTickPeriod) && !(error is Pin),
+            Err(error) => !(error is ZeroTickPeriod) && !(error is Pin) && !(error is MissingInput),
         },
     {
         let resolved = match self.resolve_device_port_bindings(owner, width_limit, requests) {

@@ -15,7 +15,7 @@ mod response;
 pub use clock::{ClockError, PendingClockChange, SimulationClock, TickPosition};
 #[cfg(verus_only)]
 pub use clock::clock_change_matches;
-pub use i2c_ports::i2c_port_bit;
+pub use i2c_ports::{i2c_port_bit, i2c_port_octet};
 pub use i2c_transfer::{I2cTransfer, I2cTransferError, I2cTransferKind};
 #[cfg(verus_only)]
 pub use i2c_ports::{i2c_octet_bit, i2c_octet_matches, i2c_port_bytes_match};

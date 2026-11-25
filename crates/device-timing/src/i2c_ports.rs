@@ -34,6 +34,13 @@ pub fn i2c_port_bit(byte: u8, bit: u32) -> (result: Option<bool>)
     if bit < 8 { Some((byte >> bit) & 1 == 1) } else { None }
 }
 
+/// 最下位ビットから並べた8本の回路ポートを、1バイトにまとめる。
+pub fn i2c_port_octet(bits: &[bool; 8]) -> (byte: u8)
+    ensures i2c_octet_matches(bits@, byte),
+{
+    pack(bits)
+}
+
 fn pack<const BITS: usize>(bits: &[bool; BITS]) -> (result: u8)
     requires BITS <= 8,
     ensures
