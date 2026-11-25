@@ -13,6 +13,7 @@ mod name_keys;
 mod path;
 mod resolution;
 mod signatures;
+mod source_indexes;
 mod sources;
 mod storage_declarations;
 mod structure_declarations;
@@ -106,6 +107,14 @@ pub use resolution::{AbsoluteResolutionError, AbsoluteTarget};
 pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, same_target,
 };
+pub use source_indexes::{
+    ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,
+};
+#[cfg(verus_only)]
+pub use source_indexes::{
+    project_file_diagnostic_origin, project_source_index_matches, project_source_parse_error,
+    project_source_parse_errors_agree, project_source_set_accepts,
+};
 pub use sources::{ProjectSource, SourceSetError, SourceSnapshot, collect_sources};
 pub use storage_declarations::{StorageDeclaration, check_storage_declaration};
 #[cfg(verus_only)]
@@ -117,7 +126,7 @@ pub use structure_declarations::{
 #[cfg(verus_only)]
 pub use structure_declarations::structure_declaration_result;
 #[cfg(verus_only)]
-pub use sources::{project_sources_match, source_set_error, valid_source_snapshots};
+pub use sources::{first_source_set_error, project_sources_match, source_set_error, source_set_errors_agree, valid_source_snapshots};
 #[cfg(verus_only)]
 pub use use_aliases::port_types_equal;
 pub use use_aliases::{
