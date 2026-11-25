@@ -1,5 +1,7 @@
 //! NCG2M のファイルを厳格に解析し、宣言と名前解決の指示を元の順序で索引化する。
 
+pub mod recovery;
+
 use alloc::vec::Vec;
 use core::ops::Range;
 use crate::syntax::{

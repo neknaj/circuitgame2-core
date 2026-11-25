@@ -871,6 +871,21 @@ spec fn after_collecting_names(
     }
 }
 
+pub(super) closed spec fn indexed_func_driver_evidence(
+    source: &ProjectSource, parsed: &NamedBuildCircuit, entry: usize, signature: TypedRoutineSignature,
+    result: Result<FuncDriverResult, FuncDriverError>,
+) -> bool {
+    match result {
+        Ok(FuncDriverResult::NeedsExpansion(location)) => {
+            &&& *location.source == *source && location_in_source(location)
+            &&& routine_expansion_evidence(source.text, &parsed.syntax, entry as int, Some(location.span))
+        },
+        _ => routine_expansion_evidence(source.text, &parsed.syntax, entry as int, None)
+            && exists|inputs: Seq<NameSite>, outputs: Seq<NameSite>, definitions: Seq<DefinitionDriver>|
+                #[trigger] after_collecting_names(source, parsed, entry, &signature, inputs, outputs, definitions, result),
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 署名、明示的な出力の駆動元、または診断が実際の関数とそのソースに対応することを表す。
     pub closed spec fn func_driver_evidence(
@@ -887,16 +902,9 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             match result {
                 Err(FuncDriverError::Signature(error)) =>
                     self.typed_signature_evidence(file, entry, max_width, Err(error)),
-                Ok(FuncDriverResult::NeedsExpansion(location)) =>
-                    *location.source == *source && location_in_source(location)
-                        && routine_expansion_evidence(source.text, &parsed.syntax, entry as int, Some(location.span))
-                        && exists|signature: TypedRoutineSignature|
-                            #[trigger] self.typed_signature_evidence(file, entry, max_width, Ok(Some(signature))),
-                _ => routine_expansion_evidence(source.text, &parsed.syntax, entry as int, None)
-                    && (exists|signature: TypedRoutineSignature, inputs: Seq<NameSite>, outputs: Seq<NameSite>,
-                        definitions: Seq<DefinitionDriver>|
-                        #[trigger] self.typed_signature_evidence(file, entry, max_width, Ok(Some(signature)))
-                        && #[trigger] after_collecting_names(source, parsed, entry, &signature, inputs, outputs, definitions, result)),
+                _ => exists|signature: TypedRoutineSignature|
+                    #[trigger] self.typed_signature_evidence(file, entry, max_width, Ok(Some(signature)))
+                    && indexed_func_driver_evidence(source, parsed, entry, signature, result),
             }
         }
     }
@@ -950,10 +958,11 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         assert(parsed_circuit_matches(*source, *parsed));
         parsed_index_evidence(*source, *parsed);
         let result = Ok(FuncDriverResult::Checked(checked));
-        let (signature, inputs, outputs, definitions) = choose|sig: TypedRoutineSignature, ins: Seq<NameSite>,
-            outs: Seq<NameSite>, defs: Seq<DefinitionDriver>|
+        let signature = choose|sig: TypedRoutineSignature|
             #[trigger] self.typed_signature_evidence(file, entry, max_width, Ok(Some(sig)))
-                && #[trigger] after_collecting_names(source, parsed, entry, &sig, ins, outs, defs, result);
+                && indexed_func_driver_evidence(source, parsed, entry, sig, result);
+        let (inputs, outputs, definitions) = choose|ins: Seq<NameSite>, outs: Seq<NameSite>, defs: Seq<DefinitionDriver>|
+            #[trigger] after_collecting_names(source, parsed, entry, &signature, ins, outs, defs, result);
         assert(signature == checked.signature && definitions == checked.definitions@);
         (inputs, outputs)
     }
@@ -1159,48 +1168,77 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             Err(error) => return Err(FuncDriverError::Signature(error)),
         };
         let source = &project.sources()[file];
-        let forms = parsed.syntax.forms.as_slice();
         proof {
             assert(parsed_circuit_matches(*source, *parsed));
-            parsed_index_evidence(*source, *parsed);
             self.typed_signature_sites(file, entry, max_width, signature);
         }
-        let expansion = first_routine_expansion(source.text, &parsed.syntax, entry);
-        if let Some(span) = expansion {
-            let location = LocatedName { source, span };
-            proof { located_name_evidence(location); }
-            return Ok((FuncDriverResult::NeedsExpansion(location), Vec::new(), None));
-        }
-        let inputs = typed_port_names(source.text, forms, signature.inputs.as_slice());
-        let outputs = typed_port_names(source.text, forms, signature.outputs.as_slice());
-        let definitions = collect_drivers(source.text, parsed, entry);
-        // 共通接頭辞の少ない名前でも索引が有利になった計測点を採用する。
-        const MIN_INDEXED_DEFINITIONS: usize = 1024;
-        let indexed = match index_override {
-            Some(enabled) => enabled,
-            None => definitions.len() >= MIN_INDEXED_DEFINITIONS,
-        };
-        let ghost definitions_model = definitions@;
-        let ghost signature_model = signature;
-        let index = match check_definitions(source, inputs.as_slice(), definitions.as_slice(), indexed) {
-            Ok(index) => index,
-            Err(error) => {
-                assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Err(error)));
-                return Err(error);
-            }
-        };
-        let bound = match check_outputs(source, signature.output_inputs.as_slice(), outputs.as_slice(),
-            definitions.as_slice(), inputs.as_slice(), index.as_ref()) {
-            Ok(bound) => bound,
-            Err(error) => {
-                assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Err(error)));
-                return Err(error);
-            }
-        };
-        let result = FuncDriverResult::Checked(FuncDrivers { signature, definitions, outputs: bound });
-        assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Ok(result)));
-        Ok((result, inputs, index))
+        prepare_indexed_func_drivers(source, parsed, entry, signature, index_override)
     }
+}
+
+// 型付き署名を受け取った後の検査は、元のソースと厳格索引だけを使う。
+pub(super) fn prepare_indexed_func_drivers<'p, 'a>(
+    source: &'p ProjectSource<'a>, parsed: &NamedBuildCircuit<'a>, entry: usize,
+    signature: TypedRoutineSignature<'p, 'a>, index_override: Option<bool>,
+) -> (prepared: Result<(FuncDriverResult<'p, 'a>, Vec<NameSite<'a>>, Option<LocalSignalIndex>), FuncDriverError<'p, 'a>>)
+    requires
+        parsed_circuit_matches(*source, *parsed),
+        entry < parsed.syntax.entries@.len(), parsed.syntax.entries@[entry as int].head is Func,
+        typed_name_sites(parsed.syntax.forms@, signature.inputs@),
+        typed_name_sites(parsed.syntax.forms@, signature.outputs@),
+        signature.output_inputs@.len() == signature.outputs@.len(),
+        forall|i: int| 0 <= i < signature.output_inputs@.len() ==>
+            ((#[trigger] signature.output_inputs@[i]) matches Some(input) ==> input < signature.inputs@.len()),
+    ensures match prepared {
+        Ok((result, inputs, index)) => indexed_func_driver_evidence(source, parsed, entry, signature, Ok(result))
+            && (result matches FuncDriverResult::Checked(drivers) ==> {
+                &&& inputs@.len() == drivers.signature.inputs@.len()
+                &&& names_match_ports(source.text, parsed.syntax.forms@, drivers.signature.inputs@, inputs@)
+                &&& forall|i: int| 0 <= i < drivers.definitions@.len() ==>
+                    name_in_source(source.text, (#[trigger] drivers.definitions@[i]).name)
+                &&& (index matches Some(names) ==> local_names_indexed(
+                    &names, inputs@, inputs@.len() as int, drivers.definitions@, drivers.definitions@.len() as int))
+            }),
+        Err(error) => indexed_func_driver_evidence(source, parsed, entry, signature, Err(error)),
+    },
+{
+    proof { parsed_index_evidence(*source, *parsed); }
+    let forms = parsed.syntax.forms.as_slice();
+    let expansion = first_routine_expansion(source.text, &parsed.syntax, entry);
+    if let Some(span) = expansion {
+        let location = LocatedName { source, span };
+        proof { located_name_evidence(location); }
+        return Ok((FuncDriverResult::NeedsExpansion(location), Vec::new(), None));
+    }
+    let inputs = typed_port_names(source.text, forms, signature.inputs.as_slice());
+    let outputs = typed_port_names(source.text, forms, signature.outputs.as_slice());
+    let definitions = collect_drivers(source.text, parsed, entry);
+    // 共通接頭辞の少ない名前でも索引が有利になった計測点を採用する。
+    const MIN_INDEXED_DEFINITIONS: usize = 1024;
+    let indexed = match index_override {
+        Some(enabled) => enabled,
+        None => definitions.len() >= MIN_INDEXED_DEFINITIONS,
+    };
+    let ghost definitions_model = definitions@;
+    let ghost signature_model = signature;
+    let index = match check_definitions(source, inputs.as_slice(), definitions.as_slice(), indexed) {
+        Ok(index) => index,
+        Err(error) => {
+            assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Err(error)));
+            return Err(error);
+        }
+    };
+    let bound = match check_outputs(source, signature.output_inputs.as_slice(), outputs.as_slice(),
+        definitions.as_slice(), inputs.as_slice(), index.as_ref()) {
+        Ok(bound) => bound,
+        Err(error) => {
+            assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Err(error)));
+            return Err(error);
+        }
+    };
+    let result = FuncDriverResult::Checked(FuncDrivers { signature, definitions, outputs: bound });
+    assert(after_collecting_names(source, parsed, entry, &signature_model, inputs@, outputs@, definitions_model, Ok(result)));
+    Ok((result, inputs, index))
 }
 
 } // verus!

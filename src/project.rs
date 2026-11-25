@@ -54,17 +54,19 @@ pub use analysis::{
     CheckedDefinitionAnalysis, DefinitionAnalysis, DefinitionAnalysisError, PreparedDefinitionAnalysis,
     PreparedDefinitionError, UseAliasReport, analyze_definitions, prepare_definition_analysis,
 };
-pub use basis::{CircuitBasisError, validate_circuit_basis};
+pub use basis::{CircuitBasisError, validate_circuit_basis, validate_mixed_circuit_basis};
 #[cfg(verus_only)]
-pub use basis::{basis_result_evidence, circuit_basis_valid};
+pub use basis::{basis_result_evidence, circuit_basis_valid, mixed_basis_result_evidence, mixed_circuit_basis_valid};
 pub use circuits::{
     CircuitProject, CircuitProjectError, CircuitProjectFailure, parse_circuit_project,
-    parse_circuit_project_with_cached_indexes, parse_circuit_project_with_recovery,
+    parse_circuit_project_recording_indexes, parse_circuit_project_with_cached_indexes,
+    parse_circuit_project_with_recovery,
 };
 pub(crate) use circuits::read_source_span;
 #[cfg(verus_only)]
 pub use circuits::{
     circuit_project_accepts, circuit_project_error, circuit_project_failure, parsed_circuit_matches,
+    recorded_circuit_index_matches,
 };
 pub use declarations::{
     DeclarationTable, LocatedName, MixedDeclarationTable, NameConflict, NameConflictKind, ProjectDeclaration,
@@ -96,6 +98,8 @@ pub(crate) use use_aliases::TypedArithmeticSite;
 pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
+pub use use_aliases::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
+    MixedFuncDriverError, MixedFuncWiringError, MixedTypedSignatureError};
 #[cfg(verus_only)]
 pub(crate) use use_aliases::call_arity_matches;
 #[cfg(verus_only)]
@@ -210,6 +214,8 @@ pub use use_aliases::{
 pub use use_aliases::{
     BoundFuncSignal, FuncSignalReason, FuncWiring, FuncWiringError, FuncWiringResult,
 };
+#[cfg(verus_only)]
+pub use use_aliases::indexed_signal_driver_matches;
 pub use use_aliases::{ResolvedPortType, TypedPort, TypedRoutineSignature, TypedSignatureError};
 pub use use_aliases::{NamedRoutinePort, RoutinePortLookup};
 pub use use_aliases::{DeviceBindingsError, DevicePortRequest};
