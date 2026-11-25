@@ -42,6 +42,7 @@ pub use module_types::{ModuleAliasCycleStep, ModuleAliasSource, ModuleAliasTypes
     ModuleRootTypes, ModuleRootTypesError, ModuleSelection, ModuleSelections, ModuleSelectionsError, ModuleTypeSources};
 pub use module_types::{ClockedEndpointError, ClockedModuleVm, ClockedModuleVmError, ClockedModuleVmLimits};
 pub use module_types::{VramOutputError, VramTarget};
+pub use module_types::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits, DevicePortIoError, DevicePortMap};
 pub use module_types::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use module_types::ClockedModuleObservation;

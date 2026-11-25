@@ -15,7 +15,12 @@ mod digits;
 mod natural;
 mod recovery_boundary;
 mod recovery_update;
-pub use recovery_update::{RecoveryEdges, RecoverySection, ReparsedRecovery, remember_recovery_edges};
+pub use recovery_update::{
+    OwnedRecoveryCache, RecoveryEdges, RecoveryFormLocation, RecoverySection, RecoverySnapshot,
+    ReparsedRecovery, SnapshotRecovery, recover_snapshot, remember_recovery_edges,
+};
+#[cfg(verus_only)]
+pub use recovery_update::{located_span, original_list_form};
 #[cfg(verus_only)]
 mod recovery_replay;
 #[cfg(verus_only)]
@@ -2161,6 +2166,8 @@ proof fn append_original_list(
     };
 }
 
+// 解析ループの証明は、同じモジュールの他の事実による探索の変動を抑えるため、独立したソルバーで検証する。
+#[verifier::spinoff_prover]
 #[verifier::rlimit(55)]
 fn parse_forms(source: &str, recovering: bool) -> (result: Result<(Vec<Form>, Vec<Repair>, Vec<Range<usize>>), Error>)
     ensures

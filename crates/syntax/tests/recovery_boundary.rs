@@ -58,10 +58,13 @@ fn local_recovery_keeps_only_the_changed_middle_owned_by_the_update() {
         *changed.recovered,
         relative_to_tail(parse_recovering(&current[..join]), start)
     );
-    assert_eq!(
-        *tail.recovered,
-        relative_to_tail(parse_recovering(&current), join)
-    );
+    let whole = parse_recovering(&current);
+    assert_eq!(*tail.recovered, relative_to_tail(whole.clone(), join));
+    assert_eq!(update.repair_count(), whole.repairs.len());
+    for (index, repair) in whole.repairs.iter().enumerate() {
+        assert_eq!(update.repair_at(index).as_ref(), Some(repair));
+    }
+    assert!(update.repair_at(whole.repairs.len()).is_none());
 
     let removal = retained
         .reparse(&format!("{prefix}{suffix}"))
@@ -90,6 +93,85 @@ fn local_recovery_keeps_only_the_changed_middle_owned_by_the_update() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn localized_original_list_inspection_uses_current_document_positions() {
+    use circuitgame2_syntax::circuit::{CircuitRecovery, recover_circuit_forms};
+
+    let previous = "(using nor)(before)\r\n) (unknown-directive) (unfinished";
+    let current = "(using nor)(after \"🦊\")\r\n) (unknown-directive) (unfinished";
+    let start = "(using nor)".len();
+    let join = "(using nor)(before)".len();
+    let edges = remember_recovery_edges(previous, start, join).unwrap();
+    let update = edges.reparse(current).unwrap();
+    assert!(update.has_repairs());
+    let CircuitRecovery::WithSyntaxRepairs { recovered, original } = recover_circuit_forms(current) else {
+        panic!("expected syntax repairs");
+    };
+
+    let location = update.original_list_location(2, 0).unwrap();
+    assert_eq!(location.span, recovered.original_lists[2]);
+    assert!(matches!(&recovered.forms[location.form], Form::List { span, .. } if span == &location.span));
+    assert_eq!(
+        update.form_location(2, 0).unwrap(),
+        location,
+    );
+    let verified = update.inspect_original_list(2, 0).unwrap();
+    let reference = original[2].as_ref().unwrap();
+    assert_eq!(verified.span, reference.span);
+    assert_eq!(verified.forms, reference.forms);
+    assert!(!verified.source_diagnostics().is_empty());
+    assert!(verified.source_diagnostics().iter().any(Option::is_some));
+    assert_eq!(verified.source_diagnostics(), reference.source_diagnostics());
+    assert!(update.original_list_location(2, 1).is_none());
+    assert!(update.form_location(3, 0).is_none());
+    assert!(update.inspect_original_list(2, 1).is_none());
+}
+
+#[test]
+fn owned_cache_borrows_local_views_and_reparses_the_current_text_on_fallback() {
+    use circuitgame2_syntax::{OwnedRecoveryCache, SnapshotRecovery, recover_snapshot};
+
+    let prefix = "(using nor)";
+    let old_middle = "(old)";
+    let suffix = "\r\n) (original) (unfinished";
+    let old = format!("{prefix}{old_middle}{suffix}");
+    let cache = OwnedRecoveryCache::remember(
+        old,
+        u64::MAX - 1,
+        prefix.len(),
+        prefix.len() + old_middle.len(),
+    ).unwrap();
+    assert_eq!(cache.revision(), u64::MAX - 1);
+    assert_eq!(cache.text(), format!("{prefix}{old_middle}{suffix}"));
+
+    let current = format!("{prefix}(new \"🦊\"){suffix}");
+    let local = recover_snapshot(Some(&cache), &current, u64::MAX);
+    assert_eq!(local.revision(), u64::MAX);
+    assert_eq!(local.source(), current);
+    let SnapshotRecovery::Local(local) = local.recovery() else { panic!("expected local recovery"); };
+    let original = recover_snapshot(Some(&cache), cache.text(), cache.revision());
+    let SnapshotRecovery::Local(original) = original.recovery() else { panic!("expected cached recovery"); };
+    assert!(core::ptr::eq(local.sections()[2].recovered, original.sections()[2].recovered));
+    assert_eq!(local.original_list_span(2, 0).unwrap(), {
+        let start = current.find("(original)").unwrap();
+        start..start + "(original)".len()
+    });
+    let malformed = format!("{prefix}(new {suffix}");
+    assert!(cache.try_snapshot(&malformed, u64::MAX).is_none());
+    for (saved, source, revision) in [
+        (Some(&cache), current.as_str(), u64::MAX - 2),
+        (Some(&cache), current.as_str(), u64::MAX - 1),
+        (Some(&cache), malformed.as_str(), u64::MAX),
+        (None, current.as_str(), u64::MAX),
+    ] {
+        let fallback = recover_snapshot(saved, source, revision);
+        assert_eq!(fallback.revision(), revision);
+        assert_eq!(fallback.source(), source);
+        let SnapshotRecovery::Full(whole) = fallback.recovery() else { panic!("expected full recovery"); };
+        assert_eq!(*whole, parse_recovering(source));
+    }
 }
 
 fn relative_to_tail(mut whole: Recovered, offset: usize) -> Recovered {

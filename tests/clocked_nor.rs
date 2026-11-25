@@ -3,6 +3,36 @@ use circuitgame2_core::project::{ClockedModuleError, ClockedPlanError, ClockedWi
     check_use_aliases, index_use_targets, parse_circuit_project, plan_clocked_links};
 
 #[test]
+fn packed_nor_preserves_feedback_and_tick_boundaries() {
+    use circuitgame2_core::netlist::TickInputError;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: vec![
+            NorGate { left: Wire::Input(0), right: Wire::Gate(1) },
+            NorGate { left: Wire::Gate(0), right: Wire::Constant(false) },
+        ],
+        outputs: vec![Wire::Gate(0), Wire::Gate(1), Wire::Input(0), Wire::Constant(true)],
+    }).unwrap();
+    let mut packed = circuit.reset_packed();
+    let mut scalar = circuit.reset();
+    let input_word = 1u64 << 63;
+    assert_eq!(packed.outputs, vec![0, 0, 0, u64::MAX]);
+    assert!(matches!(circuit.step_packed(&[], &[]), Err(TickInputError::InputCount)));
+    assert!(matches!(circuit.step_packed(&[], &[input_word]), Err(TickInputError::GateCount)));
+
+    let mut scalar_high = circuit.reset();
+    for input in [input_word, input_word, 1, 0] {
+        packed = circuit.step_packed(&packed.gates, &[input]).unwrap();
+        scalar = circuit.step(&scalar.gates, &[input & 1 != 0]).unwrap();
+        scalar_high = circuit.step(&scalar_high.gates, &[input >> 63 != 0]).unwrap();
+        for (word, (low, high)) in packed.outputs.iter().zip(scalar.outputs.iter().zip(&scalar_high.outputs)) {
+            assert_eq!((word & 1 != 0, word >> 63 != 0), (*low, *high));
+        }
+    }
+}
+
+#[test]
 fn settling_bound_covers_reversed_dependencies_and_unobserved_gates() {
     use circuitgame2_core::project::clocked_nor_settling_bound;
 
@@ -408,6 +438,121 @@ fn mixed_device_events_keep_arrival_order_after_a_cancelled_update() {
         .commit_device_events(&mut ledger, &[false]).unwrap();
     assert_eq!(ready.len(), 1);
     assert!(matches!(ready[0].payload, DeviceEvent::Input { instance: 0, payload: 20 }));
+}
+
+#[test]
+fn device_session_commits_mixed_events_and_new_requests_then_discards_old_inputs_on_reset() {
+    use circuitgame2_core::device::{
+        CommittedHostRequest, DeviceEvent, DeviceEventSession, DeviceHostRequest, HostRequest,
+    };
+    use circuitgame2_core::netlist::ClockedVm;
+    use circuitgame2_core::time::TickPosition;
+
+    let circuit = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(circuit, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceEventSession::<u8, &str>::new(vm);
+
+    let first_request: [DeviceHostRequest<(), _>; 1] = [DeviceHostRequest {
+        instance: 0,
+        request: HostRequest::Request { tag: 1, payload: "first" },
+    }];
+    let (_, outgoing) = session.prepare_tick().unwrap()
+        .commit_host_requests(&[false], &first_request).unwrap();
+    let Some(CommittedHostRequest::Request { id, .. }) = outgoing.get(0) else {
+        panic!("expected a committed request");
+    };
+
+    let target = TickPosition { generation: 0, tick: 2 };
+    session.schedule_input(0, target, 4).unwrap();
+    session.schedule_response(id, target, "answer").unwrap();
+    session.schedule_input(0, TickPosition { generation: 0, tick: 3 }, 5).unwrap();
+
+    let pending = session.prepare_tick().unwrap();
+    assert!(matches!(&pending.next_event(0).unwrap().1.payload,
+        DeviceEvent::Input { instance: 0, payload: 4 }));
+    pending.cancel();
+
+    let next_request = [DeviceHostRequest {
+        instance: 0,
+        request: HostRequest::Request { tag: 2, payload: "next" },
+    }, DeviceHostRequest { instance: 0, request: HostRequest::Notify("notice") }];
+    let (events, outgoing) = session.prepare_tick().unwrap()
+        .commit_host_requests(&[true], &next_request).unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0].payload, DeviceEvent::Input { payload: 4, .. }));
+    assert!(matches!(&events[1].payload, DeviceEvent::Response(response)
+        if response.request_id() == id && response.payload() == &"answer"));
+    assert!(matches!(outgoing.get(0), Some(CommittedHostRequest::Request { id, .. }) if id.serial == 1));
+
+    let discarded = session.prepare_reset().unwrap().commit();
+    assert_eq!(discarded.len(), 1);
+    assert!(matches!(&discarded[0].payload, DeviceEvent::Input { payload: 5, .. }));
+    assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
+}
+
+#[test]
+fn stateful_device_updates_share_the_circuit_commit_and_reset() {
+    use circuitgame2_core::device::{
+        DeviceEvent, DeviceHostRequest, DeviceStateCountError, DeviceStateSession, DeviceStateTickError,
+        HostRequest, HostRequestCommitError, RequestBatchTickError, ResponseTickError, StatefulInputError,
+    };
+    use circuitgame2_core::netlist::{ClockedVm, TickInputError};
+    use circuitgame2_core::time::TickPosition;
+
+    let network = ClockedNor::check(NorNetlist {
+        input_count: 1,
+        gates: Vec::new(),
+        outputs: vec![Wire::Input(0)],
+    }).unwrap();
+    let vm = ClockedVm::new(network, 1, Vec::new(), 0).unwrap();
+    let mut session = DeviceStateSession::<u8, (), _>::new(vm, vec![10, 20]);
+    let first = TickPosition { generation: 0, tick: 1 };
+    assert_eq!(session.schedule_input(2, first, 7), Err(StatefulInputError::UnknownInstance(2)));
+    session.schedule_input(1, first, 7).unwrap();
+
+    let hosts: [DeviceHostRequest<_, ()>; 1] = [
+        DeviceHostRequest { instance: 1, request: HostRequest::Notify("note") },
+    ];
+    let pending = session.prepare_tick().unwrap();
+    assert_eq!(pending.states(), &[10, 20]);
+    assert!(matches!(pending.commit(vec![11, 21], &[], &hosts),
+        Err(DeviceStateTickError::Commit(HostRequestCommitError::Tick(
+            RequestBatchTickError::Tick(ResponseTickError::Input(TickInputError::InputCount)))))));
+    assert_eq!(session.states(), &[10, 20]);
+    assert_eq!(session.position().tick, 0);
+    assert_eq!(session.output(), &[false]);
+
+    let pending = session.prepare_tick().unwrap();
+    let bad: [DeviceHostRequest<_, ()>; 1] = [
+        DeviceHostRequest { instance: 2, request: HostRequest::Notify("unknown") },
+    ];
+    assert!(matches!(pending.commit(vec![11, 21], &[true], &bad),
+        Err(DeviceStateTickError::HostInstance { request: 0, instance: 2 })));
+    let pending = session.prepare_tick().unwrap();
+    assert!(matches!(&pending.next_event(0).unwrap().1.payload,
+        DeviceEvent::Input { instance: 1, payload: 7 }));
+    let done = pending.commit(vec![11, 21], &[true], &hosts).unwrap();
+    assert_eq!(done.consumed.len(), 1);
+    assert_eq!(done.outgoing.len(), 1);
+    assert_eq!(session.states(), &[11, 21]);
+    assert_eq!(session.output(), &[true]);
+
+    session.schedule_input(0, TickPosition { generation: 0, tick: 2 }, 8).unwrap();
+    let reset = session.prepare_reset().unwrap();
+    assert_eq!(reset.states(), &[11, 21]);
+    assert!(matches!(reset.commit(vec![0]), Err(DeviceStateCountError { expected: 2, actual: 1 })));
+    assert_eq!(session.position(), first);
+    assert_eq!(session.states(), &[11, 21]);
+    assert_eq!(session.output(), &[true]);
+    let removed = session.prepare_reset().unwrap().commit(vec![0, 0]).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(session.states(), &[0, 0]);
+    assert_eq!(session.output(), &[false]);
+    assert_eq!(session.position(), TickPosition { generation: 1, tick: 0 });
 }
 
 #[test]

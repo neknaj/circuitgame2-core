@@ -1,6 +1,7 @@
 //! 呼び出しと公開出力が読む配線を解決し、tick 実行用の VM を初期化する。
 
 mod child_outputs;
+mod device_ports;
 #[cfg(verus_only)]
 mod direct_source;
 mod hierarchy;
@@ -9,6 +10,7 @@ mod root_storage;
 #[cfg(verus_only)]
 mod source_links;
 mod vram_binding;
+pub use device_ports::{ClockedDeviceVm, ClockedDeviceVmError, DevicePortBits, DevicePortIoError, DevicePortMap};
 pub use vram_binding::{ClockedVramVm, VramDeclaration, VramSetupError, VramView};
 #[cfg(verus_only)]
 pub use hierarchy::ClockedModuleObservation;

@@ -681,6 +681,13 @@ impl ClockedVm {
     /// ゲートの登録値をネットリスト順に並べた列。
     pub closed spec fn gate_values_model(&self) -> Seq<bool> { self.gates@ }
 
+    /// 回路の出力フレームのビット数を返す。
+    pub fn output_count(&self) -> (count: usize)
+        ensures count == self.netlist_model().outputs@.len(),
+    {
+        self.circuit.output_count()
+    }
+
     /// ゲートと公開出力が参照する回路のネットリスト。
     pub closed spec fn netlist_model(&self) -> NorNetlist { self.circuit.netlist_model() }
 
@@ -890,6 +897,14 @@ impl ClockedVm {
         &&& self.storage@.len() == previous.storage@.len()
         &&& forall|i: int| 0 <= i < self.storage@.len() ==>
             (#[trigger] self.storage@[i]).wiring_model() == previous.storage@[i].wiring_model()
+    }
+
+    /// 配線が同じ VM では、入出力フレームの幅も同じになる。
+    pub proof fn same_layout_frame_widths(&self, previous: &Self)
+        requires self.same_layout(previous),
+        ensures self.external_count() == previous.external_count(),
+            self.netlist_model().outputs@.len() == previous.netlist_model().outputs@.len(),
+    {
     }
 
     /// VM の配線を、展開時に渡したネットリストと状態素子の並びに対応付ける。

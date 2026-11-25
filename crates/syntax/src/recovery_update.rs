@@ -2,7 +2,7 @@
 
 use crate::{Recovered, parse_recovering, recovery_boundary_at};
 #[cfg(verus_only)]
-use crate::{recovered_replay_matches, settled_recovery_boundary};
+use crate::{form_spans_valid, original_list_ranges, original_list_roots, recovered_replay_matches, settled_recovery_boundary};
 #[cfg(verus_only)]
 use crate::recovery_replay::{clean_prefix_form_count, recovered_three_parts_agree, recovery_three_parts_projection};
 use vstd::prelude::*;
@@ -12,6 +12,14 @@ use vstd::{
     utf8::{encode_utf8_decode_utf8, encode_utf8_valid_utf8, is_char_boundary,
         is_char_boundary_iff_not_is_continuation_byte, is_char_boundary_start_end_of_seq},
 };
+
+mod observe;
+mod repair;
+mod owned;
+pub use owned::{OwnedRecoveryCache, RecoverySnapshot, SnapshotRecovery, recover_snapshot};
+pub use observe::RecoveryFormLocation;
+#[cfg(verus_only)]
+pub use observe::{located_span, original_list_form};
 
 verus! {
 
@@ -45,7 +53,10 @@ pub struct ReparsedRecovery<'p, 's> {
 }
 
 spec fn parsed_from(source: &str, parsed: &Recovered) -> bool {
-    recovered_replay_matches(source, parsed.forms@, parsed.repairs@, parsed.original_lists@)
+    &&& recovered_replay_matches(source, parsed.forms@, parsed.repairs@, parsed.original_lists@)
+    &&& form_spans_valid(source, parsed.forms@, source.spec_bytes().len() as int)
+    &&& original_list_ranges(source, parsed.original_lists@, parsed.repairs@, source.spec_bytes().len() as int)
+    &&& original_list_roots(parsed.forms@, parsed.original_lists@)
 }
 
 spec fn clean_prefix(source: &str, parsed: &Recovered) -> bool {
@@ -71,29 +82,43 @@ impl<'a> RecoveryEdges<'a> {
         ensures result matches Some(update) ==> update.source_model() == source && update.valid(),
     {
         proof { use_type_invariant(self); }
-        let length = source.as_bytes().len();
-        let tail = self.suffix.as_bytes().len();
-        if length > (usize::MAX - 2) / 3 || tail > length {
-            return None;
-        }
-        let start = self.prefix.as_bytes().len();
-        let join = length - tail;
-        let (prefix, middle, suffix) = split_source(source, start, join)?;
-        proof {
-            encode_utf8_decode_utf8(prefix@);
-            encode_utf8_decode_utf8(suffix@);
-            encode_utf8_decode_utf8(self.prefix@);
-            encode_utf8_decode_utf8(self.suffix@);
-        }
-        if prefix != self.prefix || suffix != self.suffix {
-            return None;
-        }
-        let changed = analyze_closed(middle)?;
-        Some(ReparsedRecovery {
-            source, _pieces: Ghost((self.prefix, middle, self.suffix)), start, join,
-            head: &self.head, changed, tail: &self.tail,
-        })
+        reparse_edges(source, self.prefix, self.suffix, &self.head, &self.tail)
     }
+}
+
+fn reparse_edges<'p, 's>(
+    source: &'s str, old_prefix: &'p str, old_suffix: &'p str, head: &'p Recovered, tail: &'p Recovered,
+) -> (result: Option<ReparsedRecovery<'p, 's>>)
+    requires clean_prefix(old_prefix, head), parsed_from(old_suffix, tail),
+    ensures result matches Some(update) ==> {
+        &&& update.source_model() == source
+        &&& update.valid()
+        &&& update.section_model(0).recovered == head
+        &&& update.section_model(2).recovered == tail
+    },
+{
+    let length = source.as_bytes().len();
+    let suffix_len = old_suffix.as_bytes().len();
+    if length > (usize::MAX - 2) / 3 || suffix_len > length {
+        return None;
+    }
+    let start = old_prefix.as_bytes().len();
+    let join = length - suffix_len;
+    let (prefix, middle, suffix) = split_source(source, start, join)?;
+    proof {
+        encode_utf8_decode_utf8(prefix@);
+        encode_utf8_decode_utf8(suffix@);
+        encode_utf8_decode_utf8(old_prefix@);
+        encode_utf8_decode_utf8(old_suffix@);
+    }
+    if prefix != old_prefix || suffix != old_suffix {
+        return None;
+    }
+    let changed = analyze_closed(middle)?;
+    Some(ReparsedRecovery {
+        source, _pieces: Ghost((old_prefix, middle, old_suffix)), start, join,
+        head, changed, tail,
+    })
 }
 
 impl<'p, 's> ReparsedRecovery<'p, 's> {
@@ -106,6 +131,8 @@ impl<'p, 's> ReparsedRecovery<'p, 's> {
         let (prefix, middle, suffix) = self._pieces@;
         &&& 3 * bytes.len() + 1 < usize::MAX
         &&& self.start <= self.join <= bytes.len()
+        &&& is_char_boundary(bytes, self.start as int)
+        &&& is_char_boundary(bytes, self.join as int)
         &&& prefix.spec_bytes() == bytes[..self.start as int]
         &&& middle.spec_bytes() == bytes[self.start as int..self.join as int]
         &&& suffix.spec_bytes() == bytes[self.join as int..]
@@ -145,13 +172,25 @@ impl<'p, 's> ReparsedRecovery<'p, 's> {
         ]
     }
 
+    /// 指定した区間の回復結果と、絶対位置への変換に使う基準値。
+    pub closed spec fn section_model(&self, index: int) -> RecoverySection<'_> {
+        if index == 0 {
+            RecoverySection { byte_base: 0, form_base: 0, recovered: self.head }
+        } else if index == 1 {
+            RecoverySection { byte_base: self.start, form_base: self.head.forms@.len() as usize,
+                recovered: &self.changed }
+        } else {
+            RecoverySection { byte_base: self.join,
+                form_base: (self.head.forms@.len() + self.changed.forms@.len()) as usize,
+                recovered: self.tail }
+        }
+    }
+
     /// 区間列がこの解析結果の位置と内容を保持することを表す。
-    pub closed spec fn sections_match(&self, sections: [RecoverySection; 3]) -> bool {
-        &&& sections@[0].byte_base == 0 && sections@[0].form_base == 0 && sections@[0].recovered == self.head
-        &&& sections@[1].byte_base == self.start && sections@[1].form_base == self.head.forms@.len()
-            && sections@[1].recovered == &self.changed
-        &&& sections@[2].byte_base == self.join && sections@[2].form_base == self.head.forms@.len() + self.changed.forms@.len()
-            && sections@[2].recovered == self.tail
+    pub open spec fn sections_match(&self, sections: [RecoverySection; 3]) -> bool {
+        &&& sections@[0] == self.section_model(0)
+        &&& sections@[1] == self.section_model(1)
+        &&& sections@[2] == self.section_model(2)
     }
 
     /// 区間ごとの結果を位置と添字で揃えたものが、参照する全文解析と一致することを表す。
@@ -176,6 +215,19 @@ impl<'p, 's> ReparsedRecovery<'p, 's> {
 /// 接頭部は空か、修復を挟まず元の閉じ括弧で終わる必要がある。
 /// 接尾部は単独で回復解析し、変更後の合流点から同じ本文が続く場合に再利用する。
 pub fn remember_recovery_edges(source: &str, start: usize, join: usize) -> Option<RecoveryEdges<'_>> {
+    remember_edges_at(source, start, join)
+}
+
+fn remember_edges_at(source: &str, start: usize, join: usize) -> (result: Option<RecoveryEdges<'_>>)
+    ensures result matches Some(edges) ==> {
+        let bytes = source.spec_bytes();
+        &&& start <= join <= bytes.len()
+        &&& edges.prefix.spec_bytes() == bytes[..start as int]
+        &&& edges.suffix.spec_bytes() == bytes[join as int..]
+        &&& clean_prefix(edges.prefix, &edges.head)
+        &&& parsed_from(edges.suffix, &edges.tail)
+    },
+{
     let (prefix, _, suffix) = split_source(source, start, join)?;
     let head = analyze_closed(prefix)?;
     let tail = parse_recovering(suffix);
@@ -197,6 +249,8 @@ fn split_source(source: &str, start: usize, join: usize) -> (result: Option<(&st
     ensures result matches Some((prefix, middle, suffix)) ==> {
         let bytes = source.spec_bytes();
         &&& start <= join <= bytes.len()
+        &&& is_char_boundary(bytes, start as int)
+        &&& is_char_boundary(bytes, join as int)
         &&& prefix.spec_bytes() == bytes[..start as int]
         &&& middle.spec_bytes() == bytes[start as int..join as int]
         &&& suffix.spec_bytes() == bytes[join as int..]
