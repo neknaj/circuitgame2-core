@@ -701,6 +701,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         -> (result: Result<Option<ClockedModuleCompilation<'p, 'a>>, ClockedModuleVmError<'p, 'a>>)
         requires self.can_resolve(),
         ensures
+            result matches Ok(None) ==> self.module_calls_result(owner, limits.width, Ok(None)),
             result matches Ok(Some(root)) ==> root.compiled.vm.valid() && root.compiled.vm.initial()
                 && root.compiled.vm.external_count() == root.compiled.inputs.total_bits_model()
                 && self.clocked_module_hierarchy_vm(owner, limits, &root.compiled)
