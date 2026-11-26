@@ -359,7 +359,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         ensures project_named_defn_body_matches(self, file, item, result),
     {
         match self.targets().project().check_named_defn_body(self, file, item, false) {
-            Some((outcome, _, _)) => Some(outcome),
+            Some((outcome, _, _, _)) => Some(outcome),
             None => None,
         }
     }

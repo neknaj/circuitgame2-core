@@ -1,5 +1,6 @@
 //! 複合式を含む引数を一つずつ受け取り、呼び出し先の環境を作る。
 
+use alloc::vec::Vec;
 use super::{
     DefnCallPlan, DefnEvaluationBody, ProjectSource, ScalarCallFrame, ScalarExpressionSite,
     ScalarValue, scalar_matches,
@@ -110,7 +111,7 @@ impl<'plan, 'p, 'a> ScalarArguments<'plan, 'p, 'a> {
                 &&& rank == self.ranks_model().1 && rank < self.ranks_model().0
                 &&& frame.body_model() == self.model().2
                 &&& frame.parameter_values_model() == self.model().1
-                &&& !frame.has_fold_bindings()
+                &&& !frame.has_scoped_bindings()
                 &&& parameters_match(frame.body_model().signature, frame.parameter_values_model())
                 &&& self.model().1.len() == self.model().0.arguments@.len()
             },
@@ -121,7 +122,7 @@ impl<'plan, 'p, 'a> ScalarArguments<'plan, 'p, 'a> {
         match waiting.next() {
             CallArgumentStep::Evaluate(pending) => ScalarArgumentsStep::Argument(PendingScalarArgument { callee, pending }),
             CallArgumentStep::Invoke { values, .. } => {
-                let frame = ScalarCallFrame { body: callee.body, values, fold_bindings: None };
+                let frame = ScalarCallFrame { body: callee.body, values, fold_bindings: None, locals: Vec::new() };
                 ScalarArgumentsStep::Enter { rank: callee.to, frame }
             }
         }

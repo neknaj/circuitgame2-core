@@ -13,6 +13,9 @@ use crate::ncg2m::expression_types::{
     same_defn_body_outcome,
 };
 use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call, retained_macro_body, retained_meta_body};
+use crate::ncg2m::expression_types::TypedLetInitializer;
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::initializer_inferred_from;
 use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::named_call::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin,
@@ -442,16 +445,19 @@ impl<'a> ParsedProjectSources<'a> {
     pub(super) fn check_named_defn_body<'p>(
         &self, aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, collect_edges: bool,
     ) -> (result: Option<(Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>,
-        Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallGraphError<'p, 'a>>, Vec<TypedArithmeticSite>)>)
+        Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallGraphError<'p, 'a>>, Vec<TypedArithmeticSite>, Vec<TypedLetInitializer>)>)
         requires *self == aliases.targets_model().project_model(),
             mixed_use_targets_match(self, aliases.targets_model()),
         ensures
             result.is_some() == self.indexed_defn(file, item).is_some(),
             match result {
-                Some((outcome, capture, arithmetic)) => {
+                Some((outcome, capture, arithmetic, initializers)) => {
+                    &&& file < self.sources_model().len()
                     &&& self.named_defn_body_matches(aliases, file, item, Some(outcome))
                     &&& self.functional_forms_model(file) matches Some(forms)
                         && arithmetic_sites_fit(forms, arithmetic@)
+                        && (forall|i: int| 0 <= i < initializers@.len() ==>
+                            initializer_inferred_from(self.sources_model()[file as int].text_model(), forms, #[trigger] initializers@[i]))
                     &&& match capture {
                         Ok(edges) => {
                             &&& (collect_edges && outcome.is_ok()) ==>

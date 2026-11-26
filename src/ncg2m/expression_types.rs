@@ -53,6 +53,9 @@ pub use named_call::{
 };
 mod local_scopes;
 mod typing;
+pub(crate) use typing::TypedLetInitializer;
+#[cfg(verus_only)]
+pub(crate) use typing::initializer_inferred_from;
 pub use fold::FoldSyntaxError;
 use fold::{FoldHeader, FoldKind, read_fold_header};
 #[cfg(verus_only)]

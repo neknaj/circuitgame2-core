@@ -14,7 +14,7 @@ verus! {
 
 spec fn supported_position(plan: &DefnCallPlan, rank: usize, frame: ScalarCallFrame, site: ScalarExpressionSite) -> bool {
     let body = frame.body_model();
-    &&& !frame.has_fold_bindings()
+    &&& !frame.has_scoped_bindings()
     &&& plan.scalar_fragment_is_closed(rank)
     &&& plan.scalar_fragment_value_type(site.expected)
     &&& scalar_evaluator_syntax(body.source.text_model(), body.forms@, site.at)

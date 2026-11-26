@@ -8,6 +8,9 @@ use crate::ncg2m::{
 use crate::project::ParsedProjectSources;
 #[cfg(verus_only)]
 use crate::project::arithmetic_sites_fit;
+use crate::ncg2m::expression_types::TypedLetInitializer;
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::initializer_inferred_from;
 use super::{DefnCallEdge, DefnCallSite, DefnPosition, MixedUseAliases, TypedArithmeticSite};
 use super::dependency_order::{DependencyEdge, check_dependency_order};
 #[cfg(verus_only)]
@@ -70,6 +73,7 @@ pub struct DefnCallPlan<'p, 'a> {
     vertices: Vec<DefnPosition>,
     edges: Vec<Vec<DefnCallEdge<'p, 'a>>>,
     arithmetic: Vec<Vec<TypedArithmeticSite>>,
+    initializers: Vec<Vec<TypedLetInitializer>>,
     order: Vec<usize>,
     ranks: Vec<usize>,
 }
@@ -161,6 +165,41 @@ spec fn anchored_arguments(project: &ParsedProjectSources, vertices: Seq<DefnPos
     }
 }
 
+spec fn initializer_row_fits(project: &ParsedProjectSources, file: usize, row: Vec<TypedLetInitializer>) -> bool {
+    &&& file < project.sources_model().len()
+    &&& project.functional_forms_model(file) matches Some(forms)
+    &&& forall|j: int| 0 <= j < row@.len() ==>
+        initializer_inferred_from(project.sources_model()[file as int].text_model(), forms, #[trigger] row@[j])
+}
+
+#[verifier::opaque]
+spec fn initializer_rows_fit(
+    project: &ParsedProjectSources, vertices: Seq<DefnPosition>, rows: Seq<Vec<TypedLetInitializer>>,
+) -> bool {
+    &&& rows.len() <= vertices.len()
+    &&& forall|i: int| 0 <= i < rows.len() ==> initializer_row_fits(project, vertices[i].file, #[trigger] rows[i])
+}
+
+proof fn append_initializers(
+    project: &ParsedProjectSources, vertices: Seq<DefnPosition>, rows: Seq<Vec<TypedLetInitializer>>,
+    row: Vec<TypedLetInitializer>,
+)
+    requires initializer_rows_fit(project, vertices, rows), rows.len() < vertices.len(),
+        initializer_row_fits(project, vertices[rows.len() as int].file, row),
+    ensures initializer_rows_fit(project, vertices, rows.push(row)),
+{
+    reveal(initializer_rows_fit);
+    let next = rows.push(row);
+    assert(next.len() == rows.len() + 1 <= vertices.len());
+    assert forall|i: int| 0 <= i < next.len() implies initializer_row_fits(project, vertices[i].file, #[trigger] next[i]) by {
+        if i < rows.len() {
+            assert(next[i] == rows[i]);
+        } else {
+            assert(i == rows.len() && next[i] == row);
+        }
+    };
+}
+
 #[verifier::opaque]
 spec fn arithmetic_rows_fit(
     project: &ParsedProjectSources, vertices: Seq<DefnPosition>, rows: Seq<Vec<TypedArithmeticSite>>,
@@ -230,6 +269,8 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
         &&& anchored_arguments(self.project, self.vertices@, self.edges@)
         &&& ordered_edges(self.project, self.vertices@, self.edges@, self.order@, self.ranks@)
         &&& self.ranks@.len() == self.vertices@.len()
+        &&& self.initializers@.len() == self.vertices@.len()
+        &&& initializer_rows_fit(self.project, self.vertices@, self.initializers@)
         &&& self.arithmetic@.len() == self.vertices@.len()
         &&& arithmetic_rows_fit(self.project, self.vertices@, self.arithmetic@)
         &&& reverse_order_matches(self.order@, self.ranks@)
@@ -397,6 +438,38 @@ impl<'p, 'a> DefnCallPlan<'p, 'a> {
     {
         let node = *self.order.get(rank)?;
         let sites = self.edges.get(node)?;
+        Some(sites.as_slice())
+    }
+
+    /// 順位で指定した補助関数で推論された `let` の初期化式を表す。
+    pub(crate) closed spec fn initializer_model_at_rank(&self, rank: usize) -> Option<Seq<TypedLetInitializer>> {
+        if rank < self.order@.len() && self.order@[rank as int] < self.initializers@.len() {
+            Some(self.initializers@[self.order@[rank as int] as int]@)
+        } else {
+            None
+        }
+    }
+
+    /// 型検査で判明した初期化式の元の位置と型を返す。
+    pub(crate) fn let_initializers_at_rank(&self, rank: usize) -> (rows: Option<&[TypedLetInitializer]>)
+        ensures
+            rows.is_some() == (rank < self.order_model().len()),
+            self.initializer_model_at_rank(rank) == match rows {
+                Some(found) => Some(found@),
+                None => None,
+            },
+            rows matches Some(found) ==> {
+                let file = self.order_model()[rank as int].file;
+                &&& file < self.project_model().sources_model().len()
+                &&& self.project_model().functional_forms_model(file) matches Some(forms)
+                &&& forall|i: int| 0 <= i < found@.len() ==> initializer_inferred_from(
+                    self.project_model().sources_model()[file as int].text_model(), forms, #[trigger] found@[i])
+            },
+    {
+        proof { use_type_invariant(self); }
+        let node = *self.order.get(rank)?;
+        proof { reveal(initializer_rows_fit); }
+        let sites = self.initializers.get(node)?;
         Some(sites.as_slice())
     }
 
@@ -640,13 +713,15 @@ spec fn graph_matches(
 fn graph_rows<'t, 'p, 'a>(
     aliases: &MixedUseAliases<'t, 'p, 'a>, vertices: &[DefnPosition],
 ) -> (result: Result<(Vec<Vec<DefnCallEdge<'p, 'a>>>, Vec<Vec<Option<usize>>>,
-    Vec<Vec<TypedArithmeticSite>>), DefnCallGraphError<'p, 'a>>)
+    Vec<Vec<TypedArithmeticSite>>, Vec<Vec<TypedLetInitializer>>), DefnCallGraphError<'p, 'a>>)
     requires
         mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
         defn_vertices_valid(&aliases.targets_model().project_model(), vertices@),
     ensures
         match result {
-            Ok((rows, graph, arithmetic)) => graph@.len() == vertices@.len() && arithmetic@.len() == graph@.len()
+            Ok((rows, graph, arithmetic, initializers)) => graph@.len() == vertices@.len() && arithmetic@.len() == graph@.len()
+                && initializers@.len() == vertices@.len()
+                && initializer_rows_fit(&aliases.targets_model().project_model(), vertices@, initializers@)
                 && graph_matches(aliases, vertices@, rows@, graph@)
                 && arithmetic_rows_fit(&aliases.targets_model().project_model(), vertices@, arithmetic@)
                 && arithmetic_typing_covered(aliases, vertices@, rows@, arithmetic@)
@@ -663,13 +738,16 @@ fn graph_rows<'t, 'p, 'a>(
     let mut rows = Vec::<Vec<DefnCallEdge>>::new();
     let mut graph = Vec::<Vec<Option<usize>>>::new();
     let mut arithmetic = Vec::<Vec<TypedArithmeticSite>>::new();
+    let mut initializers = Vec::<Vec<TypedLetInitializer>>::new();
+    assert(initializer_rows_fit(project, vertices@, initializers@)) by { reveal(initializer_rows_fit); };
     let mut node = 0;
     reveal(arithmetic_rows_fit);
     reveal(arithmetic_typing_covered);
     while node < vertices.len()
         invariant
             node == rows@.len() <= vertices@.len(),
-            node == arithmetic@.len(),
+            node == arithmetic@.len() == initializers@.len(),
+            initializer_rows_fit(project, vertices@, initializers@),
             arithmetic_rows_fit(project, vertices@, arithmetic@),
             arithmetic_typing_covered(aliases, vertices@, rows@, arithmetic@),
             *project == aliases.targets_model().project_model(),
@@ -679,7 +757,7 @@ fn graph_rows<'t, 'p, 'a>(
         decreases vertices@.len() - node,
     {
         let from = vertices[node];
-        let Some((body, capture, sites)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
+        let Some((body, capture, sites, bindings)) = project.check_named_defn_body(aliases, from.file, from.item, true) else { unreachable!() };
         match body {
             Err(error) => {
                 proof { named_body_matches_project(aliases, from.file, from.item, Some(Err(error))); }
@@ -704,6 +782,8 @@ fn graph_rows<'t, 'p, 'a>(
         let ghost earlier_sites = arithmetic@;
         let ghost captured = sites;
         arithmetic.push(sites);
+        proof { append_initializers(project, vertices@, initializers@, bindings); }
+        initializers.push(bindings);
         proof {
             reveal(arithmetic_typing_covered);
             assert(arithmetic@.len() == node + 1 <= vertices@.len());
@@ -733,7 +813,7 @@ fn graph_rows<'t, 'p, 'a>(
             assert(defn_call_edge_matches(aliases, rows@[node]@[field]));
         };
     }
-    Ok((rows, graph, arithmetic))
+    Ok((rows, graph, arithmetic, initializers))
 }
 
 fn copy_edge<'p, 'a>(
@@ -1162,7 +1242,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             mixed_exports_use_project_declarations(project, exports);
         }
         let vertices = declarations.defn_positions(project);
-        let (edges, graph, arithmetic) = graph_rows(self, &vertices)?;
+        let (edges, graph, arithmetic, initializers) = graph_rows(self, &vertices)?;
         match check_dependency_order(graph.as_slice(), true) {
             Err(cycle) => Err(DefnCallGraphError::Cycle(graph_cycle_sites(self, &vertices, &edges, &graph, &cycle))),
             Ok(order) => {
@@ -1175,7 +1255,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                     checked_rows_anchor_arguments(self, project, vertices@, edges@, graph@);
                     checked_edges_have_order(self, project, vertices@, edges@, graph@, order@, ranks@, expected);
                 }
-                let plan = DefnCallPlan { project, vertices, edges, arithmetic, order, ranks };
+                let plan = DefnCallPlan { project, vertices, edges, arithmetic, initializers, order, ranks };
                 proof { checked_dependency_order_is_call_plan(self, &plan, graph@); }
                 Ok(plan)
             }

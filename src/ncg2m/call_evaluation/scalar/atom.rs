@@ -143,9 +143,12 @@ fn read_name_atom(
 spec fn scoped_name_atom_result(
     frame: &ScalarCallFrame, word: Seq<u8>, expected: DataType, result: Option<ScalarValue>,
 ) -> bool {
-    let local = match frame.fold_bindings_model() {
-        Some(bindings) => bindings.value_for(word),
-        None => None,
+    let local = match super::locals::lexical_value(frame.locals_model(), word) {
+        Some(value) => Some(value),
+        None => match frame.fold_bindings_model() {
+            Some(bindings) => bindings.value_for(word),
+            None => None,
+        },
     };
     match local {
         Some(value) => result == if scalar_fits(value, expected) { Some(value) } else { None },
@@ -204,11 +207,12 @@ pub(super) proof fn typed_atom_yields_value<'p, 'a>(
             &&& scalar_atom_at(body.forms@, at)
             &&& local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, at, expected)
         },
-        !frame.has_fold_bindings(),
+        !frame.has_scoped_bindings(),
         scalar_atom_matches(frame, at, expected, result),
         parameters_match(frame.body_model().signature, frame.parameter_values_model()),
     ensures result matches Ok(Some(value)) && scalar_fits(value, expected),
 {
+    reveal(ScalarCallFrame::has_scoped_bindings);
     reveal(ScalarCallFrame::has_fold_bindings);
     let body = frame.body_model();
     let parameters = body.signature.parameters@;
@@ -216,6 +220,8 @@ pub(super) proof fn typed_atom_yields_value<'p, 'a>(
     let values = frame.parameter_values_model();
     let source = body.source.text_model();
     let word = spelling(source, body.forms@[at as int]);
+    assert(frame.locals_model() =~= Seq::empty());
+    super::locals::empty_local_values(word);
     scalar_atom_type_origin(source, body.forms@, parameters, at, expected);
     match body.forms@[at as int] {
         Form::Atom { kind: AtomKind::Name, .. } => {
@@ -345,6 +351,9 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
             }
             Form::Atom { kind: AtomKind::Name, .. } => {
                 let word = source_word(source, body.forms, at);
+                if let Some(value) = super::locals::local_value(self.locals.as_slice(), word) {
+                    return Ok(if scalar_matches(value, expected) { Some(value) } else { None });
+                }
                 if let Some(bindings) = self.fold_bindings {
                     if let Some(value) = bindings.lookup(word) {
                         return Ok(if scalar_matches(value, expected) { Some(value) } else { None });
