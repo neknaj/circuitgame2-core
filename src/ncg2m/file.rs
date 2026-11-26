@@ -375,8 +375,10 @@ spec fn kind_result(result: Result<MetaItemKind, MetaFileError>) -> Result<ItemC
 
 fn read_macro(_source: &str, forms: &[Form], root: usize) -> (result: Result<MetaItemKind, MetaFileError>)
     requires usable_forms(_source, forms@), root < forms@.len(), forms@[root as int] is List,
+        item_tag(_source, forms@, root) == Some(ItemTag::Defmacro),
     ensures kind_result(result) == macro_model(forms@, root),
-        result matches Ok(kind) ==> binding_kind_span_valid(_source, kind),
+        result matches Ok(kind) ==> binding_kind_span_valid(_source, kind)
+            && callable_item_at(_source, forms@, root, kind),
 {
     let (name, names, body) = read_macro_sites(forms, root)?;
     let first = names + 1;
@@ -405,9 +407,11 @@ fn read_macro(_source: &str, forms: &[Form], root: usize) -> (result: Result<Met
             form_span_readable(_source, forms@, (first + i) as usize);
         };
     }
-    Ok(MetaItemKind::Defmacro {
+    let kind = MetaItemKind::Defmacro {
         name: span_of(&forms[name]), parameters, body: span_of(&forms[body]),
-    })
+    };
+    assert(indexed_macro_site(_source, forms@, root, body, kind));
+    Ok(kind)
 }
 
 
@@ -554,18 +558,27 @@ spec fn meta_forms(source: &str, forms: Seq<Form>) -> bool {
     usable_forms(source, forms) && list_source_delimiters(source, forms, false)
 }
 
-spec fn defn_item_at(source: &str, forms: Seq<Form>, at: usize, kind: MetaItemKind) -> bool {
+spec fn indexed_macro_site(source: &str, forms: Seq<Form>, root: usize, at: usize, kind: MetaItemKind) -> bool {
+    &&& root < forms.len() && forms[root as int] is List
+    &&& at < forms.len()
+    &&& item_tag(source, forms, root) == Some(ItemTag::Defmacro)
+    &&& (kind matches MetaItemKind::Defmacro { body, .. } && form_span(forms[at as int]) == body)
+    &&& macro_model(forms, root) == Ok(kind_view(kind))
+    &&& (macro_sites(forms, root) matches Ok((_, _, body)) && at == body)
+}
+
+spec fn callable_item_at(source: &str, forms: Seq<Form>, at: usize, kind: MetaItemKind) -> bool {
     match kind {
         MetaItemKind::Defn(header) => exists|body: usize| #[trigger] indexed_body_site(source, forms, at, body, header),
+        MetaItemKind::Defmacro { .. } => exists|body: usize| #[trigger] indexed_macro_site(source, forms, at, body, kind),
         _ => true,
     }
 }
 
-spec fn defn_items_in_forms(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>) -> bool {
+spec fn callable_items_in_forms(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>) -> bool {
     forall|i: int| 0 <= i < entries.len() ==> {
         let entry = #[trigger] entries[i];
-        entry.kind matches MetaItemKind::Defn(header) ==> exists|root: usize, body: usize|
-            #[trigger] indexed_body_site(source, forms, root, body, header)
+        exists|root: usize| #[trigger] callable_item_at(source, forms, root, entry.kind)
     }
 }
 
@@ -573,7 +586,7 @@ pub(crate) closed spec fn meta_ast_matches(source: &str, forms: Seq<Form>, entri
     &&& usable_forms(source, forms)
     &&& strict_preorder_ranges(forms)
     &&& sexpr_form_model(source) == Some(forms)
-    &&& defn_items_in_forms(source, forms, entries)
+    &&& callable_items_in_forms(source, forms, entries)
 }
 
 pub(super) proof fn meta_ast_source(source: &str, forms: Seq<Form>, entries: Seq<MetaItem>)
@@ -588,7 +601,9 @@ pub(super) proof fn meta_ast_body_origin(source: &str, forms: Seq<Form>, entries
         indexed_body_site(source, forms, site.0, site.1, entries[item].kind->Defn_0),
 {
     let header = entries[item].kind->Defn_0;
-    choose|root: usize, body: usize| #[trigger] indexed_body_site(source, forms, root, body, header)
+    let root = choose|root: usize| #[trigger] callable_item_at(source, forms, root, entries[item].kind);
+    let body = choose|body: usize| #[trigger] indexed_body_site(source, forms, root, body, header);
+    (root, body)
 }
 
 
@@ -645,14 +660,43 @@ pub(super) fn indexed_meta_body(
 {
     let ghost witness = meta_ast_body_origin(_source, forms@, entries@, item as int);
     let MetaItemKind::Defn(header) = &entries[item].kind else { unreachable!() };
-    let Some(found) = find_form_start(forms, header.body_span.start) else { unreachable!() };
+    find_retained_body(forms, header.body_span.start, Ghost(witness.1))
+}
+
+fn find_retained_body(forms: &[Form], start: usize, _witness: Ghost<usize>) -> (at: usize)
+    requires strict_preorder_ranges(forms@), _witness@ < forms@.len(),
+        form_span(forms@[_witness@ as int]).start == start,
+    ensures at == _witness@,
+{
+    let Some(found) = find_form_start(forms, start) else { unreachable!() };
     proof {
-        if found < witness.1 {
-            starts_in_source_order(forms@, found as int, witness.1 as int);
-        } else if witness.1 < found {
-            starts_in_source_order(forms@, witness.1 as int, found as int);
+        if found < _witness@ {
+            starts_in_source_order(forms@, found as int, _witness@ as int);
+        } else if _witness@ < found {
+            starts_in_source_order(forms@, _witness@ as int, found as int);
         }
-        assert(found == witness.1);
+    }
+    found
+}
+
+/// プロジェクトに保持した構文木から、マクロ本体式の位置を得る。
+pub(crate) fn retained_macro_body(_source: &str, forms: &[Form], entries: &[MetaItem], item: usize)
+    -> (body: usize)
+    requires meta_ast_matches(_source, forms@, entries@), item < entries@.len(), entries@[item as int].kind is Defmacro,
+    ensures retained_forms_in_source_order(forms@), body < forms@.len(),
+        form_span(forms@[body as int]) == entries@[item as int].kind->Defmacro_body,
+        readable_span(_source, form_span(forms@[body as int])),
+        form_spans_valid(_source, forms@, _source.spec_bytes().len() as int),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+{
+    let ghost kind = entries@[item as int].kind;
+    let ghost root = choose|root: usize| #[trigger] callable_item_at(_source, forms@, root, kind);
+    let ghost at = choose|at: usize| #[trigger] indexed_macro_site(_source, forms@, root, at, kind);
+    let MetaItemKind::Defmacro { body, .. } = &entries[item].kind else { unreachable!() };
+    let found = find_retained_body(forms, body.start, Ghost(at));
+    proof {
+        reveal(retained_forms_in_source_order);
+        form_span_readable(_source, forms@, found);
     }
     found
 }
@@ -744,7 +788,7 @@ fn read_item(source: &str, forms: &[Form], root: usize, in_namespace: bool)
     requires meta_forms(source, forms@), root < forms@.len(),
     ensures
         kind_result(result) == item_model(source, forms@, root, in_namespace),
-        result matches Ok(kind) ==> binding_kind_span_valid(source, kind) && defn_item_at(source, forms@, root, kind),
+        result matches Ok(kind) ==> binding_kind_span_valid(source, kind) && callable_item_at(source, forms@, root, kind),
         result matches Ok(MetaItemKind::Namespace { path }) ==> !in_namespace
             && root + 3 <= subtree_limit(forms@, root)
             && forms@[root as int] is List
@@ -878,9 +922,9 @@ fn read_region(
     source: &str, forms: &[Form], first: usize, end: usize, parent: Option<usize>, entries: &mut Vec<MetaItem>,
 ) -> (result: Result<(), MetaFileError>)
     requires meta_forms(source, forms@), index_region(forms@, first, end, parent),
-        meta_binding_spans_valid(source, old(entries)@), defn_items_in_forms(source, forms@, old(entries)@),
+        meta_binding_spans_valid(source, old(entries)@), callable_items_in_forms(source, forms@, old(entries)@),
     ensures result.is_ok() ==> meta_binding_spans_valid(source, final(entries)@)
-        && defn_items_in_forms(source, forms@, final(entries)@),
+        && callable_items_in_forms(source, forms@, final(entries)@),
         region_model(source, forms@, first, end, parent, entry_views(old(entries)@))
         == match result { Ok(()) => Ok(entry_views(final(entries)@)), Err(error) => Err(error) },
     decreases end - first,
@@ -892,7 +936,7 @@ fn read_region(
             meta_forms(source, forms@), first <= at, index_region(forms@, at, end, parent),
             initial == entry_views(old(entries)@),
             meta_binding_spans_valid(source, entries@),
-            defn_items_in_forms(source, forms@, entries@),
+            callable_items_in_forms(source, forms@, entries@),
             region_model(source, forms@, first, end, parent, initial)
                 == region_model(source, forms@, at, end, parent, entry_views(entries@)),
         decreases end - at,
@@ -933,18 +977,15 @@ fn read_region(
                 }
             };
         };
-        assert(defn_items_in_forms(source, forms@, entries@)) by {
+        assert(callable_items_in_forms(source, forms@, entries@)) by {
             assert forall|i: int| 0 <= i < entries@.len() implies {
                 let row = #[trigger] entries@[i];
-                row.kind matches MetaItemKind::Defn(header) ==> exists|root: usize, body: usize|
-                    #[trigger] indexed_body_site(source, forms@, root, body, header)
+                exists|root: usize| #[trigger] callable_item_at(source, forms@, root, row.kind)
             } by {
                 if i < previous.len() {
                     assert(entries@[i] == previous[i]);
-                } else if let MetaItemKind::Defn(header) = entry.kind {
-                    let root = at;
-                    let body = choose|body: usize| #[trigger] indexed_body_site(source, forms@, root, body, header);
-                    assert(indexed_body_site(source, forms@, root, body, header));
+                } else {
+                    assert(callable_item_at(source, forms@, at, entry.kind));
                 }
             };
         };
@@ -1065,7 +1106,7 @@ pub(crate) fn index_meta_with_forms(source: &str)
     let mut entries = Vec::new();
     assert(entry_views(entries@) =~= Seq::<EntryView>::empty());
     assert(meta_binding_spans_valid(source, entries@));
-    assert(defn_items_in_forms(source, forms@, entries@));
+    assert(callable_items_in_forms(source, forms@, entries@));
     read_region(source, &forms, 0, forms.len(), None, &mut entries)?;
     assert(strict_sexpr_derivation(source, forms@));
     assert(usable_forms(source, forms@));

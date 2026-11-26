@@ -110,6 +110,15 @@ pub open spec fn indexed_defmacro(project: &ParsedProjectSources, definition: Re
             && declaration.name.span == name && definition.parameters@ == parameters@ && *definition.body == body)
 }
 
+/// 同じプロジェクトで解決した定義について、本体を保持済みの索引から取得できることを示す。
+pub proof fn indexed_defmacro_is_retained(project: &ParsedProjectSources, definition: &ResolvedDefmacro)
+    requires indexed_defmacro(project, *definition),
+    ensures project.contains_defmacro(definition),
+{
+    reveal(macro_reference_declaration);
+    crate::project::source_indexes::identical_macro_snapshot(definition.declaration.name.source);
+}
+
 /// 仮引数と本体の範囲が、元の文書から読み出せる UTF-8 文字境界にある。
 pub open spec fn defmacro_ranges_readable(definition: ResolvedDefmacro) -> bool {
     let source = definition.declaration.name.source.text_model();

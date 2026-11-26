@@ -142,3 +142,39 @@ fn resolves_macros_from_the_block_of_each_circuit_body() {
         Err(DefmacroNameError::InvalidName)
     ));
 }
+
+
+#[test]
+fn borrows_the_macro_body_from_the_matching_snapshot() {
+    let declarations = "; 本体\n(namespace lib (export emit) (defmacro emit (x) (list (syntax (unsyntax x)))))";
+    let indexes = parse_project_sources(&[
+        SourceSnapshot { path: "macros.ncg2m", revision: 31, text: declarations },
+        SourceSnapshot {
+            path: "main.ncg2",
+            revision: 47,
+            text: "(using nor) (func f (in x) (out y) (expand ::lib::emit x))",
+        },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&indexes).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut definition = aliases.resolve_defmacro_name(1, 1, "::lib::emit").unwrap();
+    let body = indexes.defmacro_body(&definition).unwrap();
+    let circuitgame2_core::syntax::Form::List { span, end } = &body.forms[body.at] else {
+        panic!("a list is expected");
+    };
+    assert_eq!(body.source.revision, 31);
+    assert_eq!(&body.source.text()[span.clone()], "(list (syntax (unsyntax x)))");
+    assert!(*end > body.at + 3);
+
+    let stale = parse_project_sources(&[
+        SourceSnapshot { path: "macros.ncg2m", revision: 32, text: declarations },
+    ]).unwrap();
+    assert!(stale.defmacro_body(&definition).is_none());
+    let different = parse_project_sources(&[
+        SourceSnapshot { path: "macros.ncg2m", revision: 31,
+            text: "; 本体\n(namespace lib (export emit) (defmacro emit (y) (list (syntax (unsyntax y)))))" },
+    ]).unwrap();
+    assert!(different.defmacro_body(&definition).is_none());
+    definition.body = &(0..0);
+    assert!(indexes.defmacro_body(&definition).is_none());
+}

@@ -75,7 +75,10 @@ pub use macro_calls::{macro_call_matches, macro_call_spans_in_source};
 mod defmacro_name;
 pub use defmacro_name::{DefmacroNameError, ResolvedDefmacro};
 #[cfg(verus_only)]
-pub use defmacro_name::{defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro, macro_declaration_name_origin, macro_reference_declaration};
+pub use defmacro_name::{
+    defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro,
+    indexed_defmacro_is_retained, macro_declaration_name_origin, macro_reference_declaration,
+};
 mod mixed_function;
 pub use mixed_function::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
     MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError,

@@ -102,7 +102,10 @@ pub use use_aliases::{MacroCall, MacroCallError, MacroCalls};
 pub use use_aliases::{macro_call_matches, macro_call_spans_in_source};
 pub use use_aliases::{DefmacroNameError, ResolvedDefmacro};
 #[cfg(verus_only)]
-pub use use_aliases::{defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro, macro_declaration_name_origin, macro_reference_declaration};
+pub use use_aliases::{
+    defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro,
+    indexed_defmacro_is_retained, macro_declaration_name_origin, macro_reference_declaration,
+};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 pub use use_aliases::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
     MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError,
@@ -145,7 +148,7 @@ pub use resolution::{
     mixed_declaration_visible_from, mixed_key_resolution, same_mixed_target, same_target,
 };
 pub use source_indexes::{
-    ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,
+    DefmacroBody, ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,
 };
 #[cfg(verus_only)]
 pub use source_indexes::{
