@@ -14,6 +14,7 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
     pub open spec fn has_locally_checked_site(&self, site: ScalarExpressionSite<'a>) -> bool {
         let body = self.body_model();
         let source = body.source.text_model();
+        &&& !self.has_fold_bindings()
         &&& local_scalar_fragment(source, body.forms@, site.at)
         &&& local_scalar_site_is_typed(source, body.forms@, body.signature.parameters@, site.at, site.expected)
     }
@@ -191,6 +192,7 @@ impl<'p, 'a> ScalarExpression<'p, 'a> {
                 let frame = self.frame_model();
                 let body = frame.body_model();
                 let site = self.expression_model();
+                &&& !frame.has_fold_bindings()
                 &&& scalar_atom_at(body.forms@, site.at)
                 &&& local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@,
                     site.at, site.expected)
