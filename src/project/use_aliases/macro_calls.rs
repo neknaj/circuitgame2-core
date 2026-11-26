@@ -8,7 +8,7 @@ use crate::ncg2m::{
 #[cfg(verus_only)]
 use crate::ncg2m::{
     call_evaluation::macro_binding::macro_arguments_cover,
-    expression_types::defmacro_body_check,
+    expression_types::{checked_macro_body_origin, defmacro_body_check},
 };
 #[cfg(verus_only)]
 use super::indexed_defmacro_is_retained;
@@ -291,6 +291,8 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
 
 impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
     /// 一つの呼び出しから型検査済みの本体と実引数を結び付けた結果を表す。
+    ///
+    /// 成功時は本体が元宣言と同じ構文木に対応し、実引数は呼び出し元の順序と位置を保つ。
     pub open spec fn binding_advances(
         &self, next: &Self, outcome: Option<Result<BoundMacroCall<'p, 'a>, MacroPreparationError<'p, 'a>>>,
     ) -> bool {
@@ -301,11 +303,13 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
                 let definition = bound.definition_model();
                 let site = bound.site_model();
                 let scope = bound.scope_model();
+                let checked = bound.body_model();
                 &&& self.advances(next, Some(MacroCall { site, target: Ok(definition) }))
                 &&& bound.valid()
                 &&& scope.source == next.source_model()
                 &&& (scope.file, scope.entry) == next.origin_model()
-                &&& defmacro_body_check(&project, &definition, Some(Ok(bound.body_model())))
+                &&& defmacro_body_check(&project, &definition, Some(Ok(checked)))
+                &&& checked_macro_body_origin(&project, &definition, &checked)
                 &&& macro_arguments_cover(scope, next.sites_model().syntax_model().forms@,
                     site.arguments, bound.arguments_model())
             },

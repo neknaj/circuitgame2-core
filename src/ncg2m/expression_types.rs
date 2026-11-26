@@ -37,7 +37,8 @@ mod macro_body;
 pub use macro_body::{CheckedMacroBody, CheckedMacroElement, MacroBodyError, MacroInsertion};
 #[cfg(verus_only)]
 pub use macro_body::{
-    defmacro_body_check, macro_body_elements_complete, macro_element_origin, macro_expression_is_syntax,
+    checked_macro_body_origin, defmacro_body_check, macro_body_elements_complete, macro_element_origin,
+    macro_expression_is_syntax,
     macro_insertion_is_typed, macro_insertion_origin, macro_list_element_positions,
     macro_parameter_environment, macro_subtree_end, template_insertion_positions,
 };
