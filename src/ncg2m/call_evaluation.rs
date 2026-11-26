@@ -9,6 +9,7 @@ use vstd::prelude::*;
 pub mod macro_binding;
 pub mod macro_expansion;
 pub mod macro_syntax;
+pub mod nat_fold;
 pub mod scalar;
 
 verus! {

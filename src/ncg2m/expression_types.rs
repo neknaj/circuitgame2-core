@@ -255,6 +255,65 @@ fn read_keyword(word: &str) -> (tag: Option<FormTag>)
     else { None }
 }
 
+
+/// 元の構文木における自然数反復の式と束縛名の位置。
+#[derive(Clone, Copy)]
+pub struct NatFoldTerms {
+    /// 反復回数を求める式。
+    pub count: usize,
+    /// 最初の累積値を求める式。
+    pub initial: usize,
+    /// 本体だけで使える添字の束縛名。
+    pub index_binding: usize,
+    /// 本体だけで使える累積値の束縛名。
+    pub accumulator_binding: usize,
+    /// 添字と累積値を束縛して評価する式。
+    pub body: usize,
+}
+
+/// 自然数反復に対する構文上の位置の投影を表す。
+pub closed spec fn nat_fold_terms_match(
+    source: &str, forms: Seq<Form>, at: usize, terms: Option<NatFoldTerms>,
+) -> bool {
+    terms == match shape(source, forms, at) {
+        Ok(Expression::Fold(fold)) if fold.kind is Nat => Some(NatFoldTerms {
+            count: fold.input,
+            initial: fold.initial,
+            index_binding: fold.item,
+            accumulator_binding: fold.accumulator,
+            body: fold.body,
+        }),
+        _ => None,
+    }
+}
+
+
+/// 同じ構文木上の同じ式から取り出した反復の位置は一意である。
+pub proof fn nat_fold_term_results_agree(
+    source: &str, forms: Seq<Form>, at: usize, first: Option<NatFoldTerms>, second: Option<NatFoldTerms>,
+)
+    requires nat_fold_terms_match(source, forms, at, first), nat_fold_terms_match(source, forms, at, second),
+    ensures first == second,
+{}
+pub(super) fn read_nat_fold_terms(source: &str, forms: &[Form], at: usize) -> (terms: Option<NatFoldTerms>)
+    requires usable_forms(source, forms@), at < forms@.len(),
+    ensures nat_fold_terms_match(source, forms@, at, terms),
+        terms matches Some(found) ==>
+            at < found.count < found.initial < found.index_binding
+                < found.accumulator_binding < found.body < forms@.len(),
+{
+    let Ok(Expression::Fold(fold)) = read_shape(source, forms, at) else { return None; };
+    if !matches!(fold.kind, FoldKind::Nat) {
+        return None;
+    }
+    Some(NatFoldTerms {
+        count: fold.input,
+        initial: fold.initial,
+        index_binding: fold.item,
+        accumulator_binding: fold.accumulator,
+        body: fold.body,
+    })
+}
 spec fn bool_word(word: Seq<u8>) -> bool {
     word == "true".spec_bytes() || word == "false".spec_bytes()
 }
