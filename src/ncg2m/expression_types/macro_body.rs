@@ -43,22 +43,86 @@ pub struct MacroInsertion {
 #[derive(Debug)]
 pub struct CheckedMacroElement {
     /// 要素の式の根を指す元の構文木の添字。
-    pub at: usize,
+    at: usize,
     /// `syntax` の場合、そのテンプレートの根を指す元の構文木の添字。
-    pub template: Option<usize>,
+    template: Option<usize>,
     /// テンプレートで実際に型検査した挿入式。元ソース順に並ぶ。
-    pub insertions: Vec<MacroInsertion>,
+    insertions: Vec<MacroInsertion>,
 }
 
 /// `(List Syntax)` として検査した、元ソースと本体。
 #[derive(Debug)]
 pub struct CheckedMacroBody<'p, 'a> {
     /// 元ソース、保持済みの構文木と本体式。
-    pub body: DefmacroBody<'p, 'a>,
+    body: DefmacroBody<'p, 'a>,
     /// 宣言順の仮引数。暗黙の型 `Syntax` には仮引数名の範囲を使う。
-    pub parameters: Vec<SignatureParameter<'a>>,
+    parameters: Vec<SignatureParameter<'a>>,
     /// `list` の要素を検査した順に並べた結果。
-    pub elements: Vec<CheckedMacroElement>,
+    elements: Vec<CheckedMacroElement>,
+}
+
+impl CheckedMacroElement {
+    /// 要素の式の根を指す構文木の添字を表す。
+    pub closed spec fn at_model(&self) -> usize { self.at }
+
+    /// テンプレートの根を指す構文木の添字を表す。
+    pub closed spec fn template_model(&self) -> Option<usize> { self.template }
+
+    /// 実際に型検査した挿入式の列を表す。
+    pub closed spec fn insertions_model(&self) -> Seq<MacroInsertion> { self.insertions@ }
+
+    /// 要素の式の根を指す構文木の添字を返す。
+    pub fn at(&self) -> (at: usize)
+        ensures at == self.at_model(),
+    {
+        self.at
+    }
+
+    /// `syntax` を使う要素ならテンプレートの根を指す構文木の添字を返す。
+    pub fn template(&self) -> (root: Option<usize>)
+        ensures root == self.template_model(),
+    {
+        self.template
+    }
+
+    /// 検査した挿入式を元ソース順に借りる。
+    pub fn insertions(&self) -> (insertions: &[MacroInsertion])
+        ensures insertions@ == self.insertions_model(),
+    {
+        self.insertions.as_slice()
+    }
+}
+
+impl<'p, 'a> CheckedMacroBody<'p, 'a> {
+    /// 元ソース、保持済みの構文木と本体式を表す。
+    pub closed spec fn body_model(&self) -> DefmacroBody<'p, 'a> { self.body }
+
+    /// マクロの仮引数の型環境を宣言順に表す。
+    pub closed spec fn parameters_model(&self) -> Seq<SignatureParameter<'a>> { self.parameters@ }
+
+    /// 本体のリスト要素を元ソース順に表す。
+    pub closed spec fn elements_model(&self) -> Seq<CheckedMacroElement> { self.elements@ }
+
+    /// 元ソース、保持済みの構文木と本体式を借りる。
+    pub fn body(&self) -> (body: &DefmacroBody<'p, 'a>)
+        ensures *body == self.body_model(),
+    {
+        &self.body
+    }
+
+    /// 仮引数の型環境を宣言順に借りる。
+    pub fn parameters(&self) -> (parameters: &[SignatureParameter<'a>])
+        ensures parameters@ == self.parameters_model(),
+    {
+        self.parameters.as_slice()
+    }
+
+    /// 型検査済みのリスト要素を元ソース順に借りる。
+    pub fn elements(&self) -> (elements: &[CheckedMacroElement])
+        ensures elements@ == self.elements_model(),
+    {
+        self.elements.as_slice()
+    }
 }
 
 spec fn syntax_type(depth: usize) -> TypeShape {
@@ -199,6 +263,70 @@ spec fn typed_insertions_tail<'a>(
     }
 }
 
+/// テンプレートの走査経路に沿って、評価する挿入式の根の添字を順に表す。
+///
+/// 挿入式の部分木は走査しない。`None` は走査の途中で構造違反が見つかった場合を表す。
+#[verifier::opaque]
+pub open spec fn template_insertion_positions(
+    source: &str, forms: Seq<Form>, root: usize, current: usize, stop: usize,
+) -> Option<Seq<usize>>
+    decreases stop - current,
+{
+    if current > stop || stop > forms.len() {
+        None
+    } else if current == stop {
+        Some(Seq::empty())
+    } else {
+        match template_part(source, forms, current, current == root) {
+            Err(_) => None,
+            Ok(TemplatePart::Insertion { expression, next, .. }) if current < next <= stop =>
+                match template_insertion_positions(source, forms, root, next, stop) {
+                    Some(rest) => Some(seq![expression] + rest),
+                    None => None,
+                },
+            Ok(TemplatePart::Insertion { .. }) => None,
+            Ok(_) => template_insertion_positions(source, forms, root, (current + 1) as usize, stop),
+        }
+    }
+}
+
+proof fn typed_insertions_cover_positions(
+    source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>, root: usize,
+    current: usize, stop: usize, rows: Seq<MacroInsertion>,
+)
+    requires current <= stop <= forms.len(),
+        typed_insertions_tail(source, forms, parameters, root, current, stop) == Ok(rows),
+    ensures template_insertion_positions(source, forms, root, current, stop)
+        == Some(rows.map_values(|row: MacroInsertion| row.expression)),
+    decreases stop - current,
+{
+    reveal_with_fuel(typed_insertions_tail, 1);
+    reveal_with_fuel(template_insertion_positions, 1);
+    if current < stop {
+        match template_part(source, forms, current, current == root) {
+            Ok(TemplatePart::Insertion { kind, expression, next }) => {
+                assert(current < next <= stop);
+                let row = MacroInsertion {
+                    span: form_span(forms[current as int]), expression,
+                    expression_span: form_span(forms[expression as int]), expected: kind,
+                };
+                let suffix = typed_insertions_tail(source, forms, parameters, root, next, stop);
+                assert(suffix is Ok);
+                let rest = suffix->Ok_0;
+                assert(rows == seq![row] + rest);
+                typed_insertions_cover_positions(source, forms, parameters, root, next, stop, rest);
+                assert(rows.map_values(|row: MacroInsertion| row.expression)
+                    =~= seq![expression] + rest.map_values(|row: MacroInsertion| row.expression));
+            },
+            Ok(_) => typed_insertions_cover_positions(source, forms, parameters, root,
+                (current + 1) as usize, stop, rows),
+            Err(_) => assert(false),
+        }
+    } else {
+        assert(rows.map_values(|row: MacroInsertion| row.expression) =~= Seq::<usize>::empty());
+    }
+}
+
 /// 挿入位置と式の元範囲が、同じテンプレートの構文木に対応する。
 pub open spec fn macro_insertion_origin(source: &str, forms: Seq<Form>, root: usize, row: MacroInsertion) -> bool {
     let at = row.expression - 2;
@@ -223,6 +351,8 @@ fn check_insertions<'a>(source: &'a str, forms: &[Form], parameters: &[Signature
     requires usable_forms(source, forms@), root < forms@.len(),
     ensures match result {
         Ok(rows) => typed_insertions_tail(source, forms@, parameters@, root, root, subtree_limit(forms@, root)) == Ok(rows@)
+            && template_insertion_positions(source, forms@, root, root, subtree_limit(forms@, root))
+                == Some(rows@.map_values(|row: MacroInsertion| row.expression))
             && forall|i: int| 0 <= i < rows@.len() ==>
                 macro_insertion_origin(source, forms@, root, #[trigger] rows@[i])
                 && macro_insertion_is_typed(source, forms@, parameters@, rows@[i]),
@@ -254,6 +384,7 @@ fn check_insertions<'a>(source: &'a str, forms: &[Form], parameters: &[Signature
         let Some((at, part)) = next_part else {
             assert(current == stop);
             assert(prefix + Seq::<MacroInsertion>::empty() =~= prefix);
+            proof { typed_insertions_cover_positions(source, forms@, parameters@, root, root, stop, prefix); }
             return Ok(rows);
         };
         assert(at == current);
@@ -308,17 +439,38 @@ spec fn macro_element_check<'a>(
     }
 }
 
+/// テンプレートを使わない要素の既存の型判断が `Syntax` を受理する。
+pub closed spec fn macro_expression_is_syntax(
+    source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>, at: usize,
+) -> bool {
+    typed_body(source, forms, environment_view(parameters), at, syntax_type(0)) == BodyVerdict::Accepted
+}
+
+/// 一つのフォームの部分木を過ぎた位置を表す。
+pub open spec fn macro_subtree_end(forms: Seq<Form>, at: usize) -> usize {
+    match forms[at as int] {
+        Form::List { end, .. } => end,
+        Form::Atom { .. } => (at + 1) as usize,
+    }
+}
+
 /// 要素とその挿入式が元の構文木に対応し、要求された型の検査を通っている。
 pub open spec fn macro_element_origin(
     source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>, element: CheckedMacroElement,
 ) -> bool {
-    &&& element.at < forms.len()
-    &&& syntax_template(source, forms, element.at) == Ok(element.template)
-    &&& match element.template {
-        Some(root) => root < forms.len() && forall|i: int| 0 <= i < element.insertions@.len() ==>
-            macro_insertion_origin(source, forms, root, #[trigger] element.insertions@[i])
-            && macro_insertion_is_typed(source, forms, parameters, element.insertions@[i]),
-        None => element.insertions@.len() == 0,
+    &&& element.at_model() < forms.len()
+    &&& syntax_template(source, forms, element.at_model()) == Ok(element.template_model())
+    &&& match element.template_model() {
+        Some(root) => {
+            &&& root < forms.len()
+            &&& template_insertion_positions(source, forms, root, root, macro_subtree_end(forms, root))
+                == Some(element.insertions_model().map_values(|row: MacroInsertion| row.expression))
+            &&& forall|i: int| 0 <= i < element.insertions_model().len() ==>
+                macro_insertion_origin(source, forms, root, #[trigger] element.insertions_model()[i])
+                && macro_insertion_is_typed(source, forms, parameters, element.insertions_model()[i])
+        },
+        None => element.insertions_model().len() == 0
+            && macro_expression_is_syntax(source, forms, parameters, element.at_model()),
     }
 }
 
@@ -369,6 +521,71 @@ spec fn typed_elements_tail<'a>(
     }
 }
 
+/// 子の範囲から、直下のリスト要素の根の添字を順に表す。
+#[verifier::opaque]
+pub open spec fn macro_list_element_positions(forms: Seq<Form>, current: usize, stop: usize) -> Option<Seq<usize>>
+    decreases stop - current,
+{
+    if current > stop || stop > forms.len() {
+        None
+    } else if current == stop {
+        Some(Seq::empty())
+    } else {
+        let next = macro_subtree_end(forms, current);
+        if current < next <= stop {
+            match macro_list_element_positions(forms, next, stop) {
+                Some(rest) => Some(seq![current] + rest),
+                None => None,
+            }
+        } else {
+            None
+        }
+    }
+}
+
+proof fn typed_elements_cover_positions(
+    source: &str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    current: usize, stop: usize, rows: Seq<MacroElementModel>,
+)
+    requires current <= stop <= forms.len(),
+        typed_elements_tail(source, forms, parameters, current, stop) == Ok(rows),
+    ensures macro_list_element_positions(forms, current, stop)
+        == Some(rows.map_values(|row: MacroElementModel| row.0)),
+    decreases stop - current,
+{
+    reveal_with_fuel(typed_elements_tail, 1);
+    reveal_with_fuel(macro_list_element_positions, 1);
+    if current < stop {
+        let check = macro_element_check(source, forms, parameters, current);
+        assert(check is Ok);
+        let row = check->Ok_0;
+        let next = subtree_limit(forms, current);
+        assert(current < next <= stop);
+        assert(macro_subtree_end(forms, current) == next);
+        let suffix = typed_elements_tail(source, forms, parameters, next, stop);
+        assert(suffix is Ok);
+        let rest = suffix->Ok_0;
+        assert(rows == seq![row] + rest);
+        assert(row.0 == current);
+        typed_elements_cover_positions(source, forms, parameters, next, stop, rest);
+        assert(rows.map_values(|row: MacroElementModel| row.0)
+            =~= seq![current] + rest.map_values(|row: MacroElementModel| row.0));
+    } else {
+        assert(rows.map_values(|row: MacroElementModel| row.0) =~= Seq::<usize>::empty());
+    }
+}
+
+/// 検査済みの要素が、元の `list` の直接の要素と同じ順序で過不足なく対応する。
+pub open spec fn macro_body_elements_complete(
+    forms: Seq<Form>, root: usize, elements: Seq<CheckedMacroElement>,
+) -> bool {
+    &&& root < forms.len()
+    &&& forms[root as int] matches Form::List { end, .. }
+        && root + 2 <= end <= forms.len()
+        && macro_list_element_positions(forms, (root + 2) as usize, end)
+            == Some(elements.map_values(|element: CheckedMacroElement| element.at_model()))
+}
+
 spec fn macro_body_verdict<'a>(
     source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter<'a>>, root: usize,
 ) -> Result<Seq<MacroElementModel>, MacroBodyError<'a>> {
@@ -385,8 +602,9 @@ fn check_elements<'a>(source: &'a str, forms: &[Form], parameters: &[SignaturePa
         Ok(elements) => Ok(elements@.map_values(|row: CheckedMacroElement| element_model(row))),
         Err(error) => Err(error),
     },
-        result matches Ok(elements) ==> forall|i: int| 0 <= i < elements@.len() ==>
-            macro_element_origin(source, forms@, parameters@, #[trigger] elements@[i]),
+        result matches Ok(elements) ==> macro_body_elements_complete(forms@, root, elements@)
+            && forall|i: int| 0 <= i < elements@.len() ==>
+                macro_element_origin(source, forms@, parameters@, #[trigger] elements@[i]),
 {
     let Some(args) = read_macro_list(source, forms, root) else {
         return Err(MacroBodyError::Deferred(DeferredExpression::Form(span_of(&forms[root]))));
@@ -425,6 +643,11 @@ fn check_elements<'a>(source: &'a str, forms: &[Form], parameters: &[SignaturePa
     proof { reveal_with_fuel(typed_elements_tail, 1); }
     let ghost rows = elements@.map_values(|row: CheckedMacroElement| element_model(row));
     assert(rows + Seq::<MacroElementModel>::empty() =~= rows);
+    proof {
+        typed_elements_cover_positions(source, forms@, parameters@, args.start, args.end, rows);
+        assert(rows.map_values(|row: MacroElementModel| row.0)
+            =~= elements@.map_values(|element: CheckedMacroElement| element.at_model()));
+    }
     Ok(elements)
 }
 
@@ -470,16 +693,18 @@ impl<'a> ParsedProjectSources<'a> {
         ensures result.is_some() <==> self.contains_defmacro(definition),
             defmacro_body_check(self, definition, result),
             result matches Some(Ok(checked)) ==> {
-                let source = checked.body.source.text_model();
-                &&& macro_parameter_environment(source, definition.parameters@, checked.parameters@)
-                &&& *checked.body.source == self.sources_model()[definition.declaration.file as int]
-                &&& self.functional_forms_model(definition.declaration.file) == Some(checked.body.forms@)
-                &&& checked.body.at < checked.body.forms@.len()
-                &&& form_span(checked.body.forms@[checked.body.at as int]) == *definition.body
-                &&& complete_list_indices(checked.body.forms@) && nested_list_indices(checked.body.forms@)
-                &&& form_spans_valid(source, checked.body.forms@, source.spec_bytes().len() as int)
-                &&& forall|i: int| 0 <= i < checked.elements@.len() ==>
-                    macro_element_origin(source, checked.body.forms@, checked.parameters@, #[trigger] checked.elements@[i])
+                let body = checked.body_model();
+                let source = body.source.text_model();
+                &&& macro_parameter_environment(source, definition.parameters@, checked.parameters_model())
+                &&& *body.source == self.sources_model()[definition.declaration.file as int]
+                &&& self.functional_forms_model(definition.declaration.file) == Some(body.forms@)
+                &&& body.at < body.forms@.len()
+                &&& form_span(body.forms@[body.at as int]) == *definition.body
+                &&& macro_body_elements_complete(body.forms@, body.at, checked.elements_model())
+                &&& complete_list_indices(body.forms@) && nested_list_indices(body.forms@)
+                &&& form_spans_valid(source, body.forms@, source.spec_bytes().len() as int)
+                &&& forall|i: int| 0 <= i < checked.elements_model().len() ==>
+                    macro_element_origin(source, body.forms@, checked.parameters_model(), #[trigger] checked.elements_model()[i])
             },
     {
         let body = self.defmacro_body(definition)?;

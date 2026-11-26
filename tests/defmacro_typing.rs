@@ -22,13 +22,19 @@ fn checks_macro_insertions_and_preserves_their_original_order() {
     let aliases = check_mixed_use_aliases(&targets).unwrap();
     let selected = aliases.resolve_defmacro_name(1, 1, "::lib::build").unwrap();
     let checked = project.check_defmacro_body(&selected).unwrap().unwrap();
-    assert_eq!(checked.body.source.revision, 31);
-    assert_eq!(checked.parameters.iter().map(|param| param.name).collect::<Vec<_>>(), ["x", "y"]);
-    assert!(checked.parameters.iter().all(|param| param.ty.ty.atom == DataTypeAtom::Builtin(BuiltinDataType::Syntax)
+    assert_eq!(checked.body().source.revision, 31);
+    assert_eq!(checked.parameters().iter().map(|param| param.name).collect::<Vec<_>>(), ["x", "y"]);
+    assert!(checked.parameters().iter().all(|param| param.ty.ty.atom == DataTypeAtom::Builtin(BuiltinDataType::Syntax)
         && param.ty.ty.list_depth == 0));
-    assert_eq!(checked.elements.len(), 3);
-    assert!(checked.elements[1].template.is_none());
-    let insertions = checked.elements.iter().flat_map(|element| &element.insertions).collect::<Vec<_>>();
+    assert_eq!(checked.elements().len(), 3);
+    assert!(checked.elements()[1].template().is_none());
+    assert!(checked.elements().windows(2).all(|pair| pair[0].at() < pair[1].at()));
+    let direct = &checked.body().forms[checked.elements()[1].at()];
+    let circuitgame2_core::syntax::Form::Atom { span, .. } = direct else {
+        panic!("仮引数のアトムが必要です");
+    };
+    assert_eq!(&declarations[span.clone()], "y");
+    let insertions = checked.elements().iter().flat_map(|element| element.insertions()).collect::<Vec<_>>();
     assert_eq!(insertions.len(), 3);
     assert_eq!(insertions.iter().map(|row| row.expected).collect::<Vec<_>>(),
         [InsertionKind::Syntax, InsertionKind::List, InsertionKind::Syntax]);
@@ -36,7 +42,7 @@ fn checks_macro_insertions_and_preserves_their_original_order() {
         ["(let ((alias x)) alias)", "(list y x)", "x"]);
     assert!(insertions.windows(2).all(|pair| pair[0].span.start < pair[1].span.start));
     let empty = aliases.resolve_defmacro_name(1, 1, "::lib::empty").unwrap();
-    assert!(project.check_defmacro_body(&empty).unwrap().unwrap().elements.is_empty());
+    assert!(project.check_defmacro_body(&empty).unwrap().unwrap().elements().is_empty());
 }
 
 #[test]
