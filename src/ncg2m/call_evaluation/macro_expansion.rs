@@ -96,6 +96,8 @@ pub enum MacroExpansionErrorKind {
         error: MacroArgumentError,
     },
     /// テンプレートの構文と挿入値の対応に関する診断。
+    ///
+    /// 関連範囲はテンプレートを含むリスト要素全体を指す。
     Template(TemplateEmissionError),
 }
 
@@ -369,6 +371,27 @@ pub closed spec fn macro_expansion_slice_matches<'b, 'p, 'a>(
         #[trigger] macro_expansion_trace(start, fuel, states, result)
 }
 
+/// 展開が実行枠で消費した遷移数を表す。完了または診断を返す遷移も数える。
+pub closed spec fn macro_expansion_slice_steps<'b, 'p, 'a>(
+    start: MacroExpansion<'b, 'p, 'a>, fuel: nat, result: ExpansionResult<'b, 'p, 'a>,
+) -> nat {
+    let states = choose|states: Seq<MacroExpansion<'b, 'p, 'a>>|
+        #[trigger] macro_expansion_trace(start, fuel, states, result);
+    if result matches Ok(MacroExpansionSlice::Suspended(_)) { fuel } else { states.len() }
+}
+
+/// 一時停止までに枠を使い切り、完了や診断までの遷移数が枠内に収まることを示す。
+pub proof fn macro_expansion_slice_steps_in_fuel<'b, 'p, 'a>(
+    start: MacroExpansion<'b, 'p, 'a>, fuel: nat, result: ExpansionResult<'b, 'p, 'a>,
+)
+    requires macro_expansion_slice_matches(start, fuel, result),
+    ensures macro_expansion_slice_steps(start, fuel, result) <= fuel,
+        result matches Ok(MacroExpansionSlice::Suspended(_)) ==>
+            macro_expansion_slice_steps(start, fuel, result) == fuel,
+        !(result matches Ok(MacroExpansionSlice::Suspended(_))) ==>
+            0 < macro_expansion_slice_steps(start, fuel, result),
+{}
+
 proof fn macro_expansion_trace_witness<'b, 'p, 'a>(
     start: MacroExpansion<'b, 'p, 'a>, fuel: nat, states: Seq<MacroExpansion<'b, 'p, 'a>>,
     result: ExpansionResult<'b, 'p, 'a>,
@@ -434,7 +457,7 @@ impl<'p, 'a> BoundMacroCall<'p, 'a> {
     /// `splice` で使うリスト値や一般式は、式の範囲を付けて評価を保留する。
     pub fn start_expansion<'b>(&'b self) -> (state: MacroExpansion<'b, 'p, 'a>)
         requires self.valid(),
-        ensures state.ready(), state.call_model() == self, state.position_model() == 0,
+        ensures state.ready(), state.call_model() == self, state.position_model() == 0, state.initial_for(self),
     {
         MacroExpansion { call: self, completed: Vec::new(), phase: ExpansionPhase::Select }
     }
@@ -446,6 +469,13 @@ impl<'b, 'p, 'a> MacroExpansion<'b, 'p, 'a> {
 
     /// 確定前の要素を本体の先頭から何個組み立てたかを表す。
     pub closed spec fn position_model(&self) -> nat { self.completed@.len() }
+
+    /// 呼び出しの先頭で、最初の要素をまだ選んでいないことを表す。
+    pub closed spec fn initial_for(&self, call: &'b BoundMacroCall<'p, 'a>) -> bool {
+        &&& self.call_model() == call
+        &&& self.completed@.len() == 0
+        &&& self.phase is Select
+    }
 
     /// 状態が型検査済み本体の途中または末尾にあり、式と挿入値が位置に対応することを表す。
     pub closed spec fn ready(&self) -> bool {
@@ -543,9 +573,7 @@ impl<'b, 'p, 'a> MacroExpansion<'b, 'p, 'a> {
                     MacroExpressionSite::Element(element) =>
                         element == index && elements[index as int].template_model().is_none(),
                     MacroExpressionSite::Insertion { element, insertion } =>
-                        element == index && insertion < elements[index as int].insertions_model().len()
-,
-
+                        element == index && insertion < elements[index as int].insertions_model().len(),
                 }
             },
             MacroExpansionErrorKind::Template(error) => {
