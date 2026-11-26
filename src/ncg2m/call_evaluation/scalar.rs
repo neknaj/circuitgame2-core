@@ -20,6 +20,9 @@ mod execution;
 mod fold;
 mod expression;
 mod invocation;
+mod let_execution;
+mod locals;
+use locals::ScalarLocal;
 #[cfg(verus_only)]
 mod termination;
 pub use arguments::{PendingScalarArgument, ScalarArguments, ScalarArgumentsStep, prepare_scalar_arguments};
@@ -39,6 +42,9 @@ pub use execution::{
     scalar_execution_states_observe_same, scalar_execution_steps_observe_same,
     scalar_execution_terminal_extends,
 };
+pub use let_execution::{ScalarLetEntry, ScalarLetExecution, ScalarLetSlice, prepare_scalar_let};
+#[cfg(verus_only)]
+pub use let_execution::{resumed_scalar_let_matches, scalar_let_slice_matches, scalar_let_supported};
 pub use expression::{ScalarExpression, ScalarExpressionStep};
 #[cfg(verus_only)]
 pub use condition::scalar_condition_matches;
@@ -173,6 +179,7 @@ pub struct ScalarCallFrame<'p, 'a> {
     body: DefnEvaluationBody<'p, 'a>,
     values: Vec<ScalarValue>,
     fold_bindings: Option<ScalarFoldBindings<'a>>,
+    locals: Vec<ScalarLocal<'a>>,
 }
 
 impl<'p, 'a> ScalarCallFrame<'p, 'a> {
@@ -207,9 +214,31 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
             frame.body_model() == self.body_model(),
             frame.parameter_values_model() == self.parameter_values_model(),
             frame.fold_bindings_model() == bindings,
+            frame.locals_model() == self.locals_model(),
     {
         proof { use_type_invariant(&self); }
         self.fold_bindings = bindings;
+        self
+    }
+
+    closed spec fn locals_model(&self) -> Seq<ScalarLocal<'a>> {
+        self.locals@
+    }
+
+    /// 反復か `let` による局所束縛が現在の環境に含まれることを表す。
+    pub closed spec fn has_scoped_bindings(&self) -> bool {
+        self.has_fold_bindings() || self.locals_model().len() != 0
+    }
+
+    /// 評価済みの束縛列の所有権を受け取り、`let` の本体を評価する環境に設定する。
+    fn with_let_bindings(mut self, values: Vec<ScalarLocal<'a>>) -> (after: Self)
+        ensures after.body_model() == self.body_model(),
+            after.parameter_values_model() == self.parameter_values_model(),
+            after.fold_bindings_model() == self.fold_bindings_model(),
+            after.locals_model() == values@,
+    {
+        proof { use_type_invariant(&self); }
+        self.locals = values;
         self
     }
 
@@ -242,7 +271,7 @@ pub open spec fn binding_matches<'p, 'a>(
 ) -> bool {
     &&& result.is_ok() <==> parameters_match(body.signature, values)
     &&& match result {
-        Ok(frame) => frame.body_model() == body && frame.parameter_values_model() == values && !frame.has_fold_bindings(),
+        Ok(frame) => frame.body_model() == body && frame.parameter_values_model() == values && !frame.has_scoped_bindings(),
         Err(ScalarBindingError::Rank) => false,
         Err(ScalarBindingError::Arity { source, span, expected_count, found_count }) => {
             &&& source == body.source && span == body.signature.span
@@ -292,7 +321,7 @@ fn bind<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, values: Vec<ScalarValue>)
         }
         i += 1;
     }
-    Ok(ScalarCallFrame { body, values, fold_bindings: None })
+    Ok(ScalarCallFrame { body, values, fold_bindings: None, locals: Vec::new() })
 }
 
 /// 指定した順位の本体に対して、仮引数束縛の結果が対応することを表す。
@@ -305,7 +334,7 @@ pub open spec fn binding_at_rank_matches<'p, 'a>(
             let body = frame.body_model();
             &&& plan.body_matches_at_rank(rank, body)
             &&& frame.parameter_values_model() == values
-            &&& !frame.has_fold_bindings()
+            &&& !frame.has_scoped_bindings()
             &&& parameters_match(body.signature, values)
         }
         Err(ScalarBindingError::Rank) => rank >= plan.order_model().len() || !plan.order_nodes_valid()

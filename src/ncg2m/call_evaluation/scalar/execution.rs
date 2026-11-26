@@ -278,7 +278,7 @@ spec fn entering_call<'plan, 'p, 'a>(
                 && resume == parent && rank == caller_rank && after.rank == to && to < rank
                 && origin@ == after.active.context(to)
                 && child.frame_model().body_model() == target && child.frame_model().parameter_values_model() == values
-                && !child.frame_model().has_fold_bindings()
+                && !child.frame_model().has_scoped_bindings()
                 && child.expression_model().at == target.at
                 && child.expression_model().expected == target.signature.result_type.ty
                 && child.result_type_model() == child.expression_model().expected

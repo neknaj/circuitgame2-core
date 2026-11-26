@@ -29,6 +29,7 @@ pub(in crate::ncg2m::call_evaluation::scalar) open spec fn frames_agree(left: Sc
     bodies_agree(left.body_model(), right.body_model())
         && left.parameter_values_model() == right.parameter_values_model()
         && left.fold_bindings_model() == right.fold_bindings_model()
+        && left.locals_model() == right.locals_model()
 }
 
 pub(in crate::ncg2m::call_evaluation::scalar) open spec fn condition_parts_agree(
@@ -184,6 +185,7 @@ proof fn arithmetic_start_observes_same(
     a.restored_cursors_observe_same(b);
     let tail_a = x.waiting@.last();
     let tail_b = y.waiting@.last();
+    reveal(ScalarCallFrame::has_scoped_bindings);
     reveal(ScalarCallFrame::has_fold_bindings);
     assert(waiting_agrees(tail_a, tail_b));
     appended_waits_agree(stack_a, stack_b, tail_a, tail_b);
@@ -273,8 +275,14 @@ proof fn observe_call_entry<'plan, 'p, 'a>(
     let tail_b = b.waiting@.last();
     if values.len() < edge.arguments@.len() {
         parent_a.restored_cursors_observe_same(parent_b);
+    } else {
+        reveal(ScalarCallFrame::has_scoped_bindings);
+        reveal(ScalarCallFrame::has_fold_bindings);
+        let called_a = a.active->Expression_0.frame_model();
+        let called_b = b.active->Expression_0.frame_model();
+        assert(called_a.locals_model().len() == 0 && called_b.locals_model().len() == 0);
+        assert(called_a.locals_model() =~= called_b.locals_model());
     }
-    reveal(ScalarCallFrame::has_fold_bindings);
     assert(waiting_agrees(tail_a, tail_b));
     assert forall|i: int| 0 <= i < a.waiting@.len()
         implies waiting_agrees(#[trigger] a.waiting@[i], #[trigger] b.waiting@[i]) by {
