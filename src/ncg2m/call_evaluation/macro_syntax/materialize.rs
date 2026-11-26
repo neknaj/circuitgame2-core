@@ -9,9 +9,11 @@ use crate::syntax::{
     Form, circuit::{GeneratedDefinition, GeneratedDefinitionError, check_generated_definition},
 };
 #[cfg(verus_only)]
-use super::syntax_event_in_source;
+use super::{completed_macro_template_syntax_consumed, macro_template_syntax_starts_at,
+    macro_template_syntax_step_matches, syntax_event_in_source};
 #[cfg(verus_only)]
-use crate::syntax::circuit::{generated_definition_matches, generated_definition_sites};
+use crate::syntax::circuit::{generated_definition_error, generated_definition_matches,
+    generated_definition_matches_on_same_bytes, generated_definition_sites};
 #[cfg(verus_only)]
 use crate::syntax::{
     AtomKind, bare_atom_delimiter, bare_atom_extent, bare_atom_kind, complete_list_indices, form_atom_matches,
@@ -28,8 +30,50 @@ use vstd::{
 
 verus! {
 
+/// 投影した本文のバイト列、平坦な木、各項目の出典、未終了リストの位置。
+pub type TemplateProjectionModel<'b, 'p, 'a> =
+    (Seq<u8>, Seq<Form>, Seq<MacroSyntaxEvent<'b, 'p, 'a>>, Seq<usize>);
+
+/// 元の字句または括弧を表すバイト列。
+pub open spec fn projected_event_bytes(event: MacroSyntaxEvent) -> Seq<u8> {
+    match event.token {
+        ArgumentSyntaxToken::Atom(at) => {
+            let span = form_span(event.origin.forms_model()[at as int]);
+            event.origin.source_model().text_model().spec_bytes()[span.start as int..span.end as int]
+        },
+        ArgumentSyntaxToken::Open(_) => seq![b'('],
+        ArgumentSyntaxToken::Close(_) => seq![b')'],
+    }
+}
+
+/// 元のイベント一つが、本文、平坦な添字、リストの対応と出典をどう進めるかを定める。
+pub open spec fn projected_event_step(
+    before: TemplateProjectionModel, after: TemplateProjectionModel, event: MacroSyntaxEvent,
+) -> bool {
+    let (bytes, forms, origins, open) = before;
+    let piece = projected_event_bytes(event);
+    let span = bytes.len() as usize .. (bytes.len() + piece.len()) as usize;
+    &&& syntax_event_in_source(event)
+    &&& after.0 == bytes + piece + seq![b' ']
+    &&& match event.token {
+        ArgumentSyntaxToken::Atom(at) => {
+            let kind = event.origin.forms_model()[at as int]->Atom_kind;
+            after.1 == forms.push(Form::Atom { kind, span }) && after.2 == origins.push(event) && after.3 == open
+        },
+        ArgumentSyntaxToken::Open(_) => after.1 == forms.push(Form::List { span, end: 0 })
+            && after.2 == origins.push(event) && after.3 == open.push(forms.len() as usize),
+        ArgumentSyntaxToken::Close(_) => {
+            &&& open.len() > 0 && open.last() < forms.len()
+            &&& after.1 == forms.update(open.last() as int, Form::List {
+                span: form_span(forms[open.last() as int]).start..span.end, end: forms.len() as usize,
+            })
+            &&& after.2 == origins && after.3 == open.drop_last()
+        },
+    }
+}
+
 /// 回路文法を検査するための本文と、各項目の元の文書を保持する。
-pub(super) struct ProjectedSyntax<'b, 'p, 'a> {
+struct ProjectedSyntax<'b, 'p, 'a> {
     text: String,
     forms: Vec<Form>,
     origins: Vec<MacroSyntaxEvent<'b, 'p, 'a>>,
@@ -38,7 +82,7 @@ pub(super) struct ProjectedSyntax<'b, 'p, 'a> {
 
 /// 平坦な構文木へ変換できなかった段階。
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum ProjectionShapeError {
+enum ProjectionShapeError {
     /// 閉じる対象のリストがない。
     UnexpectedClose,
 }
@@ -253,24 +297,31 @@ fn append_padded(text: &mut String, piece: &str) -> (span: Range<usize>)
 }
 
 impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
-    pub(super) closed spec fn valid(&self) -> bool {
+    spec fn valid(&self) -> bool {
         &&& projection_rows(encode_utf8(self.text@), self.forms@, self.origins@)
         &&& projection_lists(self.forms@, self.open@)
     }
 
-    pub(super) closed spec fn text_model(&self) -> Seq<char> { self.text@ }
+    spec fn text_model(&self) -> Seq<char> { self.text@ }
 
-    pub(super) closed spec fn forms_model(&self) -> Seq<Form> { self.forms@ }
+    spec fn forms_model(&self) -> Seq<Form> { self.forms@ }
 
-    pub(super) closed spec fn origins_model(&self) -> Seq<MacroSyntaxEvent<'b, 'p, 'a>> { self.origins@ }
+    spec fn origins_model(&self) -> Seq<MacroSyntaxEvent<'b, 'p, 'a>> { self.origins@ }
 
-    pub(super) fn new() -> (output: Self)
-        ensures output.valid(), output.origins_model().len() == 0,
+    spec fn model(&self) -> TemplateProjectionModel<'b, 'p, 'a> {
+        (encode_utf8(self.text@), self.forms@, self.origins@, self.open@)
+    }
+
+    fn new() -> (output: Self)
+        ensures output.valid(),
+            output.model().0.len() == 0, output.model().1.len() == 0,
+            output.model().2.len() == 0, output.model().3.len() == 0,
     {
         let output = Self { text: String::new(), forms: Vec::new(), origins: Vec::new(), open: Vec::new() };
         proof {
             reveal(nested_list_indices);
             assert(projection_rows(encode_utf8(output.text@), output.forms@, output.origins@));
+            assert(encode_utf8(output.text@).len() == 0);
         }
         output
     }
@@ -291,7 +342,7 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
                 },
                 _ => false,
             },
-        ensures final(self).valid(), final(self).origins_model() =~= old(self).origins_model().push(event),
+        ensures final(self).valid(), projected_event_step(old(self).model(), final(self).model(), event),
     {
         let at = self.forms.len();
         let ghost before = encode_utf8(self.text@);
@@ -344,9 +395,12 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
         };
     }
 
-    fn close_list(&mut self) -> (result: Result<(), ProjectionShapeError>)
-        requires old(self).valid(),
-        ensures final(self).valid(), final(self).origins_model() == old(self).origins_model(),
+    fn close_list(&mut self, event: MacroSyntaxEvent<'b, 'p, 'a>) -> (result: Result<(), ProjectionShapeError>)
+        requires old(self).valid(), syntax_event_in_source(event), event.token is Close,
+        ensures final(self).valid(),
+            result.is_ok() ==> projected_event_step(old(self).model(), final(self).model(), event),
+            result.is_err() ==> old(self).model().3.len() == 0,
+            result.is_ok() <==> old(self).model().3.len() > 0,
     {
         let ghost open = self.open@;
         let Some(at) = self.open.pop() else { return Err(ProjectionShapeError::UnexpectedClose); };
@@ -381,20 +435,19 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
         Ok(())
     }
 
-    pub(super) fn push(&mut self, event: MacroSyntaxEvent<'b, 'p, 'a>)
+    fn push(&mut self, event: MacroSyntaxEvent<'b, 'p, 'a>)
         -> (result: Result<(), ProjectionShapeError>)
         requires old(self).valid(), syntax_event_in_source(event),
         ensures final(self).valid(),
-            result.is_ok() ==> final(self).origins_model() =~= if event.token is Close {
-                old(self).origins_model()
-            } else { old(self).origins_model().push(event) },
+            result.is_ok() ==> projected_event_step(old(self).model(), final(self).model(), event),
+            result.is_err() ==> old(self).model().3.len() == 0 && event.token is Close,
     {
         match event.token {
             ArgumentSyntaxToken::Open(_) => {
                 proof { projection_delimiter_bytes(); }
                 self.append_form("(", None, event);
             },
-            ArgumentSyntaxToken::Close(_) => return self.close_list(),
+            ArgumentSyntaxToken::Close(_) => return self.close_list(event),
             ArgumentSyntaxToken::Atom(at) => {
                 let forms = event.origin.forms();
                 let source = event.origin.source().text();
@@ -453,7 +506,25 @@ impl<'b, 'p, 'a> CheckedTemplateDefinition<'b, 'p, 'a> {
     /// 構文検査のバイト範囲が指す本文。
     pub fn text(&self) -> (text: &str)
         ensures text@ == self.text_model(),
-    { self.syntax.text.as_str() }
+            generated_definition_matches(text, self.forms_model(), self.row_model()),
+            generated_definition_sites(text, self.forms_model(), self.row_model()),
+    {
+        let text = self.syntax.text.as_str();
+        proof {
+            use_type_invariant(self);
+            reveal(projected_row_matches);
+            let known = choose|s: &str| s@ == self.text_model()
+                && #[trigger] generated_definition_matches(s, self.forms_model(), self.row_model())
+                && generated_definition_sites(s, self.forms_model(), self.row_model());
+            generated_definition_matches_on_same_bytes(known, text, self.forms_model(), self.row_model());
+        }
+        text
+    }
+
+    /// 検査に渡した本文、構文木、出典の組を表す。
+    pub open spec fn projection_model(&self) -> TemplateProjectionModel<'b, 'p, 'a> {
+        (encode_utf8(self.text_model()), self.forms_model(), self.origins_model(), Seq::empty())
+    }
 
     /// 構文検査用の本文を表す。
     pub closed spec fn text_model(&self) -> Seq<char> { self.syntax.text_model() }
@@ -489,7 +560,7 @@ pub enum TemplateDefinitionError<'b, 'p, 'a> {
     Definition {
         /// 構文検査用の本文上の診断。
         kind: GeneratedDefinitionError,
-        /// 診断に対応する元の項目。欠落の場合は対応する元のリストを示す。
+        /// 診断に対応する元の項目。該当項目がない場合は、呼び出しと要素番号から元のテンプレートを参照できる。
         related: Option<MacroSyntaxEvent<'b, 'p, 'a>>,
     },
 }
@@ -505,7 +576,8 @@ pub struct TemplateDefinitionDiagnostic<'b, 'p, 'a> {
     pub error: TemplateDefinitionError<'b, 'p, 'a>,
 }
 
-spec fn projection_diagnostic_span(error: GeneratedDefinitionError) -> Option<Range<usize>> {
+/// 回路文法の診断が指す、構文検査用の本文上の範囲を返す。
+pub open spec fn projection_diagnostic_span(error: GeneratedDefinitionError) -> Option<Range<usize>> {
     match error {
         GeneratedDefinitionError::Empty => None,
         GeneratedDefinitionError::ExtraRoot(span) | GeneratedDefinitionError::ExpectedDefinition(span)
@@ -524,9 +596,61 @@ fn diagnostic_span(error: &GeneratedDefinitionError) -> (range: Option<&Range<us
     }
 }
 
-spec fn is_diagnostic_anchor(form: Form, span: Range<usize>) -> bool {
+/// フォームの全体またはリストの閉じ括弧に診断があることを表す。
+pub open spec fn is_diagnostic_anchor(form: Form, span: Range<usize>) -> bool {
     let here = form_span(form);
     here == span || (form is List && span.start == span.end && span.start + 1 == here.end)
+}
+
+/// 指定位置のフォームが診断範囲に対応する最初の項目であることを表す。
+pub open spec fn first_diagnostic_anchor(forms: Seq<Form>, range: Range<usize>, at: int) -> bool {
+    &&& 0 <= at < forms.len()
+    &&& is_diagnostic_anchor(forms[at], range)
+    &&& forall|i: int| 0 <= i < at ==> !#[trigger] is_diagnostic_anchor(forms[i], range)
+}
+
+/// 構文検査用の範囲に対応する最初のフォームから、元文書の関連項目を選ぶ。
+///
+/// 長さ0の範囲が閉じ括弧の位置にある場合は、その元リストを示す。
+#[verifier::opaque]
+pub open spec fn projected_definition_related(
+    projection: TemplateProjectionModel, range: Option<Range<usize>>, related: Option<MacroSyntaxEvent>,
+) -> bool {
+    let (_, forms, origins, _) = projection;
+    &&& forms.len() == origins.len()
+    &&& if let Some(range) = range {
+        if exists|i: int| #[trigger] first_diagnostic_anchor(forms, range, i) {
+            let i = choose|i: int| #[trigger] first_diagnostic_anchor(forms, range, i);
+            related == Some(origins[i])
+        } else {
+            related.is_none()
+        }
+    } else {
+        related.is_none()
+    }
+}
+
+proof fn projected_related_found<'b, 'p, 'a>(
+    projection: TemplateProjectionModel<'b, 'p, 'a>, range: Range<usize>, at: int,
+)
+    requires projection.1.len() == projection.2.len(), 0 <= at < projection.1.len(),
+        is_diagnostic_anchor(projection.1[at], range),
+        forall|i: int| 0 <= i < at ==> !#[trigger] is_diagnostic_anchor(projection.1[i], range),
+    ensures projected_definition_related(projection, Some(range), Some(projection.2[at])),
+{
+    reveal(projected_definition_related);
+    let (_, forms, origins, _) = projection;
+    assert(first_diagnostic_anchor(forms, range, at));
+    assert(exists|i: int| #[trigger] first_diagnostic_anchor(forms, range, i));
+    let first = choose|i: int| #[trigger] first_diagnostic_anchor(forms, range, i);
+    if first < at {
+        assert(is_diagnostic_anchor(forms[first], range));
+        assert(!is_diagnostic_anchor(forms[first], range));
+    } else if at < first {
+        assert(!is_diagnostic_anchor(forms[at], range));
+    }
+    assert(first == at);
+    assert(projected_definition_related(projection, Some(range), Some(origins[at])));
 }
 
 fn diagnostic_anchor(form: &Form, range: &Range<usize>) -> (matches: bool)
@@ -581,38 +705,85 @@ proof fn projected_tree_evidence(
     };
 }
 
+/// 全項目を投影した木の検査結果を、通常の回路契約と元の関連位置に結び付ける。
+#[verifier::opaque]
+pub open spec fn projected_definition_finish_matches(
+    projection: TemplateProjectionModel,
+    result: Result<CheckedTemplateDefinition, TemplateDefinitionError>,
+) -> bool {
+    let (bytes, forms, origins, open) = projection;
+    if open.len() > 0 {
+        open.last() < origins.len() && result == Err(TemplateDefinitionError::Unclosed(origins[open.last() as int]))
+    } else {
+        match result {
+            Ok(checked) => checked.valid() && checked.projection_model() == projection,
+            Err(TemplateDefinitionError::Definition { kind, related }) => {
+                &&& exists|text: &str| text.spec_bytes() == bytes
+                    && #[trigger] generated_definition_error(text, forms, kind)
+                &&& projected_definition_related(projection, projection_diagnostic_span(kind), related)
+            },
+            _ => false,
+        }
+    }
+}
+
+proof fn projected_definition_failed<'b, 'p, 'a>(
+    projection: TemplateProjectionModel<'b, 'p, 'a>, text: &str, kind: GeneratedDefinitionError,
+    related: Option<MacroSyntaxEvent<'b, 'p, 'a>>,
+)
+    requires projection.3.len() == 0, projection.0 == text.spec_bytes(),
+        generated_definition_error(text, projection.1, kind),
+        projected_definition_related(projection, projection_diagnostic_span(kind), related),
+    ensures projected_definition_finish_matches(projection, Err(TemplateDefinitionError::Definition { kind, related })),
+{
+    reveal(projected_definition_finish_matches);
+    assert(exists|source: &str| source.spec_bytes() == projection.0
+        && #[trigger] generated_definition_error(source, projection.1, kind));
+}
+
 impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
     fn related(&self, range: &Range<usize>) -> (origin: Option<MacroSyntaxEvent<'b, 'p, 'a>>)
         requires self.valid(),
-        ensures match origin {
-            Some(origin) => exists|i: int| 0 <= i < self.forms_model().len()
-                && #[trigger] is_diagnostic_anchor(self.forms_model()[i], *range) && origin == self.origins_model()[i]
-                && (forall|j: int| 0 <= j < i ==> !#[trigger] is_diagnostic_anchor(self.forms_model()[j], *range)),
-            None => forall|i: int| 0 <= i < self.forms_model().len()
-                ==> !#[trigger] is_diagnostic_anchor(self.forms_model()[i], *range),
-        },
+        ensures projected_definition_related(self.model(), Some(*range), origin),
     {
+        let forms = self.forms.as_slice();
+        let origins = self.origins.as_slice();
+        assert(forms@.len() == origins@.len());
         let mut i = 0;
-        while i < self.forms.len()
-            invariant self.valid(), i <= self.forms_model().len(),
-                forall|j: int| 0 <= j < i ==> !#[trigger] is_diagnostic_anchor(self.forms_model()[j], *range),
-            decreases self.forms_model().len() - i,
+        while i < forms.len()
+            invariant i <= forms@.len(), forms@.len() == origins@.len(),
+                forms@ == self.model().1, origins@ == self.model().2,
+                forall|j: int| 0 <= j < i ==> !#[trigger] is_diagnostic_anchor(forms@[j], *range),
+            decreases forms@.len() - i,
         {
-            if diagnostic_anchor(&self.forms[i], range) {
-                return Some(self.origins[i]);
+            if diagnostic_anchor(&forms[i], range) {
+                proof { projected_related_found(self.model(), *range, i as int); }
+                return Some(origins[i]);
             }
             i += 1;
+        }
+        proof {
+            reveal(projected_definition_related);
+            assert(forall|j: int| !#[trigger] first_diagnostic_anchor(forms@, *range, j));
+            assert(projected_definition_related(self.model(), Some(*range), None));
         }
         None
     }
 
     fn finish(self) -> (result: Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionError<'b, 'p, 'a>>)
         requires self.valid(),
-        ensures result matches Ok(ok) ==> ok.valid() && ok.origins_model() == self.origins_model()
-            && ok.forms_model() == self.forms_model(),
+        ensures projected_definition_finish_matches(self.model(), result),
+            result matches Err(error) ==> !(error is Source) && !(error is UnexpectedClose),
     {
         if let Some(last) = self.open.last() {
-            return Err(TemplateDefinitionError::Unclosed(self.origins[*last]));
+            let result = Err(TemplateDefinitionError::Unclosed(self.origins[*last]));
+            proof {
+                reveal(projected_definition_finish_matches);
+                assert(*last == self.model().3.last());
+                assert(*last < self.model().2.len());
+                assert(projected_definition_finish_matches(self.model(), result));
+            }
+            return result;
         }
         let text = self.text.as_str();
         let forms = self.forms.as_slice();
@@ -625,42 +796,216 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
                         assert(generated_definition_matches(text, forms@, row));
                     };
                 }
-                Ok(CheckedTemplateDefinition { syntax: self, row })
+                let ghost projection = self.model();
+                let checked = CheckedTemplateDefinition { syntax: self, row };
+                proof {
+                    use_type_invariant(&checked);
+                    reveal(projected_definition_finish_matches);
+                    assert(projection.3 =~= Seq::<usize>::empty());
+                    assert(checked.projection_model() == projection);
+                    assert(projected_definition_finish_matches(projection, Ok(checked)));
+                }
+                Ok(checked)
             },
             Err(kind) => {
                 let related = match diagnostic_span(&kind) {
                     Some(span) => self.related(span),
-                    None => None,
+                    None => {
+                        proof {
+                            reveal(projected_definition_related);
+                            assert(projected_definition_related(self.model(), None, None));
+                        }
+                        None
+                    },
                 };
+                proof { projected_definition_failed(self.model(), text, kind, related); }
                 Err(TemplateDefinitionError::Definition { kind, related })
             },
         }
     }
 }
 
-fn project_template<'s, 'b, 'p, 'a>(mut cursor: MacroTemplateSyntax<'s, 'b, 'p, 'a>)
-    -> (result: Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionError<'b, 'p, 'a>>)
-    requires cursor.valid(),
-    ensures result matches Ok(checked) ==> checked.valid(),
+type ProjectionResult<'b, 'p, 'a> =
+    Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionError<'b, 'p, 'a>>;
+
+/// 続行した各ステップが、テンプレートの次の項目から投影を進めたことを表す。
+pub open spec fn template_projection_prefix<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, cursors: Seq<MacroTemplateSyntax<'s, 'b, 'p, 'a>>,
+    projections: Seq<TemplateProjectionModel<'b, 'p, 'a>>, events: Seq<Option<MacroSyntaxEvent<'b, 'p, 'a>>>,
+) -> bool {
+    &&& cursors.len() == projections.len() == events.len() + 1
+    &&& cursors[0] == initial
+    &&& projections[0].0.len() == 0 && projections[0].1.len() == 0
+    &&& projections[0].2.len() == 0 && projections[0].3.len() == 0
+    &&& forall|i: int| 0 <= i < events.len() ==> #[trigger]
+        template_projection_continue(cursors[i], projections[i], events[i], cursors[i + 1], projections[i + 1])
+}
+
+/// 一歩から得た構文イベントを、元の順序のまま投影に適用する。
+pub open spec fn template_projection_continue<'s, 'b, 'p, 'a>(
+    before: MacroTemplateSyntax<'s, 'b, 'p, 'a>, prior: TemplateProjectionModel<'b, 'p, 'a>,
+    event: Option<MacroSyntaxEvent<'b, 'p, 'a>>,
+    next: MacroTemplateSyntax<'s, 'b, 'p, 'a>, after: TemplateProjectionModel<'b, 'p, 'a>,
+) -> bool {
+    &&& macro_template_syntax_step_matches(before, Ok(MacroTemplateSyntaxStep::Continue { event, next }))
+    &&& match event {
+        Some(event) => projected_event_step(prior, after, event),
+        None => after == prior,
+    }
+}
+
+/// 続行可能な全ステップの後で、最初に止まった理由と診断を定める。
+pub open spec fn template_projection_trace_result<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, cursors: Seq<MacroTemplateSyntax<'s, 'b, 'p, 'a>>,
+    projections: Seq<TemplateProjectionModel<'b, 'p, 'a>>, events: Seq<Option<MacroSyntaxEvent<'b, 'p, 'a>>>,
+    result: ProjectionResult<'b, 'p, 'a>,
+) -> bool {
+    &&& template_projection_prefix(initial, cursors, projections, events)
+    &&& match result {
+        Err(TemplateDefinitionError::Source(error)) => macro_template_syntax_step_matches(cursors.last(), Err(error)),
+        Err(TemplateDefinitionError::UnexpectedClose(event)) => {
+            &&& event.token is Close && projections.last().3.len() == 0
+            &&& exists|next: MacroTemplateSyntax<'s, 'b, 'p, 'a>| #[trigger]
+                macro_template_syntax_step_matches(cursors.last(), Ok(MacroTemplateSyntaxStep::Continue {
+                    event: Some(event), next,
+                }))
+        },
+        _ => {
+            let last = cursors.last();
+            &&& macro_template_syntax_step_matches(last, Ok(MacroTemplateSyntaxStep::Complete))
+            &&& last.at_model() == last.parts_model().len() && last.splice_at_model() == last.splice_model().len()
+            &&& last.argument_model().is_none()
+            &&& projected_definition_finish_matches(projections.last(), result)
+        },
+    }
+}
+
+/// 指定のテンプレートから、構文イベント列を順に消費して検査結果を得る。
+pub open spec fn template_projection_matches<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, result: ProjectionResult<'b, 'p, 'a>,
+) -> bool {
+    exists|cursors: Seq<MacroTemplateSyntax<'s, 'b, 'p, 'a>>,
+        projections: Seq<TemplateProjectionModel<'b, 'p, 'a>>, events: Seq<Option<MacroSyntaxEvent<'b, 'p, 'a>>>|
+        #[trigger] template_projection_trace_result(initial, cursors, projections, events, result)
+}
+
+proof fn extend_projection_trace<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, cursors: Seq<MacroTemplateSyntax<'s, 'b, 'p, 'a>>,
+    projections: Seq<TemplateProjectionModel<'b, 'p, 'a>>, events: Seq<Option<MacroSyntaxEvent<'b, 'p, 'a>>>,
+    next: MacroTemplateSyntax<'s, 'b, 'p, 'a>, after: TemplateProjectionModel<'b, 'p, 'a>,
+    event: Option<MacroSyntaxEvent<'b, 'p, 'a>>,
+)
+    requires template_projection_prefix(initial, cursors, projections, events),
+        template_projection_continue(cursors.last(), projections.last(), event, next, after),
+    ensures template_projection_prefix(initial, cursors.push(next), projections.push(after), events.push(event)),
 {
+    let steps = cursors.push(next);
+    let states = projections.push(after);
+    let items = events.push(event);
+    assert forall|i: int| 0 <= i < items.len() implies #[trigger]
+        template_projection_continue(steps[i], states[i], items[i], steps[i + 1], states[i + 1]) by {
+        if i < events.len() {
+            assert(template_projection_continue(cursors[i], projections[i], events[i], cursors[i + 1], projections[i + 1]));
+        }
+    };
+}
+
+proof fn projection_trace_witness<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, cursors: Seq<MacroTemplateSyntax<'s, 'b, 'p, 'a>>,
+    projections: Seq<TemplateProjectionModel<'b, 'p, 'a>>, events: Seq<Option<MacroSyntaxEvent<'b, 'p, 'a>>>,
+    result: ProjectionResult<'b, 'p, 'a>,
+)
+    requires template_projection_trace_result(initial, cursors, projections, events, result),
+    ensures template_projection_matches(initial, result),
+{}
+
+fn project_template<'s, 'b, 'p, 'a>(initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>)
+    -> (result: ProjectionResult<'b, 'p, 'a>)
+    requires initial.valid(),
+    ensures template_projection_matches(initial, result),
+{
+    let mut cursor = initial;
     let mut output = ProjectedSyntax::new();
+    let ghost mut cursors = seq![initial];
+    let ghost mut projections = seq![output.model()];
+    let ghost mut events = Seq::<Option<MacroSyntaxEvent<'b, 'p, 'a>>>::empty();
     loop
         invariant cursor.valid(), output.valid(),
+            template_projection_prefix(initial, cursors, projections, events),
+            cursor == cursors.last(), output.model() == projections.last(),
         decreases cursor.remaining().0, cursor.remaining().1, cursor.remaining().2,
     {
+        let ghost before = cursor;
+        let ghost prior = output.model();
         match cursor.step() {
-            Ok(MacroTemplateSyntaxStep::Complete) => return output.finish(),
+            Ok(MacroTemplateSyntaxStep::Complete) => {
+                let result = output.finish();
+                proof {
+                    completed_macro_template_syntax_consumed(before);
+                    projection_trace_witness(initial, cursors, projections, events, result);
+                }
+                return result;
+            },
             Ok(MacroTemplateSyntaxStep::Continue { event, next }) => {
-                if let Some(event) = event {
-                    if output.push(event).is_err() {
-                        return Err(TemplateDefinitionError::UnexpectedClose(event));
+                if let Some(item) = event {
+                    if output.push(item).is_err() {
+                        let result = Err(TemplateDefinitionError::UnexpectedClose(item));
+                        proof { projection_trace_witness(initial, cursors, projections, events, result); }
+                        return result;
                     }
+                }
+                proof {
+                    assert(template_projection_continue(before, prior, event, next, output.model()));
+                    extend_projection_trace(initial, cursors, projections, events, next, output.model(), event);
+                    cursors = cursors.push(next);
+                    projections = projections.push(output.model());
+                    events = events.push(event);
                 }
                 cursor = next;
             },
-            Err(error) => return Err(TemplateDefinitionError::Source(error)),
+            Err(error) => {
+                let result = Err(TemplateDefinitionError::Source(error));
+                proof { projection_trace_witness(initial, cursors, projections, events, result); }
+                return result;
+            },
         }
     }
+}
+
+/// 選んだテンプレートの展開順と、回路文法に基づく検査結果を対応付ける。
+#[verifier::opaque]
+pub open spec fn template_definition_check_matches<'s, 'b, 'p, 'a>(
+    body: &'s MacroExpandedBody<'b, 'p, 'a>, element: usize,
+    result: Option<Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionDiagnostic<'b, 'p, 'a>>>,
+) -> bool {
+    if element < body.elements_model().len() && body.elements_model()[element as int] is Template {
+        match result {
+            Some(Ok(checked)) => checked.valid() && exists|initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
+                macro_template_syntax_starts_at(&initial, body, element)
+                    && #[trigger] template_projection_matches(initial, Ok(checked)),
+            Some(Err(error)) => error.call == body.call_model() && error.element == element
+                && exists|initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
+                    macro_template_syntax_starts_at(&initial, body, element)
+                        && #[trigger] template_projection_matches(initial, Err(error.error)),
+            None => false,
+        }
+    } else {
+        result.is_none()
+    }
+}
+
+proof fn checked_template_projection_matches<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, body: &'s MacroExpandedBody<'b, 'p, 'a>,
+    element: usize, checked: CheckedTemplateDefinition<'b, 'p, 'a>,
+)
+    requires macro_template_syntax_starts_at(&initial, body, element), checked.valid(),
+        template_projection_matches(initial, Ok(checked)),
+    ensures template_definition_check_matches(body, element, Some(Ok(checked))),
+{
+    reveal(template_definition_check_matches);
+    assert(exists|start: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
+        macro_template_syntax_starts_at(&start, body, element)
+        && #[trigger] template_projection_matches(start, Ok(checked)));
 }
 
 impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
@@ -672,19 +1017,42 @@ impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
     /// # Errors
     ///
     /// 構文の組み立て・回路文法の順に検査し、最初の違反とその出典を返す。
-    pub fn check_template_definition(&self, element: usize)
+    pub fn check_template_definition<'s>(&'s self, element: usize)
         -> (result: Option<Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionDiagnostic<'b, 'p, 'a>>>)
-        ensures
-            result.is_some() <==> element < self.elements_model().len() && self.elements_model()[element as int] is Template,
-            result matches Some(Ok(checked)) ==> checked.valid(),
-            result matches Some(Err(error)) ==> error.call == self.call_model() && error.element == element,
+        ensures template_definition_check_matches(self, element, result),
     {
-        let cursor = self.template_syntax(element)?;
-        let result = project_template(cursor);
-        Some(match result {
-            Ok(checked) => Ok(checked),
-            Err(error) => Err(TemplateDefinitionDiagnostic { call: self.call(), element, error }),
-        })
+        let Some(cursor) = self.template_syntax(element) else {
+            proof { reveal(template_definition_check_matches); }
+            return None;
+        };
+        let ghost initial = cursor;
+        let outcome = project_template(cursor);
+        proof {
+            assert(element < self.elements_model().len() && self.elements_model()[element as int] is Template);
+            assert(macro_template_syntax_starts_at(&initial, self, element));
+        }
+        match outcome {
+            Ok(checked) => {
+                proof {
+                    use_type_invariant(&checked);
+                    checked_template_projection_matches(initial, self, element, checked);
+                }
+                Some(Ok(checked))
+            },
+            Err(error) => {
+                let diagnostic = TemplateDefinitionDiagnostic { call: self.call(), element, error };
+                proof {
+                    assert(diagnostic.call == self.call_model() && diagnostic.element == element);
+                    assert(diagnostic.error == error);
+                    assert(exists|start: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
+                        macro_template_syntax_starts_at(&start, self, element)
+                        && #[trigger] template_projection_matches(start, Err(diagnostic.error)));
+                    reveal(template_definition_check_matches);
+                    assert(template_definition_check_matches(self, element, Some(Err(diagnostic))));
+                }
+                Some(Err(diagnostic))
+            },
+        }
     }
 }
 

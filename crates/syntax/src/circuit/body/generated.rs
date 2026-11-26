@@ -217,6 +217,24 @@ pub open spec fn generated_definition_sites(source: &str, forms: Seq<Form>, row:
     &&& generated_definition_in_sites(source, forms, 0..forms.len() as usize, row)
 }
 
+/// 同じ UTF-8 バイト列の本文へ、回路文法での検査結果を移す。
+pub proof fn generated_definition_matches_on_same_bytes(left: &str, right: &str, forms: Seq<Form>, row: GeneratedDefinition)
+    requires left.spec_bytes() == right.spec_bytes(),
+        generated_definition_matches(left, forms, row), generated_definition_sites(left, forms, row),
+    ensures generated_definition_matches(right, forms, row), generated_definition_sites(right, forms, row),
+{
+    let start = row.expression.start as int;
+    let stop = row.expression.end as int;
+    super::super::expression_forest::expression_forest_agrees_on_bytes(
+        left, right, forms, start, stop, (HeaderError::ExpectedList, 0..0),
+    );
+    super::super::expression_forest::expression_collections_agree_on_bytes(left, right, forms, start, stop);
+    assert forall|i: int| 0 <= i < row.references@.len()
+        implies forbidden_generated_reference(right, #[trigger] row.references@[i]).is_none() by {
+        assert(forbidden_generated_reference(left, row.references@[i]).is_none());
+    };
+}
+
 /// 指定範囲で根の個数、先頭語、通常の構文違反、禁止フォームの順に診断を選ぶ。
 pub closed spec fn generated_definition_in_error(
     source: &str, forms: Seq<Form>, region: Range<usize>, error: GeneratedDefinitionError,

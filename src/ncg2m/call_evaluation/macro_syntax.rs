@@ -22,13 +22,22 @@ use vstd::prelude::*;
 mod materialize;
 pub use materialize::{CheckedTemplateDefinition, TemplateDefinitionDiagnostic, TemplateDefinitionError};
 #[cfg(verus_only)]
-pub use materialize::projected_form_has_origin;
+pub use materialize::{
+    TemplateProjectionModel, first_diagnostic_anchor, is_diagnostic_anchor, projected_definition_finish_matches,
+    projected_definition_related,
+    projected_event_bytes, projected_event_step, projected_form_has_origin, projection_diagnostic_span,
+    template_definition_check_matches, template_projection_continue, template_projection_matches,
+    template_projection_prefix, template_projection_trace_result,
+};
 mod projection;
 pub use projection::{
     MacroSyntaxEvent, MacroSyntaxOrigin, MacroTemplateSyntax, MacroTemplateSyntaxError, MacroTemplateSyntaxStep,
 };
 #[cfg(verus_only)]
-pub use projection::{macro_template_syntax_step_matches, syntax_event_in_source, syntax_token_matches_forms};
+pub use projection::{
+    completed_macro_template_syntax_consumed, macro_template_syntax_starts_at, macro_template_syntax_step_matches,
+    syntax_event_in_source, syntax_token_matches_forms,
+};
 
 verus! {
 

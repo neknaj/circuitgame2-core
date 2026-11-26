@@ -358,6 +358,25 @@ proof fn template_matches_definition<'b, 'p, 'a>(
             template_assembly_trace_result(initial, fuel, states, parts, Ok(TemplateAssemblySlice::Complete(syntax)));
 }
 
+/// カーソルが選んだテンプレートの先頭から、挿入を開始していない状態にある。
+pub open spec fn macro_template_syntax_starts_at(
+    cursor: &MacroTemplateSyntax, body: &MacroExpandedBody, element: usize,
+) -> bool {
+    &&& cursor.valid() && cursor.call_model() == body.call_model()
+    &&& element < body.elements_model().len()
+    &&& body.elements_model()[element as int] is Template
+    &&& cursor.element_model() == element && cursor.at_model() == 0
+    &&& cursor.splice_at_model() == 0 && cursor.splice_model().len() == 0 && cursor.argument_model().is_none()
+    &&& cursor.parts_model() == body.elements_model()[element as int]->Template_syntax.parts_model()
+}
+
+/// 終端には、テンプレート本体、挿入列と引数のすべてを消費して到達する。
+pub proof fn completed_macro_template_syntax_consumed(cursor: MacroTemplateSyntax)
+    requires cursor.valid(), macro_template_syntax_step_matches(cursor, Ok(MacroTemplateSyntaxStep::Complete)),
+    ensures cursor.at_model() == cursor.parts_model().len(),
+        cursor.splice_at_model() == cursor.splice_model().len(), cursor.argument_model().is_none(),
+{}
+
 impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
     /// 指定したテンプレートの元構文と挿入断片を、展開順に読む。
     ///
@@ -366,10 +385,7 @@ impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
         -> (result: Option<MacroTemplateSyntax<'s, 'b, 'p, 'a>>)
         ensures result.is_some() <==> element < self.elements_model().len()
             && self.elements_model()[element as int] is Template,
-            result matches Some(state) ==> state.valid() && state.call_model() == self.call_model()
-                && state.element_model() == element && state.at_model() == 0
-                && state.splice_model().len() == 0 && state.argument_model().is_none()
-                && state.parts_model() == self.elements_model()[element as int]->Template_syntax.parts_model(),
+            result matches Some(state) ==> macro_template_syntax_starts_at(&state, self, element),
     {
         let elements = self.elements();
         let MacroExpandedElement::Template { syntax, history } = elements.get(element)? else { return None; };

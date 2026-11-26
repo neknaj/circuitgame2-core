@@ -42,7 +42,7 @@ mod test_values;
 pub use body::{
     expansion_body_region_matches, generated_definition_error, generated_definition_in_error,
     generated_definition_in_matches, generated_definition_in_sites, generated_definition_in_valid,
-    generated_definition_matches, generated_definition_region, generated_definition_sites, generated_definition_valid,
+    generated_definition_matches, generated_definition_matches_on_same_bytes, generated_definition_region, generated_definition_sites, generated_definition_valid,
     next_expansion_site_matches, routine_expansion_at, routine_expansion_evidence,
     routine_expansion_site_at, routine_expansion_sites_match,
 };
