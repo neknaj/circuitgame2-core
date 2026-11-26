@@ -174,6 +174,11 @@ pub use structure_declarations::structure_declaration_result;
 pub use sources::{first_source_set_error, project_sources_match, source_set_error, source_set_errors_agree, valid_source_snapshots};
 #[cfg(verus_only)]
 pub use use_aliases::port_types_equal;
+pub use use_aliases::{DefinitionPositions, DefinitionPositionStep};
+#[cfg(verus_only)]
+pub use use_aliases::{
+    definition_position_before, definition_position_exists, definition_position_progress, definition_position_remaining, definition_positions_advance,
+};
 pub use use_aliases::{CachedAbsoluteReferenceDiagnostic, DefinitionLookupObservation, ReferenceDiagnosticKind, StoredReferenceProblem};
 #[cfg(verus_only)]
 pub use use_aliases::{

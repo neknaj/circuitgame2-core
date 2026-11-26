@@ -14,6 +14,12 @@ pub use bit_func::{
 };
 mod call_arity;
 mod call_dependencies;
+mod definition_positions;
+pub use definition_positions::{DefinitionPositions, DefinitionPositionStep};
+#[cfg(verus_only)]
+pub use definition_positions::{
+    definition_position_before, definition_position_exists, definition_position_progress, definition_position_remaining, definition_positions_advance,
+};
 mod definitions;
 pub use definitions::{CachedAbsoluteReferenceDiagnostic, DefinitionLookupObservation, ReferenceDiagnosticKind, StoredReferenceProblem};
 #[cfg(verus_only)]
