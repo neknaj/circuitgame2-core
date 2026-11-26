@@ -209,7 +209,7 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
     /// 反復の局所束縛が現在の環境に含まれることを表す。
     pub closed spec fn has_fold_bindings(&self) -> bool { self.fold_bindings.is_some() }
 
-    pub(super) fn with_fold_bindings(mut self, bindings: Option<ScalarFoldBindings<'a>>) -> (frame: Self)
+    fn with_fold_bindings(mut self, bindings: Option<ScalarFoldBindings<'a>>) -> (frame: Self)
         ensures
             frame.body_model() == self.body_model(),
             frame.parameter_values_model() == self.parameter_values_model(),
