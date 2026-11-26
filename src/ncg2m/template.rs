@@ -12,6 +12,11 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+mod emission;
+pub use emission::{TemplateEmission, TemplateEmissionError, TemplateEmitter, TemplateSubstitution, emit_template};
+#[cfg(verus_only)]
+pub use emission::{template_emission_step, template_substitution_at};
+
 verus! {
 
 /// テンプレートに挿入する値の形。
