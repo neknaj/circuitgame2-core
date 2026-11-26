@@ -211,6 +211,17 @@ fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
         (47, '(', ""), (47, 'a', "nor"), (47, 'a', "x"), (47, 'a', "x"), (47, ')', ""),
         (31, ')', ""),
     ]);
+    assert!(output.check_template_definition(0).is_none());
+    let checked = output.check_template_definition(1).unwrap().unwrap();
+    let row = checked.row();
+    assert_eq!(row.targets.len(), 1);
+    assert_eq!(row.signals.len(), 2);
+    let target = checked.origin(row.targets.start).unwrap();
+    assert!(matches!(target.origin, MacroSyntaxOrigin::Template(call) if core::ptr::eq(call, &bound)));
+    let reference = checked.origin(row.references[0].form).unwrap();
+    assert!(matches!(reference.origin, MacroSyntaxOrigin::Argument(argument)
+        if core::ptr::eq(argument, &bound.arguments()[1])));
+    assert_eq!(&checked.text()[row.references[0].span.clone()], "nor");
 }
 
 
@@ -251,4 +262,53 @@ fn checks_direct_expansion_in_the_callers_original_subtree() {
     let GeneratedDefinitionError::ForbiddenHead { head: ForbiddenGeneratedHead::Expand, span } = failure.kind
         else { panic!("入れ子の展開を診断する必要があります"); };
     assert_eq!(&circuit[span], "expand");
+}
+
+
+#[test]
+fn restores_the_source_of_a_template_definition_diagnostic() {
+    use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::TemplateDefinitionError;
+    use circuitgame2_core::syntax::circuit::{ForbiddenGeneratedHead, GeneratedDefinitionError, HeaderError};
+    let library = "(defmacro emit (expr) (list (syntax (def y (unsyntax expr)))))
+        (defmacro missing () (list (syntax (def y))))";
+    let circuit = "(using nor) (func top (in x) (out y)
+        (expand emit (expand emit x)) (expand missing))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 10, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 15, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut calls = aliases.macro_calls(1, 1).unwrap();
+    let bound = calls.next_bound_macro().unwrap().unwrap();
+    let fuel = NonZeroUsize::new(64).unwrap();
+    let MacroExpansionSlice::Complete(output) = bound.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("展開が完了する必要があります"); };
+    let failure = output.check_template_definition(0).unwrap().err().unwrap();
+    assert!(core::ptr::eq(failure.call, &bound));
+    let TemplateDefinitionError::Definition {
+        kind: GeneratedDefinitionError::ForbiddenHead { head: ForbiddenGeneratedHead::Expand, .. },
+        related: Some(related),
+    } = failure.error else { panic!("禁止した先頭語の元範囲が必要です"); };
+    assert_eq!(related.origin.source().revision, 15);
+    assert!(matches!(related.origin, MacroSyntaxOrigin::Argument(argument)
+        if core::ptr::eq(argument, &bound.arguments()[0])));
+    let ArgumentSyntaxToken::Atom(at) = related.token else { unreachable!() };
+    let Form::Atom { span, .. } = &related.origin.forms()[at] else { unreachable!() };
+    assert_eq!(&circuit[span.clone()], "expand");
+
+    let bound = calls.next_bound_macro().unwrap().unwrap();
+    let MacroExpansionSlice::Complete(output) = bound.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("展開が完了する必要があります"); };
+    let failure = output.check_template_definition(0).unwrap().err().unwrap();
+    let TemplateDefinitionError::Definition {
+        kind: GeneratedDefinitionError::Invalid { kind: HeaderError::ExpectedExpression, span },
+        related: Some(related),
+    } = failure.error else { panic!("右辺の欠落を元のリストに対応付ける必要があります"); };
+    assert!(span.is_empty());
+    assert_eq!(related.origin.source().revision, 10);
+    assert!(matches!(related.origin, MacroSyntaxOrigin::Template(call) if core::ptr::eq(call, &bound)));
+    let ArgumentSyntaxToken::Open(at) = related.token else { unreachable!() };
+    let Form::List { span, .. } = &related.origin.forms()[at] else { unreachable!() };
+    assert_eq!(&library[span.clone()], "(def y)");
 }

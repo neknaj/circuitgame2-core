@@ -19,6 +19,10 @@ use crate::syntax::{
 };
 use vstd::prelude::*;
 
+mod materialize;
+pub use materialize::{CheckedTemplateDefinition, TemplateDefinitionDiagnostic, TemplateDefinitionError};
+#[cfg(verus_only)]
+pub use materialize::projected_form_has_origin;
 mod projection;
 pub use projection::{
     MacroSyntaxEvent, MacroSyntaxOrigin, MacroTemplateSyntax, MacroTemplateSyntaxError, MacroTemplateSyntaxStep,
