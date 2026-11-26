@@ -88,8 +88,13 @@ fn matches_macro_snapshot(source: &ProjectSource, requested: &ProjectSource) -> 
         vstd::utf8::encode_utf8_decode_utf8(text@);
         vstd::utf8::encode_utf8_decode_utf8(requested_text@);
     }
-    source.kind == requested.kind && source.revision == requested.revision
-        && source.id.same_file(&requested.id) && text == requested_text
+    let kind = matches!((source.kind, requested.kind),
+        (SourceKind::Circuit, SourceKind::Circuit) | (SourceKind::Functional, SourceKind::Functional));
+    let path = source.id.same_file(&requested.id);
+    let content = text == requested_text;
+    assert(kind == (source.kind == requested.kind));
+    assert(content == (text@ == requested_text@));
+    kind && source.revision == requested.revision && path && content
 }
 
 fn same_range(left: &Range<usize>, right: &Range<usize>) -> (same: bool)
