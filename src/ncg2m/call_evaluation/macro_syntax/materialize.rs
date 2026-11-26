@@ -506,6 +506,7 @@ impl<'b, 'p, 'a> CheckedTemplateDefinition<'b, 'p, 'a> {
     /// 構文検査のバイト範囲が指す本文。
     pub fn text(&self) -> (text: &str)
         ensures text@ == self.text_model(),
+            form_spans_valid(text, self.forms_model(), text.spec_bytes().len() as int),
             generated_definition_matches(text, self.forms_model(), self.row_model()),
             generated_definition_sites(text, self.forms_model(), self.row_model()),
     {
@@ -517,6 +518,7 @@ impl<'b, 'p, 'a> CheckedTemplateDefinition<'b, 'p, 'a> {
                 && #[trigger] generated_definition_matches(s, self.forms_model(), self.row_model())
                 && generated_definition_sites(s, self.forms_model(), self.row_model());
             generated_definition_matches_on_same_bytes(known, text, self.forms_model(), self.row_model());
+            projected_tree_evidence(text, self.syntax.forms@, self.syntax.origins@, self.syntax.open@);
         }
         text
     }
