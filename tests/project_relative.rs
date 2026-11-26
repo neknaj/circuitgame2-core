@@ -1,5 +1,5 @@
 use circuitgame2_core::project::{
-    AbsoluteTarget, ReferenceScopeError, RelativeResolutionError, RelativeTarget, SourceSnapshot,
+    AbsoluteTarget, LookupTarget, OwnedUnqualifiedLookup, ReferenceScopeError, RelativeResolutionError, RelativeTarget, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::{circuit::Head, split_relative_path};
@@ -122,4 +122,32 @@ fn follows_namespace_aliases_and_checks_visibility_from_the_caller() {
     assert_eq!(parent, "logic");
     assert_eq!(name, "inner");
     assert_eq!(&text[introduced_at.span], "inner");
+}
+
+#[test]
+fn observes_a_missing_relative_head_and_the_alias_that_replaces_it() {
+    fn observe(text: &str, revision: u64) -> OwnedUnqualifiedLookup {
+        let project = parse_circuit_project(&[SourceSnapshot { path: "area/main.ncg2", revision, text }]).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let aliases = check_use_aliases(&targets).unwrap();
+        aliases.observe_unqualified(0, None, "gates").unwrap()
+    }
+
+    let declarations = "(namespace logic (struct Open (width 1)) (export Open))";
+    let missing = observe(declarations, 1);
+    assert_eq!(missing, OwnedUnqualifiedLookup::Missing);
+
+    let text = format!("{declarations} (use ::logic gates)");
+    let alias = observe(&text, 2);
+    let OwnedUnqualifiedLookup::Alias {
+        directive,
+        target: LookupTarget::Namespace { parent, name, introduced_at },
+    } = alias else {
+        panic!("相対名の先頭で別名が選ばれるはず");
+    };
+    assert_eq!(directive.file, [b"area".to_vec(), b"main.ncg2".to_vec()]);
+    assert_eq!(&text[directive.span], "gates");
+    assert_eq!(parent, None);
+    assert_eq!(name, b"logic");
+    assert_eq!(&text[introduced_at.span], "logic");
 }

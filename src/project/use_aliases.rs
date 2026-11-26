@@ -15,6 +15,11 @@ pub use bit_func::{
 mod call_arity;
 mod call_dependencies;
 mod definitions;
+pub use definitions::{CachedAbsoluteReferenceDiagnostic, DefinitionLookupObservation, ReferenceDiagnosticKind, StoredReferenceProblem};
+#[cfg(verus_only)]
+pub use definitions::{
+    absolute_observation_answers, definition_diagnostic_model, definition_lookup_diagnostics_agree, definition_lookup_input, definition_lookup_matches,
+};
 mod dependency_order;
 mod settling;
 mod settling_hint;

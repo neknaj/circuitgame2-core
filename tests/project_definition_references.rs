@@ -1,5 +1,6 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason, SourceSnapshot,
+    DefinitionBinding, DefinitionLookupObservation, DefinitionPosition, DefinitionReferenceError, DefinitionReferenceReason,
+    OwnedUnqualifiedLookup, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
@@ -60,6 +61,9 @@ fn resolves_real_references_and_keeps_diagnostic_ranges() {
     }
     let builtin = aliases.resolve_definition_reference(0, main, 1, 0).unwrap();
     assert!(matches!(builtin.binding, DefinitionBinding::Nor));
+    let (observed_builtin, builtin_observation) = aliases.observe_definition_reference(0, main, 1, 0);
+    assert!(matches!(observed_builtin.unwrap().binding, DefinitionBinding::Nor));
+    assert_eq!(builtin_observation, Some(DefinitionLookupObservation::Unqualified(OwnedUnqualifiedLookup::Missing)));
     for (definition, spelling) in [(2, "gates::Secret"), (3, "::lib::Secret")] {
         let error = aliases
             .resolve_definition_reference(0, main, definition, 0)
@@ -74,6 +78,19 @@ fn resolves_real_references_and_keeps_diagnostic_ranges() {
         assert_eq!(&app[site.name.span], spelling);
         assert_eq!(&library[location.span], "Secret");
         assert_eq!(location.source.revision, 2);
+    }
+    let (reference, observation) = aliases.observe_definition_reference(0, main, 3, 0);
+    let Err(DefinitionReferenceError::Rejected { site, reason: DefinitionReferenceReason::Private(location) }) = reference
+        else { panic!("完全修飾名の診断には非公開の宣言位置が必要"); };
+    assert_eq!(&app[site.name.span], "::lib::Secret");
+    assert_eq!(&library[location.span], "Secret");
+    assert!(matches!(observation, Some(DefinitionLookupObservation::Absolute(found)) if !found.visible_declaration));
+    let (relative, observation) = aliases.observe_definition_reference(0, main, 2, 0);
+    assert!(matches!(relative, Err(DefinitionReferenceError::Rejected { reason: DefinitionReferenceReason::Private(_), .. })));
+    assert!(observation.is_none());
+    for definition in [1, 2] {
+        let at = DefinitionPosition { file: 0, entry: main, definition, reference: 0 };
+        assert!(aliases.cache_absolute_reference_diagnostic(at).is_none());
     }
     assert!(matches!(
         aliases.resolve_definition_reference(0, part, 0, 0),
@@ -132,4 +149,46 @@ fn a_wrong_kind_with_the_builtin_spelling_still_resolves_to_that_binding() {
         aliases.resolve_definition_reference(0, 1, 1, 0).unwrap().binding,
         DefinitionBinding::Declaration { form, .. } if form.head == Head::Struct
     ));
+}
+
+#[test]
+fn reuses_a_cached_absolute_diagnostic_only_while_its_evidence_agrees() {
+    fn with_project<T>(
+        library: &str, revision: u64,
+        check: impl FnOnce(&circuitgame2_core::project::UseAliases<'_, '_, '_>, DefinitionPosition) -> T,
+    ) -> T {
+        let app = "(using nor) (func Run (in x) (out y) (def y (::lib::Task x)))";
+        let project = parse_circuit_project(&[
+            SourceSnapshot { path: "app.ncg2", revision: 8, text: app },
+            SourceSnapshot { path: "lib.ncg2", revision, text: library },
+        ]).unwrap();
+        let entry = project.circuits()[0].syntax.entries.iter().position(|row| row.head == Head::Func).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let aliases = check_use_aliases(&targets).unwrap();
+        check(&aliases, DefinitionPosition { file: 0, entry, definition: 0, reference: 0 })
+    }
+
+    use circuitgame2_core::project::ReferenceDiagnosticKind;
+    let private = "(namespace lib (func Task (in x) (out x)))";
+    let cached = with_project(private, 1, |aliases, at| aliases.cache_absolute_reference_diagnostic(at).unwrap());
+    assert_eq!(cached.word(), "::lib::Task");
+    assert_eq!(cached.primary().file, [b"app.ncg2".to_vec()]);
+    assert_eq!(cached.primary().span.len(), cached.word().len());
+    assert_eq!(cached.problem().unwrap().kind, ReferenceDiagnosticKind::Private);
+
+    with_project(&format!("{private} ; 変更"), 2, |aliases, at| {
+        let reused = aliases.reuse_absolute_reference_diagnostic(at, &cached).unwrap();
+        assert!(core::ptr::eq(reused, &cached));
+        assert_eq!(reused.problem().unwrap().kind, ReferenceDiagnosticKind::Private);
+    });
+    for edited in [
+        format!("; 先頭
+{private}"),
+        format!("{private} (namespace lib (export Task))"),
+        "(namespace lib)".to_owned(),
+    ] {
+        with_project(&edited, 3, |aliases, at| {
+            assert!(aliases.reuse_absolute_reference_diagnostic(at, &cached).is_none());
+        });
+    }
 }
