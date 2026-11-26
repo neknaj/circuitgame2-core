@@ -133,3 +133,36 @@ fn resolves_implicit_namespaces_and_distinguishes_missing_and_malformed_paths() 
         Err(AbsoluteResolutionError::InvalidPath)
     ));
 }
+
+#[test]
+fn observes_missing_private_and_exported_candidates_across_snapshots() {
+    let key = NameKey { parent: Some("lib"), name: "item" };
+    for (revision, text, visible) in [
+        (1, "(namespace lib)", false),
+        (2, "(namespace lib (struct item (width 1)))", false),
+        (3, "(namespace lib (struct item (width 1)) (export item))", true),
+    ] {
+        let project = parse_circuit_project(&[SourceSnapshot {
+            path: "lib.ncg2",
+            revision,
+            text,
+        }])
+        .unwrap();
+        let table = index_exports(&project).unwrap();
+        let lookup = table.observe_absolute_key(key, Some("caller"));
+        assert_eq!(lookup.target().is_some(), revision != 1);
+        assert_eq!(lookup.is_visible_declaration(), visible);
+        match (revision, lookup.into_resolution()) {
+            (1, Err(AbsoluteResolutionError::Missing)) => {}
+            (2, Err(AbsoluteResolutionError::Private(location))) => {
+                assert_eq!(location.source.revision, revision);
+                assert_eq!(&text[location.span], "item");
+            }
+            (3, Ok(AbsoluteTarget::Declaration { source, form })) => {
+                assert_eq!(source.revision, revision);
+                assert_eq!(&text[form.name.span.clone()], "item");
+            }
+            (_, result) => panic!("観測から得た解決結果が期待と異なる {result:?}"),
+        }
+    }
+}

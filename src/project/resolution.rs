@@ -81,6 +81,69 @@ pub enum AbsoluteResolutionError<'p, 'a> {
     Private(LocatedName<'p, 'a>),
 }
 
+/// 指定したキーの候補と、参照元から独立宣言が見えるかを記録する。
+///
+/// 候補がない場合も観測値に含める。名前空間の場合は、最初に導入した箇所を保持する。
+#[derive(Debug)]
+pub struct AbsoluteLookup<'p, 'a, 'q> {
+    target: Option<AbsoluteTarget<'p, 'a, 'q>>,
+    visible: bool,
+}
+
+impl<'p, 'a, 'q> AbsoluteLookup<'p, 'a, 'q> {
+    /// 宣言表で選んだ候補を表す。候補がなければ `None`。
+    pub closed spec fn target_model(&self) -> Option<AbsoluteTarget<'p, 'a, 'q>> { self.target }
+
+    /// 独立宣言が参照元から見えることを表す。名前空間と候補の不在では偽。
+    pub closed spec fn visible_model(&self) -> bool { self.visible }
+
+    /// 観測値から決まる解決結果と診断の範囲を表す。
+    pub open spec fn resolution_model(&self) -> Result<AbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>> {
+        match self.target_model() {
+            Some(target @ AbsoluteTarget::Declaration { source, form }) =>
+                if self.visible_model() { Ok(target) }
+                else { Err(AbsoluteResolutionError::Private(LocatedName { source, span: form.name.span })) },
+            Some(target @ AbsoluteTarget::Namespace { .. }) => Ok(target),
+            None => Err(AbsoluteResolutionError::Missing),
+        }
+    }
+
+    /// 共有宣言表で選んだ候補を借りる。候補がなければ `None`。
+    pub fn target(&self) -> (result: Option<&AbsoluteTarget<'p, 'a, 'q>>)
+        ensures (match result { Some(target) => Some(*target), None => None }) == self.target_model(),
+    {
+        match &self.target {
+            Some(target) => Some(target),
+            None => None,
+        }
+    }
+
+    /// 候補が独立宣言であり、参照元から見えることを返す。
+    pub fn is_visible_declaration(&self) -> (result: bool)
+        ensures result == self.visible_model(),
+    {
+        self.visible
+    }
+
+    /// 観測値から解決結果を返す。
+    ///
+    /// # Errors
+    ///
+    /// 候補がなければ不在を、見えない宣言なら宣言名の元範囲とともに非公開を返す。
+    pub fn into_resolution(self) -> (result: Result<AbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>>)
+        ensures result == self.resolution_model(),
+    {
+        match self.target {
+            Some(AbsoluteTarget::Declaration { source, form }) if !self.visible => {
+                let span = &form.name.span;
+                Err(AbsoluteResolutionError::Private(LocatedName { source, span: span.start..span.end }))
+            },
+            Some(target) => Ok(target),
+            None => Err(AbsoluteResolutionError::Missing),
+        }
+    }
+}
+
 /// 宣言が参照元と同じ名前空間に属するか、公開されていることを表す。
 pub open spec fn declaration_visible_from(table: &ExportTable, key: NameKey, from: Option<&str>) -> bool {
     key_view(key) == key_view(NameKey { parent: from, name: key.name })
@@ -253,24 +316,50 @@ impl<'p, 'a> ExportTable<'p, 'a> {
         self.resolve_key(key, from)
     }
 
+    /// 一つのキーについて、候補の有無と参照元からの可視性を観測する。
+    ///
+    /// `from` は先頭の `::` を除いた参照元の名前空間で、ルート直下では `None`。
+    pub fn observe_absolute_key<'q>(&self, key: NameKey<'q>, from: Option<&str>)
+        -> (lookup: AbsoluteLookup<'p, 'a, 'q>)
+        requires self.declarations_model().well_formed(),
+        ensures
+            selected_direct_target_matches(&self.declarations_model(), key, lookup.target_model()),
+            lookup.visible_model() == (lookup.target_model() matches Some(AbsoluteTarget::Declaration { .. })
+                && declaration_visible_from(self, key, from)),
+            has_resolution(self, key, from, lookup.resolution_model()),
+    {
+        let target = self.declarations().direct_target(key);
+        let visible = matches!(target, Some(AbsoluteTarget::Declaration { .. }))
+            && (key.same_name(NameKey { parent: from, name: key.name }) || self.is_public(key));
+        proof {
+            if let Some(AbsoluteTarget::Declaration { source, form }) = target {
+                if !visible {
+                    let location = LocatedName { source, span: form.name.span };
+                    assert(exists|candidate: &NamedForm|
+                        #[trigger] self.declarations_model().declaration_at(key, location.source, candidate)
+                            && location.span == candidate.name.span);
+                }
+            }
+        }
+        AbsoluteLookup { target, visible }
+    }
+
     /// 宣言表のキーを解決し、参照元から末尾の宣言が見えることを確かめる。
     pub(super) fn resolve_key<'q>(&self, key: NameKey<'q>, from: Option<&str>)
         -> (result: Result<AbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>>)
         requires self.declarations_model().well_formed(),
         ensures has_resolution(self, key, from, result),
+            exists|lookup: AbsoluteLookup<'p, 'a, 'q>|
+                #[trigger] lookup.resolution_model() == result
+                && selected_direct_target_matches(&self.declarations_model(), key, lookup.target_model())
+                && lookup.visible_model() == (lookup.target_model() matches Some(AbsoluteTarget::Declaration { .. })
+                    && declaration_visible_from(self, key, from)),
     {
-        match self.declarations().direct_target(key) {
-            Some(target @ AbsoluteTarget::Declaration { source, form }) => {
-                if key.same_name(NameKey { parent: from, name: key.name }) || self.is_public(key) {
-                    Ok(target)
-                } else {
-                    let span = &form.name.span;
-                    Err(AbsoluteResolutionError::Private(LocatedName { source, span: span.start..span.end }))
-                }
-            }
-            Some(target @ AbsoluteTarget::Namespace { .. }) => Ok(target),
-            None => Err(AbsoluteResolutionError::Missing),
-        }
+        let lookup = self.observe_absolute_key(key, from);
+        let ghost observed = lookup;
+        let result = lookup.into_resolution();
+        assert(observed.resolution_model() == result);
+        result
     }
 }
 

@@ -142,7 +142,7 @@ pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, 
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
-pub use resolution::{AbsoluteResolutionError, AbsoluteTarget, MixedAbsoluteTarget};
+pub use resolution::{AbsoluteLookup, AbsoluteResolutionError, AbsoluteTarget, MixedAbsoluteTarget};
 #[cfg(verus_only)]
 pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, mixed_absolute_resolution_evidence,
