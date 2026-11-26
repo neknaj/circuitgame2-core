@@ -3,6 +3,7 @@
 mod alias_index;
 mod batch;
 mod bit_func;
+pub use bit_func::{CheckedGeneratedAliasFunc, GeneratedWiringError};
 pub use bit_func::{
     BitFuncError, BitFuncLowerError, CheckedBitFunc, ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic,
     LoweredBitFunc, UnsupportedBitFunc,
@@ -10,7 +11,9 @@ pub use bit_func::{
 #[cfg(verus_only)]
 pub use bit_func::{
     bit_func_evaluation, bit_func_lowering_preserves_evaluation, bit_func_evaluations_agree,
-    checked_bit_func_available, lowered_bit_func_result, port_values,
+    checked_bit_func_available, collected_aliases_match, collected_alias_prefix, collected_alias_step,
+    function_generated_aliases_match, generated_alias_element_matches, generated_alias_elements_match,
+    generated_alias_function_wiring, generated_port_names_match, lowered_bit_func_result, port_values,
 };
 mod call_arity;
 mod call_dependencies;
@@ -38,6 +41,10 @@ mod function_atoms;
 mod function_literals;
 mod function_types;
 mod function_wiring;
+mod generated_signals;
+pub use generated_signals::{GeneratedSignalAlias, GeneratedSignalName, GeneratedSignalPosition};
+#[cfg(verus_only)]
+pub use generated_signals::{generated_signal_alias_shape, generated_signal_form, generated_signal_origin_matches, generated_template_signal_matches};
 pub(in crate::project) mod local_signal_index;
 pub use local_signal_index::LocalSignalKey;
 #[cfg(verus_only)]
