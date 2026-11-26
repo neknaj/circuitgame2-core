@@ -795,4 +795,239 @@ impl<'b, 'p, 'a> MacroExpansion<'b, 'p, 'a> {
     }
 }
 
+/// 一要素の構文と出典が一致することを表す。
+pub open spec fn macro_expanded_elements_agree<'b, 'p, 'a>(
+    a: MacroExpandedElement<'b, 'p, 'a>, b: MacroExpandedElement<'b, 'p, 'a>,
+) -> bool {
+    match (a, b) {
+        (MacroExpandedElement::Argument(a), MacroExpandedElement::Argument(b)) => *a == *b,
+        (MacroExpandedElement::Template { syntax: a, .. }, MacroExpandedElement::Template { syntax: b, .. }) =>
+            a.source_model() == b.source_model()
+                && a.forms_model() == b.forms_model() && a.parts_model() == b.parts_model(),
+        _ => false,
+    }
+}
+
+/// 同じ順序で、同じ構文と出典を持つ要素が並ぶことを表す。
+pub open spec fn macro_expanded_prefixes_agree<'b, 'p, 'a>(
+    a: Seq<MacroExpandedElement<'b, 'p, 'a>>, b: Seq<MacroExpandedElement<'b, 'p, 'a>>,
+) -> bool {
+    &&& a.len() == b.len()
+    &&& forall|i: int| 0 <= i < a.len() ==> macro_expanded_elements_agree(#[trigger] a[i], b[i])
+}
+
+proof fn macro_expanded_prefixes_append<'b, 'p, 'a>(
+    a: Seq<MacroExpandedElement<'b, 'p, 'a>>, b: Seq<MacroExpandedElement<'b, 'p, 'a>>,
+    left: MacroExpandedElement<'b, 'p, 'a>, right: MacroExpandedElement<'b, 'p, 'a>,
+)
+    requires macro_expanded_prefixes_agree(a, b), macro_expanded_elements_agree(left, right),
+    ensures macro_expanded_prefixes_agree(a.push(left), b.push(right)),
+{
+    let next_a = a.push(left);
+    let next_b = b.push(right);
+    assert forall|i: int| 0 <= i < next_a.len() implies macro_expanded_elements_agree(#[trigger] next_a[i], next_b[i]) by {
+        if i < a.len() {
+            assert(macro_expanded_elements_agree(a[i], b[i]));
+        }
+    };
+}
+
+spec fn macro_assemblies_agree<'b, 'p, 'a>(
+    a: TemplateAssembly<'p, 'b, MacroArgument<'p, 'a>>, b: TemplateAssembly<'p, 'b, MacroArgument<'p, 'a>>,
+) -> bool {
+    crate::ncg2m::template::template_emitters_agree(&a.emitter_model(), &b.emitter_model())
+        && a.parts_model() == b.parts_model()
+}
+
+spec fn macro_pending_templates_agree<'b, 'p, 'a>(
+    a: PendingTemplate<'b, 'p, 'a>, b: PendingTemplate<'b, 'p, 'a>,
+) -> bool {
+    a.root == b.root && a.values@ == b.values@
+}
+
+/// 同じ呼び出しについて、確定前の要素と次に実行する処理が一致することを表す。
+pub closed spec fn macro_expansion_states_agree<'b, 'p, 'a>(
+    a: &MacroExpansion<'b, 'p, 'a>, b: &MacroExpansion<'b, 'p, 'a>,
+) -> bool {
+    &&& a.call_model() == b.call_model()
+    &&& macro_expanded_prefixes_agree(a.completed@, b.completed@)
+    &&& match (a.phase, b.phase) {
+        (ExpansionPhase::Select, ExpansionPhase::Select) => true,
+        (ExpansionPhase::Insertions(a), ExpansionPhase::Insertions(b)) => macro_pending_templates_agree(a, b),
+        (ExpansionPhase::Expression { expression: a, template: left },
+         ExpansionPhase::Expression { expression: b, template: right }) => {
+            &&& super::macro_binding::macro_expression_states_agree(&a, &b)
+            &&& match (left, right) {
+                (Some(left), Some(right)) => macro_pending_templates_agree(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+        },
+        (ExpansionPhase::Assemble { current: a, .. }, ExpansionPhase::Assemble { current: b, .. }) =>
+            macro_assemblies_agree(a, b),
+        _ => false,
+    }
+}
+
+/// 一遷移の出力、診断、または次の実行枠へ渡す状態が一致することを表す。
+pub open spec fn macro_expansion_step_results_agree<'b, 'p, 'a>(
+    a: ExpansionResult<'b, 'p, 'a>, b: ExpansionResult<'b, 'p, 'a>,
+) -> bool {
+    match (a, b) {
+        (Ok(MacroExpansionSlice::Complete(a)), Ok(MacroExpansionSlice::Complete(b))) =>
+            a.call_model() == b.call_model() && macro_expanded_prefixes_agree(a.elements_model(), b.elements_model()),
+        (Ok(MacroExpansionSlice::Suspended(a)), Ok(MacroExpansionSlice::Suspended(b))) =>
+            macro_expansion_states_agree(&a, &b),
+        (Err(a), Err(b)) => a.call == b.call && a.definition == b.definition
+            && a.related == b.related && a.element == b.element && a.kind == b.kind,
+        _ => false,
+    }
+}
+
+// 展開の一遷移から、その場で行った式評価の結果を取り出す。
+spec fn expansion_expression_step<'b, 'p, 'a>(
+    result: ExpansionResult<'b, 'p, 'a>,
+) -> Option<Result<MacroExpressionStep<'b, 'p, 'a>, MacroArgumentError>> {
+    match result {
+        Err(error) => match error.kind {
+            MacroExpansionErrorKind::Expression { error, .. } => Some(Err(error)),
+            _ => None,
+        },
+        Ok(MacroExpansionSlice::Suspended(next)) => match next.phase {
+            ExpansionPhase::Expression { expression, .. } => Some(Ok(MacroExpressionStep::Continue(expression))),
+            ExpansionPhase::Insertions(pending) if pending.values@.len() > 0 =>
+                if let TemplateSubstitution::One(value) = pending.values@.last() {
+                    Some(Ok(MacroExpressionStep::Value(value)))
+                } else { None },
+            ExpansionPhase::Select if next.completed@.len() > 0 =>
+                if let MacroExpandedElement::Argument(value) = next.completed@.last() {
+                    Some(Ok(MacroExpressionStep::Value(value)))
+                } else { None },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// 展開の一遷移から、その場で行ったテンプレートの組み立て結果を取り出す。
+spec fn expansion_assembly_step<'b, 'p, 'a>(
+    result: ExpansionResult<'b, 'p, 'a>,
+) -> Option<Result<TemplateAssemblySlice<'p, 'b, MacroArgument<'p, 'a>>, TemplateEmissionError>> {
+    match result {
+        Err(error) => match error.kind {
+            MacroExpansionErrorKind::Template(error) => Some(Err(error)),
+            _ => None,
+        },
+        Ok(MacroExpansionSlice::Suspended(next)) => match next.phase {
+            ExpansionPhase::Assemble { current, .. } => Some(Ok(TemplateAssemblySlice::Suspended(current))),
+            ExpansionPhase::Select if next.completed@.len() > 0 =>
+                if let MacroExpandedElement::Template { syntax, .. } = next.completed@.last() {
+                    Some(Ok(TemplateAssemblySlice::Complete(syntax)))
+                } else { None },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+proof fn same_assembly_start<'b, 'p, 'a>(
+    call: &'b BoundMacroCall<'p, 'a>, index: usize,
+    a: TemplateAssembly<'p, 'b, MacroArgument<'p, 'a>>, b: TemplateAssembly<'p, 'b, MacroArgument<'p, 'a>>,
+)
+    requires macro_template_origin(call, index, a), macro_template_origin(call, index, b),
+        a.emitter_model().values_model() == b.emitter_model().values_model(),
+    ensures macro_assemblies_agree(a, b),
+{
+    assert(a.parts_model() =~= b.parts_model());
+    assert(a.emitter_model().lists_model() =~= b.emitter_model().lists_model());
+}
+
+proof fn expansion_expression_steps_agree<'b, 'p, 'a>(
+    a: &MacroExpansion<'b, 'p, 'a>, b: &MacroExpansion<'b, 'p, 'a>,
+    expression_a: MacroExpressionEvaluation<'b, 'p, 'a>, expression_b: MacroExpressionEvaluation<'b, 'p, 'a>,
+    out_a: ExpansionResult<'b, 'p, 'a>, out_b: ExpansionResult<'b, 'p, 'a>,
+)
+    requires macro_expansion_states_agree(a, b),
+        a.phase matches ExpansionPhase::Expression { expression, .. } && expression == expression_a,
+        b.phase matches ExpansionPhase::Expression { expression, .. } && expression == expression_b,
+        macro_expansion_step_matches(*a, out_a), macro_expansion_step_matches(*b, out_b),
+    ensures macro_expansion_step_results_agree(out_a, out_b),
+{
+    let left = expansion_expression_step(out_a);
+    let right = expansion_expression_step(out_b);
+    assert(left is Some && right is Some);
+    let left = left->Some_0;
+    let right = right->Some_0;
+    assert(macro_expression_step_matches(expression_a, left));
+    assert(macro_expression_step_matches(expression_b, right));
+    super::macro_binding::macro_expression_steps_agree(&expression_a, &expression_b, left, right);
+    if let (Ok(MacroExpansionSlice::Suspended(next_a)), Ok(MacroExpansionSlice::Suspended(next_b))) = (out_a, out_b) {
+        if let (ExpansionPhase::Select, ExpansionPhase::Select) = (next_a.phase, next_b.phase) {
+            macro_expanded_prefixes_append(a.completed@, b.completed@, next_a.completed@.last(), next_b.completed@.last());
+        }
+    }
+}
+
+proof fn expansion_assembly_steps_agree<'b, 'p, 'a>(
+    a: &MacroExpansion<'b, 'p, 'a>, b: &MacroExpansion<'b, 'p, 'a>,
+    current_a: TemplateAssembly<'p, 'b, MacroArgument<'p, 'a>>,
+    current_b: TemplateAssembly<'p, 'b, MacroArgument<'p, 'a>>,
+    out_a: ExpansionResult<'b, 'p, 'a>, out_b: ExpansionResult<'b, 'p, 'a>,
+)
+    requires macro_expansion_states_agree(a, b),
+        a.phase matches ExpansionPhase::Assemble { current, .. } && current == current_a,
+        b.phase matches ExpansionPhase::Assemble { current, .. } && current == current_b,
+        macro_expansion_step_matches(*a, out_a), macro_expansion_step_matches(*b, out_b),
+    ensures macro_expansion_step_results_agree(out_a, out_b),
+{
+    let left = expansion_assembly_step(out_a);
+    let right = expansion_assembly_step(out_b);
+    assert(left is Some && right is Some);
+    let left = left->Some_0;
+    let right = right->Some_0;
+    assert(template_assembly_matches(current_a, 1, left));
+    assert(template_assembly_matches(current_b, 1, right));
+    crate::ncg2m::template::template_assembly_results_from_equivalent_states(current_a, current_b, 1, left, right);
+    if let (Ok(MacroExpansionSlice::Suspended(next_a)), Ok(MacroExpansionSlice::Suspended(next_b))) = (out_a, out_b) {
+        if let (ExpansionPhase::Select, ExpansionPhase::Select) = (next_a.phase, next_b.phase) {
+            macro_expanded_prefixes_append(a.completed@, b.completed@, next_a.completed@.last(), next_b.completed@.last());
+        }
+    }
+}
+
+/// 同じ途中状態からは、同じ診断、出力、または再開状態を一意に得る。
+pub proof fn macro_expansion_steps_agree<'b, 'p, 'a>(
+    a: &MacroExpansion<'b, 'p, 'a>, b: &MacroExpansion<'b, 'p, 'a>,
+    out_a: ExpansionResult<'b, 'p, 'a>, out_b: ExpansionResult<'b, 'p, 'a>,
+)
+    requires macro_expansion_states_agree(a, b),
+        macro_expansion_step_matches(*a, out_a), macro_expansion_step_matches(*b, out_b),
+    ensures macro_expansion_step_results_agree(out_a, out_b),
+{
+    assert(a.position_model() == b.position_model());
+    match (a.phase, b.phase) {
+        (ExpansionPhase::Select, ExpansionPhase::Select) => {
+            if let (Ok(MacroExpansionSlice::Suspended(next_a)), Ok(MacroExpansionSlice::Suspended(next_b))) = (out_a, out_b) {
+                if let (ExpansionPhase::Insertions(left), ExpansionPhase::Insertions(right)) = (next_a.phase, next_b.phase) {
+                    assert(left.values@ =~= right.values@);
+                }
+            }
+        },
+        (ExpansionPhase::Insertions(_), ExpansionPhase::Insertions(_)) => {
+            if let (Ok(MacroExpansionSlice::Suspended(next_a)), Ok(MacroExpansionSlice::Suspended(next_b))) = (out_a, out_b) {
+                if let (ExpansionPhase::Assemble { current: left, .. }, ExpansionPhase::Assemble { current: right, .. }) =
+                    (next_a.phase, next_b.phase)
+                {
+                    same_assembly_start(a.call_model(), a.position_model() as usize, left, right);
+                }
+            }
+        },
+        (ExpansionPhase::Expression { expression: left, .. }, ExpansionPhase::Expression { expression: right, .. }) =>
+            expansion_expression_steps_agree(a, b, left, right, out_a, out_b),
+        (ExpansionPhase::Assemble { current: left, .. }, ExpansionPhase::Assemble { current: right, .. }) =>
+            expansion_assembly_steps_agree(a, b, left, right, out_a, out_b),
+        _ => assert(false),
+    }
+}
+
 } // verus!
