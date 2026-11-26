@@ -10,6 +10,7 @@ mod clocked_io;
 mod clocked_storage;
 mod clocked_session;
 mod clocked_vm;
+pub use clocked_vm::checkpoint::{ClockedCheckpointError, ClockedStorageCheckpoint, ClockedVmCheckpoint};
 pub(crate) mod instances;
 mod port_layout;
 mod state_elements;

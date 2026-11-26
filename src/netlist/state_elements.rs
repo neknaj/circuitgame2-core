@@ -82,6 +82,24 @@ fn zero_bits(count: usize) -> (result: Result<Vec<bool>, StateAllocationError>)
     Ok(bits)
 }
 
+fn overwrite_bits(bits: &mut Vec<bool>, source: &[bool])
+    requires old(bits)@.len() == source@.len(),
+    ensures final(bits)@ == source@,
+    no_unwind
+{
+    let mut i = 0;
+    while i < source.len()
+        invariant
+            i <= bits@.len() == source@.len(),
+            forall|j: int| 0 <= j < i ==> #[trigger] bits@[j] == source@[j],
+        decreases source@.len() - i,
+    {
+        bits[i] = source[i];
+        i += 1;
+    }
+    assert(bits@ =~= source@);
+}
+
 fn clear_bits(bits: &mut Vec<bool>)
     ensures final(bits)@ == Seq::new(old(bits)@.len(), |_: int| false),
     no_unwind
@@ -157,6 +175,14 @@ impl LatchState {
         no_unwind
     {
         clear_bits(&mut self.bits);
+    }
+
+    pub(super) fn restore_output(&mut self, output: &[bool])
+        requires output@.len() == old(self).value().len(),
+        ensures final(self).value() == output@,
+        no_unwind
+    {
+        overwrite_bits(&mut self.bits, output);
     }
 
     /// 許可ビットが1なら入力値を保持し、0なら保持値を保存する。
@@ -418,6 +444,21 @@ impl RamState {
         proof { use_type_invariant(&*self); }
         clear_bits(&mut self.memory);
         clear_bits(&mut self.output);
+    }
+
+    // 読み出し出力は書き込み前の語を保持するため、RAM の内容とは別に復元する。
+    pub(super) fn restore_state(&mut self, memory: &[bool], output: &[bool])
+        requires memory@.len() == old(self).memory_model().len(),
+            output@.len() == old(self).output_model().len(),
+        ensures final(self).memory_model() == memory@,
+            final(self).output_model() == output@,
+            final(self).address_bits_model() == old(self).address_bits_model(),
+            final(self).word_bits_model() == old(self).word_bits_model(),
+        no_unwind
+    {
+        proof { use_type_invariant(&*self); }
+        overwrite_bits(&mut self.memory, memory);
+        overwrite_bits(&mut self.output, output);
     }
 
     /// 対象語の更新前の値を読み出し出力へ格納する。
