@@ -109,6 +109,13 @@ pub use port_layout::{port_bit_layout_port, port_bit_layout_result, port_bit_lay
 #[cfg(verus_only)]
 pub(crate) use port_layout::preceding_port_bits_grow;
 
+mod checkpoint_bits;
+mod checkpoint_format;
+mod checkpoint_layout;
+mod checkpoint_file_vm;
+pub use checkpoint_file_vm::*;
+pub use checkpoint_format::{CheckpointFileError, CheckpointHeader};
+
 use alloc::vec::Vec;
 use vstd::prelude::*;
 

@@ -175,6 +175,35 @@ impl ClockedVmCheckpoint {
 }
 
 impl ClockedVm {
+    pub(crate) proof fn checkpoint_gate_width(&self)
+        requires self.valid(),
+        ensures self.gate_values_model().len() == self.netlist_model().gates@.len(),
+    {
+    }
+
+    /// 確定済みの NOR 出力をゲート番号順に借りる。
+    pub fn checkpoint_gate_values(&self) -> (bits: &[bool])
+        ensures bits@ == self.gate_values_model(),
+            self.valid() ==> bits@.len() == self.netlist_model().gates@.len(),
+    {
+        self.gates.as_slice()
+    }
+
+    /// ラッチの保持値または RAM の登録読み出し出力を借りる。
+    ///
+    /// 対象の状態素子が存在しない場合は `None` を返す。
+    pub fn checkpoint_storage_output(&self, index: usize) -> (bits: Option<&[bool]>)
+        ensures
+            bits.is_some() <==> index < self.storage_model().len(),
+            bits matches Some(value) ==> value@ == self.storage_model()[index as int].output_model(),
+    {
+        if index < self.storage.len() {
+            Some(self.storage[index].output())
+        } else {
+            None
+        }
+    }
+
     /// ゲート、ラッチ、RAM の確定済み状態と配線を複製する。
     pub fn checkpoint(&self) -> (saved: ClockedVmCheckpoint)
         ensures saved.layout_matches(self), saved.state_matches(self),
