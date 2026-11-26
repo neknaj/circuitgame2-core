@@ -13,17 +13,19 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
 mod assembly;
+pub(crate) use assembly::assemble_owned_template;
 pub use assembly::{ExpandedTemplate, TemplateAssembly, TemplateAssemblySlice, assemble_template};
 #[cfg(verus_only)]
 pub use assembly::{
     resumed_template_assembly_matches, template_assembly_matches, template_assembly_outputs_agree,
-    template_assembly_results_agree, template_assembly_trace_result, template_emission_prefix,
+    template_assembly_results_agree, template_assembly_results_from_equivalent_states,
+    template_assembly_start, template_assembly_trace_result, template_emission_prefix,
 };
 mod emission;
 pub use emission::{TemplateEmission, TemplateEmissionError, TemplateEmitter, TemplateSubstitution, emit_template};
 #[cfg(verus_only)]
 pub use emission::{
-    template_emission_from_part, template_emission_step, template_emission_steps_agree,
+    emitter_start, template_emission_from_part, template_emission_step, template_emission_steps_agree,
     template_emitters_agree, template_substitution_at,
 };
 

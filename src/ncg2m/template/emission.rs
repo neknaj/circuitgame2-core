@@ -51,10 +51,33 @@ pub enum TemplateEmissionError {
     ExtraValue(usize),
 }
 
-/// 元の構文木と挿入値を借りたまま、展開した構文の並びを取り出す。
+pub(super) enum TemplateValues<'v, T> {
+    Borrowed(&'v [TemplateSubstitution<'v, T>]),
+    Owned(Vec<TemplateSubstitution<'v, T>>),
+}
+
+impl<'v, T> TemplateValues<'v, T> {
+    pub(super) open spec fn model(&self) -> Seq<TemplateSubstitution<'v, T>> {
+        match self {
+            Self::Borrowed(values) => values@,
+            Self::Owned(values) => values@,
+        }
+    }
+
+    fn as_slice(&self) -> (values: &[TemplateSubstitution<'v, T>])
+        ensures values@ == self.model(),
+    {
+        match self {
+            Self::Borrowed(values) => values,
+            Self::Owned(values) => values.as_slice(),
+        }
+    }
+}
+
+/// 元の構文木と挿入する構文を参照しながら、展開した構文の並びを取り出す。
 pub struct TemplateEmitter<'s, 'v, T> {
     walk: TemplateWalk<'s>,
-    values: &'v [TemplateSubstitution<'v, T>],
+    values: TemplateValues<'v, T>,
     used: usize,
     lists: Vec<Range<usize>>,
     finished: bool,
@@ -65,7 +88,7 @@ impl<'s, 'v, T> TemplateEmitter<'s, 'v, T> {
     pub closed spec fn walk_model(&self) -> TemplateWalk<'s> { self.walk }
 
     /// 挿入式を評価した順に並べた値を表す。
-    pub closed spec fn values_model(&self) -> Seq<TemplateSubstitution<'v, T>> { self.values@ }
+    pub closed spec fn values_model(&self) -> Seq<TemplateSubstitution<'v, T>> { self.values.model() }
 
     /// 使用した挿入値の個数を表す。
     pub closed spec fn used_model(&self) -> usize { self.used }
@@ -84,7 +107,7 @@ impl<'s, 'v, T> TemplateEmitter<'s, 'v, T> {
         &&& walk.range_model().end == subtree_limit(walk.forms_model(), walk.range_model().start)
         &&& walk.range_model().start <= walk.position_model() <= walk.range_model().end
         &&& complete_list_indices(walk.forms_model())
-        &&& self.used <= self.values@.len()
+        &&& self.used <= self.values.model().len()
         &&& nested_list_indices(walk.forms_model())
         &&& !self.finished ==> open_template_lists(walk.forms_model(), walk.position_model(),
             walk.range_model().end, self.lists@)
@@ -146,7 +169,7 @@ impl<'s, 'v, T> TemplateEmitter<'s, 'v, T> {
         let Some((at, part)) = self.walk.next_part() else {
             assert(open.len() == 0);
             self.finished = true;
-            if self.used != self.values.len() {
+            if self.used != self.values.as_slice().len() {
                 return Some(Err(TemplateEmissionError::ExtraValue(self.used)));
             }
             return None;
@@ -176,7 +199,7 @@ impl<'s, 'v, T> TemplateEmitter<'s, 'v, T> {
                     }
                     advance_open_lists(prior.forms_model(), at, next, part_range.end, open);
                 }
-                let values = self.values;
+                let values = self.values.as_slice();
                 if self.used == values.len() {
                     self.finished = true;
                     return Some(Err(TemplateEmissionError::MissingValue(at)));
@@ -379,16 +402,38 @@ pub fn emit_template<'s, 'v, T>(
 ) -> (result: Option<TemplateEmitter<'s, 'v, T>>)
     requires complete_list_indices(forms@), nested_list_indices(forms@),
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-    ensures result.is_some() <==> root < forms@.len(),
-        result matches Some(result) ==> result.valid()
-            && result.walk_model().source_model() == source && result.walk_model().forms_model() == forms@
-            && result.walk_model().range_model().start == root && result.walk_model().position_model() == root
-            && result.walk_model().range_model().end == match forms@[root as int] {
-                Form::Atom { .. } => root + 1,
-                Form::List { end, .. } => end as int,
-            }
-            && result.values_model() == values@ && result.used_model() == 0
-            && result.lists_model().len() == 0 && !result.finished_model(),
+    ensures emitter_start(source, forms@, root, values@, result),
+{
+    start_emitter(source, forms, root, TemplateValues::Borrowed(values))
+}
+
+/// 展開走査が、渡されたテンプレートと評価済みの値の先頭から始まることを表す。
+pub open spec fn emitter_start<'s, 'v, T>(
+    source: &'s str, forms: Seq<Form>, root: usize, values: Seq<TemplateSubstitution<'v, T>>,
+    result: Option<TemplateEmitter<'s, 'v, T>>,
+) -> bool {
+    &&& result.is_some() <==> root < forms.len()
+    &&& result matches Some(result) ==> {
+        &&& result.valid()
+        &&& result.walk_model().source_model() == source
+        &&& result.walk_model().forms_model() == forms
+        &&& result.walk_model().range_model().start == root
+        &&& result.walk_model().position_model() == root
+        &&& result.walk_model().range_model().end == match forms[root as int] {
+            Form::Atom { .. } => root + 1,
+            Form::List { end, .. } => end as int,
+        }
+        &&& result.values_model() == values && result.used_model() == 0
+        &&& result.lists_model().len() == 0 && !result.finished_model()
+    }
+}
+
+pub(super) fn start_emitter<'s, 'v, T>(
+    source: &'s str, forms: &'s [Form], root: usize, values: TemplateValues<'v, T>,
+) -> (result: Option<TemplateEmitter<'s, 'v, T>>)
+    requires complete_list_indices(forms@), nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures emitter_start(source, forms@, root, values.model(), result),
 {
     let walk = walk_template(source, forms, root)?;
     Some(TemplateEmitter { walk, values, used: 0, lists: Vec::new(), finished: false })

@@ -9,9 +9,20 @@ use crate::project::{MacroArgument, MacroArgumentScope, MacroArguments, Resolved
 use crate::syntax::{Form, circuit::RoutineExpansionSite};
 #[cfg(verus_only)]
 use crate::syntax::{AtomKind, form_span, form_spans_valid};
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::checked_macro_body_layout;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
+
+mod expression;
+pub use expression::{MacroExpressionEvaluation, MacroExpressionStep};
+#[cfg(verus_only)]
+pub use expression::{
+    macro_expression_evaluation_result, macro_expression_expected, macro_expression_start_matches,
+    macro_expression_starts_agree, macro_expression_states_agree, macro_expression_step_matches,
+    macro_expression_step_results_agree, macro_expression_steps_agree,
+};
 
 verus! {
 
@@ -66,12 +77,10 @@ impl<'p, 'a> BoundMacroCall<'p, 'a> {
     /// 仮引数と同じ順序の実引数を表す。
     pub closed spec fn arguments_model(&self) -> Seq<MacroArgument<'p, 'a>> { self.arguments@ }
 
-    /// 仮引数の個数と本体内の範囲が、評価に使う同じ構文木に対応する。
+    /// 仮引数と実引数の個数が合い、本体の各要素と挿入式が保持した構文木に対応する。
     pub open spec fn valid(&self) -> bool {
-        let body = self.body_model().body_model();
-        let source = body.source.text_model();
         &&& self.body_model().parameters_model().len() == self.arguments_model().len()
-        &&& form_spans_valid(source, body.forms@, source.spec_bytes().len() as int)
+        &&& checked_macro_body_layout(&self.body_model())
     }
 
     /// 呼び出し位置を、元のソースと構文木の範囲で借りる。
@@ -142,18 +151,19 @@ impl<'p, 'a> BoundMacroCall<'p, 'a> {
         let body = self.body.body();
         let Some(form) = body.forms.get(at) else { return Err(MacroArgumentError::NoExpression); };
         let span = span_of(form);
-        if !is_name(form) {
+        let Some(name) = read_macro_direct_name(body.source.text(), body.forms, at) else {
             return Err(MacroArgumentError::Deferred(span));
-        }
-        let source = body.source.text();
-        let name = source_word(source, body.forms, at);
-        if is_spelling(name, "true") || is_spelling(name, "false") {
-            return Err(MacroArgumentError::Deferred(span));
-        }
+        };
         let Some(index) = find_macro_parameter(self.body.parameters(), name) else {
+            proof {
+                macro_argument_result_by_selection(self, site, at, name.spec_bytes(), None,
+                    Err(MacroArgumentError::Unbound(span)));
+            }
             return Err(MacroArgumentError::Unbound(span));
         };
-        Ok(&self.arguments[index])
+        let argument = &self.arguments[index];
+        proof { macro_argument_result_by_selection(self, site, at, name.spec_bytes(), Some(index), Ok(argument)); }
+        Ok(argument)
     }
 }
 
@@ -200,35 +210,93 @@ fn find_macro_parameter(parameters: &[SignatureParameter], name: &str) -> (index
     None
 }
 
+/// 仮引数の参照として評価できるフォームの綴りを返す。
+pub open spec fn macro_direct_name(source: &str, forms: Seq<Form>, at: usize) -> Option<Seq<u8>> {
+    let form = forms[at as int];
+    let span = form_span(form);
+    let word = source.spec_bytes()[span.start as int..span.end as int];
+    if (form matches Form::Atom { kind: AtomKind::Name, .. })
+        && word != "true".spec_bytes() && word != "false".spec_bytes()
+    {
+        Some(word)
+    } else {
+        None
+    }
+}
+
+fn read_macro_direct_name<'a>(source: &'a str, forms: &[Form], at: usize)
+    -> (name: Option<&'a str>)
+    requires at < forms@.len(), form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures (match name { Some(name) => Some(name.spec_bytes()), None => None })
+        == macro_direct_name(source, forms@, at),
+{
+    if !is_name(&forms[at]) {
+        return None;
+    }
+    let name = source_word(source, forms, at);
+    if is_spelling(name, "true") || is_spelling(name, "false") { None } else { Some(name) }
+}
+
+/// 仮引数の名前を宣言順で照合し、実引数または未束縛の診断を返す。
+#[verifier::opaque]
+pub open spec fn macro_named_argument_result(
+    bound: &BoundMacroCall, name: Seq<u8>, span: Range<usize>,
+    result: Result<&MacroArgument, MacroArgumentError>,
+) -> bool {
+    exists|index: Option<usize>| #[trigger] macro_parameter_selection(bound.body_model().parameters_model(), name, index)
+        && match index {
+            Some(i) => i < bound.arguments_model().len()
+                && (result matches Ok(argument) && *argument == bound.arguments_model()[i as int]),
+            None => result == Err(MacroArgumentError::Unbound(span)),
+        }
+}
+
 /// 仮引数名だけを評価し、選んだ位置の元の構文を返す。
 pub open spec fn macro_argument_expression_result(
     bound: &BoundMacroCall, site: MacroExpressionSite, result: Result<&MacroArgument, MacroArgumentError>,
 ) -> bool {
     let body = bound.body_model();
     let forms = body.body_model().forms@;
-    let source = body.body_model().source.text_model().spec_bytes();
+    let source = body.body_model().source.text_model();
     if let Some(at) = macro_expression_position(&body, site) {
         if at >= forms.len() {
             result == Err(MacroArgumentError::NoExpression)
         } else {
-            let form = forms[at as int];
-            let span = form_span(form);
-            let name = source[span.start as int..span.end as int];
-            if !(form matches Form::Atom { kind: AtomKind::Name, .. })
-                || name == "true".spec_bytes() || name == "false".spec_bytes()
-            {
-                result == Err(MacroArgumentError::Deferred(span))
+            let span = form_span(forms[at as int]);
+            if let Some(name) = macro_direct_name(source, forms, at) {
+                macro_named_argument_result(bound, name, span, result)
             } else {
-                exists|index: Option<usize>| #[trigger] macro_parameter_selection(body.parameters_model(), name, index)
-                    && match index {
-                        Some(i) => result matches Ok(argument) && *argument == bound.arguments_model()[i as int],
-                        None => result == Err(MacroArgumentError::Unbound(span)),
-                    }
+                result == Err(MacroArgumentError::Deferred(span))
             }
         }
     } else {
         result == Err(MacroArgumentError::NoExpression)
     }
+}
+
+// 照合で決めた添字を、実引数または未束縛の診断を返す仕様の証人にする。
+proof fn macro_argument_result_by_selection(
+    bound: &BoundMacroCall, site: MacroExpressionSite, at: usize, name: Seq<u8>, index: Option<usize>,
+    result: Result<&MacroArgument, MacroArgumentError>,
+)
+    requires
+        macro_expression_position(&bound.body_model(), site) == Some(at),
+        at < bound.body_model().body_model().forms@.len(),
+        macro_direct_name(bound.body_model().body_model().source.text_model(),
+            bound.body_model().body_model().forms@, at) == Some(name),
+        macro_parameter_selection(bound.body_model().parameters_model(), name, index),
+        match index {
+            Some(i) => i < bound.arguments_model().len()
+                && (result matches Ok(argument) && *argument == bound.arguments_model()[i as int]),
+            None => result == Err(MacroArgumentError::Unbound(form_span(bound.body_model().body_model().forms@[at as int]))),
+        },
+    ensures macro_argument_expression_result(bound, site, result),
+{
+    let body = bound.body_model();
+    let span = form_span(body.body_model().forms@[at as int]);
+    assert(macro_named_argument_result(bound, name, span, result)) by {
+        reveal(macro_named_argument_result);
+    };
 }
 
 /// 実引数が同じスコープ・構文木を保ち、引数の元範囲を順につなぎ合わせる。
@@ -259,8 +327,7 @@ pub(crate) fn bind_macro_call<'p, 'a>(
     requires pending.valid(),
         pending.count_model() == body.parameters_model().len(),
         pending.remaining_model() == site.arguments,
-        form_spans_valid(body.body_model().source.text_model(), body.body_model().forms@,
-            body.body_model().source.text_model().spec_bytes().len() as int),
+        checked_macro_body_layout(&body),
     ensures bound.valid(), bound.site_model() == site, bound.scope_model() == pending.scope_model(),
         bound.definition_model() == definition, bound.body_model() == body,
         macro_arguments_cover(bound.scope_model(), pending.forms_model(), site.arguments, bound.arguments_model()),
