@@ -64,75 +64,6 @@ pub(super) open spec fn has_mixed_func(project: &ParsedProjectSources, file: usi
     &&& project.indexes_model()[file as int]->Circuit_0.syntax.entries@[entry as int].head is Func
 }
 
-// 名前の探索結果から、選んだ宣言が混在索引に現れるキーを取り出す。
-#[verifier::spinoff_prover]
-proof fn scoped_declaration_key<'q>(
-    aliases: &MixedUseAliases, file: usize, scope: DefnScope, word: &'q str,
-    expected: Head, declaration: ProjectDeclaration,
-) -> (key: NameKey<'q>)
-    requires
-        scoped_circuit_name_matches(aliases, file, scope, word, expected, Ok(Some(declaration))),
-        mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
-    ensures
-        declaration.kind == ProjectDeclarationKind::Circuit(expected),
-        aliases.targets_model().exports_model().declarations_model().declaration_at(key, declaration),
-{
-    let targets = aliases.targets_model();
-    let exports = targets.exports_model();
-    let declarations = exports.declarations_model();
-    let result = Ok(Some(declaration));
-    match bare_atom_kind(word.spec_bytes()) {
-        Some(AtomKind::Name) => {
-            let binding = choose|binding: Option<MixedAbsoluteTarget>|
-                {
-                    &&& #[trigger] scoped_binding(aliases, file, scope, word, binding)
-                    &&& binding matches Some(target)
-                    &&& scoped_absolute_result(Ok(target), expected, result)
-                };
-            assert(binding == Some(MixedAbsoluteTarget::Declaration(declaration)));
-            if aliases.first_alias_matches(file, scope.block, word, None) {
-                assert(declarations.declaration_at(NameKey { parent: scope.namespace, name: word }, declaration));
-            } else {
-                let rows = targets.directives_model();
-                let rank = choose|rank: usize| #[trigger] aliases.first_alias_matches(file, scope.block, word, Some(rank))
-                    && rank < rows.len() && binding == Some(rows[rank as int].target);
-                targets.directive_origin(rank as int);
-                let row = rows[rank as int];
-                absolute_name_declares(&exports, row.site.reference.word, row.site.namespace, declaration);
-            }
-        },
-        Some(AtomKind::AbsolutePath) => {
-            let absolute = choose|absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
-                #[trigger] mixed_absolute_resolution_evidence(&exports, word, scope.namespace, absolute)
-                    && scoped_absolute_result(absolute, expected, result);
-            assert(absolute == Ok(MixedAbsoluteTarget::Declaration(declaration)));
-            absolute_name_declares(&exports, word, scope.namespace, declaration);
-        },
-        Some(AtomKind::RelativePath) => {
-            let (head, middle, last, binding) = choose|head: &str, middle: Option<&str>, last: &str, binding: Option<MixedAbsoluteTarget>|
-                #[trigger] relative_path_parts(word, head, middle, last)
-                    && #[trigger] scoped_binding(aliases, file, scope, head, binding)
-                    && match binding {
-                        Some(MixedAbsoluteTarget::Namespace { key, .. }) =>
-                            exists|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
-                                parent@ == parent_spelling(key, middle)
-                                    && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, scope.namespace, absolute)
-                                    && scoped_absolute_result(absolute, expected, result),
-                        _ => false,
-                    };
-            let key = binding->Some_0->Namespace_key;
-            let (parent, absolute) = choose|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
-                parent@ == parent_spelling(key, middle)
-                    && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, scope.namespace, absolute)
-                    && scoped_absolute_result(absolute, expected, result);
-            assert(absolute == Ok(MixedAbsoluteTarget::Declaration(declaration)));
-            assert(declarations.declaration_at(NameKey { parent: Some(parent), name: last }, declaration));
-        },
-        _ => assert(false),
-    }
-    choose|key: NameKey| #[trigger] declarations.declaration_at(key, declaration)
-}
-
 struct MixedPortContext<'p, 'a> {
     file: usize,
     scope: DefnScope<'a>,
@@ -163,7 +94,7 @@ spec fn mixed_port_result(
                 (DeclaredPortType::Bits(width), ResolvedPortType::Bits(found)) => width == found,
                 (DeclaredPortType::Named { .. }, ResolvedPortType::Struct { source, form }) => exists|word: &str, declaration: ProjectDeclaration| {
                     &&& word.spec_bytes() == context.source.text.spec_bytes()[annotation.start as int..annotation.end as int]
-                    &&& #[trigger] scoped_circuit_name_matches(aliases, context.file, context.scope, word, Head::Struct, Ok(Some(declaration)))
+                    &&& #[trigger] scoped_circuit_name_matches(aliases, context.file, context.scope, word, ProjectDeclarationKind::Circuit(Head::Struct), Ok(Some(declaration)))
                     &&& declaration.file < project.indexes_model().len()
                     &&& *source == *declaration.name.source
                     &&& project.indexes_model()[declaration.file as int] matches ProjectSourceIndex::Circuit(parsed)
@@ -178,7 +109,7 @@ spec fn mixed_port_result(
             &&& location_in_source(reference)
             &&& exists|word: &str, found: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>| {
                 &&& word.spec_bytes() == context.source.text.spec_bytes()[annotation.start as int..annotation.end as int]
-                &&& #[trigger] scoped_circuit_name_matches(aliases, context.file, context.scope, word, Head::Struct, found)
+                &&& #[trigger] scoped_circuit_name_matches(aliases, context.file, context.scope, word, ProjectDeclarationKind::Circuit(Head::Struct), found)
                 &&& (found == Err(reason) || found == Ok(None) && reason is Missing)
             }
         },
@@ -237,7 +168,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         let ty = match port.ty {
             DeclaredPortType::Bits(width) => ResolvedPortType::Bits(width),
             DeclaredPortType::Named { .. } => {
-                let selection = self.resolve_scoped_circuit_name(context.file, context.scope, word, Head::Struct);
+                let selection = self.resolve_scoped_circuit_name(context.file, context.scope, word, ProjectDeclarationKind::Circuit(Head::Struct));
                 let declaration = match selection {
                     Ok(Some(declaration)) => declaration,
                     Ok(None) => return Err(MixedTypedSignatureError::TypeReference {
@@ -247,7 +178,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
                 };
                 let project = self.targets().project();
                 proof {
-                    let key = scoped_declaration_key(self, context.file, context.scope, word, Head::Struct, declaration);
+                    let key = scoped_declaration_key(self, context.file, context.scope, word, ProjectDeclarationKind::Circuit(Head::Struct), declaration, Ok(Some(declaration)));
                     let targets = self.targets_model();
                     let exports = targets.exports_model();
                     targets.mixed_use_exports_match(project);

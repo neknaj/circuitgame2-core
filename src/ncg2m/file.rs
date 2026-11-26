@@ -145,7 +145,10 @@ spec fn binding_kind_span_valid(source: &str, kind: MetaItemKind) -> bool {
     match kind {
         MetaItemKind::Namespace { path } => readable_span(source, path),
         MetaItemKind::Defn(header) => readable_span(source, header.name_span) && signature_spans_valid(source, header),
-        MetaItemKind::Defmacro { name, .. } => readable_span(source, name),
+        MetaItemKind::Defmacro { name, parameters, body } => {
+            &&& readable_span(source, name) && readable_span(source, body)
+            &&& forall|i: int| 0 <= i < parameters@.len() ==> readable_span(source, #[trigger] parameters@[i])
+        },
         MetaItemKind::Use { target, alias } => meta_use_spans_valid(source, target, alias),
         MetaItemKind::Export { names } => forall|i: int| 0 <= i < names@.len()
             ==> readable_span(source, #[trigger] names@[i]),
@@ -171,6 +174,15 @@ pub(crate) proof fn meta_binding_span_evidence(source: &str, items: Seq<MetaItem
             _ => true,
         },
         items[rank].namespace matches Some(path) ==> readable_span(source, path),
+{}
+
+/// マクロの仮引数と本体の範囲を、元ソースから安全に読み出せることを示す。
+pub(crate) proof fn meta_macro_span_evidence(source: &str, items: Seq<MetaItem>, rank: int)
+    requires meta_binding_spans_valid(source, items), 0 <= rank < items.len(), items[rank].kind is Defmacro,
+    ensures
+        readable_span(source, items[rank].kind->Defmacro_body),
+        forall|i: int| 0 <= i < items[rank].kind->Defmacro_parameters@.len() ==>
+            readable_span(source, #[trigger] items[rank].kind->Defmacro_parameters@[i]),
 {}
 
 /// 公開名の範囲が元ソースの UTF-8 文字境界にあることを示す。
@@ -383,9 +395,18 @@ fn read_macro(_source: &str, forms: &[Form], root: usize) -> (result: Result<Met
         at += 1;
     }
     assert(first_invalid_parameter(forms@, first, body).is_none());
-    proof { form_span_readable(_source, forms@, name); }
+    let parameters = collect_spans(forms, first, body);
+    proof {
+        form_span_readable(_source, forms@, name);
+        form_span_readable(_source, forms@, body);
+        assert forall|i: int| 0 <= i < parameters@.len()
+            implies readable_span(_source, #[trigger] parameters@[i]) by {
+            assert(parameters@[i] == form_span(forms@[first + i]));
+            form_span_readable(_source, forms@, (first + i) as usize);
+        };
+    }
     Ok(MetaItemKind::Defmacro {
-        name: span_of(&forms[name]), parameters: collect_spans(forms, first, body), body: span_of(&forms[body]),
+        name: span_of(&forms[name]), parameters, body: span_of(&forms[body]),
     })
 }
 

@@ -1,7 +1,7 @@
 //! 回路宣言の署名に続く本体を検査する。
 
 #[cfg(verus_only)]
-use super::clauses::enclosing_region_bounds_form;
+use super::{call_shapes::list_children_region, clauses::enclosing_region_bounds_form};
 #[cfg(verus_only)]
 use super::expression_forest::{
     expression_forest, expression_forest_error, expression_forest_errors_agree,
@@ -551,20 +551,69 @@ pub(super) open spec fn body_items_before(
         ==> body_item_matches(source, forms, index, end)
 }
 
-spec fn expansion_at(source: &str, forms: Seq<Form>, start: int, end: int, item: int) -> bool {
+/// 指定したフォームが本体直下の展開呼び出しであることを表す。
+pub closed spec fn routine_expansion_at(source: &str, forms: Seq<Form>, start: int, end: int, item: int) -> bool {
     &&& direct_form_in_range(forms, start, end, item)
     &&& forms[item] is List
     &&& body_head_at(source, forms, item + 1, forms[item]->List_end as int, BodyHead::Expand)
 }
 
+/// 回路本体の直下にある一つのマクロ呼び出し。
+#[derive(Debug, Eq, PartialEq)]
+pub struct RoutineExpansionSite {
+    /// 元の構文木で呼び出し全体のリストを指す添字。
+    pub form: usize,
+    /// 呼び出し全体が占める元入力の半開バイト範囲。
+    pub span: Range<usize>,
+    /// 呼び出し先の参照が占める元入力の半開バイト範囲。
+    pub callee: Range<usize>,
+    /// 引数の部分木を並べた、元の構文木の半開区間。
+    pub arguments: Range<usize>,
+}
+
+/// 列挙結果の呼び出し先と引数範囲が、元の構文木に対応することを表す。
+pub open spec fn routine_expansion_site_at(
+    source: &str, forms: Seq<Form>, start: int, stop: int, site: RoutineExpansionSite,
+) -> bool {
+    let item = site.form as int;
+    &&& routine_expansion_at(source, forms, start, stop, item)
+    &&& site.span == form_span(forms[item])
+    &&& forms[item] is List
+    &&& item + 2 < forms[item]->List_end <= forms.len()
+    &&& forms[item + 2] is Atom && reference_atom(forms[item + 2]->Atom_kind)
+    &&& expression_region(forms, item + 3, forms[item]->List_end as int)
+    &&& site.callee == form_span(forms[item + 2])
+    &&& site.arguments.start == item + 3
+    &&& site.arguments.end == forms[item]->List_end
+    &&& site.arguments.start <= site.arguments.end <= stop
+}
+
+/// 今回走査した範囲にある展開呼び出しが、返り値に過不足なく含まれることを表す。
+pub open spec fn next_expansion_site_matches(
+    source: &str, forms: Seq<Form>, start: int, stop: int, from: int, next: int, result: Option<RoutineExpansionSite>,
+) -> bool {
+    match result {
+        Some(site) => {
+            &&& from <= site.form
+            &&& routine_expansion_site_at(source, forms, start, stop, site)
+            &&& next == site.arguments.end && site.form < next
+            &&& forall|item: int| from <= item < next && #[trigger] routine_expansion_at(source, forms, start, stop, item)
+                ==> item == site.form
+        },
+        None => next == stop
+            && forall|item: int| from <= item ==> !#[trigger] routine_expansion_at(source, forms, start, stop, item),
+    }
+}
+
 /// 展開待ちの範囲が、指定された本体の最初の展開フォームに対応することを表す。
-spec fn expansion_body_region_matches(
+pub closed spec fn expansion_body_region_matches(
     source: &str, syntax: &CircuitForms, entry: int, region: Option<(usize, usize)>,
 ) -> bool {
     let entries = syntax.entries@;
     let forms = syntax.forms@;
     &&& region matches Some((start, end)) ==>
-        start <= end <= forms.len() && body_items_before(source, forms, start as int, end as int, end as int)
+        start <= end <= forms.len() && form_region_ends_at(forms, start as int, end as int)
+            && body_items_before(source, forms, start as int, end as int, end as int)
     &&& if 0 <= entry < entries.len() && entries[entry].head is ModulePart {
         let form = entries[entry].form as int;
         region matches Some((start, end)) && start == form + 3 && forms[form] is List
@@ -615,10 +664,10 @@ pub closed spec fn routine_expansion_evidence(source: &str, syntax: &CircuitForm
             let start = start as int;
             let end = end as int;
             match span {
-                Some(span) => exists|item: int| #[trigger] expansion_at(source, forms, start, end, item)
+                Some(span) => exists|item: int| #[trigger] routine_expansion_at(source, forms, start, end, item)
                     && span == form_span(forms[item])
-                    && forall|prior: int| prior < item ==> !#[trigger] expansion_at(source, forms, start, end, prior),
-                None => forall|item: int| !#[trigger] expansion_at(source, forms, start, end, item),
+                    && forall|prior: int| prior < item ==> !#[trigger] routine_expansion_at(source, forms, start, end, prior),
+                None => forall|item: int| !#[trigger] routine_expansion_at(source, forms, start, end, item),
             }
         }
 }
@@ -643,22 +692,54 @@ pub fn first_routine_expansion(source: &str, syntax: &CircuitForms, entry: usize
 {
     let Some((start, stop)) = expansion_body_region(source, syntax, entry) else { return None; };
     let forms = syntax.forms.as_slice();
-    let mut at = start;
     proof {
-        assert(body_items_before(source, forms@, start as int, stop as int, stop as int));
-        reveal(body_items_before);
         reveal(direct_form_in_range);
-        assert(at < stop ==> direct_form_in_range(forms@, start as int, stop as int, at as int));
     }
+    let (_, site) = scan_expansion_site(source, forms, start, stop, start);
+    proof {
+        reveal(direct_form_in_range);
+        assert forall|prior: int| prior < start implies
+            !#[trigger] routine_expansion_at(source, forms@, start as int, stop as int, prior) by {};
+    }
+    match site {
+        Some(site) => Some(site.span),
+        None => None,
+    }
+}
+
+fn scan_expansion_site(source: &str, forms: &[Form], _start: usize, stop: usize, from: usize)
+    -> (result: (usize, Option<RoutineExpansionSite>))
+    requires
+        _start <= from <= stop <= forms@.len(),
+        form_region_ends_at(forms@, _start as int, stop as int),
+        from < stop ==> direct_form_in_range(forms@, _start as int, stop as int, from as int),
+        body_items_before(source, forms@, _start as int, stop as int, stop as int),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures
+        next_expansion_site_matches(source, forms@, _start as int, stop as int, from as int, result.0 as int, result.1),
+        result.0 < stop ==> direct_form_in_range(forms@, _start as int, stop as int, result.0 as int),
+        result.0 <= stop,
+        result.1 matches Some(site) ==> result.0 == site.arguments.end
+            && from < result.0
+            && site.span.start < site.span.end <= source.spec_bytes().len()
+            && is_char_boundary(source.spec_bytes(), site.span.start as int)
+            && is_char_boundary(source.spec_bytes(), site.span.end as int)
+            && site.callee.start < site.callee.end <= source.spec_bytes().len()
+            && is_char_boundary(source.spec_bytes(), site.callee.start as int)
+            && is_char_boundary(source.spec_bytes(), site.callee.end as int),
+        result.1.is_none() ==> result.0 == stop,
+{
+    let mut at = from;
     while at < stop
         invariant
-            expansion_body_region_matches(source, syntax, entry as int, Some((start, stop))),
-            body_items_before(source, forms@, start as int, stop as int, stop as int),
-            forms@ == syntax.forms@, start <= at <= stop <= forms@.len(),
-            at < stop ==> direct_form_in_range(forms@, start as int, stop as int, at as int),
+            body_items_before(source, forms@, _start as int, stop as int, stop as int),
+            _start <= from <= at <= stop <= forms@.len(),
+            form_region_ends_at(forms@, _start as int, stop as int),
+            at < stop ==> direct_form_in_range(forms@, _start as int, stop as int, at as int),
             complete_list_indices(forms@), nested_list_indices(forms@),
             form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-            forall|prior: int| prior < at ==> !#[trigger] expansion_at(source, forms@, start as int, stop as int, prior),
+            forall|prior: int| from <= prior < at ==> !#[trigger] routine_expansion_at(source, forms@, _start as int, stop as int, prior),
         decreases stop - at,
     {
         proof {
@@ -674,17 +755,37 @@ pub fn first_routine_expansion(source: &str, syntax: &CircuitForms, entry: usize
             proof { assert(false); }
             unreachable!();
         };
-        if matches!(kind, BodyHead::Expand) {
-            let span = item_span.start..item_span.end;
-            assert(expansion_at(source, forms@, start as int, stop as int, at as int));
-            return Some(span);
-        }
         proof {
             node_end_is_following_direct_form(forms@, at as int, *next as int);
             reveal(following_direct_form);
-            assert(form_region_ends_at(forms@, start as int, stop as int));
-            assert forall|prior: int| prior < *next implies
-                !#[trigger] expansion_at(source, forms@, start as int, stop as int, prior) by {
+        }
+        if matches!(kind, BodyHead::Expand) {
+            proof {
+                let head = choose|head: BodyHead| #[trigger] body_head_at(source, forms@, at + 1, *next as int, head)
+                    && body_arguments_match(source, forms@, at + 2, *next as int, head);
+                assert(head == BodyHead::Expand);
+                assert(argument_matches(forms@, at + 2, *next as int, HeaderError::ExpectedReference));
+            }
+            let site = RoutineExpansionSite {
+                form: at,
+                span: item_span.start..item_span.end,
+                callee: form_span_exec(&forms[at + 2]),
+                arguments: at + 3..*next,
+            };
+            proof {
+                reveal(following_direct_form);
+                list_children_region(forms@, at as int, at + 3, *next as int);
+                assert(routine_expansion_site_at(source, forms@, _start as int, stop as int, site));
+                assert forall|item: int| from <= item < *next
+                    && #[trigger] routine_expansion_at(source, forms@, _start as int, stop as int, item)
+                    implies item == at by {};
+            }
+            return (*next, Some(site));
+        }
+        proof {
+            reveal(following_direct_form);
+            assert forall|prior: int| from <= prior < *next implies
+                !#[trigger] routine_expansion_at(source, forms@, _start as int, stop as int, prior) by {
                 if prior == at {
                     assert(!body_head_at(source, forms@, at + 1, *next as int, BodyHead::Expand));
                 }
@@ -692,8 +793,147 @@ pub fn first_routine_expansion(source: &str, syntax: &CircuitForms, entry: usize
         }
         at = *next;
     }
-    None
+    proof {
+        reveal(direct_form_in_range);
+        assert forall|item: int| from <= item implies
+            !#[trigger] routine_expansion_at(source, forms@, _start as int, stop as int, item) by {};
+    }
+    (stop, None)
 }
+
+/// 検査済みの回路本体からマクロ呼び出しを元ソース順に取り出す。
+pub struct RoutineExpansionSites<'a> {
+    source: &'a str,
+    syntax: &'a CircuitForms,
+    start: usize,
+    stop: usize,
+    current: usize,
+}
+
+impl<'a> RoutineExpansionSites<'a> {
+
+    /// カーソルの呼び出し範囲と参照範囲が対応する元入力を表す。
+    pub closed spec fn source_model(&self) -> &str { self.source }
+
+    /// 呼び出しと引数の添字が参照する厳格索引を表す。
+    pub closed spec fn syntax_model(&self) -> &CircuitForms { self.syntax }
+
+    /// 本体全体が占める、元の構文木の半開区間を表す。
+    pub closed spec fn body_model(&self) -> Range<usize> { self.start..self.stop }
+
+    /// 次に調べる位置を表す。末尾は本体の終了添字に等しい。
+    pub closed spec fn position_model(&self) -> usize { self.current }
+
+    /// 確認済みの本体の中で、次に調べる位置が直下のフォームか末尾であることを表す。
+    pub closed spec fn valid(&self) -> bool {
+        let forms = self.syntax.forms@;
+        &&& self.start <= self.current <= self.stop <= forms.len()
+        &&& self.current < self.stop ==>
+            direct_form_in_range(forms, self.start as int, self.stop as int, self.current as int)
+        &&& form_region_ends_at(forms, self.start as int, self.stop as int)
+        &&& body_items_before(self.source, forms, self.start as int, self.stop as int, self.stop as int)
+        &&& complete_list_indices(forms) && nested_list_indices(forms)
+        &&& form_spans_valid(self.source, forms, self.source.spec_bytes().len() as int)
+    }
+
+    /// 返した項目が未走査の先頭であり、残りの走査がその部分木の外から続くことを表す。
+    pub open spec fn advances(&self, next: &Self, result: Option<RoutineExpansionSite>) -> bool {
+        &&& next.source_model() == self.source_model() && next.syntax_model() == self.syntax_model()
+        &&& next.body_model() == self.body_model()
+        &&& next_expansion_site_matches(self.source_model(), self.syntax_model().forms@,
+            self.body_model().start as int, self.body_model().end as int,
+            self.position_model() as int, next.position_model() as int, result)
+    }
+
+    /// 呼び出しと引数の添字が参照する厳格索引を借りる。
+    pub fn syntax(&self) -> (syntax: &'a CircuitForms)
+        requires self.valid(),
+        ensures syntax == self.syntax_model(), complete_list_indices(syntax.forms@),
+    {
+        self.syntax
+    }
+
+    /// 次の展開呼び出しを返す。走査の末尾では `None` を返す。
+    ///
+    /// 本体の直下だけを調べ、マクロの引数や定義の右辺に含まれる構文へは降りない。
+    ///
+    /// # Panics
+    ///
+    /// カーソルに同じ本文から作った厳格索引を渡していない場合はパニックすることがある。
+    pub fn next_site(&mut self) -> (site: Option<RoutineExpansionSite>)
+        requires old(self).valid(),
+        ensures final(self).valid(), old(self).advances(final(self), site),
+            site matches Some(site) ==>
+                site.arguments.start <= site.arguments.end <= final(self).syntax_model().forms@.len()
+                    && site.span.start < site.span.end <= final(self).source_model().spec_bytes().len()
+                    && is_char_boundary(final(self).source_model().spec_bytes(), site.span.start as int)
+                    && is_char_boundary(final(self).source_model().spec_bytes(), site.span.end as int)
+                    && site.callee.start < site.callee.end <= final(self).source_model().spec_bytes().len()
+                    && is_char_boundary(final(self).source_model().spec_bytes(), site.callee.start as int)
+                    && is_char_boundary(final(self).source_model().spec_bytes(), site.callee.end as int),
+    {
+        let (next, site) = scan_expansion_site(self.source, self.syntax.forms.as_slice(), self.start, self.stop, self.current);
+        self.current = next;
+        site
+    }
+}
+
+/// 指定した回路本体を列挙するためのカーソルが先頭にあることを表す。
+pub open spec fn routine_expansion_sites_match(
+    source: &str, syntax: &CircuitForms, entry: int, sites: Option<RoutineExpansionSites>,
+) -> bool {
+    match sites {
+        Some(sites) => sites.valid() && sites.source_model() == source && sites.syntax_model() == syntax
+            && sites.position_model() == sites.body_model().start
+            && expansion_body_region_matches(source, syntax, entry,
+                Some((sites.body_model().start, sites.body_model().end))),
+        None => expansion_body_region_matches(source, syntax, entry, None),
+    }
+}
+
+/// `func`、`module`、`module-part` の本体の展開呼び出しを列挙する。
+///
+/// `syntax` には同じ `source` から得た厳格索引を渡す。他の種別や範囲外の項目では `None`。
+/// 引数の範囲には元の構文木の部分木が並ぶ。次の引数へ進むときは、アトムなら一つ進み、リストなら `Form::List::end` へ進む。
+///
+/// # Panics
+///
+/// 手動で組み立てた構文木と索引の添字が互いに対応しない場合はパニックすることがある。
+///
+/// # Examples
+///
+/// ```
+/// use circuitgame2_syntax::circuit::{index_headers, routine_expansion_sites};
+///
+/// let source = "(func f (in x) (out y) (expand ::make (expand ignored x)) (expand finish y))";
+/// let syntax = index_headers(source)?;
+/// let mut sites = routine_expansion_sites(source, &syntax, 0).unwrap();
+/// let make = sites.next_site().unwrap();
+/// let finish = sites.next_site().unwrap();
+/// assert_eq!(&source[make.callee], "::make");
+/// assert_eq!(&source[finish.callee], "finish");
+/// assert!(make.arguments.end > make.arguments.start + 1);
+/// assert!(sites.next_site().is_none());
+/// # Ok::<(), circuitgame2_syntax::circuit::CircuitFormError>(())
+/// ```
+pub fn routine_expansion_sites<'a>(source: &'a str, syntax: &'a CircuitForms, entry: usize)
+    -> (sites: Option<RoutineExpansionSites<'a>>)
+    requires
+        circuit_index_matches(source, syntax.forms@, syntax.entries@),
+        complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
+        form_spans_valid(source, syntax.forms@, source.spec_bytes().len() as int),
+    ensures routine_expansion_sites_match(source, syntax, entry as int, sites),
+        sites.is_some() <==> entry < syntax.entries@.len() && {
+            let head = syntax.entries@[entry as int].head;
+            head is Func || head is Module || head is ModulePart
+        },
+        sites matches Some(sites) ==> sites.valid() && sites.source_model() == source && sites.syntax_model() == syntax,
+{
+    let Some((start, stop)) = expansion_body_region(source, syntax, entry) else { return None; };
+    proof { reveal(direct_form_in_range); }
+    Some(RoutineExpansionSites { source, syntax, start, stop, current: start })
+}
+
 
 /// 本体項目列のうち最初に失敗した項目の診断と、それより前の項目の妥当性を表す。
 pub(super) open spec fn body_error(

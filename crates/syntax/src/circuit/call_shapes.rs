@@ -503,7 +503,7 @@ pub fn call_argument_range(forms: &[Form], call: &CallShape) -> (range: Range<us
 
 /// 残りの引数列から、先頭の引数式が占める半開範囲を返す。
 ///
-/// 通常呼び出しや [`concat`](super::concat_argument_range) の引数範囲を渡せる。
+/// 通常呼び出し、[`concat`](super::concat_argument_range)、[`expand`](super::routine_expansion_sites) の引数範囲を渡せる。
 /// 次の呼び出しでは、この範囲の末尾を残りの引数列の先頭に使う。
 /// 入れ子のリストは、その末尾の添字まで一度に進む。
 ///
@@ -543,9 +543,23 @@ pub fn next_call_argument(
     Some(remaining.start..end)
 }
 
+/// 半開区間に含まれる引数の個数を返す。
+///
+/// アトムまたは入れ子のリスト一つを引数一個として数える。
+///
+/// # Panics
+///
+/// 厳格索引に対応しない範囲を指定するとパニックすることがある。
+pub fn call_argument_count(forms: &[Form], range: &Range<usize>) -> (count: usize)
+    requires expression_region(forms@, range.start as int, range.end as int), complete_list_indices(forms@),
+    ensures call_argument_sequence(forms@, *range, count as int), count <= range.end - range.start,
+{
+    count_arguments(forms, range.start, range.end)
+}
+
 fn count_arguments(forms: &[Form], first: usize, end: usize) -> (count: usize)
     requires expression_region(forms@, first as int, end as int), complete_list_indices(forms@),
-    ensures count == argument_count(forms@, first as int, end as int),
+    ensures count == argument_count(forms@, first as int, end as int), count <= end - first,
 {
     let mut index = first;
     let mut count: usize = 0;

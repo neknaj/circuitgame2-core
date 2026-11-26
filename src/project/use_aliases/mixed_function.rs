@@ -65,11 +65,11 @@ pub enum MixedFuncCalleeError<'p, 'a> {
 
 spec fn scoped_absolute_result(
     absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>,
-    expected: Head, result: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>,
+    expected: ProjectDeclarationKind, result: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>,
 ) -> bool {
     match absolute {
         Ok(MixedAbsoluteTarget::Declaration(declaration)) => {
-            if declaration.kind == ProjectDeclarationKind::Circuit(expected) {
+            if declaration.kind == expected {
                 result == Ok(Some(declaration))
             } else {
                 result == Err(MixedFuncCalleeError::WrongDeclaration(declaration))
@@ -81,15 +81,16 @@ spec fn scoped_absolute_result(
     }
 }
 
-fn checked_scoped_target<'p, 'a>(absolute: Result<MixedAbsoluteTarget<'p, 'a, '_>, AbsoluteResolutionError<'p, 'a>>, expected: Head)
+fn checked_scoped_target<'p, 'a>(absolute: Result<MixedAbsoluteTarget<'p, 'a, '_>, AbsoluteResolutionError<'p, 'a>>, expected: ProjectDeclarationKind)
     -> (result: Result<Option<ProjectDeclaration<'p, 'a>>, MixedFuncCalleeError<'p, 'a>>)
-    requires expected is Func || expected is Struct,
+    requires scoped_kind_supported(expected),
     ensures scoped_absolute_result(absolute, expected, result),
 {
     match absolute {
         Ok(MixedAbsoluteTarget::Declaration(declaration)) => match (declaration.kind, expected) {
-            (ProjectDeclarationKind::Circuit(Head::Func), Head::Func)
-                | (ProjectDeclarationKind::Circuit(Head::Struct), Head::Struct) => Ok(Some(declaration)),
+            (ProjectDeclarationKind::Circuit(Head::Func), ProjectDeclarationKind::Circuit(Head::Func))
+                | (ProjectDeclarationKind::Circuit(Head::Struct), ProjectDeclarationKind::Circuit(Head::Struct))
+                | (ProjectDeclarationKind::Defmacro, ProjectDeclarationKind::Defmacro) => Ok(Some(declaration)),
             _ => Err(MixedFuncCalleeError::WrongDeclaration(declaration)),
         },
         Ok(MixedAbsoluteTarget::Namespace { introduced_at, .. }) => Err(MixedFuncCalleeError::Namespace(introduced_at)),
@@ -98,8 +99,14 @@ fn checked_scoped_target<'p, 'a>(absolute: Result<MixedAbsoluteTarget<'p, 'a, '_
     }
 }
 
-spec fn scoped_circuit_name_matches(
-    aliases: &MixedUseAliases, file: usize, scope: DefnScope, word: &str, expected: Head,
+pub(super) open spec fn scoped_kind_supported(expected: ProjectDeclarationKind) -> bool {
+    expected == ProjectDeclarationKind::Circuit(Head::Func)
+        || expected == ProjectDeclarationKind::Circuit(Head::Struct)
+        || expected is Defmacro
+}
+
+pub(super) closed spec fn scoped_circuit_name_matches(
+    aliases: &MixedUseAliases, file: usize, scope: DefnScope, word: &str, expected: ProjectDeclarationKind,
     result: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>,
 ) -> bool {
     let exports = aliases.targets_model().exports_model();
@@ -127,6 +134,76 @@ spec fn scoped_circuit_name_matches(
                 },
         _ => false,
     }
+}
+
+// 名前の探索結果から、選んだ宣言が混在索引に現れるキーを取り出す。
+#[verifier::spinoff_prover]
+pub(super) proof fn scoped_declaration_key<'q>(
+    aliases: &MixedUseAliases, file: usize, scope: DefnScope, word: &'q str,
+    expected: ProjectDeclarationKind, declaration: ProjectDeclaration,
+    result: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>,
+) -> (key: NameKey<'q>)
+    requires
+        scoped_circuit_name_matches(aliases, file, scope, word, expected, result),
+        result == Ok(Some(declaration)) || result == Err(MixedFuncCalleeError::WrongDeclaration(declaration)),
+        mixed_use_targets_match(&aliases.targets_model().project_model(), aliases.targets_model()),
+    ensures
+        (declaration.kind == expected) <==> result == Ok(Some(declaration)),
+        aliases.targets_model().exports_model().declarations_model().declaration_at(key, declaration),
+{
+    let targets = aliases.targets_model();
+    let exports = targets.exports_model();
+    let declarations = exports.declarations_model();
+    match bare_atom_kind(word.spec_bytes()) {
+        Some(AtomKind::Name) => {
+            let binding = choose|binding: Option<MixedAbsoluteTarget>|
+                {
+                    &&& #[trigger] scoped_binding(aliases, file, scope, word, binding)
+                    &&& binding matches Some(target)
+                    &&& scoped_absolute_result(Ok(target), expected, result)
+                };
+            assert(binding == Some(MixedAbsoluteTarget::Declaration(declaration)));
+            if aliases.first_alias_matches(file, scope.block, word, None) {
+                assert(declarations.declaration_at(NameKey { parent: scope.namespace, name: word }, declaration));
+            } else {
+                let rows = targets.directives_model();
+                let rank = choose|rank: usize| #[trigger] aliases.first_alias_matches(file, scope.block, word, Some(rank))
+                    && rank < rows.len() && binding == Some(rows[rank as int].target);
+                targets.directive_origin(rank as int);
+                let row = rows[rank as int];
+                absolute_name_declares(&exports, row.site.reference.word, row.site.namespace, declaration);
+            }
+        },
+        Some(AtomKind::AbsolutePath) => {
+            let absolute = choose|absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
+                #[trigger] mixed_absolute_resolution_evidence(&exports, word, scope.namespace, absolute)
+                    && scoped_absolute_result(absolute, expected, result);
+            assert(absolute == Ok(MixedAbsoluteTarget::Declaration(declaration)));
+            absolute_name_declares(&exports, word, scope.namespace, declaration);
+        },
+        Some(AtomKind::RelativePath) => {
+            let (head, middle, last, binding) = choose|head: &str, middle: Option<&str>, last: &str, binding: Option<MixedAbsoluteTarget>|
+                #[trigger] relative_path_parts(word, head, middle, last)
+                    && #[trigger] scoped_binding(aliases, file, scope, head, binding)
+                    && match binding {
+                        Some(MixedAbsoluteTarget::Namespace { key, .. }) =>
+                            exists|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
+                                parent@ == parent_spelling(key, middle)
+                                    && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, scope.namespace, absolute)
+                                    && scoped_absolute_result(absolute, expected, result),
+                        _ => false,
+                    };
+            let key = binding->Some_0->Namespace_key;
+            let (parent, absolute) = choose|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
+                parent@ == parent_spelling(key, middle)
+                    && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, scope.namespace, absolute)
+                    && scoped_absolute_result(absolute, expected, result);
+            assert(absolute == Ok(MixedAbsoluteTarget::Declaration(declaration)));
+            assert(declarations.declaration_at(NameKey { parent: Some(parent), name: last }, declaration));
+        },
+        _ => assert(false),
+    }
+    choose|key: NameKey| #[trigger] declarations.declaration_at(key, declaration)
 }
 
 spec fn qualified_func_target(
@@ -219,7 +296,7 @@ spec fn func_target_in_scope(
     }
 }
 
-spec fn func_scope_path(parsed: &NamedBuildCircuit, block: Option<usize>, namespace: Option<&str>) -> bool {
+pub(super) open spec fn func_scope_path(parsed: &NamedBuildCircuit, block: Option<usize>, namespace: Option<&str>) -> bool {
     match block {
         None => namespace.is_none(),
         Some(block) => exists|i: int| 0 <= i < parsed.names@.len()
@@ -233,7 +310,7 @@ proof fn function_result_follows_scope(
     aliases: &MixedUseAliases, file: usize, scope: DefnScope, word: &str,
     selected: Result<Option<ProjectDeclaration>, MixedFuncCalleeError>,
 )
-    requires scoped_circuit_name_matches(aliases, file, scope, word, Head::Func, selected),
+    requires scoped_circuit_name_matches(aliases, file, scope, word, ProjectDeclarationKind::Circuit(Head::Func), selected),
     ensures func_target_in_scope(aliases, file, scope, word, func_result(word, selected)),
 {
     let exports = aliases.targets_model().exports_model();
@@ -244,14 +321,14 @@ proof fn function_result_follows_scope(
                 #[trigger] scoped_binding(aliases, file, scope, word, binding)
                     && match binding {
                         None => selected == Ok(None),
-                        Some(target) => scoped_absolute_result(Ok(target), Head::Func, selected),
+                        Some(target) => scoped_absolute_result(Ok(target), ProjectDeclarationKind::Circuit(Head::Func), selected),
                     };
             assert(unqualified_func_target(word, binding, result));
         },
         Some(AtomKind::AbsolutePath) => {
             let absolute = choose|absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
                 #[trigger] mixed_absolute_resolution_evidence(&exports, word, scope.namespace, absolute)
-                    && scoped_absolute_result(absolute, Head::Func, selected);
+                    && scoped_absolute_result(absolute, ProjectDeclarationKind::Circuit(Head::Func), selected);
             assert(qualified_func_target(absolute, result));
         },
         Some(AtomKind::RelativePath) => {
@@ -266,13 +343,13 @@ proof fn function_result_follows_scope(
                             exists|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
                                 parent@ == parent_spelling(key, middle)
                                     && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, scope.namespace, absolute)
-                                    && scoped_absolute_result(absolute, Head::Func, selected),
+                                    && scoped_absolute_result(absolute, ProjectDeclarationKind::Circuit(Head::Func), selected),
                     };
             if let Some(MixedAbsoluteTarget::Namespace { key, .. }) = binding {
                 let (parent, absolute) = choose|parent: &str, absolute: Result<MixedAbsoluteTarget, AbsoluteResolutionError>|
                     parent@ == parent_spelling(key, middle)
                         && #[trigger] mixed_key_resolution(&exports, NameKey { parent: Some(parent), name: last }, scope.namespace, absolute)
-                        && scoped_absolute_result(absolute, Head::Func, selected);
+                        && scoped_absolute_result(absolute, ProjectDeclarationKind::Circuit(Head::Func), selected);
                 assert(qualified_func_target(absolute, result));
             }
         },
@@ -693,7 +770,7 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             name
         } else { None };
         let scope = DefnScope { block: site.block, namespace };
-        let binding = self.resolve_scoped_circuit_name(file, scope, word, Head::Func);
+        let binding = self.resolve_scoped_circuit_name(file, scope, word, ProjectDeclarationKind::Circuit(Head::Func));
         proof { function_result_follows_scope(self, file, scope, word, binding); }
         let target = match binding {
             Ok(Some(declaration)) => Ok(MixedFuncCallee::Function(declaration)),
@@ -705,11 +782,11 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     }
 
     // 名前の探索と公開範囲は呼び出し名と型名で共用する。
-    fn resolve_scoped_circuit_name(&self, file: usize, scope: DefnScope<'a>, word: &str, expected: Head)
+    pub(super) fn resolve_scoped_circuit_name(&self, file: usize, scope: DefnScope<'a>, word: &str, expected: ProjectDeclarationKind)
         -> (result: Result<Option<ProjectDeclaration<'p, 'a>>, MixedFuncCalleeError<'p, 'a>>)
         requires
             bare_atom_kind(word.spec_bytes()) matches Some(kind) && reference_atom(kind),
-            expected is Func || expected is Struct,
+            scoped_kind_supported(expected),
         ensures scoped_circuit_name_matches(self, file, scope, word, expected, result),
     {
         let exports = self.targets().exports();

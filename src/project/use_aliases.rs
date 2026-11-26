@@ -68,6 +68,14 @@ pub(crate) use call_site::call_arity_matches;
 #[cfg(verus_only)]
 pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin};
 mod defn_name;
+mod macro_calls;
+pub use macro_calls::{MacroCall, MacroCallError, MacroCalls};
+#[cfg(verus_only)]
+pub use macro_calls::{macro_call_matches, macro_call_spans_in_source};
+mod defmacro_name;
+pub use defmacro_name::{DefmacroNameError, ResolvedDefmacro};
+#[cfg(verus_only)]
+pub use defmacro_name::{defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro, macro_declaration_name_origin, macro_reference_declaration};
 mod mixed_function;
 pub use mixed_function::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
     MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError,
