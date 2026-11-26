@@ -20,6 +20,13 @@ use super::ports::{
 use super::ports::{read_routine_signature, routine_layout};
 use super::*;
 
+mod generated;
+pub use generated::{ForbiddenGeneratedHead, GeneratedDefinition, GeneratedDefinitionError, check_generated_definition};
+#[cfg(verus_only)]
+pub use generated::{
+    generated_definition_error, generated_definition_matches, generated_definition_sites, generated_definition_valid,
+};
+
 verus! {
 
 /// 一つの `def` と、その右辺に現れる回路名と型名。
