@@ -1,5 +1,9 @@
 //! NOR と状態素子を同じ tick で更新する。
 
+pub(super) mod checkpoint;
+#[cfg(verus_only)]
+pub(super) mod resume;
+
 use super::clocked::observe;
 use super::{ClockedNor, ClockedStorage, ClockedStorageError, ClockedStorageInputs, NorNetlist, TickInputError};
 use core::ops::Range;

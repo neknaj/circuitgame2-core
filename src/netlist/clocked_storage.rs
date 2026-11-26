@@ -113,6 +113,30 @@ impl StorageState {
         match self { Self::Latch(_) => None, Self::Ram(ram) => Some(ram.memory_model()) }
     }
 
+    fn restore_state(&mut self, output: &[bool], memory: Option<&[bool]>)
+        requires
+            output@.len() == old(self).output_bits().len(),
+            match (memory, old(self).memory_bits()) {
+                (Some(first), Some(second)) => first@.len() == second.len(),
+                (None, None) => true,
+                _ => false,
+            },
+        ensures
+            final(self).address_width() == old(self).address_width(),
+            final(self).data_width() == old(self).data_width(),
+            final(self).output_bits() == output@,
+            final(self).memory_bits() == match memory { Some(bits) => Some(bits@), None => None },
+        no_unwind
+    {
+        match self {
+            StorageState::Latch(latch) => latch.restore_output(output),
+            StorageState::Ram(ram) => {
+                let Some(memory) = memory else { unreachable!() };
+                ram.restore_state(memory, output);
+            },
+        }
+    }
+
     fn reset(&mut self)
         ensures
             final(self).address_width() == old(self).address_width(),
@@ -287,6 +311,29 @@ impl ClockedStorage {
     #[verifier::type_invariant]
     spec fn valid(&self) -> bool {
         storage_wires_valid(&self.wiring, self.inputs, self.gates) && state_shape(&self.wiring, &self.state)
+    }
+
+    // VM が全インスタンスの形状を検査した後で、保持済みの状態に入れ替える。
+    pub(super) fn restore_state(&mut self, output: &[bool], memory: Option<&[bool]>)
+        requires
+            old(self).memory_shape(),
+            output@.len() == old(self).output_model().len(),
+            match (memory, old(self).memory_model()) {
+                (Some(first), Some(second)) => first@.len() == second.len(),
+                (None, None) => true,
+                _ => false,
+            },
+        ensures
+            final(self).input_count_model() == old(self).input_count_model(),
+            final(self).gate_count_model() == old(self).gate_count_model(),
+            final(self).wiring_model() == old(self).wiring_model(),
+            final(self).output_model() == output@,
+            final(self).memory_model() == match memory { Some(bits) => Some(bits@), None => None },
+            final(self).memory_shape(),
+        no_unwind
+    {
+        proof { use_type_invariant(&*self); }
+        self.state.restore_state(output, memory);
     }
 
     /// 状態素子の配線を VM の外部観測用に借りる。
