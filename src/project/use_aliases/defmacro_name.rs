@@ -7,7 +7,7 @@ use crate::ncg2m::file::MetaItemKind;
 #[cfg(verus_only)]
 use crate::ncg2m::{defn::readable_span, file::meta_macro_span_evidence};
 #[cfg(verus_only)]
-use crate::project::circuits::parsed_index_evidence;
+use crate::project::{circuits::parsed_index_evidence, declarations::located_name_bounds};
 use crate::project::source_indexes::DefnScope;
 #[cfg(verus_only)]
 use crate::project::source_indexes::project_source_index_evidence;
@@ -84,6 +84,18 @@ pub closed spec fn macro_reference_declaration(project: &ParsedProjectSources, d
                 _ => false,
             },
     }
+}
+
+/// 関連診断が指す宣言名を、同じプロジェクトの元ソースから読めることを示す。
+pub proof fn macro_declaration_name_origin(project: &ParsedProjectSources, declaration: ProjectDeclaration)
+    requires macro_reference_declaration(project, declaration),
+    ensures
+        declaration.file < project.sources_model().len(),
+        *declaration.name.source == project.sources_model()[declaration.file as int],
+        readable_span(declaration.name.source.text_model(), declaration.name.span),
+{
+    located_name_bounds(declaration.name);
+    declaration.name.source.text_model_is_text();
 }
 
 /// 解決結果のマクロ名、仮引数、本体が同じ宣言の索引に対応する。

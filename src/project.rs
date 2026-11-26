@@ -97,9 +97,12 @@ pub(crate) use use_aliases::TypedArithmeticSite;
 #[cfg(verus_only)]
 pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
+pub use use_aliases::{MacroCall, MacroCallError, MacroCalls};
+#[cfg(verus_only)]
+pub use use_aliases::{macro_call_matches, macro_call_spans_in_source};
 pub use use_aliases::{DefmacroNameError, ResolvedDefmacro};
 #[cfg(verus_only)]
-pub use use_aliases::{defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro, macro_reference_declaration};
+pub use use_aliases::{defmacro_name_resolution, defmacro_ranges_readable, has_macro_caller, indexed_defmacro, macro_declaration_name_origin, macro_reference_declaration};
 pub use use_aliases::{DefnCallEdge, DefnCallError, DefnCallSite, DefnCallGraphError, DefnCallPlan, DefnPosition, PreparedDefnCall, DefnNameError, ResolvedDefnName, MixedUseAliasConflict, MixedUseAliases, check_mixed_use_aliases};
 pub use use_aliases::{MixedFuncArityError, MixedFuncCallError, MixedFuncCallee, MixedFuncCalleeError, MixedFuncCalleeResolution,
     MixedFuncInputTypes, MixedFuncOutputTypes, MixedFuncTypeError,

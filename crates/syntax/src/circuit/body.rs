@@ -1,7 +1,7 @@
 //! 回路宣言の署名に続く本体を検査する。
 
 #[cfg(verus_only)]
-use super::clauses::enclosing_region_bounds_form;
+use super::{call_shapes::list_children_region, clauses::enclosing_region_bounds_form};
 #[cfg(verus_only)]
 use super::expression_forest::{
     expression_forest, expression_forest_error, expression_forest_errors_agree,
@@ -581,7 +581,7 @@ pub open spec fn routine_expansion_site_at(
     &&& forms[item] is List
     &&& item + 2 < forms[item]->List_end <= forms.len()
     &&& forms[item + 2] is Atom && reference_atom(forms[item + 2]->Atom_kind)
-    &&& form_region_ends_at(forms, item + 3, forms[item]->List_end as int)
+    &&& expression_region(forms, item + 3, forms[item]->List_end as int)
     &&& site.callee == form_span(forms[item + 2])
     &&& site.arguments.start == item + 3
     &&& site.arguments.end == forms[item]->List_end
@@ -774,6 +774,7 @@ fn scan_expansion_site(source: &str, forms: &[Form], _start: usize, stop: usize,
             };
             proof {
                 reveal(following_direct_form);
+                list_children_region(forms@, at as int, at + 3, *next as int);
                 assert(routine_expansion_site_at(source, forms@, _start as int, stop as int, site));
                 assert forall|item: int| from <= item < *next
                     && #[trigger] routine_expansion_at(source, forms@, _start as int, stop as int, item)
@@ -809,7 +810,7 @@ pub struct RoutineExpansionSites<'a> {
     current: usize,
 }
 
-impl RoutineExpansionSites<'_> {
+impl<'a> RoutineExpansionSites<'a> {
 
     /// カーソルの呼び出し範囲と参照範囲が対応する元入力を表す。
     pub closed spec fn source_model(&self) -> &str { self.source }
@@ -842,6 +843,14 @@ impl RoutineExpansionSites<'_> {
         &&& next_expansion_site_matches(self.source_model(), self.syntax_model().forms@,
             self.body_model().start as int, self.body_model().end as int,
             self.position_model() as int, next.position_model() as int, result)
+    }
+
+    /// 呼び出しと引数の添字が参照する厳格索引を借りる。
+    pub fn syntax(&self) -> (syntax: &'a CircuitForms)
+        requires self.valid(),
+        ensures syntax == self.syntax_model(), complete_list_indices(syntax.forms@),
+    {
+        self.syntax
     }
 
     /// 次の展開呼び出しを返す。走査の末尾では `None` を返す。
@@ -914,6 +923,10 @@ pub fn routine_expansion_sites<'a>(source: &'a str, syntax: &'a CircuitForms, en
         complete_list_indices(syntax.forms@), nested_list_indices(syntax.forms@),
         form_spans_valid(source, syntax.forms@, source.spec_bytes().len() as int),
     ensures routine_expansion_sites_match(source, syntax, entry as int, sites),
+        sites.is_some() <==> entry < syntax.entries@.len() && {
+            let head = syntax.entries@[entry as int].head;
+            head is Func || head is Module || head is ModulePart
+        },
         sites matches Some(sites) ==> sites.valid() && sites.source_model() == source && sites.syntax_model() == syntax,
 {
     let Some((start, stop)) = expansion_body_region(source, syntax, entry) else { return None; };

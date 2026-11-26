@@ -66,7 +66,7 @@ pub use call_order::{
     nested_call_postorder_position, root_call_postorder_last, root_call_reference,
 };
 pub use call_shapes::{
-    CallShape, RoutineArity, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,
+    CallShape, RoutineArity, call_argument_count, call_argument_range, callee_reference_at_form, definition_root_is_call, indexed_call_shape,
     indexed_call_signal, next_call_argument, routine_arity,
 };
 #[cfg(verus_only)]

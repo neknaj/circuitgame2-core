@@ -1,8 +1,8 @@
 use circuitgame2_core::project::{
-    DefmacroNameError, MixedFuncCalleeError, ProjectDeclarationKind, ProjectSourceIndex,
+    DefmacroNameError, MacroCallError, MixedFuncCalleeError, ProjectDeclarationKind, ProjectSourceIndex,
     SourceSnapshot, check_mixed_use_aliases, index_mixed_use_targets, parse_project_sources,
 };
-use circuitgame2_core::syntax::circuit::Head;
+use circuitgame2_core::syntax::circuit::{Head, next_call_argument};
 
 #[test]
 fn resolves_macros_from_the_block_of_each_circuit_body() {
@@ -15,7 +15,11 @@ fn resolves_macros_from_the_block_of_each_circuit_body() {
         (namespace app
             (use ::lib::emit make)
             (use ::lib lib)
-            (func target (in x) (out y) (expand make y x))
+            (func target (in x) (out y)
+                (expand make y (expand ignored x))
+                (expand make y)
+                (expand lib::helper)
+                (expand make y x))
             (module top (in x) (out y) (expand lib::emit y x)))
         (namespace app (module-part top (expand make y x)))
         (namespace lib (module private-caller (in) (out y) (expand hidden)))";
@@ -71,6 +75,30 @@ fn resolves_macros_from_the_block_of_each_circuit_body() {
             "(list (syntax (def (unsyntax out) (unsyntax source))))"
         );
     }
+    let mut calls = aliases.macro_calls(1, function).unwrap();
+    assert_eq!(calls.source().revision, 47);
+    let syntax = calls.syntax();
+    let first = calls.next_call().unwrap();
+    assert_eq!(&circuit[first.site.callee], "make");
+    assert_eq!(first.target.unwrap().declaration.name.source.revision, 31);
+    let first_argument = next_call_argument(&syntax.forms, first.site.arguments.clone()).unwrap();
+    let second_argument =
+        next_call_argument(&syntax.forms, first_argument.end..first.site.arguments.end).unwrap();
+    assert_eq!(second_argument.end, first.site.arguments.end);
+    assert!(second_argument.end - second_argument.start > 1);
+    let too_few = calls.next_call().unwrap();
+    assert_eq!(&circuit[too_few.site.span], "(expand make y)");
+    assert!(matches!(too_few.target, Err(MacroCallError::Arity { actual: 1, .. })));
+    let wrong_kind = calls.next_call().unwrap();
+    assert_eq!(&circuit[wrong_kind.site.callee], "lib::helper");
+    assert!(matches!(
+        wrong_kind.target,
+        Err(MacroCallError::Name(DefmacroNameError::Reference(MixedFuncCalleeError::WrongDeclaration(_))))
+    ));
+    assert!(calls.next_call().unwrap().target.is_ok());
+    assert!(calls.next_call().is_none());
+    assert!(aliases.macro_calls(1, 0).is_none());
+
     assert!(matches!(
         aliases.resolve_defmacro_name(1, part, "make"),
         Err(DefmacroNameError::Reference(MixedFuncCalleeError::Missing)),
