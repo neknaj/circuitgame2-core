@@ -731,8 +731,9 @@ spec fn wait_follows(calls: Seq<CallTypeEntry>, forms: Seq<Form>, waiting: Await
         Await::InferredYes { no, .. } => end <= no,
         Await::Element { at, owner, .. } => child.request.at == at && child.request.list.is_none()
             && forms[owner as int] is List,
-        Await::Binding { header, index, .. } => index < header.bindings@.len()
-            && child.request.at == header.bindings@[index as int].value && child.request.list.is_none(),
+        Await::Binding { header, index, binding_owner, .. } => index < header.bindings@.len()
+            && child.request.at == header.bindings@[index as int].value && child.request.list.is_none()
+            && child.scope == binding_owner.scope && child.goal == Goal::Infer,
         Await::FoldInput { fold, .. } => child.request.at == fold.input && child.request.list.is_none(),
         Await::FoldInitial { fold, .. } => child.request.at == fold.initial && child.request.list.is_none(),
     }
@@ -1941,6 +1942,17 @@ spec fn completed_typing<'a>(
     }
 }
 
+// 各初期化式の結果を、その式の直上まで進めた独立の型判断と照合する。
+#[verifier::opaque]
+spec fn initializer_types_fit<'a>(
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    locals: &LocalScopes, pending: Seq<Pending>, result: Result<TypeShape, ExpressionCheckFailure<'a>>,
+) -> bool {
+    forall|i: int| 0 <= i < pending.len() && (#[trigger] pending[i]).awaiting is Binding ==>
+        completed_typing(calls, source, forms, parameters, locals, pending.skip(i + 1), result)
+            == job_type(calls, source, forms, parameters, locals, pending[i].child@)
+}
+
 proof fn pushed_pending_agrees<'a>(
     calls: Seq<CallTypeEntry>,
     source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter>, locals: &LocalScopes,
@@ -2000,6 +2012,86 @@ proof fn pending_keeps_earlier_scopes<'a>(
                 resumed_type(calls, source, forms, parameters, locals, last.awaiting, ty));
         }
     }
+}
+
+proof fn pushed_initializer_types_fit<'a>(
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    locals: &LocalScopes, pending: Seq<Pending>, work: Pending,
+)
+    requires initializer_types_fit(calls, source, forms, parameters, locals, pending,
+        action_type(calls, source, forms, parameters, locals, Ok(Action::Visit(work.child@, Some(work.awaiting))))),
+    ensures initializer_types_fit(calls, source, forms, parameters, locals, pending.push(work),
+        job_type(calls, source, forms, parameters, locals, work.child@)),
+{
+    reveal(initializer_types_fit);
+    let grown = pending.push(work);
+    let next = job_type(calls, source, forms, parameters, locals, work.child@);
+    assert forall|i: int| 0 <= i < grown.len() && (#[trigger] grown[i]).awaiting is Binding implies
+        completed_typing(calls, source, forms, parameters, locals, grown.skip(i + 1), next)
+            == job_type(calls, source, forms, parameters, locals, grown[i].child@) by {
+        if i < pending.len() {
+            assert(grown[i] == pending[i]);
+            assert(grown.skip(i + 1) =~= pending.skip(i + 1).push(work));
+            pushed_pending_agrees(calls, source, forms, parameters, locals, pending.skip(i + 1), work, next);
+        } else {
+            assert(grown[i] == work && grown.skip(i + 1) =~= Seq::<Pending>::empty());
+            reveal(completed_typing);
+        }
+    };
+}
+
+// 型環境へ新しい局所束縛を足した後も、外側の初期化式の判断は元の環境を使う。
+proof fn resumed_initializer_types_fit<'a>(
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    before: &LocalScopes, after: &LocalScopes, pending: Seq<Pending>, work: Pending, cursor: Job, ty: TypeShape,
+)
+    requires
+        initializer_types_fit(calls, source, forms, parameters, before, pending.push(work), Ok(ty)),
+        pending_ranges(calls, forms, pending, cursor),
+        pending_scopes(before, pending),
+        forall|scope: Scope| #[trigger] before.contains(scope) ==> after.contains(scope)
+            && after.local_types(scope) == before.local_types(scope),
+    ensures initializer_types_fit(calls, source, forms, parameters, after, pending,
+        resumed_type(calls, source, forms, parameters, before, work.awaiting, ty)),
+{
+    reveal(initializer_types_fit);
+    let prior = pending.push(work);
+    let next = resumed_type(calls, source, forms, parameters, before, work.awaiting, ty);
+    assert forall|i: int| 0 <= i < pending.len() && (#[trigger] pending[i]).awaiting is Binding implies
+        completed_typing(calls, source, forms, parameters, after, pending.skip(i + 1), next)
+            == job_type(calls, source, forms, parameters, after, pending[i].child@) by {
+        assert(prior[i] == pending[i]);
+        let tail = pending.skip(i + 1);
+        assert(prior.skip(i + 1) =~= tail.push(work));
+        pushed_pending_agrees(calls, source, forms, parameters, before, tail, work, Ok(ty));
+        assert(pending_scopes(before, tail)) by {
+            assert forall|j: int| 0 <= j < tail.len() implies wait_has_scopes(before, (#[trigger] tail[j]).awaiting) by {
+                assert(tail[j] == pending[j + i + 1]);
+            };
+        };
+        pending_keeps_earlier_scopes(calls, source, forms, parameters, before, after, tail, next);
+        let edge = pending[i];
+        if let Await::Binding { binding_owner: owner, .. } = edge.awaiting {
+            assert(edge.child@.scope == owner.scope);
+            assert(before.contains(owner.scope));
+            assert(lexical_view(parameters, after, owner.scope) =~= lexical_view(parameters, before, owner.scope));
+        }
+    };
+}
+
+proof fn next_initializer_has_inferred_type<'a>(
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, parameters: Seq<SignatureParameter>,
+    locals: &LocalScopes, pending: Seq<Pending>, work: Pending, ty: TypeShape,
+)
+    requires work.awaiting is Binding,
+        initializer_types_fit(calls, source, forms, parameters, locals, pending.push(work), Ok(ty)),
+    ensures job_type(calls, source, forms, parameters, locals, work.child@) == Ok(ty),
+{
+    reveal(initializer_types_fit);
+    reveal(completed_typing);
+    let full = pending.push(work);
+    assert(full[pending.len() as int] == work);
+    assert(full.skip(full.len() as int) =~= Seq::<Pending>::empty());
 }
 
 proof fn pushed_pending_fits(
@@ -2102,12 +2194,16 @@ fn attach_action<'a>(
     requires
         pending_ranges(_calls@, _forms@, old(pending)@, _current), pending_scopes(_locals, old(pending)@),
         _current.request.at <= child.request.at,
+        initializer_types_fit(_calls@, _source, _forms@, _parameters@, _locals, old(pending)@,
+            action_type(_calls@, _source, _forms@, _parameters@, _locals, Ok(Action::Visit(child, continuation)))),
         action_valid(_calls@, _forms@, _locals, Action::Visit(child, continuation)),
         action_advances(_calls@, _forms@, Action::Visit(child, continuation), child.request.at),
         forall|i:int| 0 <= i < old(pending)@.len() ==>
             action_limit(_calls@, _forms@, Action::Visit(child, continuation)) <= request_limit(_forms@, (#[trigger] old(pending)@[i]).child@.request),
     ensures
         result == child, pending_ranges(_calls@, _forms@, final(pending)@, result), pending_scopes(_locals, final(pending)@),
+        initializer_types_fit(_calls@, _source, _forms@, _parameters@, _locals, final(pending)@,
+            job_type(_calls@, _source, _forms@, _parameters@, _locals, result)),
         completed_typing(_calls@, _source, _forms@, _parameters@, _locals, final(pending)@,
             job_type(_calls@, _source, _forms@, _parameters@, _locals, result))
             == completed_typing(_calls@, _source, _forms@, _parameters@, _locals, old(pending)@,
@@ -2117,8 +2213,10 @@ fn attach_action<'a>(
     if let Some(awaiting) = continuation {
         proof {
             pushed_pending_fits(_calls@, _forms@, _locals, pending@, _current, child, awaiting);
+            let work = Pending { child: Ghost(child), awaiting };
             pushed_pending_agrees(_calls@, _source, _forms@, _parameters@, _locals, pending@,
-                Pending { child: Ghost(child), awaiting }, job_type(_calls@, _source, _forms@, _parameters@, _locals, child));
+                work, job_type(_calls@, _source, _forms@, _parameters@, _locals, child));
+            pushed_initializer_types_fit(_calls@, _source, _forms@, _parameters@, _locals, pending@, work);
         }
         pending.push(Pending { child: Ghost(child), awaiting });
     } else {
@@ -2188,9 +2286,12 @@ fn type_with_scopes<'a>(
             reveal(arithmetic_trace_fits);
         };
         reveal(completed_typing);
+        reveal(initializer_types_fit);
     }
     loop
         invariant
+            initializer_types_fit(calls@, source, forms@, parameters@, &locals, pending@,
+                job_type(calls@, source, forms@, parameters@, &locals, job)),
             call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
             call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
             arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, job.request.at as nat),
@@ -2245,6 +2346,7 @@ fn type_with_scopes<'a>(
         loop
             invariant_except_break
                 before == job.request.at,
+                initializer_types_fit(calls@, source, forms@, parameters@, &locals, pending@, Ok(ty)),
                 arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, (job.request.at + 1) as nat),
                 completed_typing(calls@, source, forms@, parameters@, &locals, pending@, Ok(ty)) == root,
             invariant
@@ -2258,6 +2360,8 @@ fn type_with_scopes<'a>(
                     Request { at, expected, list: None }, Goal::Check(expected)),
             ensures
                 before < job.request.at,
+                initializer_types_fit(calls@, source, forms@, parameters@, &locals, pending@,
+                    job_type(calls@, source, forms@, parameters@, &locals, job)),
                 arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, job.request.at as nat),
                 completed_typing(calls@, source, forms@, parameters@, &locals, pending@,
                     job_type(calls@, source, forms@, parameters@, &locals, job)) == root,
@@ -2277,12 +2381,16 @@ fn type_with_scopes<'a>(
                 assert(before =~= pending@.push(work));
                 pushed_pending_agrees(calls@, source, forms@, parameters@, &locals, pending@, work, Ok(ty));
                 shrunk_pending_fits(calls@, forms@, &locals, pending@, job, work);
+                if work.awaiting is Binding {
+                    next_initializer_has_inferred_type(calls@, source, forms@, parameters@, &locals, pending@, work, ty);
+                }
             }
             let result = accept_result(calls, source, forms, parameters, &mut locals, work.awaiting, ty, work.child);
             let ghost operation = result;
             proof {
                 pending_keeps_earlier_scopes(calls@, source, forms@, parameters@, &previous, &locals, pending@,
                     action_type(calls@, source, forms@, parameters@, &locals, result));
+                resumed_initializer_types_fit(calls@, source, forms@, parameters@, &previous, &locals, pending@, last, job, ty);
             }
             match result {
                 Err(error) => {
