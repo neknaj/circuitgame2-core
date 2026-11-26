@@ -13,6 +13,7 @@ mod module_parts;
 mod name_keys;
 mod path;
 mod resolution;
+mod lookup_observation;
 mod signatures;
 mod source_indexes;
 mod sources;
@@ -142,11 +143,14 @@ pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, 
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
+pub use lookup_observation::{LookupLocation, LookupTarget, OwnedAbsoluteLookup, OwnedUnqualifiedLookup};
+#[cfg(verus_only)]
+pub use lookup_observation::{lookup_location_model, lookup_target_model, owned_unqualified_model};
 pub use resolution::{AbsoluteLookup, AbsoluteResolutionError, AbsoluteTarget, MixedAbsoluteTarget};
 #[cfg(verus_only)]
 pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, mixed_absolute_resolution_evidence,
-    mixed_declaration_visible_from, mixed_key_resolution, same_mixed_target, same_target,
+    mixed_declaration_visible_from, mixed_key_resolution, same_mixed_target, same_target, selected_direct_target_matches,
 };
 pub use source_indexes::{
     DefmacroBody, ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,

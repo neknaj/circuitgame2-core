@@ -152,6 +152,9 @@ fn observes_missing_private_and_exported_candidates_across_snapshots() {
         let lookup = table.observe_absolute_key(key, Some("caller"));
         assert_eq!(lookup.target().is_some(), revision != 1);
         assert_eq!(lookup.is_visible_declaration(), visible);
+        let owned = lookup.owned_observation();
+        assert_eq!(owned.visible_declaration, visible);
+        assert_eq!(owned.target.is_some(), revision != 1);
         match (revision, lookup.into_resolution()) {
             (1, Err(AbsoluteResolutionError::Missing)) => {}
             (2, Err(AbsoluteResolutionError::Private(location))) => {

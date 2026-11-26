@@ -60,6 +60,26 @@ pub struct ResolvedUse<'p, 'a> {
 }
 
 impl<'p, 'a> ResolvedUse<'p, 'a> {
+    /// 別名の指定位置と字句を表す。
+    pub closed spec fn site_model(&self) -> UseSite<'p, 'a> { self.site }
+
+    /// 別名に束縛された宣言または名前空間を表す。
+    pub closed spec fn target_model(&self) -> AbsoluteTarget<'p, 'a, 'a> { self.target }
+
+    /// 別名の指定位置と字句を借りる。
+    pub(super) fn site(&self) -> (site: &UseSite<'p, 'a>)
+        ensures *site == self.site_model(),
+    {
+        &self.site
+    }
+
+    /// 別名に束縛された宣言または名前空間を借りる。
+    pub(super) fn target(&self) -> (target: &AbsoluteTarget<'p, 'a, 'a>)
+        ensures *target == self.target_model(),
+    {
+        &self.target
+    }
+
     /// 索引を借りずに返せる診断に、指定位置と参照先を写す。
     pub(super) fn copy_for_diagnostic(&self) -> (copy: Self)
         ensures copy == *self,
