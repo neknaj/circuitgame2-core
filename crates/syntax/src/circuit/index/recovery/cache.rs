@@ -5,9 +5,9 @@ use core::ops::Range;
 use vstd::prelude::*;
 
 use super::{BuildCircuitIndex, CircuitRecovery, CircuitRecoveryReuseWindow, NamedBuildCircuit, recover_circuit_build_index, recover_circuit_forms};
-use super::window::select_recovery_window;
+use super::window::{select_recovery_window, strict_recovery_window};
 #[cfg(verus_only)]
-use super::window::original_lists_ordered;
+use super::window::{original_lists_ordered, strict_root_list_ranges, window_available};
 #[cfg(verus_only)]
 use crate::{original_list_ranges, recovered_replay_matches};
 use crate::circuit::build::{BuildRows, copy_build_parts, index_build_forms};
@@ -225,6 +225,67 @@ impl CachedCircuitRecovery {
         ensures *result == self.recovery_model(),
     {
         &self.recovery
+    }
+
+    /// 厳格な S 式構文木で、最上位にあるリストの範囲を元本文の順に表す。
+    ///
+    /// 入れ子のリストや最上位のアトムは列に含まない。S 式の修復が必要だった場合は `None`。
+    pub closed spec fn strict_root_ranges_model(&self) -> Option<Seq<Range<usize>>> {
+        match self.recovery_model() {
+            CircuitRecovery::Complete(syntax) => Some(strict_root_list_ranges(syntax.forms@, 0)),
+            CircuitRecovery::Inspected { forms, .. } => Some(strict_root_list_ranges(forms@, 0)),
+            CircuitRecovery::WithSyntaxRepairs { .. } => None,
+        }
+    }
+
+    /// 厳格な S 式構文木の最上位リストから選んだ境界であることを表す。
+    pub open spec fn strict_window_matches(&self, edit: Range<usize>, window: CircuitRecoveryReuseWindow) -> bool {
+        self.strict_root_ranges_model() matches Some(lists) && window.matches(lists, edit)
+    }
+
+    /// 旧本文の厳格な構文木から編集区間を囲む境界が選べることを表す。
+    pub closed spec fn strict_window_available(&self, edit: Range<usize>) -> bool {
+        self.strict_root_ranges_model() matches Some(lists)
+            && original_lists_ordered(lists)
+            && window_available(lists, edit)
+    }
+
+    /// 旧本文を厳格な S 式として読めた場合に、編集区間を囲む再解析の境界を選ぶ。
+    ///
+    /// 元本文の UTF-8 バイト位置を使う。選んだ境界を
+    /// [`crate::OwnedRecoveryCache::remember`] に渡す。新しい本文を
+    /// [`crate::OwnedRecoveryCache::try_snapshot`] に渡すと、前後の本文が一致し、
+    /// 再解析した区間を接続できるかを照合する。
+    ///
+    /// 編集範囲が逆順の場合や、末尾の空白まで編集が及ぶなど、編集終了位置を
+    /// 含む境界が選べない場合は `None` を返す。修復が必要だった旧本文には
+    /// [`Self::recovery_reuse_window`] を使う。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use circuitgame2_syntax::circuit::{CachedCircuitRecovery, CircuitRecoveryReuseWindow};
+    ///
+    /// let old = CachedCircuitRecovery::analyze("(using nor) (using nor)".to_owned());
+    /// assert_eq!(old.strict_reuse_window(7..8), Some(CircuitRecoveryReuseWindow {
+    ///     start: 0, join: 11, head_count: 0, first_tail: 1,
+    /// }));
+    /// ```
+    pub fn strict_reuse_window(&self, edit: Range<usize>) -> (result: Option<CircuitRecoveryReuseWindow>)
+        ensures result.is_some() == self.strict_window_available(edit),
+            result matches Some(window) ==> self.strict_window_matches(edit, window),
+    {
+        proof {
+            use_type_invariant(self);
+            let original = choose|text: &str| text@ == self.source@
+                && #[trigger] circuit_recovery_matches(text, self.recovery);
+            reveal(circuit_recovery_matches);
+        }
+        match &self.recovery {
+            CircuitRecovery::Complete(syntax) => strict_recovery_window(syntax.forms.as_slice(), edit),
+            CircuitRecovery::Inspected { forms, .. } => strict_recovery_window(forms.as_slice(), edit),
+            CircuitRecovery::WithSyntaxRepairs { .. } => None,
+        }
     }
 
     /// 修復を含む旧本文について、編集区間の外にある元リストの列を選ぶ。
