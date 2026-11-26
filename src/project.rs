@@ -99,7 +99,7 @@ pub(crate) use use_aliases::TypedArithmeticSite;
 pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 pub use use_aliases::{MacroArgument, MacroArgumentScope, MacroArguments};
-pub use use_aliases::{MacroCall, MacroCallError, MacroCalls};
+pub use use_aliases::{MacroCall, MacroCallError, MacroCalls, MacroPreparationError, MacroPreparationFailure};
 #[cfg(verus_only)]
 pub use use_aliases::{macro_call_matches, macro_call_spans_in_source};
 pub use use_aliases::{DefmacroNameError, ResolvedDefmacro};

@@ -6,6 +6,7 @@ use crate::syntax::Form;
 use super::data_types::DefnSignature;
 use vstd::prelude::*;
 
+pub mod macro_binding;
 pub mod scalar;
 
 verus! {

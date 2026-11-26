@@ -71,7 +71,7 @@ mod defn_name;
 mod macro_arguments;
 pub use macro_arguments::{MacroArgument, MacroArgumentScope, MacroArguments};
 mod macro_calls;
-pub use macro_calls::{MacroCall, MacroCallError, MacroCalls};
+pub use macro_calls::{MacroCall, MacroCallError, MacroCalls, MacroPreparationError, MacroPreparationFailure};
 #[cfg(verus_only)]
 pub use macro_calls::{macro_call_matches, macro_call_spans_in_source};
 mod defmacro_name;

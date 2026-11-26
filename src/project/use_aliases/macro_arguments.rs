@@ -110,6 +110,21 @@ impl<'p, 'a> MacroArguments<'p, 'a> {
         Self { scope, forms, remaining, count }
     }
 
+    /// まだ読んでいない範囲が、元の構文木の内側にあることを示す。
+    pub proof fn remaining_bounds(&self)
+        requires self.valid(),
+        ensures self.remaining_model().start <= self.remaining_model().end <= self.forms_model().len(),
+    {
+        reveal(expression_region);
+    }
+
+    /// まだ引数が残っていない場合も、呼び出し元のスコープを返す。
+    pub fn scope(&self) -> (scope: MacroArgumentScope<'p, 'a>)
+        ensures scope == self.scope_model(),
+    {
+        self.scope
+    }
+
     /// まだ取り出していない引数の個数を返す。
     pub fn remaining_count(&self) -> (count: usize)
         ensures count == self.count_model(),
