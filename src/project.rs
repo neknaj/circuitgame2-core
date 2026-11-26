@@ -174,6 +174,11 @@ pub use structure_declarations::structure_declaration_result;
 pub use sources::{first_source_set_error, project_sources_match, source_set_error, source_set_errors_agree, valid_source_snapshots};
 #[cfg(verus_only)]
 pub use use_aliases::port_types_equal;
+pub use use_aliases::{DefinitionLookupObservation, ReferenceDiagnosticKind};
+#[cfg(verus_only)]
+pub use use_aliases::{
+    definition_diagnostic_model, definition_lookup_diagnostics_agree, definition_lookup_input, definition_lookup_matches,
+};
 pub use use_aliases::{
     AliasConflict, AliasDisposition, DefinitionBatchError, DefinitionBinding, DefinitionPosition, DefinitionReferences,
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,

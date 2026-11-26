@@ -1,5 +1,15 @@
 //! 定義の右辺にある名前を、参照元のスコープと用途に従って解決する。
 
+mod observations;
+pub use observations::{DefinitionLookupObservation, ReferenceDiagnosticKind};
+#[cfg(verus_only)]
+pub use observations::{
+    definition_diagnostic_model, definition_lookup_diagnostics_agree, definition_lookup_input, definition_lookup_matches,
+};
+#[cfg(verus_only)]
+use observations::{absolute_problem_matches, observed_binding_matches, unqualified_problem_matches};
+use crate::project::lookup_observation::capture_unqualified;
+
 use super::{RelativeResolutionError, RelativeTarget, UnqualifiedTarget, UseAliases};
 #[cfg(verus_only)]
 use crate::project::absolute_resolution_evidence;
@@ -15,13 +25,13 @@ use crate::project::name_keys::key_view;
 #[cfg(verus_only)]
 use crate::project::resolution::{declaration_exists, direct_targets_agree, has_resolution};
 #[cfg(verus_only)]
-use crate::project::{NameKey, same_target};
+use crate::project::same_target;
 #[cfg(verus_only)]
 use crate::project::circuits::parsed_index_evidence;
 #[cfg(verus_only)]
 use crate::project::sources::source_ordinals_agree;
 use crate::project::circuits::read_indexed_atom;
-use crate::project::{AbsoluteResolutionError, AbsoluteTarget, LocatedName, ProjectSource};
+use crate::project::{AbsoluteLookup, AbsoluteResolutionError, AbsoluteTarget, LocatedName, NameKey, ProjectSource};
 #[cfg(verus_only)]
 use crate::syntax::{absolute_path_parts, absolute_path_parts_agree, bare_atom_kind};
 use crate::syntax::circuit::{ExpressionReferenceKind, Head, NameSite, NamedForm, named_build_entry};
@@ -30,7 +40,7 @@ use crate::syntax::circuit::{
     NamedBuildCircuit, build_definition_scope_evidence, build_entry_ranges_evidence,
     expression_reference_in_source, indexed_entry_evidence, namespace_name_evidence,
 };
-use crate::syntax::{AtomKind, Form};
+use crate::syntax::{AtomKind, Form, split_absolute_path};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
@@ -439,21 +449,48 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             kind is Name || kind is RelativePath || kind is AbsolutePath,
         ensures self.binding_evidence(file, *site, from, kind, binding),
     {
+        self.resolve_scoped_binding_recording(file, site, from, kind, false).0
+    }
+
+    // 両経路で同じ検索と用途判定を使い、必要なときだけ観測を所有値に写す。
+    fn resolve_scoped_binding_recording(
+        &self, file: usize, site: &ReferenceRequest, from: Option<&str>, kind: AtomKind, record: bool,
+    ) -> (out: (Result<DefinitionBinding<'p, 'a>, DefinitionReferenceReason<'p, 'a>>, Option<DefinitionLookupObservation>))
+        requires
+            self.can_resolve(),
+            self.scope_matches(file, site.block, Ok(from)),
+            bare_atom_kind(site.word.spec_bytes()) == Some(kind),
+            kind is Name || kind is RelativePath || kind is AbsolutePath,
+        ensures self.binding_evidence(file, *site, from, kind, out.0),
+            out.1.is_some() == (record && (kind is Name || kind is AbsolutePath)),
+            out.1 matches Some(observation) ==> observed_binding_matches(*site, observation, out.0),
+    {
         let word = site.word;
         match kind {
             AtomKind::Name => {
                 let found = self.lookup_in_scope(file, site.block, from, word);
-                match found {
-                    Some(UnqualifiedTarget::Alias(directive)) => check_absolute(site, &directive.target),
+                let observation = if record { Some(capture_unqualified(&found)) } else { None };
+                let ghost observed_target = found;
+                let binding = match found {
+                    Some(UnqualifiedTarget::Alias(directive)) => {
+                        proof { directive.target_model_agrees(); }
+                        check_absolute(site, directive.target())
+                    },
                     Some(UnqualifiedTarget::Direct(target)) => check_absolute(site, &target),
                     None if matches!(site.role, ReferenceUse::Callee(_)) && word == "nor" => Ok(DefinitionBinding::Nor),
                     None => Err(DefinitionReferenceReason::Missing),
+                };
+                if let Some(observation) = observation {
+                    proof { unqualified_problem_matches(*site, observed_target, observation); }
+                    (binding, Some(DefinitionLookupObservation::Unqualified(observation)))
+                } else {
+                    (binding, None)
                 }
             },
             AtomKind::RelativePath => {
                 let found = self.resolve_relative(file, site.block, word);
                 proof { self.relative_requires_valid_input(file, site.block, word, from, found); }
-                match found {
+                let binding = match found {
                     Ok(RelativeTarget::Declaration { source, form }) => check_declaration(site, source, form),
                     Ok(RelativeTarget::Namespace { introduced_at, .. }) => Err(DefinitionReferenceReason::Namespace(introduced_at)),
                     Err(RelativeResolutionError::Private(location)) => Err(DefinitionReferenceReason::Private(location)),
@@ -465,11 +502,22 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         proof { assert(false); }
                         unreachable!();
                     }
-                }
+                };
+                (binding, None)
             },
             AtomKind::AbsolutePath => {
-                let found = self.targets.exports().resolve_absolute(word, from);
-                match found {
+                let Some((parent, name)) = split_absolute_path(word) else {
+                    proof { assert(false); }
+                    unreachable!();
+                };
+                let key = NameKey { parent, name };
+                let lookup = self.targets.exports().observe_absolute_key(key, from);
+                let observation = if record { Some(lookup.owned_observation()) } else { None };
+                let ghost observed_target = lookup;
+                let found = lookup.into_resolution();
+                assert(absolute_path_parts(word, key.parent, key.name));
+                assert(absolute_resolution_evidence(&self.targets.exports_model(), word, from, found));
+                let binding = match found {
                     Ok(target) => check_absolute(site, &target),
                     Err(AbsoluteResolutionError::Missing) => Err(DefinitionReferenceReason::Missing),
                     Err(AbsoluteResolutionError::Private(location)) => Err(DefinitionReferenceReason::Private(location)),
@@ -477,6 +525,12 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                         proof { assert(false); }
                         unreachable!();
                     }
+                };
+                if let Some(observation) = observation {
+                    proof { absolute_problem_matches(*site, observed_target, observation, binding); }
+                    (binding, Some(DefinitionLookupObservation::Absolute(observation)))
+                } else {
+                    (binding, None)
                 }
             },
             _ => {
@@ -998,14 +1052,59 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         requires self.can_resolve(),
         ensures self.definition_resolution_evidence(file, entry, definition, reference, result),
     {
+        self.resolve_definition_reference_recording(file, entry, definition, reference, false).0
+    }
+
+    /// 参照の綴りと構文上の位置が、名前検索の観測を得られる範囲にあることを示す。
+    pub open spec fn definition_lookup_is_supported(
+        result: Result<ResolvedDefinitionReference, DefinitionReferenceError>,
+    ) -> bool {
+        let name = match result {
+            Ok(resolved) => Some(resolved.site.name.word),
+            Err(DefinitionReferenceError::Rejected { site, .. }) => Some(site.name.word),
+            Err(DefinitionReferenceError::UnknownPosition) => None,
+        };
+        name matches Some(word) && match bare_atom_kind(word.spec_bytes()) {
+            Some(AtomKind::Name) | Some(AtomKind::AbsolutePath) => true,
+            _ => false,
+        }
+    }
+
+    /// 定義の参照を、通常の名前解決と同じ規則で検査する。
+    ///
+    /// 無修飾名と完全修飾名では候補の不在も含めて観測を返す。相対名と範囲外では観測はない。
+    /// 観測を返さない参照の診断を再利用するときは、改めて名前解決する。
+    ///
+    /// # Errors
+    ///
+    /// 添字が範囲外、名前を解決できない、または参照位置で対象を使えない場合は通常の診断を返す。
+    pub fn observe_definition_reference(
+        &self, file: usize, entry: usize, definition: usize, reference: usize,
+    ) -> (out: (Result<ResolvedDefinitionReference<'p, 'a>, DefinitionReferenceError<'p, 'a>>, Option<DefinitionLookupObservation>))
+        requires self.can_resolve(),
+        ensures self.definition_resolution_evidence(file, entry, definition, reference, out.0),
+            out.1.is_some() == Self::definition_lookup_is_supported(out.0),
+            out.1 matches Some(observation) ==> definition_lookup_matches(out.0, observation),
+    {
+        self.resolve_definition_reference_recording(file, entry, definition, reference, true)
+    }
+
+    fn resolve_definition_reference_recording(
+        &self, file: usize, entry: usize, definition: usize, reference: usize, record: bool,
+    ) -> (out: (Result<ResolvedDefinitionReference<'p, 'a>, DefinitionReferenceError<'p, 'a>>, Option<DefinitionLookupObservation>))
+        requires self.can_resolve(),
+        ensures self.definition_resolution_evidence(file, entry, definition, reference, out.0),
+            out.1.is_some() == (record && Self::definition_lookup_is_supported(out.0)),
+            out.1 matches Some(observation) ==> definition_lookup_matches(out.0, observation),
+    {
         let project = self.targets.project();
         let circuits = project.circuits();
         if file >= circuits.len() {
-            return Err(DefinitionReferenceError::UnknownPosition);
+            return (Err(DefinitionReferenceError::UnknownPosition), None);
         }
         let parsed = &circuits[file];
         if entry >= parsed.entry_ranges.len() {
-            return Err(DefinitionReferenceError::UnknownPosition);
+            return (Err(DefinitionReferenceError::UnknownPosition), None);
         }
         let source = &project.sources()[file];
         proof {
@@ -1014,7 +1113,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         }
         let defs = &parsed.entry_ranges[entry].definitions;
         if definition >= defs.end - defs.start {
-            return Err(DefinitionReferenceError::UnknownPosition);
+            return (Err(DefinitionReferenceError::UnknownPosition), None);
         }
         let _definition_count = parsed.definitions.len();
         assert(defs.start + definition < _definition_count);
@@ -1024,7 +1123,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             build_definition_scope_evidence(source.text, &parsed.build_model(), entry as int, definition_index as int);
         }
         if reference >= refs.end - refs.start {
-            return Err(DefinitionReferenceError::UnknownPosition);
+            return (Err(DefinitionReferenceError::UnknownPosition), None);
         }
         let _reference_count = parsed.references.len();
         assert(refs.start + reference < _reference_count);
@@ -1053,10 +1152,16 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             proof { assert(false); }
             unreachable!();
         };
-        match self.resolve_scoped_binding(file, &site.request(), from, *atom_kind) {
+        let (binding, observation) =
+            self.resolve_scoped_binding_recording(file, &site.request(), from, *atom_kind, record);
+        let ghost original_site = site;
+        let ghost original_binding = binding;
+        let result = match binding {
             Ok(binding) => Ok(ResolvedDefinitionReference { site, binding }),
             Err(reason) => Err(DefinitionReferenceError::Rejected { site, reason }),
-        }
+        };
+        proof { observations::observation_from_binding(original_site, original_binding, observation, result); }
+        (result, observation)
     }
 }
 

@@ -1,5 +1,6 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, DefinitionReferenceError, DefinitionReferenceReason, SourceSnapshot,
+    DefinitionBinding, DefinitionLookupObservation, DefinitionReferenceError, DefinitionReferenceReason,
+    OwnedUnqualifiedLookup, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
 use circuitgame2_core::syntax::circuit::Head;
@@ -60,6 +61,9 @@ fn resolves_real_references_and_keeps_diagnostic_ranges() {
     }
     let builtin = aliases.resolve_definition_reference(0, main, 1, 0).unwrap();
     assert!(matches!(builtin.binding, DefinitionBinding::Nor));
+    let (observed_builtin, builtin_observation) = aliases.observe_definition_reference(0, main, 1, 0);
+    assert!(matches!(observed_builtin.unwrap().binding, DefinitionBinding::Nor));
+    assert_eq!(builtin_observation, Some(DefinitionLookupObservation::Unqualified(OwnedUnqualifiedLookup::Missing)));
     for (definition, spelling) in [(2, "gates::Secret"), (3, "::lib::Secret")] {
         let error = aliases
             .resolve_definition_reference(0, main, definition, 0)
@@ -75,6 +79,15 @@ fn resolves_real_references_and_keeps_diagnostic_ranges() {
         assert_eq!(&library[location.span], "Secret");
         assert_eq!(location.source.revision, 2);
     }
+    let (reference, observation) = aliases.observe_definition_reference(0, main, 3, 0);
+    let Err(DefinitionReferenceError::Rejected { site, reason: DefinitionReferenceReason::Private(location) }) = reference
+        else { panic!("完全修飾名の診断には非公開の宣言位置が必要"); };
+    assert_eq!(&app[site.name.span], "::lib::Secret");
+    assert_eq!(&library[location.span], "Secret");
+    assert!(matches!(observation, Some(DefinitionLookupObservation::Absolute(found)) if !found.visible_declaration));
+    let (relative, observation) = aliases.observe_definition_reference(0, main, 2, 0);
+    assert!(matches!(relative, Err(DefinitionReferenceError::Rejected { reason: DefinitionReferenceReason::Private(_), .. })));
+    assert!(observation.is_none());
     assert!(matches!(
         aliases.resolve_definition_reference(0, part, 0, 0),
         Err(DefinitionReferenceError::Rejected {

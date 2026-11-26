@@ -130,15 +130,20 @@ fn capture_target(target: &AbsoluteTarget) -> (out: LookupTarget)
     }
 }
 
+/// 完全修飾名の検索で保存した候補と可視性を、同じ検索の観測値に結び付ける。
+pub open spec fn owned_absolute_model(out: OwnedAbsoluteLookup, lookup: AbsoluteLookup) -> bool {
+    &&& out.visible_declaration == lookup.visible_model()
+    &&& match (out.target, lookup.target_model()) {
+        (Some(out), Some(target)) => lookup_target_model(out, target),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 impl AbsoluteLookup<'_, '_, '_> {
     /// 完全修飾名の検索で観測した候補と可視性を、他の版と照合できる値に写す。
     pub fn owned_observation(&self) -> (out: OwnedAbsoluteLookup)
-        ensures out.visible_declaration == self.visible_model(),
-            match (out.target, self.target_model()) {
-                (Some(out), Some(target)) => lookup_target_model(out, target),
-                (None, None) => true,
-                _ => false,
-            },
+        ensures owned_absolute_model(out, *self),
     {
         let target = match self.target() {
             Some(target) => Some(capture_target(target)),
@@ -161,6 +166,22 @@ pub open spec fn owned_unqualified_model(out: OwnedUnqualifiedLookup, resolved: 
     }
 }
 
+pub(super) fn capture_unqualified(resolved: &Option<UnqualifiedTarget>) -> (out: OwnedUnqualifiedLookup)
+    ensures owned_unqualified_model(out, *resolved),
+{
+    match resolved {
+        None => OwnedUnqualifiedLookup::Missing,
+        Some(UnqualifiedTarget::Direct(target)) => OwnedUnqualifiedLookup::Direct(capture_target(target)),
+        Some(UnqualifiedTarget::Alias(item)) => {
+            let site = item.site();
+            OwnedUnqualifiedLookup::Alias {
+                directive: capture_location(site.source, &site.alias.span),
+                target: capture_target(item.target()),
+            }
+        },
+    }
+}
+
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     /// 無修飾名の検索で確定する束縛を、他の版と照合できる値に写す。
     ///
@@ -180,17 +201,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         },
     {
         let resolved = self.resolve_unqualified(file, block, name)?;
-        let out = match &resolved {
-            None => OwnedUnqualifiedLookup::Missing,
-            Some(UnqualifiedTarget::Direct(target)) => OwnedUnqualifiedLookup::Direct(capture_target(target)),
-            Some(UnqualifiedTarget::Alias(item)) => {
-                let site = item.site();
-                OwnedUnqualifiedLookup::Alias {
-                    directive: capture_location(site.source, &site.alias.span),
-                    target: capture_target(item.target()),
-                }
-            },
-        };
+        let out = capture_unqualified(&resolved);
         assert(owned_unqualified_model(out, resolved));
         Ok(out)
     }

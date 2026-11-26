@@ -66,6 +66,12 @@ impl<'p, 'a> ResolvedUse<'p, 'a> {
     /// 別名に束縛された宣言または名前空間を表す。
     pub closed spec fn target_model(&self) -> AbsoluteTarget<'p, 'a, 'a> { self.target }
 
+    // 既存の束縛判定と、公開する参照先の仕様が同じ値を指す。
+    pub(super) proof fn target_model_agrees(&self)
+        ensures self.target_model() == self.target,
+    {
+    }
+
     /// 別名の指定位置と字句を借りる。
     pub(super) fn site(&self) -> (site: &UseSite<'p, 'a>)
         ensures *site == self.site_model(),
