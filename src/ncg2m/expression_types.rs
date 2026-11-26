@@ -33,6 +33,13 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+mod macro_body;
+pub use macro_body::{CheckedMacroBody, CheckedMacroElement, MacroBodyError, MacroInsertion};
+#[cfg(verus_only)]
+pub use macro_body::{
+    defmacro_body_check, macro_element_origin, macro_insertion_is_typed, macro_insertion_origin,
+    macro_parameter_environment,
+};
 mod fold;
 pub(crate) mod named_call;
 pub use named_call::DefnBodyCallError;
