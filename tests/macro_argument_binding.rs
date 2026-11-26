@@ -511,3 +511,54 @@ fn shared_template_diagnostics_identify_the_failing_expansion() {
     assert_eq!((&circuit[target.span.clone()], &circuit[output.span.clone()]), ("y", "y"));
     assert!(output.span.start < call.span.start && call.span.contains(&target.span.start));
 }
+
+#[test]
+fn expanded_function_reports_source_revisions_before_wiring() {
+    use circuitgame2_core::project::{ExpandedFuncWiringError, GeneratedWiringError};
+
+    let library = "(defmacro delayed (out x)
+        (list (syntax (def (unsyntax out) (splice (list x))))))
+        (defmacro invalid (out) (list (syntax (def (unsyntax out)))))
+        (defmacro pass (x) (list x))";
+    let circuit = "(using nor)
+        (func unresolved (in x) (out y) (expand unknown y x))
+        (func evaluates (in x) (out y) (expand delayed y x))
+        (func projects (in x) (out y) (expand invalid y))
+        (func unsupported (in x) (out y) (expand pass (def y x)))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "macros.ncg2m", revision: 7, text: library },
+        SourceSnapshot { path: "uses.ncg2", revision: 9, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let fuel = NonZeroUsize::new(128).unwrap();
+
+    let Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Preparation(error))) =
+        aliases.check_expanded_bit_func(1, 1, 16, fuel)
+        else { panic!("未解決のマクロを準備段階で診断する"); };
+    assert_eq!((&circuit[error.site.span], error.source.revision), ("(expand unknown y x)", 9));
+
+    let Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Fuel(call))) =
+        aliases.check_expanded_bit_func(1, 2, 16, NonZeroUsize::new(1).unwrap())
+        else { panic!("実行枠の終了を診断する"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand delayed y x)", 9));
+
+    let Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Expansion { call, definition, related, .. })) =
+        aliases.check_expanded_bit_func(1, 2, 16, fuel)
+        else { panic!("評価段階でマクロ本体の範囲を診断する"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand delayed y x)", 9));
+    assert_eq!((&library[related], definition.revision), ("(list x)", 7));
+
+    let Err(ExpandedFuncWiringError::Base(GeneratedWiringError::InvalidDefinition {
+        call, element: 0, related: Some(related), ..
+    })) = aliases.check_expanded_bit_func(1, 3, 16, fuel)
+        else { panic!("生成した定義の右辺がないことを診断する"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand invalid y)", 9));
+    assert_eq!(related.source.revision, 7);
+    assert_eq!(&library[related.span], "(def (unsyntax out))");
+
+    let Err(ExpandedFuncWiringError::Base(GeneratedWiringError::UnsupportedDefinition { call, element: 0 })) =
+        aliases.check_expanded_bit_func(1, 4, 16, fuel)
+        else { panic!("対応範囲外の生成結果を診断する"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand pass (def y x))", 9));
+}

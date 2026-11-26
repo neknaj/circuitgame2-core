@@ -23,7 +23,10 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::{
     generated_port_names_from_signature, generated_port_names_match, scoped_nor::nor_scope_error_location,
-    wiring::{expanded_bit_func_wiring, expanded_definition_cause_location, generated_error_after_collection, scoped_diagnostic_cause_location, scoped_wiring_diagnostic_source},
+    wiring::{
+        expanded_bit_func_wiring, expanded_definition_cause_location, expanded_function_is_wiring_diagnostic,
+        row_diagnostic_at, scoped_diagnostic_cause_location, scoped_wiring_diagnostic_source,
+    },
     rows::{ordinary_simple_definition, scoped_definition_locations, template_simple_definition},
 };
 #[cfg(verus_only)]
@@ -33,17 +36,19 @@ use crate::syntax::circuit::{
 #[cfg(verus_only)]
 use crate::ncg2m::call_evaluation::macro_binding::BoundMacroCall;
 #[cfg(verus_only)]
-use crate::ncg2m::call_evaluation::macro_expansion::{MacroExpansion, macro_expansion_slice_matches};
+use crate::ncg2m::call_evaluation::macro_expansion::{MacroExpansion, MacroExpansionError, macro_expansion_slice_matches};
+#[cfg(verus_only)]
+use crate::ncg2m::expression_types::checked_macro_body_layout;
 #[cfg(verus_only)]
 use super::super::checked_bit_func_available;
 #[cfg(verus_only)]
 use crate::ncg2m::call_evaluation::macro_syntax::{CheckedTemplateDefinition, template_definition_check_matches};
 #[cfg(verus_only)]
-use crate::project::{circuits::parsed_index_evidence, declarations::located_name_evidence, location_in_source,
+use crate::project::{MacroPreparationError, circuits::parsed_index_evidence, declarations::located_name_evidence, location_in_source,
     macro_call_spans_in_source, source_indexes::project_source_index_evidence, mixed_use_targets_match};
 #[cfg(verus_only)]
 use crate::syntax::{
-    circuit::{build_definition_scope_evidence, build_index_matches}, form_spans_valid,
+    circuit::{build_definition_scope_evidence, build_index_matches}, form_span, form_spans_valid,
 };
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -103,11 +108,41 @@ proof fn push_keeps_locations(body: &OrdinaryBody, rows: Seq<ScopedDefinition>, 
     };
 }
 
-spec fn diagnostic_in_body(body: &OrdinaryBody, error: ExpandedFuncWiringError) -> bool {
-    error matches ExpandedFuncWiringError::Generated { call, cause } ==> {
-        &&& call_in_body(body, call)
-        &&& expanded_definition_cause_location(*cause) matches Some(site) && location_in_source(site)
+/// 展開に由来する診断から呼び出しの範囲と文書版を取り出す。
+pub open spec fn expanded_function_diagnostic_call<'p, 'a>(
+    error: ExpandedFuncWiringError<'p, 'a>,
+) -> Option<LocatedName<'p, 'a>> {
+    match error {
+        ExpandedFuncWiringError::Generated { call, .. }
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::Fuel(call))
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::Expansion { call, .. })
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::InvalidDefinition { call, .. })
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::InvalidProjection { call, .. })
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::UnsupportedDefinition { call, .. }) => Some(call),
+        ExpandedFuncWiringError::Base(GeneratedWiringError::Preparation(error)) =>
+            Some(LocatedName { source: error.source, span: error.site.span }),
+        _ => None,
     }
+}
+
+/// 展開後の結線、構文投影、評価で特定できた原因の元範囲を取り出す。
+pub open spec fn expanded_function_diagnostic_related<'p, 'a>(
+    error: ExpandedFuncWiringError<'p, 'a>,
+) -> Option<LocatedName<'p, 'a>> {
+    match error {
+        ExpandedFuncWiringError::Generated { cause, .. } => expanded_definition_cause_location(*cause),
+        ExpandedFuncWiringError::Base(GeneratedWiringError::InvalidDefinition { related, .. })
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::InvalidProjection { related, .. }) => related,
+        ExpandedFuncWiringError::Base(GeneratedWiringError::Expansion { definition, related, .. }) =>
+            Some(LocatedName { source: definition, span: related }),
+        _ => None,
+    }
+}
+
+spec fn diagnostic_in_body(body: &OrdinaryBody, error: ExpandedFuncWiringError) -> bool {
+    &&& (expanded_function_diagnostic_call(error) matches Some(call) ==> call_in_body(body, call))
+    &&& (error is Generated ==> expanded_function_diagnostic_related(error).is_some())
+    &&& (expanded_function_diagnostic_related(error) matches Some(site) ==> location_in_source(site))
 }
 
 spec fn macro_call_location<'p, 'a>(bound: &BoundMacroCall<'p, 'a>) -> LocatedName<'p, 'a> {
@@ -199,7 +234,8 @@ fn take_ordinary_before<'p, 'a>(
             &&& ordinary_before_matches(body, *old(position), *final(position), stop_form,
                 final(rows)@.skip(old(rows)@.len() as int))
         },
-        result matches Err(error) ==> !(error is Generated),
+        result matches Err(error) ==> expanded_function_diagnostic_call(error).is_none()
+            && expanded_function_diagnostic_related(error).is_none() && !expanded_function_is_wiring_diagnostic(error),
 {
     let start = *position;
     let offset = rows.len();
@@ -286,7 +322,7 @@ fn take_expansion<'p, 'a>(
             &&& call == macro_call_location(expanded.call_model()) && call_in_body(body, call)
             &&& expanded_definition_cause_location(*cause) matches Some(site) && location_in_source(site)
         },
-        result matches Err(error) ==> !generated_error_after_collection(error),
+        result matches Err(error) ==> diagnostic_in_body(body, error) && !expanded_function_is_wiring_diagnostic(error),
 {
     let aliases = body.aliases;
     let offset = rows.len();
@@ -443,6 +479,26 @@ spec fn cursor_stays_in_body(body: &OrdinaryBody, initial: MacroCalls, cursor: M
     &&& cursor.sites_model().body_model() == initial.sites_model().body_model()
 }
 
+proof fn indexed_call_in_body(
+    body: &OrdinaryBody, initial: MacroCalls, later: MacroCalls, site: RoutineExpansionSite,
+    origin: LocatedName,
+)
+    requires
+        mixed_calls_start(body, initial), cursor_stays_in_body(body, initial, later),
+        origin.source == later.source_model(), origin.span == site.span,
+        macro_call_spans_in_source(later.source_model().text_model(), site),
+        routine_expansion_site_at(later.source_model().text_model(), later.sites_model().syntax_model().forms@,
+            later.sites_model().body_model().start as int, later.sites_model().body_model().end as int, site),
+    ensures call_in_body(body, origin), location_in_source(origin),
+{
+    let region = later.sites_model().body_model();
+    origin.source.text_model_is_text();
+    located_name_evidence(origin);
+    reveal(call_in_body);
+    assert(expansion_body_region_matches(body.source.text_model(), &body.parsed.syntax, body.entry as int,
+        Some((region.start, region.end))));
+}
+
 proof fn resolved_call_in_body(
     body: &OrdinaryBody, initial: MacroCalls, before: MacroCalls, later: MacroCalls, bound: BoundMacroCall,
 )
@@ -451,18 +507,36 @@ proof fn resolved_call_in_body(
     ensures cursor_stays_in_body(body, initial, later), call_in_body(body, macro_call_location(&bound)),
         location_in_source(macro_call_location(&bound)),
 {
-    let origin = macro_call_location(&bound);
-    let source = origin.source;
-    let site = bound.site_model();
-    let region = later.sites_model().body_model();
-    assert(macro_call_spans_in_source(source.text_model(), site));
-    source.text_model_is_text();
-    located_name_evidence(origin);
-    reveal(call_in_body);
-    assert(expansion_body_region_matches(body.source.text_model(), &body.parsed.syntax, body.entry as int,
-        Some((region.start, region.end))));
-    assert(routine_expansion_site_at(body.source.text_model(), body.parsed.syntax.forms@,
-        region.start as int, region.end as int, site));
+    indexed_call_in_body(body, initial, later, bound.site_model(), macro_call_location(&bound));
+}
+
+proof fn failed_call_in_body(
+    body: &OrdinaryBody, initial: MacroCalls, before: MacroCalls, later: MacroCalls, error: MacroPreparationError,
+)
+    requires mixed_calls_start(body, initial), cursor_stays_in_body(body, initial, before),
+        before.binding_advances(&later, Some(Err(error))),
+    ensures call_in_body(body, LocatedName { source: error.source, span: error.site.span }),
+{
+    indexed_call_in_body(body, initial, later, error.site, LocatedName { source: error.source, span: error.site.span });
+}
+
+proof fn expansion_error_location(start: MacroExpansion, error: MacroExpansionError)
+    requires start.call_model().valid(), start.failure_matches(error),
+    ensures location_in_source(LocatedName { source: error.definition, span: error.related }),
+{
+    let checked = start.call_model().body_model();
+    let body = checked.body_model();
+    let at = match error.kind {
+        crate::ncg2m::call_evaluation::macro_expansion::MacroExpansionErrorKind::Expression { .. } => {
+            choose|at: usize| at < body.forms@.len() && #[trigger] form_span(body.forms@[at as int]) == error.related
+        },
+        _ => checked.elements_model()[error.element as int].at_model(),
+    };
+    assert(checked_macro_body_layout(&checked));
+    assert(at < body.forms@.len() && error.related == form_span(body.forms@[at as int]));
+    body.source.text_model_is_text();
+    reveal(form_spans_valid);
+    located_name_evidence(LocatedName { source: error.definition, span: error.related });
 }
 
 proof fn scoped_wiring_error_in_body(body: &OrdinaryBody, rows: Seq<ScopedDefinition>, error: ExpandedFuncWiringError)
@@ -485,7 +559,7 @@ fn collect_body<'p, 'a>(
     requires body.valid(), mixed_calls_start(body, initial),
     ensures
         result matches Ok(rows) ==> locations_valid(body, rows@) && complete_mixed_body(body, initial, fuel@ as nat, rows@),
-        result matches Err(error) ==> diagnostic_in_body(body, error) && !generated_error_after_collection(error),
+        result matches Err(error) ==> diagnostic_in_body(body, error) && !expanded_function_is_wiring_diagnostic(error),
 {
     let mut rows: Vec<ScopedDefinition<'p, 'a>> = Vec::new();
     let mut calls = initial;
@@ -511,19 +585,26 @@ fn collect_body<'p, 'a>(
         let ghost between = rows@;
         let bound = match next {
             Ok(bound) => bound,
-            Err(error) => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Preparation(error))),
+            Err(error) => {
+                proof { failed_call_in_body(body, initial, before.0, calls, error); }
+                return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Preparation(error)));
+            },
         };
         proof { resolved_call_in_body(body, initial, before.0, calls, bound); }
         let site = bound.site();
         let call = LocatedName { source: bound.scope().source, span: site.span.start..site.span.end };
+        assert(call == macro_call_location(&bound));
         let start = bound.start_expansion();
         let ghost initial_expansion = start;
         let expanded = match start.run_slice(fuel) {
             Ok(MacroExpansionSlice::Complete(expanded)) => expanded,
             Ok(MacroExpansionSlice::Suspended(_)) => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Fuel(call))),
-            Err(error) => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Expansion {
-                call, related: error.related, kind: error.kind,
-            })),
+            Err(error) => {
+                proof { expansion_error_location(initial_expansion, error); }
+                return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Expansion {
+                    call, definition: error.definition, related: error.related, kind: error.kind,
+                }));
+            },
         };
         take_expansion(body, &expanded, &mut rows)?;
         proof {
@@ -582,11 +663,15 @@ proof fn record_expanded_bit_func(
 {
 }
 
-/// 生成診断の主範囲が、検査対象の関数本体にある展開呼び出しを指す。
+/// 展開の診断が検査対象の関数本体にある呼び出しを指す。
+///
+/// 原因の元範囲は元文書の UTF-8 文字境界にある。
 pub open spec fn expanded_function_diagnostic_source(
     aliases: &MixedUseAliases, file: usize, entry: usize, error: ExpandedFuncWiringError,
 ) -> bool {
-    error matches ExpandedFuncWiringError::Generated { call, cause } ==> {
+    &&& (error is Generated ==> expanded_function_diagnostic_related(error).is_some())
+    &&& (expanded_function_diagnostic_related(error) matches Some(site) ==> location_in_source(site))
+    &&& (expanded_function_diagnostic_call(error) matches Some(call) ==> {
         let project = aliases.targets_model().project_model();
         let source = &project.sources_model()[file as int];
         let parsed = &project.indexes_model()[file as int]->Circuit_0;
@@ -594,13 +679,12 @@ pub open spec fn expanded_function_diagnostic_source(
         &&& project.indexes_model()[file as int] is Circuit
         &&& entry < parsed.syntax.entries@.len() && parsed.syntax.entries@[entry as int].head is Func
         &&& *source == *call.source && location_in_source(call)
-        &&& (expanded_definition_cause_location(*cause) matches Some(site) && location_in_source(site))
         &&& exists|first: usize, last: usize, site: RoutineExpansionSite| {
             &&& expansion_body_region_matches(source.text_model(), &parsed.syntax, entry as int, Some((first, last)))
             &&& #[trigger] routine_expansion_site_at(source.text_model(), parsed.syntax.forms@, first as int, last as int, site)
             &&& call.span == site.span
         }
-    }
+    })
 }
 
 proof fn expanded_diagnostic_from_body(
@@ -609,23 +693,74 @@ proof fn expanded_diagnostic_from_body(
     requires source_body_matches(body, aliases, file, entry), diagnostic_in_body(body, error),
     ensures expanded_function_diagnostic_source(aliases, file, entry, error),
 {
-    if let ExpandedFuncWiringError::Generated { call, .. } = error {
-        reveal(call_in_body);
-        assert(location_in_source(call));
-    }
+    reveal(call_in_body);
 }
 
 /// 生成後の結線・幅の診断が、同じ関数を展開した本体の行と、その行の原因位置に対応する。
 pub closed spec fn expanded_function_wiring_diagnostic(
     aliases: &MixedUseAliases, file: usize, entry: usize, fuel: nat, error: ExpandedFuncWiringError,
 ) -> bool {
-    generated_error_after_collection(error) ==> {
+    expanded_function_is_wiring_diagnostic(error) ==> {
         exists|body: OrdinaryBody, initial: MacroCalls, rows: Seq<ScopedDefinition>| {
             &&& source_body_matches(&body, aliases, file, entry)
             &&& mixed_calls_start(&body, initial)
             &&& #[trigger] complete_mixed_body(&body, initial, fuel, rows)
+            &&& locations_valid(&body, rows)
             &&& scoped_wiring_diagnostic_source(rows, error)
         }
+    }
+}
+
+/// 検査対象の関数を展開して得た、診断対象の定義を表す。
+///
+/// `row` は展開後の本体順の添字。左辺と右辺の先頭は元の文書と版を指す。
+pub closed spec fn expanded_function_diagnostic_row(
+    aliases: &MixedUseAliases, file: usize, entry: usize, fuel: nat, error: ExpandedFuncWiringError,
+    row: int, target: LocatedName, expression: LocatedName,
+) -> bool {
+    &&& error matches ExpandedFuncWiringError::Generated { call, cause }
+    &&& exists|body: OrdinaryBody, initial: MacroCalls, rows: Seq<ScopedDefinition>| {
+        &&& source_body_matches(&body, aliases, file, entry)
+        &&& mixed_calls_start(&body, initial)
+        &&& #[trigger] complete_mixed_body(&body, initial, fuel, rows)
+        &&& 0 <= row < rows.len()
+        &&& rows[row].call == Some(call) && row_diagnostic_at(rows[row], *cause)
+        &&& rows[row].target.location_model() == target && rows[row].expression == expression
+    }
+}
+
+/// 結線や幅の違反から、その原因となった生成定義の本体内の順序と元範囲を得る。
+pub proof fn expanded_function_wiring_diagnostic_row(
+    aliases: &MixedUseAliases, file: usize, entry: usize, fuel: nat, error: ExpandedFuncWiringError,
+)
+    requires expanded_function_is_wiring_diagnostic(error), expanded_function_wiring_diagnostic(aliases, file, entry, fuel, error),
+    ensures exists|row: int, target: LocatedName, expression: LocatedName| {
+        &&& 0 <= row && #[trigger] expanded_function_diagnostic_row(aliases, file, entry, fuel, error, row, target, expression)
+        &&& location_in_source(target) && location_in_source(expression)
+        &&& match error {
+            ExpandedFuncWiringError::Generated { cause, .. } => {
+                (*cause is OutputWidthFromDefinition
+                    || (*cause matches ExpandedFuncWiringError::Base(reason) && reason is MultipleDrivers))
+                    ==> expanded_definition_cause_location(*cause) == Some(target)
+            },
+            _ => false,
+        }
+    },
+{
+    if let ExpandedFuncWiringError::Generated { call, cause } = error {
+        let (body, initial, rows) = choose|body: OrdinaryBody, initial: MacroCalls, rows: Seq<ScopedDefinition>| {
+            &&& source_body_matches(&body, aliases, file, entry)
+            &&& mixed_calls_start(&body, initial)
+            &&& #[trigger] complete_mixed_body(&body, initial, fuel, rows)
+            &&& locations_valid(&body, rows)
+            &&& scoped_wiring_diagnostic_source(rows, error)
+        };
+        let row = choose|i: int| 0 <= i < rows.len() && (#[trigger] rows[i]).call == Some(call)
+            && row_diagnostic_at(rows[i], *cause);
+        assert(definition_in_body(&body, rows[row]));
+        let target = rows[row].target.location_model();
+        let expression = rows[row].expression;
+        assert(expanded_function_diagnostic_row(aliases, file, entry, fuel, error, row, target, expression));
     }
 }
 
@@ -635,7 +770,7 @@ proof fn expanded_wiring_diagnostic_from_body(
 )
     requires
         source_body_matches(body, aliases, file, entry), mixed_calls_start(body, initial),
-        complete_mixed_body(body, initial, fuel, rows), scoped_wiring_diagnostic_source(rows, error),
+        complete_mixed_body(body, initial, fuel, rows), locations_valid(body, rows), scoped_wiring_diagnostic_source(rows, error),
     ensures expanded_function_wiring_diagnostic(aliases, file, entry, fuel, error),
 {}
 
@@ -650,7 +785,8 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     ///
     /// 基底と署名を検査してから本体を順に展開する。駆動元を登録した後、定義と出力の幅を
     /// 順に検査する。対応範囲外の式、先行しない駆動元、NOR の幅違反には元文書の範囲を返す。
-    /// 生成定義の診断では、その定義を生成した `expand` の位置を主範囲として返す。
+    /// マクロの準備、評価、生成定義の検査に関する診断では `expand` の位置と文書版を返す。
+    /// 評価や生成定義の検査で原因の範囲を特定できる場合は、原因の元文書と範囲も返す。
     pub fn check_expanded_bit_func(
         &self, file: usize, entry: usize, width_limit: u64, fuel: NonZeroUsize,
     ) -> (result: Result<Option<CheckedBitFunc<'p, 'a>>, ExpandedFuncWiringError<'p, 'a>>)

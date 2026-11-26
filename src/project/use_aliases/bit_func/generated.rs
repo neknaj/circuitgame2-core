@@ -3,7 +3,7 @@
 use super::{BitFuncRhs, CheckedBitDefinition, CheckedBitFunc, OutputDriver, TypedRoutineSignature};
 use crate::project::{
     GeneratedSignalAlias, LocalSignalKey, LocatedName, MacroPreparationError, MixedTypedSignatureError,
-    MixedUseAliases, ProjectSourceIndex, ResolvedPortType,
+    MixedUseAliases, ProjectSource, ProjectSourceIndex, ResolvedPortType,
 };
 use crate::ncg2m::call_evaluation::macro_expansion::MacroExpansionErrorKind;
 use crate::ncg2m::call_evaluation::macro_syntax::ArgumentSyntaxToken;
@@ -16,9 +16,8 @@ use crate::syntax::{Form, form_span};
 use super::super::{TypedPort, function_drivers::names_match_ports};
 #[cfg(verus_only)]
 use crate::project::{
-    circuits::parsed_index_evidence, source_indexes::project_source_index_evidence, mixed_use_targets_match, ProjectSource,
+    circuits::parsed_index_evidence, source_indexes::project_source_index_evidence, mixed_use_targets_match,
 };
-use core::ops::Range;
 use super::super::{function_atoms::copy_location, local_signal_index::LocalSignalIndex};
 #[cfg(verus_only)]
 use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available};
@@ -26,6 +25,7 @@ use super::{bit_definition_matches, bit_driver_width, checked_bit_func_available
 use crate::project::location_in_source;
 use crate::syntax::circuit::NameSite;
 use alloc::vec::Vec;
+use core::ops::Range;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -37,9 +37,14 @@ mod rows;
 mod wiring;
 mod mixed_body;
 #[cfg(verus_only)]
-pub use mixed_body::{expanded_bit_func_matches, expanded_function_diagnostic_source, expanded_function_wiring_diagnostic};
+pub use mixed_body::{
+    expanded_bit_func_matches,
+    expanded_function_diagnostic_call, expanded_function_diagnostic_related, expanded_function_diagnostic_row,
+    expanded_function_diagnostic_source, expanded_function_wiring_diagnostic,
+    expanded_function_wiring_diagnostic_row,
+};
 #[cfg(verus_only)]
-pub use wiring::{expanded_definition_cause_location, expanded_definition_diagnostic_wraps};
+pub use wiring::{expanded_definition_cause_location, expanded_definition_diagnostic_wraps, expanded_function_is_wiring_diagnostic};
 pub use wiring::ExpandedFuncWiringError;
 use collection::collect_generated_aliases;
 #[cfg(verus_only)]
@@ -67,7 +72,9 @@ pub enum GeneratedWiringError<'p, 'a> {
     Expansion {
         /// 展開呼び出しの元範囲。
         call: LocatedName<'p, 'a>,
-        /// マクロ本体で評価に失敗した範囲。
+        /// 評価に失敗したマクロ本体のファイルと文書版。
+        definition: &'p ProjectSource<'a>,
+        /// マクロ本体を参照する UTF-8 半開バイト範囲。
         related: Range<usize>,
         /// 評価を止めた理由。
         kind: MacroExpansionErrorKind,
@@ -217,6 +224,7 @@ fn index_generated_inputs<'p, 'a>(signature: &TypedRoutineSignature<'p, 'a>, nam
     requires names@.len() == signature.inputs@.len(),
     ensures result matches Ok(index) ==> index.valid()
         && indexed_keys(names@, Seq::<GeneratedSignalAlias>::empty(), names@.len() as int, 0, index.keyed_bindings()),
+        result matches Err(error) ==> error is MultipleDrivers || error is Capacity,
 {
     let mut index = LocalSignalIndex::new();
     let mut i = 0;

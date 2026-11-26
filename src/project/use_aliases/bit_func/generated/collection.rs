@@ -298,7 +298,9 @@ pub(super) fn collect_generated_aliases<'p, 'a>(initial: MacroCalls<'_, '_, 'p, 
         let expanded = match start.run_slice(fuel) {
             Ok(MacroExpansionSlice::Complete(expanded)) => expanded,
             Ok(MacroExpansionSlice::Suspended(_)) => return Err(GeneratedWiringError::Fuel(call)),
-            Err(error) => return Err(GeneratedWiringError::Expansion { call, related: error.related, kind: error.kind }),
+            Err(error) => return Err(GeneratedWiringError::Expansion {
+                call, definition: error.definition, related: error.related, kind: error.kind,
+            }),
         };
         let ghost earlier = aliases@;
         check_generated_alias_elements(&expanded, &mut aliases)?;

@@ -139,8 +139,8 @@ pub(super) open spec fn row_diagnostic_at(definition: ScopedDefinition, error: E
     }
 }
 
-// 名前解決を終えてから、生成済みの定義を検査して見つかる違反。
-pub(super) open spec fn generated_error_after_collection(error: ExpandedFuncWiringError) -> bool {
+/// 展開結果の名前解決後に行う、結線または幅検査の診断を表す。
+pub open spec fn expanded_function_is_wiring_diagnostic(error: ExpandedFuncWiringError) -> bool {
     error matches ExpandedFuncWiringError::Generated { cause, .. }
         && match *cause {
             ExpandedFuncWiringError::Base(GeneratedWiringError::MultipleDrivers(_))
@@ -159,6 +159,8 @@ pub(super) open spec fn scoped_wiring_diagnostic_source(
         ExpandedFuncWiringError::Generated { call, cause } =>
             exists|i: int| 0 <= i < definitions.len() && (#[trigger] definitions[i]).call == Some(call)
                 && row_diagnostic_at(definitions[i], *cause),
+        ExpandedFuncWiringError::Base(error) => !(error is Preparation || error is Expansion
+            || error is Fuel || error is InvalidDefinition || error is InvalidProjection || error is UnsupportedDefinition),
         _ => true,
     }
 }

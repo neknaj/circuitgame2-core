@@ -99,7 +99,12 @@ pub(crate) use use_aliases::TypedArithmeticSite;
 pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
 #[cfg(verus_only)]
-pub use use_aliases::{expanded_bit_func_matches, expanded_definition_cause_location, expanded_definition_diagnostic_wraps, expanded_function_diagnostic_source, expanded_function_wiring_diagnostic};
+pub use use_aliases::{
+    expanded_bit_func_matches, expanded_definition_cause_location, expanded_definition_diagnostic_wraps,
+    expanded_function_diagnostic_call, expanded_function_diagnostic_related, expanded_function_diagnostic_row,
+    expanded_function_diagnostic_source, expanded_function_is_wiring_diagnostic, expanded_function_wiring_diagnostic,
+    expanded_function_wiring_diagnostic_row,
+};
 pub use use_aliases::{CheckedGeneratedAliasFunc, ExpandedFuncWiringError, GeneratedSignalAlias, GeneratedSignalName, GeneratedSignalPosition, GeneratedWiringError};
 #[cfg(verus_only)]
 pub use use_aliases::{

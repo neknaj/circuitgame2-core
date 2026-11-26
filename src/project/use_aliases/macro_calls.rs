@@ -59,6 +59,8 @@ pub struct MacroCall<'p, 'a> {
 /// 展開呼び出しを名前解決または型検査できなかった最初の理由。
 #[derive(Debug)]
 pub struct MacroPreparationError<'p, 'a> {
+    /// 展開呼び出しのファイルと文書版。
+    pub source: &'p ProjectSource<'a>,
     /// 診断の対象になった元の展開呼び出し。
     pub site: RoutineExpansionSite,
     /// 呼び出しまたは本体の診断。
@@ -314,7 +316,7 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
                 &&& macro_arguments_cover(scope, next.sites_model().syntax_model().forms@,
                     site.arguments, bound.arguments_model())
             },
-            Some(Err(error)) => match error.kind {
+            Some(Err(error)) => error.source == next.source_model() && match error.kind {
                 MacroPreparationFailure::Call(cause) =>
                     self.advances(next, Some(MacroCall { site: error.site, target: Err(cause) })),
                 MacroPreparationFailure::Body { definition, error: cause } =>
@@ -343,7 +345,7 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
         let definition = match call.target {
             Ok(definition) => definition,
             Err(cause) => return Some(Err(MacroPreparationError {
-                site, kind: MacroPreparationFailure::Call(cause),
+                source: self.source, site, kind: MacroPreparationFailure::Call(cause),
             })),
         };
         let project = self.aliases.targets().project();
@@ -355,7 +357,7 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
                 Some(Ok(bind_macro_call(site, definition, body, arguments)))
             },
             Err(error) => Some(Err(MacroPreparationError {
-                site, kind: MacroPreparationFailure::Body { definition, error },
+                source: self.source, site, kind: MacroPreparationFailure::Body { definition, error },
             })),
         }
     }

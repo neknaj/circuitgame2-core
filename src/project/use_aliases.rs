@@ -4,7 +4,12 @@ mod alias_index;
 mod batch;
 mod bit_func;
 #[cfg(verus_only)]
-pub use bit_func::{expanded_bit_func_matches, expanded_definition_cause_location, expanded_definition_diagnostic_wraps, expanded_function_diagnostic_source, expanded_function_wiring_diagnostic};
+pub use bit_func::{
+    expanded_bit_func_matches, expanded_definition_cause_location, expanded_definition_diagnostic_wraps,
+    expanded_function_diagnostic_call, expanded_function_diagnostic_related, expanded_function_diagnostic_row,
+    expanded_function_diagnostic_source, expanded_function_is_wiring_diagnostic, expanded_function_wiring_diagnostic,
+    expanded_function_wiring_diagnostic_row,
+};
 pub use bit_func::{CheckedGeneratedAliasFunc, ExpandedFuncWiringError, GeneratedWiringError};
 pub use bit_func::{
     BitFuncError, BitFuncLowerError, CheckedBitFunc, ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic,
