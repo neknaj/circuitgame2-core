@@ -19,6 +19,91 @@ enum Goal {
     Infer,
 }
 
+/// `let` の初期化式を評価するときに使う、元の構文位置と推論された型。
+#[derive(Clone, Copy)]
+pub(crate) struct TypedLetInitializer {
+    /// 元の構文木における `let` 全体の位置。
+    pub(crate) owner: usize,
+    /// この `let` の束縛列における位置。
+    pub(crate) index: usize,
+    /// 元の構文木における束縛名の位置。
+    pub(crate) name: usize,
+    /// 元の構文木における初期化式の位置。
+    pub(crate) value: usize,
+    /// スカラー評価器で使える型。リストなどの場合は `None`。
+    pub(crate) scalar: Option<BuiltinDataType>,
+    inferred: Ghost<TypeShape>,
+    #[cfg(verus_only)]
+    environment: Ghost<Seq<TypeBinding>>,
+    #[cfg(verus_only)]
+    calls: Ghost<Seq<CallTypeEntry>>,
+}
+
+impl TypedLetInitializer {
+    /// 元の `let`、束縛列の添字、名前と式の位置、スカラー型を表す。
+    pub(crate) closed spec fn model(&self) -> (usize, usize, usize, usize, Option<BuiltinDataType>) {
+        (self.owner, self.index, self.name, self.value, self.scalar)
+    }
+
+    /// 型検査で確定した位置と型を返す。
+    pub(crate) fn binding_site(&self) -> (site: (usize, usize, usize, usize, Option<BuiltinDataType>))
+        ensures site == self.model(),
+    {
+        (self.owner, self.index, self.name, self.value, self.scalar)
+    }
+}
+
+/// 束縛名と初期化式が元の構文木に含まれることを表す。
+pub(crate) open spec fn let_initializer_positions(forms: Seq<Form>, row: TypedLetInitializer) -> bool {
+    let (owner, _, name, value, _) = row.model();
+    owner < name < value < forms.len()
+}
+
+/// 元ソースと型検査時の環境から推論した型を、実行用のスカラー型へ射影したことを表す。
+pub(crate) closed spec fn initializer_inferred_from(
+    source: &str, forms: Seq<Form>, row: TypedLetInitializer,
+) -> bool {
+    &&& let_initializer_positions(forms, row)
+    &&& row.scalar == initializer_scalar(row.inferred@)
+    &&& typed_expression(row.calls@, source, forms, row.environment@, inferred_request(row.value), Goal::Infer)
+        == Ok(row.inferred@)
+}
+
+spec fn initializer_scalar(ty: TypeShape) -> Option<BuiltinDataType> {
+    if ty.list_depth != 0 { None } else {
+        match ty.builtin {
+            Some(builtin) if builtin is Bool || builtin is Integer => Some(builtin),
+            _ => None,
+        }
+    }
+}
+
+pub(super) closed spec fn initializer_trace_matches<'a>(
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, trace: Seq<TypedLetInitializer>,
+) -> bool {
+    forall|i: int| 0 <= i < trace.len() ==> {
+        let row = #[trigger] trace[i];
+        &&& row.calls@ == calls
+        &&& initializer_inferred_from(source, forms, row)
+    }
+}
+
+pub(super) open spec fn initializer_trace_model(trace: Option<Vec<TypedLetInitializer>>) -> Seq<TypedLetInitializer> {
+    match trace {
+        Some(rows) => rows@,
+        None => Seq::empty(),
+    }
+}
+
+pub(super) proof fn initializer_trace_evidence<'a>(
+    calls: Seq<CallTypeEntry>, source: &'a str, forms: Seq<Form>, rows: Seq<TypedLetInitializer>,
+)
+    requires initializer_trace_matches(calls, source, forms, rows),
+    ensures forall|i: int| 0 <= i < rows.len() ==> initializer_inferred_from(source, forms, #[trigger] rows[i]),
+{
+    reveal(initializer_trace_matches);
+}
+
 spec fn goal_rank(goal: Goal) -> nat {
     match goal { Goal::Check(_) => 0, Goal::Infer => 1 }
 }
@@ -733,7 +818,8 @@ spec fn wait_follows(calls: Seq<CallTypeEntry>, forms: Seq<Form>, waiting: Await
             && forms[owner as int] is List,
         Await::Binding { header, index, binding_owner, .. } => index < header.bindings@.len()
             && child.request.at == header.bindings@[index as int].value && child.request.list.is_none()
-            && child.scope == binding_owner.scope && child.goal == Goal::Infer,
+            && child.scope == binding_owner.scope && child.goal == Goal::Infer
+            && child.request == inferred_request(header.bindings@[index as int].value),
         Await::FoldInput { fold, .. } => child.request.at == fold.input && child.request.list.is_none(),
         Await::FoldInitial { fold, .. } => child.request.at == fold.initial && child.request.list.is_none(),
     }
@@ -2094,6 +2180,57 @@ proof fn next_initializer_has_inferred_type<'a>(
     assert(full.skip(full.len() as int) =~= Seq::<Pending>::empty());
 }
 
+fn retain_initializer<'a>(
+    _calls: &[CallTypeEntry], _source: &'a str, _forms: &[Form], _parameters: &[SignatureParameter<'a>],
+    _locals: &LocalScopes, work: &Pending, ty: TypeShape, capture: &mut Option<Vec<TypedLetInitializer>>,
+)
+    requires
+        wait_in_bounds(_calls@, _forms@, work.awaiting),
+        wait_follows(_calls@, _forms@, work.awaiting, work.child@),
+        work.awaiting is Binding ==> job_type(_calls@, _source, _forms@, _parameters@, _locals, work.child@) == Ok(ty),
+        initializer_trace_matches(_calls@, _source, _forms@, initializer_trace_model(*old(capture))),
+    ensures
+        initializer_trace_matches(_calls@, _source, _forms@, initializer_trace_model(*final(capture))),
+        final(capture).is_some() == old(capture).is_some(),
+{
+    if let Await::Binding { header, binding_owner, index, .. } = &work.awaiting {
+        if let Some(rows) = capture {
+            let binding = header.bindings[*index];
+            let scalar = if ty.list_depth != 0 { None } else {
+                match ty.builtin {
+                    Some(BuiltinDataType::Bool | BuiltinDataType::Integer(_)) => ty.builtin,
+                    _ => None,
+                }
+            };
+            let entry = TypedLetInitializer {
+                owner: binding_owner.request.at, index: *index, name: binding.name, value: binding.value, scalar,
+                inferred: Ghost(ty),
+                #[cfg(verus_only)]
+                environment: Ghost(lexical_view(_parameters@, _locals, binding_owner.scope)),
+                #[cfg(verus_only)]
+                calls: Ghost(_calls@),
+            };
+            let ghost before = rows@;
+            rows.push(entry);
+            proof {
+                reveal(initializer_trace_matches);
+                assert(work.child@.request == inferred_request(binding.value));
+                assert(job_type(_calls@, _source, _forms@, _parameters@, _locals, work.child@) == Ok(ty));
+                assert(initializer_trace_matches(_calls@, _source, _forms@, rows@)) by {
+                    assert forall|i: int| 0 <= i < rows@.len() implies {
+                        let row = #[trigger] rows@[i];
+                        &&& row.calls@ == _calls@
+                        &&& initializer_inferred_from(_source, _forms@, row)
+                    } by {
+                        if i < before.len() { assert(rows@[i] == before[i]); }
+                        else { assert(rows@[i] == entry); }
+                    };
+                };
+            }
+        }
+    }
+}
+
 proof fn pushed_pending_fits(
     calls: Seq<CallTypeEntry>,
     forms: Seq<Form>, locals: &LocalScopes, pending: Seq<Pending>, current: Job, child: Job, frame: Await,
@@ -2257,15 +2394,19 @@ fn type_with_scopes<'a>(
     source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>], at: usize, expected: TypeShape,
     trace: &mut Option<Vec<usize>>,
     arithmetic: &mut Option<Vec<usize>>,
+    initializers: &mut Option<Vec<TypedLetInitializer>>,
 ) -> (result: Result<TypeShape, ExpressionCheckFailure<'a>>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), at < forms@.len(),
         call_trace_model(*old(trace)).len() == 0,
         call_trace_model(*old(arithmetic)).len() == 0,
+        initializer_trace_model(*old(initializers)).len() == 0,
     ensures result == typed_expression(calls@, source, forms@, environment_view(parameters@),
         Request { at, expected, list: None }, Goal::Check(expected)),
         call_trace_fits(calls@, call_trace_model(*final(trace)), at, forms@.len()),
         arithmetic_trace_fits(calls@, call_trace_model(*final(arithmetic)), at, forms@.len()),
         final(arithmetic).is_some() == old(arithmetic).is_some(),
+        initializer_trace_matches(calls@, source, forms@, initializer_trace_model(*final(initializers))),
+        final(initializers).is_some() == old(initializers).is_some(),
 {
     let mut locals = LocalScopes::new();
     let mut job = check_job(Request { at, expected, list: None }, None);
@@ -2287,6 +2428,7 @@ fn type_with_scopes<'a>(
         };
         reveal(completed_typing);
         reveal(initializer_types_fit);
+        reveal(initializer_trace_matches);
     }
     loop
         invariant
@@ -2295,6 +2437,8 @@ fn type_with_scopes<'a>(
             call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
             call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
             arithmetic_trace_fits(calls@, call_trace_model(*arithmetic), at, job.request.at as nat),
+            initializer_trace_matches(calls@, source, forms@, initializer_trace_model(*initializers)),
+            initializers.is_some() == old(initializers).is_some(),
             arithmetic.is_some() == captures_arithmetic,
             captures_arithmetic == old(arithmetic).is_some(),
             at <= job.request.at,
@@ -2352,7 +2496,9 @@ fn type_with_scopes<'a>(
             invariant
                 call_entries_fit(forms@, calls@), usable_forms(source, forms@), request_ready(forms@, job.request), job_in_bounds(forms@, job),
                 call_trace_fits(calls@, call_trace_model(*trace), at, forms@.len()),
-                arithmetic.is_some() == captures_arithmetic,
+                initializer_trace_matches(calls@, source, forms@, initializer_trace_model(*initializers)),
+            initializers.is_some() == old(initializers).is_some(),
+            arithmetic.is_some() == captures_arithmetic,
                 captures_arithmetic == old(arithmetic).is_some(),
                 at <= job.request.at,
                 locals.contains(job.scope), pending_ranges(calls@, forms@, pending@, job), pending_scopes(&locals, pending@),
@@ -2385,6 +2531,7 @@ fn type_with_scopes<'a>(
                     next_initializer_has_inferred_type(calls@, source, forms@, parameters@, &locals, pending@, work, ty);
                 }
             }
+            retain_initializer(calls, source, forms, parameters, &locals, &work, ty, initializers);
             let result = accept_result(calls, source, forms, parameters, &mut locals, work.awaiting, ty, work.child);
             let ghost operation = result;
             proof {
@@ -2432,7 +2579,7 @@ pub(super) fn check_typed_body<'a>(
 {
     let calls: &[CallTypeEntry] = &[];
     assert(calls@ =~= Seq::<CallTypeEntry>::empty());
-    match type_with_scopes(calls, source, forms, parameters, at, expected, &mut None, &mut None) {
+    match type_with_scopes(calls, source, forms, parameters, at, expected, &mut None, &mut None, &mut None) {
         Ok(_) => BodyVerdict::Accepted,
         Err(error) => BodyVerdict::Rejected(error),
     }
@@ -2453,16 +2600,20 @@ pub(super) fn check_typed_body_with_calls<'a>(
     calls: &[CallTypeEntry], source: &'a str, forms: &[Form], parameters: &[SignatureParameter<'a>],
     at: usize, expected: TypeShape, trace: &mut Option<Vec<usize>>,
     arithmetic: &mut Option<Vec<usize>>,
+    initializers: &mut Option<Vec<TypedLetInitializer>>,
 ) -> (verdict: BodyVerdict<'a>)
     requires call_entries_fit(forms@, calls@), usable_forms(source, forms@), at < forms@.len(),
         call_trace_model(*old(trace)).len() == 0,
         call_trace_model(*old(arithmetic)).len() == 0,
+        initializer_trace_model(*old(initializers)).len() == 0,
     ensures verdict == typed_body_with_calls(calls@, source, forms@, environment_view(parameters@), at, expected),
         call_trace_fits(calls@, call_trace_model(*final(trace)), at, forms@.len()),
         arithmetic_trace_fits(calls@, call_trace_model(*final(arithmetic)), at, forms@.len()),
         final(arithmetic).is_some() == old(arithmetic).is_some(),
+        initializer_trace_matches(calls@, source, forms@, initializer_trace_model(*final(initializers))),
+        final(initializers).is_some() == old(initializers).is_some(),
 {
-    match type_with_scopes(calls, source, forms, parameters, at, expected, trace, arithmetic) {
+    match type_with_scopes(calls, source, forms, parameters, at, expected, trace, arithmetic, initializers) {
         Ok(_) => BodyVerdict::Accepted,
         Err(error) => BodyVerdict::Rejected(error),
     }

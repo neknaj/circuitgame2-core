@@ -1,11 +1,11 @@
 //! 元の本体と呼び出し先の署名を結び付け、型検査スタックに渡す。
 
 use super::*;
-use super::typing::{CallTypeEntry, CallTypeTarget, check_typed_body_with_calls};
+use super::typing::{CallTypeEntry, CallTypeTarget, TypedLetInitializer, check_typed_body_with_calls};
 use crate::ncg2m::integers::IntegerOperation;
 #[cfg(verus_only)]
 use super::typing::{arithmetic_trace_fits, widen_arithmetic_trace, call_entries_fit, call_trace_fits, call_trace_model,
-    trace_entry_in_range, canonical_call, typed_body_with_calls};
+    trace_entry_in_range, canonical_call, typed_body_with_calls, initializer_inferred_from, initializer_trace_evidence};
 use super::named_call::{prepare_call_types, read_call_form};
 #[cfg(verus_only)]
 use super::named_call::{call_form_matches, call_form_origin, call_signature_types_match, decoded_call_has_arity};
@@ -1619,7 +1619,7 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
     aliases: &MixedUseAliases<'_, 'p, 'a>, file: usize, item: usize, source: &'a str, forms: &[Form],
     entries: &[MetaItem], collect_edges: bool,
 ) -> (result: (Result<DefnSignature<'a>, DefnBodyCallError<'p, 'a>>,
-    Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallGraphError<'p, 'a>>, Vec<TypedArithmeticSite>))
+    Result<Vec<DefnCallEdge<'p, 'a>>, DefnCallGraphError<'p, 'a>>, Vec<TypedArithmeticSite>, Vec<TypedLetInitializer>))
     requires
         meta_ast_matches(source, forms@, entries@), meta_binding_spans_valid(source, entries@),
         item < entries@.len(), entries@[item as int].kind is Defn,
@@ -1634,6 +1634,8 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
         (!collect_edges || result.0.is_err()) ==> (result.1 matches Ok(edges) && edges@.len() == 0),
         (!collect_edges || result.0.is_err()) ==> result.2@.len() == 0,
         arithmetic_sites_fit(forms@, result.2@),
+        (!collect_edges || result.0.is_err()) ==> result.3@.len() == 0,
+        forall|i: int| 0 <= i < result.3@.len() ==> initializer_inferred_from(source, forms@, #[trigger] result.3@[i]),
         result.1 matches Ok(edges) ==> {
             &&& (collect_edges && result.0.is_ok()) ==>
                 defn_body_calls_cover_slots(aliases, DefnPosition { file, item }, edges@)
@@ -1673,8 +1675,9 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
     let ghost original_issues = call_issues@;
     let mut trace = if collect_edges { Some(Vec::new()) } else { None };
     let mut arithmetic = if collect_edges { Some(Vec::new()) } else { None };
+    let mut initializers = if collect_edges { Some(Vec::new()) } else { None };
     let outcome = match check_typed_body_with_calls(
-        &call_types, source, forms, &signature.parameters, body, expected, &mut trace, &mut arithmetic,
+        &call_types, source, forms, &signature.parameters, body, expected, &mut trace, &mut arithmetic, &mut initializers,
     ) {
         BodyVerdict::Accepted => Ok(signature),
         BodyVerdict::Rejected(error) => Err(match_body_error(&mut call_issues, error)),
@@ -1733,7 +1736,7 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
                         crate::ncg2m::defn::form_span_readable(source, forms@, at);
                         assert(unvisited_arithmetic_at_source(aliases, from, at, site));
                     }
-                    return (outcome, Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }), Vec::new());
+                    return (outcome, Err(DefnCallGraphError::UnvisitedArithmetic { from, at, site }), Vec::new(), Vec::new());
                 }
                 let sites = capture_arithmetic_sites(&call_types, visits.as_slice(), Ghost(forms@));
                 let _call_count = call_types.len();
@@ -1754,7 +1757,18 @@ pub(crate) fn check_indexed_call_body<'p, 'a>(
     } else {
         Vec::new()
     };
-    (outcome, edges, sites)
+    let initializers = if collect_edges && outcome.is_ok() {
+        match initializers {
+            Some(rows) => {
+                proof { initializer_trace_evidence(call_types@, source, forms@, rows@); }
+                rows
+            },
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    (outcome, edges, sites, initializers)
 }
 
 proof fn read_recorded_call_form<'p, 'a>(
