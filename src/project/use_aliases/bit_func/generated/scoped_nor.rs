@@ -72,6 +72,13 @@ pub(super) enum NorScopeError<'p, 'a> {
     },
 }
 
+pub(super) open spec fn nor_scope_error_location<'p, 'a>(error: NorScopeError<'p, 'a>) -> LocatedName<'p, 'a> {
+    match error {
+        NorScopeError::MissingScope(site) | NorScopeError::Function { callee: site, .. }
+        | NorScopeError::Name { callee: site, .. } => site,
+    }
+}
+
 spec fn selected_nor_scope(aliases: &MixedUseAliases, at: CalleeScope, selected: Option<(usize, DefnScope)>) -> bool {
     let project = aliases.targets_model().project_model();
     match at {
@@ -175,6 +182,7 @@ pub(super) fn check_scoped_nor<'p, 'a>(
 ) -> (outcome: Result<(), NorScopeError<'p, 'a>>)
     requires spelling.spec_bytes() == "nor".spec_bytes(), bare_atom_kind(spelling.spec_bytes()) == Some(AtomKind::Name),
     ensures scoped_nor_matches(aliases, scope, callee, outcome),
+        outcome matches Err(error) ==> nor_scope_error_location(error) == callee,
 {
     let Some((file, found)) = read_nor_scope(aliases, scope) else { return Err(NorScopeError::MissingScope(callee)); };
     let ghost original = callee;

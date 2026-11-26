@@ -4,7 +4,7 @@ use super::{
     GeneratedWiringError,
     rows::{ScopedDefinition, read_ordinary_definition, read_template_definition},
     scoped_nor::{CalleeScope, NorScopeError},
-    wiring::{ExpandedFuncWiringError, check_scoped_wiring},
+    wiring::{ExpandedFuncWiringError, check_scoped_wiring, with_generated_call},
 };
 use super::super::CheckedBitFunc;
 use crate::ncg2m::call_evaluation::{
@@ -22,11 +22,16 @@ use core::num::NonZeroUsize;
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::{
-    generated_port_names_from_signature, generated_port_names_match, wiring::expanded_bit_func_wiring,
+    generated_port_names_from_signature, generated_port_names_match, scoped_nor::nor_scope_error_location,
+    wiring::{expanded_bit_func_wiring, expanded_definition_cause_location, generated_error_after_collection, scoped_diagnostic_cause_location, scoped_wiring_diagnostic_source},
     rows::{ordinary_simple_definition, scoped_definition_locations, template_simple_definition},
 };
 #[cfg(verus_only)]
-use crate::syntax::circuit::{NameSite, routine_expansion_sites_match};
+use crate::syntax::circuit::{
+    NameSite, RoutineExpansionSite, expansion_body_region_matches, routine_expansion_site_at, routine_expansion_sites_match,
+};
+#[cfg(verus_only)]
+use crate::ncg2m::call_evaluation::macro_binding::BoundMacroCall;
 #[cfg(verus_only)]
 use crate::ncg2m::call_evaluation::macro_expansion::{MacroExpansion, macro_expansion_slice_matches};
 #[cfg(verus_only)]
@@ -34,7 +39,8 @@ use super::super::checked_bit_func_available;
 #[cfg(verus_only)]
 use crate::ncg2m::call_evaluation::macro_syntax::{CheckedTemplateDefinition, template_definition_check_matches};
 #[cfg(verus_only)]
-use crate::project::{circuits::parsed_index_evidence, source_indexes::project_source_index_evidence, mixed_use_targets_match};
+use crate::project::{circuits::parsed_index_evidence, declarations::located_name_evidence, location_in_source,
+    macro_call_spans_in_source, source_indexes::project_source_index_evidence, mixed_use_targets_match};
 #[cfg(verus_only)]
 use crate::syntax::{
     circuit::{build_definition_scope_evidence, build_index_matches}, form_spans_valid,
@@ -65,21 +71,54 @@ impl OrdinaryBody<'_, '_, '_, '_> {
     spec fn range(&self) -> core::ops::Range<usize> { self.parsed.entry_ranges@[self.entry as int].definitions }
 }
 
-spec fn locations_valid(rows: Seq<ScopedDefinition>) -> bool {
-    forall|i: int| 0 <= i < rows.len() ==> scoped_definition_locations(#[trigger] rows[i])
+
+#[verifier::opaque]
+spec fn call_in_body(body: &OrdinaryBody, call: LocatedName) -> bool {
+    &&& *call.source == *body.source && location_in_source(call)
+    &&& exists|first: usize, last: usize, site: RoutineExpansionSite| {
+        &&& expansion_body_region_matches(body.source.text_model(), &body.parsed.syntax, body.entry as int, Some((first, last)))
+        &&& #[trigger] routine_expansion_site_at(
+            body.source.text_model(), body.parsed.syntax.forms@, first as int, last as int, site,
+        )
+        &&& call.span == site.span
+    }
 }
 
-proof fn push_keeps_locations(rows: Seq<ScopedDefinition>, row: ScopedDefinition)
-    requires locations_valid(rows), scoped_definition_locations(row),
-    ensures locations_valid(rows.push(row)),
+spec fn definition_in_body(body: &OrdinaryBody, definition: ScopedDefinition) -> bool {
+    &&& scoped_definition_locations(definition)
+    &&& (definition.call matches Some(call) ==> call_in_body(body, call))
+}
+
+spec fn locations_valid(body: &OrdinaryBody, rows: Seq<ScopedDefinition>) -> bool {
+    forall|i: int| 0 <= i < rows.len() ==> definition_in_body(body, #[trigger] rows[i])
+}
+
+proof fn push_keeps_locations(body: &OrdinaryBody, rows: Seq<ScopedDefinition>, row: ScopedDefinition)
+    requires locations_valid(body, rows), definition_in_body(body, row),
+    ensures locations_valid(body, rows.push(row)),
 {
     let next = rows.push(row);
-    assert forall|i: int| 0 <= i < next.len() implies scoped_definition_locations(#[trigger] next[i]) by {
+    assert forall|i: int| 0 <= i < next.len() implies definition_in_body(body, #[trigger] next[i]) by {
         if i < rows.len() { assert(next[i] == rows[i]); }
     };
 }
 
-fn map_nor_scope_error<'p, 'a>(error: NorScopeError<'p, 'a>) -> ExpandedFuncWiringError<'p, 'a> {
+spec fn diagnostic_in_body(body: &OrdinaryBody, error: ExpandedFuncWiringError) -> bool {
+    error matches ExpandedFuncWiringError::Generated { call, cause } ==> {
+        &&& call_in_body(body, call)
+        &&& expanded_definition_cause_location(*cause) matches Some(site) && location_in_source(site)
+    }
+}
+
+spec fn macro_call_location<'p, 'a>(bound: &BoundMacroCall<'p, 'a>) -> LocatedName<'p, 'a> {
+    LocatedName { source: bound.scope_model().source, span: bound.site_model().span }
+}
+
+fn map_nor_scope_error<'p, 'a>(error: NorScopeError<'p, 'a>) -> (out: ExpandedFuncWiringError<'p, 'a>)
+    ensures
+        !(out is Generated), expanded_definition_cause_location(out) == Some(nor_scope_error_location(error)),
+        out is NorScope || out is NorName || out is NorResolvesToFunction,
+{
     match error {
         NorScopeError::MissingScope(callee) => ExpandedFuncWiringError::NorScope(callee),
         NorScopeError::Function { callee, declaration } => ExpandedFuncWiringError::NorResolvesToFunction { callee, declaration },
@@ -152,14 +191,15 @@ proof fn prefix_after_row<'p, 'a>(before: Seq<ScopedDefinition<'p, 'a>>, item: S
 fn take_ordinary_before<'p, 'a>(
     body: &OrdinaryBody<'_, '_, 'p, 'a>, position: &mut usize, stop_form: Option<usize>, rows: &mut Vec<ScopedDefinition<'p, 'a>>,
 ) -> (result: Result<(), ExpandedFuncWiringError<'p, 'a>>)
-    requires body.valid(), body.range().start <= *old(position) <= body.range().end, locations_valid(old(rows)@),
-    ensures body.range().start <= *final(position) <= body.range().end, locations_valid(final(rows)@),
+    requires body.valid(), body.range().start <= *old(position) <= body.range().end, locations_valid(body, old(rows)@),
+    ensures body.range().start <= *final(position) <= body.range().end, locations_valid(body, final(rows)@),
         result.is_ok() ==> {
             &&& old(rows)@.len() <= final(rows)@.len()
             &&& final(rows)@.take(old(rows)@.len() as int) == old(rows)@
             &&& ordinary_before_matches(body, *old(position), *final(position), stop_form,
                 final(rows)@.skip(old(rows)@.len() as int))
         },
+        result matches Err(error) ==> !(error is Generated),
 {
     let start = *position;
     let offset = rows.len();
@@ -168,7 +208,7 @@ fn take_ordinary_before<'p, 'a>(
     let forms = body.parsed.syntax.forms.as_slice();
     while *position < stop
         invariant body.valid(), stop == body.range().end, body.range().start <= *position <= stop,
-            forms@ == body.parsed.syntax.forms@, locations_valid(rows@),
+            forms@ == body.parsed.syntax.forms@, locations_valid(body, rows@),
             start == *old(position), offset == earlier.len(), earlier == old(rows)@,
             offset <= rows@.len(), rows@.take(offset as int) == earlier,
             ordinary_prefix(body, start as int, *position as int, stop_form, rows@.skip(offset as int)),
@@ -189,7 +229,7 @@ fn take_ordinary_before<'p, 'a>(
             Err(error) => return Err(map_nor_scope_error(error)),
         };
         proof {
-            push_keeps_locations(rows@, definition);
+            push_keeps_locations(body, rows@, definition);
             assert(ordinary_row_matches(body, *position as int, stop_form, definition)) by {
                 reveal(ordinary_row_matches);
             };
@@ -207,6 +247,7 @@ spec fn template_element_matches(
     aliases: &MixedUseAliases, expanded: &MacroExpandedBody, element: usize, definition: ScopedDefinition,
 ) -> bool {
     element < expanded.elements_model().len()
+        && definition.call == Some(macro_call_location(expanded.call_model()))
         && exists|checked: CheckedTemplateDefinition|
             #[trigger] template_definition_check_matches(expanded, element, Some(Ok(checked)))
             && template_simple_definition(aliases, &checked, definition)
@@ -219,6 +260,7 @@ proof fn record_template_element(
     requires element < expanded.elements_model().len(),
         template_definition_check_matches(expanded, element, Some(Ok(checked))),
         template_simple_definition(aliases, &checked, definition),
+        definition.call == Some(macro_call_location(expanded.call_model())),
     ensures template_element_matches(aliases, expanded, element, definition),
 {
     reveal(template_element_matches);
@@ -230,31 +272,41 @@ spec fn generated_rows_match(aliases: &MixedUseAliases, expanded: &MacroExpanded
 }
 
 fn take_expansion<'p, 'a>(
-    aliases: &MixedUseAliases<'_, 'p, 'a>, expanded: &MacroExpandedBody<'_, 'p, 'a>, rows: &mut Vec<ScopedDefinition<'p, 'a>>,
+    body: &OrdinaryBody<'_, '_, 'p, 'a>, expanded: &MacroExpandedBody<'_, 'p, 'a>, rows: &mut Vec<ScopedDefinition<'p, 'a>>,
 ) -> (result: Result<(), ExpandedFuncWiringError<'p, 'a>>)
-    requires locations_valid(old(rows)@),
-    ensures locations_valid(final(rows)@),
+    requires locations_valid(body, old(rows)@), call_in_body(body, macro_call_location(expanded.call_model())),
+        location_in_source(macro_call_location(expanded.call_model())),
+    ensures locations_valid(body, final(rows)@),
         result.is_ok() ==> {
             &&& old(rows)@.len() <= final(rows)@.len()
             &&& final(rows)@.take(old(rows)@.len() as int) == old(rows)@
-            &&& generated_rows_match(aliases, expanded, final(rows)@.skip(old(rows)@.len() as int))
+            &&& generated_rows_match(body.aliases, expanded, final(rows)@.skip(old(rows)@.len() as int))
         },
+        result matches Err(ExpandedFuncWiringError::Generated { call, cause }) ==> {
+            &&& call == macro_call_location(expanded.call_model()) && call_in_body(body, call)
+            &&& expanded_definition_cause_location(*cause) matches Some(site) && location_in_source(site)
+        },
+        result matches Err(error) ==> !generated_error_after_collection(error),
 {
+    let aliases = body.aliases;
     let offset = rows.len();
     let ghost earlier = rows@;
     let bound = expanded.call();
     let site = bound.site();
     let source = bound.scope().source;
+    let primary = LocatedName { source, span: site.span.start..site.span.end };
+    assert(primary == macro_call_location(expanded.call_model()));
     let count = expanded.elements().len();
     let mut element = 0;
     while element < count
-        invariant element <= count == expanded.elements_model().len(), locations_valid(rows@),
+        invariant element <= count == expanded.elements_model().len(), locations_valid(body, rows@),
+            primary == macro_call_location(expanded.call_model()), location_in_source(primary), call_in_body(body, primary),
             offset == earlier.len(), earlier == old(rows)@,
             offset + element == rows@.len(), rows@.take(offset as int) == earlier,
             forall|i: int| 0 <= i < element ==> template_element_matches(aliases, expanded, i as usize, #[trigger] rows@[offset + i]),
         decreases count - element,
     {
-        let call = LocatedName { source, span: site.span.start..site.span.end };
+        let call = crate::project::use_aliases::function_atoms::copy_location(&primary);
         let checked = match expanded.check_template_definition(element) {
             Some(Ok(checked)) => checked,
             None => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::UnsupportedDefinition { call, element })),
@@ -277,13 +329,13 @@ fn take_expansion<'p, 'a>(
                 return Err(ExpandedFuncWiringError::Base(error));
             },
         };
-        let definition = match read_template_definition(aliases, &checked) {
+        let definition = match read_template_definition(aliases, &checked, &call) {
             Ok(Some(definition)) => definition,
             Ok(None) => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::UnsupportedDefinition { call, element })),
-            Err(error) => return Err(map_nor_scope_error(error)),
+            Err(error) => return Err(with_generated_call(Some(&call), map_nor_scope_error(error))),
         };
         proof {
-            push_keeps_locations(rows@, definition);
+            push_keeps_locations(body, rows@, definition);
             record_template_element(aliases, expanded, element, checked, definition);
             prefix_after_row(rows@, definition, offset as int);
         }
@@ -384,18 +436,64 @@ proof fn finish_mixed_body(
     reveal(complete_mixed_body);
 }
 
+spec fn cursor_stays_in_body(body: &OrdinaryBody, initial: MacroCalls, cursor: MacroCalls) -> bool {
+    &&& cursor.valid()
+    &&& cursor.origin_model() == (body.file, body.entry) && cursor.aliases_model() == body.aliases
+    &&& *cursor.source_model() == *body.source && *cursor.sites_model().syntax_model() == body.parsed.syntax
+    &&& cursor.sites_model().body_model() == initial.sites_model().body_model()
+}
+
+proof fn resolved_call_in_body(
+    body: &OrdinaryBody, initial: MacroCalls, before: MacroCalls, later: MacroCalls, bound: BoundMacroCall,
+)
+    requires mixed_calls_start(body, initial), cursor_stays_in_body(body, initial, before),
+        before.binding_advances(&later, Some(Ok(bound))),
+    ensures cursor_stays_in_body(body, initial, later), call_in_body(body, macro_call_location(&bound)),
+        location_in_source(macro_call_location(&bound)),
+{
+    let origin = macro_call_location(&bound);
+    let source = origin.source;
+    let site = bound.site_model();
+    let region = later.sites_model().body_model();
+    assert(macro_call_spans_in_source(source.text_model(), site));
+    source.text_model_is_text();
+    located_name_evidence(origin);
+    reveal(call_in_body);
+    assert(expansion_body_region_matches(body.source.text_model(), &body.parsed.syntax, body.entry as int,
+        Some((region.start, region.end))));
+    assert(routine_expansion_site_at(body.source.text_model(), body.parsed.syntax.forms@,
+        region.start as int, region.end as int, site));
+}
+
+proof fn scoped_wiring_error_in_body(body: &OrdinaryBody, rows: Seq<ScopedDefinition>, error: ExpandedFuncWiringError)
+    requires locations_valid(body, rows), scoped_wiring_diagnostic_source(rows, error),
+    ensures diagnostic_in_body(body, error),
+{
+    if let ExpandedFuncWiringError::Generated { call, .. } = error {
+        let i = choose|i: int| 0 <= i < rows.len() && (#[trigger] rows[i]).call == Some(call);
+        assert(definition_in_body(body, rows[i]));
+        assert forall|j: int| 0 <= j < rows.len() implies scoped_definition_locations(#[trigger] rows[j]) by {
+            assert(definition_in_body(body, rows[j]));
+        };
+        scoped_diagnostic_cause_location(rows, error);
+    }
+}
+
 fn collect_body<'p, 'a>(
     body: &OrdinaryBody<'_, '_, 'p, 'a>, initial: MacroCalls<'_, '_, 'p, 'a>, fuel: NonZeroUsize,
 ) -> (result: Result<Vec<ScopedDefinition<'p, 'a>>, ExpandedFuncWiringError<'p, 'a>>)
-    requires body.valid(), initial.valid(),
-    ensures result matches Ok(rows) ==> locations_valid(rows@) && complete_mixed_body(body, initial, fuel@ as nat, rows@),
+    requires body.valid(), mixed_calls_start(body, initial),
+    ensures
+        result matches Ok(rows) ==> locations_valid(body, rows@) && complete_mixed_body(body, initial, fuel@ as nat, rows@),
+        result matches Err(error) ==> diagnostic_in_body(body, error) && !generated_error_after_collection(error),
 {
     let mut rows: Vec<ScopedDefinition<'p, 'a>> = Vec::new();
     let mut calls = initial;
     let mut position = body.parsed.entry_ranges[body.entry].definitions.start;
     let ghost mut history = seq![(initial, position, rows@)];
     loop
-        invariant body.valid(), body.range().start <= position <= body.range().end, calls.valid(), locations_valid(rows@),
+        invariant body.valid(), body.range().start <= position <= body.range().end, locations_valid(body, rows@),
+            mixed_calls_start(body, initial), cursor_stays_in_body(body, initial, calls),
             history.last() == (calls, position, rows@), mixed_body_prefix(body, initial, fuel@ as nat, history),
         decreases calls.sites_model().body_model().end - calls.sites_model().position_model(),
     {
@@ -415,6 +513,7 @@ fn collect_body<'p, 'a>(
             Ok(bound) => bound,
             Err(error) => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Preparation(error))),
         };
+        proof { resolved_call_in_body(body, initial, before.0, calls, bound); }
         let site = bound.site();
         let call = LocatedName { source: bound.scope().source, span: site.span.start..site.span.end };
         let start = bound.start_expansion();
@@ -426,7 +525,7 @@ fn collect_body<'p, 'a>(
                 call, related: error.related, kind: error.kind,
             })),
         };
-        take_expansion(body.aliases, &expanded, &mut rows)?;
+        take_expansion(body, &expanded, &mut rows)?;
         proof {
             let next = (calls, position, rows@);
             record_mixed_body_step(body, fuel@ as nat, before, next, between, initial_expansion, expanded);
@@ -449,6 +548,7 @@ spec fn source_body_matches(body: &OrdinaryBody, aliases: &MixedUseAliases, file
 spec fn mixed_calls_start(body: &OrdinaryBody, initial: MacroCalls) -> bool {
     &&& initial.valid() && initial.origin_model() == (body.file, body.entry)
     &&& initial.aliases_model() == body.aliases
+    &&& *initial.source_model() == *body.source && *initial.sites_model().syntax_model() == body.parsed.syntax
     &&& routine_expansion_sites_match(initial.source_model().text_model(), initial.sites_model().syntax_model(),
         body.entry as int, Some(initial.sites_model()))
 }
@@ -482,6 +582,63 @@ proof fn record_expanded_bit_func(
 {
 }
 
+/// 生成診断の主範囲が、検査対象の関数本体にある展開呼び出しを指す。
+pub open spec fn expanded_function_diagnostic_source(
+    aliases: &MixedUseAliases, file: usize, entry: usize, error: ExpandedFuncWiringError,
+) -> bool {
+    error matches ExpandedFuncWiringError::Generated { call, cause } ==> {
+        let project = aliases.targets_model().project_model();
+        let source = &project.sources_model()[file as int];
+        let parsed = &project.indexes_model()[file as int]->Circuit_0;
+        &&& file < project.sources_model().len() && file < project.indexes_model().len()
+        &&& project.indexes_model()[file as int] is Circuit
+        &&& entry < parsed.syntax.entries@.len() && parsed.syntax.entries@[entry as int].head is Func
+        &&& *source == *call.source && location_in_source(call)
+        &&& (expanded_definition_cause_location(*cause) matches Some(site) && location_in_source(site))
+        &&& exists|first: usize, last: usize, site: RoutineExpansionSite| {
+            &&& expansion_body_region_matches(source.text_model(), &parsed.syntax, entry as int, Some((first, last)))
+            &&& #[trigger] routine_expansion_site_at(source.text_model(), parsed.syntax.forms@, first as int, last as int, site)
+            &&& call.span == site.span
+        }
+    }
+}
+
+proof fn expanded_diagnostic_from_body(
+    body: &OrdinaryBody, aliases: &MixedUseAliases, file: usize, entry: usize, error: ExpandedFuncWiringError,
+)
+    requires source_body_matches(body, aliases, file, entry), diagnostic_in_body(body, error),
+    ensures expanded_function_diagnostic_source(aliases, file, entry, error),
+{
+    if let ExpandedFuncWiringError::Generated { call, .. } = error {
+        reveal(call_in_body);
+        assert(location_in_source(call));
+    }
+}
+
+/// 生成後の結線・幅の診断が、同じ関数を展開した本体の行と、その行の原因位置に対応する。
+pub closed spec fn expanded_function_wiring_diagnostic(
+    aliases: &MixedUseAliases, file: usize, entry: usize, fuel: nat, error: ExpandedFuncWiringError,
+) -> bool {
+    generated_error_after_collection(error) ==> {
+        exists|body: OrdinaryBody, initial: MacroCalls, rows: Seq<ScopedDefinition>| {
+            &&& source_body_matches(&body, aliases, file, entry)
+            &&& mixed_calls_start(&body, initial)
+            &&& #[trigger] complete_mixed_body(&body, initial, fuel, rows)
+            &&& scoped_wiring_diagnostic_source(rows, error)
+        }
+    }
+}
+
+proof fn expanded_wiring_diagnostic_from_body(
+    aliases: &MixedUseAliases, file: usize, entry: usize, fuel: nat, error: ExpandedFuncWiringError,
+    body: &OrdinaryBody, initial: MacroCalls, rows: Seq<ScopedDefinition>,
+)
+    requires
+        source_body_matches(body, aliases, file, entry), mixed_calls_start(body, initial),
+        complete_mixed_body(body, initial, fuel, rows), scoped_wiring_diagnostic_source(rows, error),
+    ensures expanded_function_wiring_diagnostic(aliases, file, entry, fuel, error),
+{}
+
 impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     /// 通常の定義と生成定義が混在する関数を検査し、結線とビット幅を確定する。
     ///
@@ -493,13 +650,17 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
     ///
     /// 基底と署名を検査してから本体を順に展開する。駆動元を登録した後、定義と出力の幅を
     /// 順に検査する。対応範囲外の式、先行しない駆動元、NOR の幅違反には元文書の範囲を返す。
+    /// 生成定義の診断では、その定義を生成した `expand` の位置を主範囲として返す。
     pub fn check_expanded_bit_func(
         &self, file: usize, entry: usize, width_limit: u64, fuel: NonZeroUsize,
     ) -> (result: Result<Option<CheckedBitFunc<'p, 'a>>, ExpandedFuncWiringError<'p, 'a>>)
         requires mixed_use_targets_match(&self.targets_model().project_model(), self.targets_model()),
-        ensures result matches Ok(Some(checked)) ==> checked_bit_func_available(&checked)
-            && expanded_bit_func_matches(self, file, entry, fuel@ as nat, &checked)
-            && self.mixed_typed_signature_matches(file, entry, width_limit, Ok(Some(checked.signature_model()))),
+        ensures
+            result matches Ok(Some(checked)) ==> checked_bit_func_available(&checked)
+                && expanded_bit_func_matches(self, file, entry, fuel@ as nat, &checked)
+                && self.mixed_typed_signature_matches(file, entry, width_limit, Ok(Some(checked.signature_model()))),
+            result matches Err(error) ==> expanded_function_diagnostic_source(self, file, entry, error)
+                && expanded_function_wiring_diagnostic(self, file, entry, fuel@ as nat, error),
     {
         let project = self.targets().project();
         let Some(index) = project.indexes().get(file) else { return Ok(None); };
@@ -537,8 +698,24 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
             assert(source_body_matches(&body, self, file, entry));
             assert(mixed_calls_start(&body, initial));
         }
-        let definitions = collect_body(&body, calls, fuel)?;
-        let checked = check_scoped_wiring(signature, inputs.as_slice(), outputs.as_slice(), definitions.as_slice())?;
+        let definitions = match collect_body(&body, calls, fuel) {
+            Ok(definitions) => definitions,
+            Err(error) => {
+                proof { expanded_diagnostic_from_body(&body, self, file, entry, error); }
+                return Err(error);
+            },
+        };
+        let checked = match check_scoped_wiring(signature, inputs.as_slice(), outputs.as_slice(), definitions.as_slice()) {
+            Ok(checked) => checked,
+            Err(error) => {
+                proof {
+                    scoped_wiring_error_in_body(&body, definitions@, error);
+                    expanded_diagnostic_from_body(&body, self, file, entry, error);
+                    expanded_wiring_diagnostic_from_body(self, file, entry, fuel@ as nat, error, &body, initial, definitions@);
+                }
+                return Err(error);
+            },
+        };
         proof {
             record_expanded_bit_func(self, file, entry, fuel@ as nat, &checked, body, initial, definitions@, inputs@, outputs@);
         }

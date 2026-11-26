@@ -13,7 +13,7 @@ use crate::syntax::{Form, circuit::{BuildDefinition, definition_target_atoms}};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::{
-    scoped_nor::{event_callee_scope, scoped_nor_matches},
+    scoped_nor::{event_callee_scope, nor_scope_error_location, scoped_nor_matches},
     simple_rhs::{simple_operand_uses_atom, simple_rhs, simple_rhs_sites},
 };
 #[cfg(verus_only)]
@@ -43,6 +43,7 @@ pub(super) enum ScopedRhs<'p, 'a> {
 
 #[derive(Debug)]
 pub(super) struct ScopedDefinition<'p, 'a> {
+    pub(super) call: Option<LocatedName<'p, 'a>>,
     pub(super) target: GeneratedSignalName<'p, 'a>,
     pub(super) expression: LocatedName<'p, 'a>,
     pub(super) rhs: ScopedRhs<'p, 'a>,
@@ -56,6 +57,7 @@ pub(super) open spec fn operand_location<'p, 'a>(operand: ScopedOperand<'p, 'a>)
 }
 
 pub(super) open spec fn scoped_definition_locations(definition: ScopedDefinition) -> bool {
+    &&& (definition.call matches Some(call) ==> location_in_source(call))
     &&& location_in_source(definition.target.location_model())
     &&& location_in_source(definition.expression)
     &&& match definition.rhs {
@@ -177,6 +179,7 @@ pub(super) closed spec fn ordinary_simple_definition(
 ) -> bool {
     let (target, end) = definition_target_range(forms, row);
     let site = definition.target.location_model();
+    &&& definition.call.is_none()
     &&& target + 1 == end
     &&& ordinary_site(source, forms, target as usize, site)
     &&& definition.target.key_model().model() == (None, source.text_model().spec_bytes()[site.span.start as int..site.span.end as int])
@@ -211,7 +214,7 @@ pub(super) fn read_ordinary_definition<'p, 'a>(
     requires definition_targets_match(forms@, *row),
         form_spans_valid(source.text_model(), forms@, source.text_model().spec_bytes().len() as int),
     ensures result matches Ok(Some(definition)) ==> scoped_definition_locations(definition)
-        && ordinary_simple_definition(aliases, at, source, forms@, *row, definition),
+        && definition.call.is_none() && ordinary_simple_definition(aliases, at, source, forms@, *row, definition),
 {
     let targets = definition_target_atoms(forms, row);
     if targets.end - targets.start != 1 { return Ok(None); }
@@ -233,14 +236,17 @@ pub(super) fn read_ordinary_definition<'p, 'a>(
             ScopedRhs::Nor { callee: site, left: read_ordinary_operand(source, forms, left), right: read_ordinary_operand(source, forms, right) }
         },
     };
-    Ok(Some(ScopedDefinition { target, expression, rhs }))
+    Ok(Some(ScopedDefinition { call: None, target, expression, rhs }))
 }
 
 pub(super) fn read_template_definition<'p, 'a>(
-    aliases: &MixedUseAliases<'_, 'p, 'a>, checked: &CheckedTemplateDefinition<'_, 'p, 'a>,
+    aliases: &MixedUseAliases<'_, 'p, 'a>, checked: &CheckedTemplateDefinition<'_, 'p, 'a>, call: &LocatedName<'p, 'a>,
 ) -> (result: Result<Option<ScopedDefinition<'p, 'a>>, NorScopeError<'p, 'a>>)
-    ensures result matches Ok(Some(definition)) ==> scoped_definition_locations(definition)
-        && template_simple_definition(aliases, checked, definition),
+    requires location_in_source(*call),
+    ensures
+        result matches Ok(Some(definition)) ==> scoped_definition_locations(definition)
+            && definition.call == Some(*call) && template_simple_definition(aliases, checked, definition),
+        result matches Err(error) ==> location_in_source(nor_scope_error_location(error)),
 {
     let row = checked.row();
     let forms = checked.forms();
@@ -264,7 +270,7 @@ pub(super) fn read_template_definition<'p, 'a>(
         },
     };
     assert(simple_rhs_with_template_text(checked, row.expression, aliases, rhs));
-    Ok(Some(ScopedDefinition { target, expression, rhs }))
+    Ok(Some(ScopedDefinition { call: Some(crate::project::use_aliases::function_atoms::copy_location(call)), target, expression, rhs }))
 }
 
 } // verus!

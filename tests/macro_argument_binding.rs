@@ -390,12 +390,18 @@ fn wires_nor_and_ordinary_definitions_in_their_expanded_body_order() {
             assert_eq!(lowered.netlist().evaluate(&[x, other]).unwrap(), [x, !(x || other)]);
         }
     }
-    let Err(ExpandedFuncWiringError::NorInputWidth { reference, width: 2 }) =
+    let Err(ExpandedFuncWiringError::Generated { call, cause }) =
         aliases.check_expanded_bit_func(1, 2, 16, fuel)
+        else { panic!("生成した NOR の入力幅違反には展開呼び出しの位置が必要です"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand invert y x)", 94));
+    let ExpandedFuncWiringError::NorInputWidth { reference, width: 2 } = *cause
         else { panic!("基底 NOR の入力幅を検査する"); };
     assert_eq!((&circuit[reference.span], reference.source.revision), ("x", 94));
-    let Err(ExpandedFuncWiringError::UnavailableDefinition { reference, target }) =
+    let Err(ExpandedFuncWiringError::Generated { call, cause }) =
         aliases.check_expanded_bit_func(1, 3, 16, fuel)
+        else { panic!("前方参照には展開呼び出しの位置が必要です"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand invert y later)", 94));
+    let ExpandedFuncWiringError::UnavailableDefinition { reference, target } = *cause
         else { panic!("後続の通常定義を、先行する展開中の参照から使うことを拒否する"); };
     assert_eq!((&circuit[reference.span.clone()], &circuit[target.span.clone()]), ("later", "later"));
     assert!(reference.span.start < target.span.start);
@@ -432,9 +438,76 @@ fn resolves_nor_in_the_scope_of_the_expression_origin() {
     let fuel = NonZeroUsize::new(128).unwrap();
     let checked = aliases.check_expanded_bit_func(1, entry("from-template"), 16, fuel).unwrap().unwrap();
     assert_eq!(checked.lower_bit_func(16).unwrap().netlist().evaluate(&[false]).unwrap(), [true]);
-    let Err(ExpandedFuncWiringError::NorResolvesToFunction { callee, declaration }) =
+    let Err(ExpandedFuncWiringError::Generated { call, cause }) =
         aliases.check_expanded_bit_func(1, entry("from-argument"), 16, fuel)
+        else { panic!("生成した呼び出しの診断に元の展開位置が必要です"); };
+    assert_eq!((&circuit[call.span], call.source.revision), ("(expand ::macros::supplied y (nor x 0))", 95));
+    let ExpandedFuncWiringError::NorResolvesToFunction { callee, declaration } = *cause
         else { panic!("呼び出し側の nor 別名に解決する"); };
     assert_eq!((&circuit[callee.span], callee.source.revision), ("nor", 95));
     assert_eq!((&circuit[declaration.name.span], declaration.name.source.revision), ("nor", 95));
+}
+
+
+#[test]
+fn shared_template_diagnostics_identify_the_failing_expansion() {
+    use circuitgame2_core::project::ExpandedFuncWiringError;
+    let library = "(defmacro invert (out input)
+        (list (syntax (def tmp (unsyntax input)))
+              (syntax (def (unsyntax out) (nor tmp 0)))))
+        (defmacro copy (out input)
+          (list (syntax (def (unsyntax out) (unsyntax input)))))";
+    let circuit = "(using nor)
+        (func good (in a b) (out y z)
+          (expand invert y a)
+          (expand invert z b))
+        (func bad-second (in one (wide (bits 2))) (out y z)
+          (expand invert y one)
+          (expand invert z wide))
+        (func bad-first (in one (wide (bits 2))) (out y z)
+          (expand invert y wide)
+          (expand invert z one))
+        (func ordinary (in (wide (bits 2))) (out y)
+          (def y (nor wide 0)))
+        (func output-width (in (wide (bits 2))) (out y)
+          (expand copy y wide))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "shared.ncg2m", revision: 111, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 222, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let fuel = NonZeroUsize::new(128).unwrap();
+    let checked = aliases.check_expanded_bit_func(1, 1, 16, fuel).unwrap().unwrap();
+    let lowered = checked.lower_bit_func(16).unwrap();
+    assert_eq!(lowered.netlist().gates.len(), 2);
+    assert_eq!(lowered.netlist().evaluate(&[true, false]).unwrap(), [false, true]);
+
+    let cause_at = |entry, expected_call| {
+        let Err(ExpandedFuncWiringError::Generated { call, cause }) =
+            aliases.check_expanded_bit_func(1, entry, 16, fuel)
+            else { panic!("失敗した展開を特定できる診断が必要です"); };
+        assert_eq!((&circuit[call.span], call.source.revision), (expected_call, 222));
+        let ExpandedFuncWiringError::NorInputWidth { reference, width: 2 } = *cause
+            else { panic!("テンプレートの NOR に幅の診断が必要です"); };
+        assert_eq!((&library[reference.span.clone()], reference.source.revision), ("tmp", 111));
+        reference.span
+    };
+    assert_eq!(
+        cause_at(2, "(expand invert z wide)"),
+        cause_at(3, "(expand invert y wide)"),
+    );
+    let Err(ExpandedFuncWiringError::NorInputWidth { reference, width: 2 }) =
+        aliases.check_expanded_bit_func(1, 4, 16, fuel)
+        else { panic!("通常の定義では右辺そのものの位置を診断する"); };
+    assert_eq!((&circuit[reference.span], reference.source.revision), ("wide", 222));
+
+    let Err(ExpandedFuncWiringError::Generated { call, cause }) =
+        aliases.check_expanded_bit_func(1, 5, 16, fuel)
+        else { panic!("生成した駆動元に由来する出力幅違反には展開位置が必要です"); };
+    assert_eq!(&circuit[call.span.clone()], "(expand copy y wide)");
+    let ExpandedFuncWiringError::OutputWidthFromDefinition { target, output, expected: 1, actual: 2 } = *cause
+        else { panic!("生成定義と出力宣言の両方の位置が必要です"); };
+    assert_eq!((&circuit[target.span.clone()], &circuit[output.span.clone()]), ("y", "y"));
+    assert!(output.span.start < call.span.start && call.span.contains(&target.span.start));
 }

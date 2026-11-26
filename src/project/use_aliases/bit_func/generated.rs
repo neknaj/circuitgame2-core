@@ -37,7 +37,9 @@ mod rows;
 mod wiring;
 mod mixed_body;
 #[cfg(verus_only)]
-pub use mixed_body::expanded_bit_func_matches;
+pub use mixed_body::{expanded_bit_func_matches, expanded_function_diagnostic_source, expanded_function_wiring_diagnostic};
+#[cfg(verus_only)]
+pub use wiring::{expanded_definition_cause_location, expanded_definition_diagnostic_wraps};
 pub use wiring::ExpandedFuncWiringError;
 use collection::collect_generated_aliases;
 #[cfg(verus_only)]

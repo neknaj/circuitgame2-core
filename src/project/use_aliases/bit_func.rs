@@ -4,7 +4,7 @@ mod compile;
 mod frontend;
 mod generated;
 #[cfg(verus_only)]
-pub use generated::expanded_bit_func_matches;
+pub use generated::{expanded_bit_func_matches, expanded_definition_cause_location, expanded_definition_diagnostic_wraps, expanded_function_diagnostic_source, expanded_function_wiring_diagnostic};
 pub use generated::{CheckedGeneratedAliasFunc, ExpandedFuncWiringError, GeneratedWiringError};
 #[cfg(verus_only)]
 pub use generated::{

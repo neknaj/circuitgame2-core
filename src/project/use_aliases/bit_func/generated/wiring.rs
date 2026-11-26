@@ -7,7 +7,7 @@ use super::{
 };
 use crate::project::{LocatedName, SingleBitOperand, use_aliases::function_atoms::copy_location};
 use crate::syntax::circuit::NameSite;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use super::{BindingKey, indexed_keys, ordinary_port_key,
@@ -44,12 +44,30 @@ pub enum ExpandedFuncWiringError<'p, 'a> {
         /// 通常の名前解決が報告した違反。
         error: crate::project::MixedFuncCalleeError<'p, 'a>,
     },
+    /// 生成定義の検査で見つかった違反。
+    Generated {
+        /// この定義を生成した `expand` の文書版と UTF-8 半開バイト範囲。診断の主範囲に使う。
+        call: LocatedName<'p, 'a>,
+        /// 原因の診断。テンプレートまたは挿入元の構文を指す範囲を含む。
+        cause: Box<ExpandedFuncWiringError<'p, 'a>>,
+    },
     /// 同じ定義または後続の定義の信号を参照した。
     UnavailableDefinition {
         /// 右辺の参照箇所。
         reference: LocatedName<'p, 'a>,
         /// 先行していない左辺の元位置。
         target: LocatedName<'p, 'a>,
+    },
+    /// 生成定義の幅が出力ポートの宣言幅と一致しない。
+    OutputWidthFromDefinition {
+        /// 駆動元となる左辺の元位置。
+        target: LocatedName<'p, 'a>,
+        /// 宣言した出力幅を指す元位置。
+        output: LocatedName<'p, 'a>,
+        /// 出力ポートの宣言幅。
+        expected: u64,
+        /// 駆動元の幅。
+        actual: u64,
     },
     /// 基底 NOR の入力が1ビットではない。
     NorInputWidth {
@@ -58,6 +76,117 @@ pub enum ExpandedFuncWiringError<'p, 'a> {
         /// 実際に束縛された信号の幅。
         width: u64,
     },
+}
+
+/// 生成行の診断が、原因の診断と生成元の呼び出しを保持することを表す。
+pub open spec fn expanded_definition_diagnostic_wraps(
+    call: Option<LocatedName>, cause: ExpandedFuncWiringError, error: ExpandedFuncWiringError,
+) -> bool {
+    match call {
+        Some(site) => error matches ExpandedFuncWiringError::Generated { call, cause: inner }
+            && call == site && *inner == cause,
+        None => error == cause,
+    }
+}
+
+pub(super) fn with_generated_call<'p, 'a>(
+    call: Option<&LocatedName<'p, 'a>>, cause: ExpandedFuncWiringError<'p, 'a>,
+) -> (error: ExpandedFuncWiringError<'p, 'a>)
+    ensures expanded_definition_diagnostic_wraps(
+        match call { Some(site) => Some(*site), None => None }, cause, error,
+    ),
+{
+    match call {
+        Some(call) => ExpandedFuncWiringError::Generated { call: copy_location(call), cause: Box::new(cause) },
+        None => cause,
+    }
+}
+
+/// 生成診断で保持する、幅・名前・結線の原因を指す元範囲を返す。
+pub open spec fn expanded_definition_cause_location<'p, 'a>(cause: ExpandedFuncWiringError<'p, 'a>) -> Option<LocatedName<'p, 'a>> {
+    match cause {
+        ExpandedFuncWiringError::Base(GeneratedWiringError::MultipleDrivers(site))
+        | ExpandedFuncWiringError::Base(GeneratedWiringError::Unavailable(site))
+        | ExpandedFuncWiringError::NorScope(site)
+        | ExpandedFuncWiringError::NorName { callee: site, .. }
+        | ExpandedFuncWiringError::NorResolvesToFunction { callee: site, .. }
+        | ExpandedFuncWiringError::NorInputWidth { reference: site, .. }
+        | ExpandedFuncWiringError::OutputWidthFromDefinition { target: site, .. }
+        | ExpandedFuncWiringError::UnavailableDefinition { reference: site, .. } => Some(site),
+        _ => None,
+    }
+}
+
+pub(super) open spec fn operand_diagnostic_at(operand: ScopedOperand, error: ExpandedFuncWiringError) -> bool {
+    &&& error is UnavailableDefinition || error is NorInputWidth
+        || (error matches ExpandedFuncWiringError::Base(cause) && cause is Unavailable)
+    &&& expanded_definition_cause_location(error) == Some(operand_location(operand))
+}
+
+pub(super) open spec fn rhs_diagnostic_at(rhs: ScopedRhs, error: ExpandedFuncWiringError) -> bool {
+    match rhs {
+        ScopedRhs::Leaf(operand) => operand_diagnostic_at(operand, error),
+        ScopedRhs::Nor { left, right, .. } => operand_diagnostic_at(left, error) || operand_diagnostic_at(right, error),
+    }
+}
+
+pub(super) open spec fn row_diagnostic_at(definition: ScopedDefinition, error: ExpandedFuncWiringError) -> bool {
+    match error {
+        ExpandedFuncWiringError::Base(GeneratedWiringError::MultipleDrivers(site))
+        | ExpandedFuncWiringError::OutputWidthFromDefinition { target: site, .. } =>
+            site == definition.target.location_model(),
+        _ => rhs_diagnostic_at(definition.rhs, error),
+    }
+}
+
+// 名前解決を終えてから、生成済みの定義を検査して見つかる違反。
+pub(super) open spec fn generated_error_after_collection(error: ExpandedFuncWiringError) -> bool {
+    error matches ExpandedFuncWiringError::Generated { cause, .. }
+        && match *cause {
+            ExpandedFuncWiringError::Base(GeneratedWiringError::MultipleDrivers(_))
+            | ExpandedFuncWiringError::Base(GeneratedWiringError::Unavailable(_))
+            | ExpandedFuncWiringError::UnavailableDefinition { .. }
+            | ExpandedFuncWiringError::NorInputWidth { .. }
+            | ExpandedFuncWiringError::OutputWidthFromDefinition { .. } => true,
+            _ => false,
+        }
+}
+
+pub(super) open spec fn scoped_wiring_diagnostic_source(
+    definitions: Seq<ScopedDefinition>, error: ExpandedFuncWiringError,
+) -> bool {
+    match error {
+        ExpandedFuncWiringError::Generated { call, cause } =>
+            exists|i: int| 0 <= i < definitions.len() && (#[trigger] definitions[i]).call == Some(call)
+                && row_diagnostic_at(definitions[i], *cause),
+        _ => true,
+    }
+}
+
+proof fn scoped_diagnostic_from_row(
+    definitions: Seq<ScopedDefinition>, at: int, cause: ExpandedFuncWiringError, error: ExpandedFuncWiringError,
+)
+    requires
+        0 <= at < definitions.len(), !(cause is Generated), row_diagnostic_at(definitions[at], cause),
+        expanded_definition_diagnostic_wraps(definitions[at].call, cause, error),
+    ensures scoped_wiring_diagnostic_source(definitions, error),
+{}
+
+pub(super) proof fn scoped_diagnostic_cause_location(definitions: Seq<ScopedDefinition>, error: ExpandedFuncWiringError)
+    requires
+        scoped_wiring_diagnostic_source(definitions, error),
+        forall|i: int| 0 <= i < definitions.len() ==> scoped_definition_locations(#[trigger] definitions[i]),
+    ensures error matches ExpandedFuncWiringError::Generated { cause, .. } ==>
+        expanded_definition_cause_location(*cause) matches Some(site)
+            && crate::project::location_in_source(site),
+{
+    if let ExpandedFuncWiringError::Generated { call, cause } = error {
+        let i = choose|i: int| 0 <= i < definitions.len() && (#[trigger] definitions[i]).call == Some(call)
+            && row_diagnostic_at(definitions[i], *cause);
+        let row = definitions[i];
+        assert(scoped_definition_locations(row));
+        assert(row_diagnostic_at(row, *cause));
+    }
 }
 
 spec fn scoped_target_key(definition: ScopedDefinition) -> BindingKey {
@@ -115,12 +244,17 @@ proof fn add_scope_key(
 
 fn index_scoped_definitions<'p, 'a>(
     signature: &TypedRoutineSignature<'p, 'a>, input_names: &[NameSite], definitions: &[ScopedDefinition<'p, 'a>],
-) -> (result: Result<LocalSignalIndex, GeneratedWiringError<'p, 'a>>)
+) -> (result: Result<LocalSignalIndex, ExpandedFuncWiringError<'p, 'a>>)
     requires signature.inputs@.len() == input_names@.len(),
-    ensures result matches Ok(index) ==> index.valid()
-        && function_keys(input_names@, definitions@, definitions@.len() as int, index.keyed_bindings()),
+    ensures
+        result matches Ok(index) ==> index.valid()
+            && function_keys(input_names@, definitions@, definitions@.len() as int, index.keyed_bindings()),
+        result matches Err(error) ==> scoped_wiring_diagnostic_source(definitions@, error),
 {
-    let mut index = index_generated_inputs(signature, input_names)?;
+    let mut index = match index_generated_inputs(signature, input_names) {
+        Ok(index) => index,
+        Err(error) => return Err(ExpandedFuncWiringError::Base(error)),
+    };
     proof {
         assert(indexed_keys(input_names@, Seq::<GeneratedSignalAlias>::empty(), input_names@.len() as int, 0, index.keyed_bindings()));
         assert(input_names@.take(input_names@.len() as int) =~= input_names@);
@@ -139,8 +273,15 @@ fn index_scoped_definitions<'p, 'a>(
         let ghost before = index.keyed_bindings();
         match index.insert_key_if_absent(key, OutputDriver::Definition(i)) {
             Some(None) => {},
-            Some(Some(_)) => return Err(GeneratedWiringError::MultipleDrivers(copy_location(definitions[i].target.location()))),
-            None => return Err(GeneratedWiringError::Capacity),
+            Some(Some(_)) => {
+                let definition = &definitions[i];
+                let cause = ExpandedFuncWiringError::Base(GeneratedWiringError::MultipleDrivers(copy_location(definition.target.location())));
+                let ghost plain = cause;
+                let error = with_generated_call(definition.call.as_ref(), cause);
+                proof { scoped_diagnostic_from_row(definitions@, i as int, plain, error); }
+                return Err(error);
+            },
+            None => return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::Capacity)),
         }
         proof { add_scope_key(input_names@, definitions@, i, before); }
         i += 1;
@@ -198,7 +339,8 @@ fn resolve_operand<'p, 'a>(
         function_keys(names@, definitions@, definitions@.len() as int, index.keyed_bindings()),
     ensures
         scoped_operand_result(index.keyed_bindings(), definitions@, at, *operand, result),
-        result matches Err(error) ==> !(error is NorInputWidth),
+        result matches Err(error) ==> !(error is NorInputWidth) && !(error is Generated)
+            && operand_diagnostic_at(*operand, error),
         result matches Ok(value) ==> operand_has_driver(names@, definitions@.take(at as int), *operand, value),
 {
     proof { reveal(scoped_operand_result); }
@@ -258,6 +400,7 @@ fn resolve_nor_operand<'p, 'a>(
     ensures
         result matches Ok(bound) ==> nor_operand_matches(widths@, prior@, bound)
             && operand_has_driver(names@, definitions@.take(at as int), *operand, bound),
+        result matches Err(error) ==> !(error is Generated) && operand_diagnostic_at(*operand, error),
         result matches Err(ExpandedFuncWiringError::NorInputWidth { reference, width }) ==> {
             &&& width != 1 && reference == operand_location(*operand)
             &&& exists|driver: OutputDriver| #[trigger] operand_has_driver(
@@ -301,9 +444,12 @@ fn check_scoped_rhs<'p, 'a>(
         scoped_definition_locations(definitions@[at as int]),
         forall|i: int| 0 <= i < widths@.len() ==> #[trigger] widths@[i] > 0,
         forall|i: int| 0 <= i < prior@.len() ==> (#[trigger] prior@[i]).width > 0,
-    ensures result matches Ok(checked) ==> bit_definition_matches(widths@, prior@, checked)
-        && checked.expression == definitions@[at as int].expression
-        && scoped_rhs_bound(names@, definitions@, at as int, definitions@[at as int].rhs, checked.rhs),
+    ensures
+        result matches Ok(checked) ==> bit_definition_matches(widths@, prior@, checked)
+            && checked.expression == definitions@[at as int].expression
+            && scoped_rhs_bound(names@, definitions@, at as int, definitions@[at as int].rhs, checked.rhs),
+        result matches Err(error) ==> !(error is Generated)
+            && rhs_diagnostic_at(definitions@[at as int].rhs, error),
 {
     let statement = &definitions[at];
     let (rhs, width) = match &statement.rhs {
@@ -371,8 +517,10 @@ fn wire_scoped_definitions<'p, 'a>(
         function_keys(names@, definitions@, definitions@.len() as int, index.keyed_bindings()),
         forall|i: int| 0 <= i < widths@.len() ==> #[trigger] widths@[i] > 0,
         forall|i: int| 0 <= i < definitions@.len() ==> scoped_definition_locations(#[trigger] definitions@[i]),
-    ensures result matches Ok(rows) ==> rows@.len() == definitions@.len()
-        && wired_definitions(widths@, names@, definitions@, rows@),
+    ensures
+        result matches Ok(rows) ==> rows@.len() == definitions@.len()
+            && wired_definitions(widths@, names@, definitions@, rows@),
+        result matches Err(error) ==> scoped_wiring_diagnostic_source(definitions@, error),
 {
     let mut rows: Vec<CheckedBitDefinition<'p, 'a>> = Vec::new();
     let mut at = 0;
@@ -385,7 +533,15 @@ fn wire_scoped_definitions<'p, 'a>(
             wired_definitions(widths@, names@, definitions@, rows@),
         decreases definitions@.len() - at,
     {
-        let row = check_scoped_rhs(index, widths, names, definitions, at, rows.as_slice())?;
+        let row = match check_scoped_rhs(index, widths, names, definitions, at, rows.as_slice()) {
+            Ok(row) => row,
+            Err(cause) => {
+                let ghost plain = cause;
+                let error = with_generated_call(definitions[at].call.as_ref(), cause);
+                proof { scoped_diagnostic_from_row(definitions@, at as int, plain, error); }
+                return Err(error);
+            },
+        };
         proof { append_wired_definition(widths@, names@, definitions@, rows@, row); }
         rows.push(row);
         at += 1;
@@ -404,14 +560,16 @@ spec fn scoped_output_matches(
 fn scoped_outputs<'p, 'a>(
     index: &LocalSignalIndex, signature: &TypedRoutineSignature<'p, 'a>, inputs: &[u64], input_names: &[NameSite],
     widths: &[u64], names: &[NameSite], definitions: &[ScopedDefinition<'p, 'a>], rows: &[CheckedBitDefinition<'p, 'a>],
-) -> (result: Result<Vec<OutputDriver>, GeneratedWiringError<'p, 'a>>)
+) -> (result: Result<Vec<OutputDriver>, ExpandedFuncWiringError<'p, 'a>>)
     requires
         index.valid(), inputs@.len() == input_names@.len(), widths@.len() == names@.len() == signature.outputs@.len(),
         rows@.len() == definitions@.len(),
         function_keys(input_names@, definitions@, definitions@.len() as int, index.keyed_bindings()),
-    ensures result matches Ok(drivers) ==> drivers@.len() == widths@.len()
-        && forall|i: int| 0 <= i < drivers@.len() ==> scoped_output_matches(
-            inputs@, input_names@, widths@, names@, definitions@, rows@, i, #[trigger] drivers@[i]),
+    ensures
+        result matches Ok(drivers) ==> drivers@.len() == widths@.len()
+            && forall|i: int| 0 <= i < drivers@.len() ==> scoped_output_matches(
+                inputs@, input_names@, widths@, names@, definitions@, rows@, i, #[trigger] drivers@[i]),
+        result matches Err(error) ==> scoped_wiring_diagnostic_source(definitions@, error),
 {
     let mut drivers: Vec<OutputDriver> = Vec::new();
     let mut i = 0;
@@ -427,7 +585,7 @@ fn scoped_outputs<'p, 'a>(
         let output = &signature.outputs[i];
         let key = LocalSignalKey::ordinary(names[i].word);
         let Some(driver) = index.lookup_key(key) else {
-            return Err(GeneratedWiringError::MissingOutput(copy_location(&output.annotation)));
+            return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::MissingOutput(copy_location(&output.annotation))));
         };
         let _ = inputs.len();
         let _ = rows.len();
@@ -440,7 +598,20 @@ fn scoped_outputs<'p, 'a>(
         let actual = generated_driver_width(inputs, rows, driver);
         let expected = widths[i];
         if actual != expected {
-            return Err(GeneratedWiringError::OutputWidth { site: copy_location(&output.annotation), expected, actual });
+            let site = copy_location(&output.annotation);
+            if let OutputDriver::Definition(at) = driver {
+                let definition = &definitions[at];
+                if let Some(call) = &definition.call {
+                    let cause = ExpandedFuncWiringError::OutputWidthFromDefinition {
+                        target: copy_location(definition.target.location()), output: site, expected, actual,
+                    };
+                    let ghost plain = cause;
+                    let error = with_generated_call(Some(call), cause);
+                    proof { scoped_diagnostic_from_row(definitions@, at as int, plain, error); }
+                    return Err(error);
+                }
+            }
+            return Err(ExpandedFuncWiringError::Base(GeneratedWiringError::OutputWidth { site, expected, actual }));
         }
         drivers.push(driver);
         i += 1;
@@ -471,8 +642,10 @@ pub(super) fn check_scoped_wiring<'p, 'a>(
         input_names@.len() == signature.inputs@.len(),
         0 < output_names@.len() == signature.outputs@.len(),
         forall|i: int| 0 <= i < body@.len() ==> scoped_definition_locations(#[trigger] body@[i]),
-    ensures result matches Ok(checked) ==>
-        checked_bit_func_available(&checked) && checked.signature_model() == signature && expanded_bit_func_wiring(input_names@, output_names@, body@, &checked),
+    ensures
+        result matches Ok(checked) ==> checked_bit_func_available(&checked)
+            && checked.signature_model() == signature && expanded_bit_func_wiring(input_names@, output_names@, body@, &checked),
+        result matches Err(error) ==> scoped_wiring_diagnostic_source(body@, error),
 {
     let input_widths = match bit_port_widths(signature.inputs.as_slice()) {
         Ok(widths) => widths,
@@ -482,16 +655,10 @@ pub(super) fn check_scoped_wiring<'p, 'a>(
         Ok(widths) => widths,
         Err(error) => return Err(ExpandedFuncWiringError::Base(error)),
     };
-    let index = match index_scoped_definitions(&signature, input_names, body) {
-        Ok(index) => index,
-        Err(error) => return Err(ExpandedFuncWiringError::Base(error)),
-    };
+    let index = index_scoped_definitions(&signature, input_names, body)?;
     let definitions = wire_scoped_definitions(&index, input_widths.as_slice(), input_names, body)?;
-    let output_drivers = match scoped_outputs(&index, &signature, input_widths.as_slice(), input_names,
-        output_widths.as_slice(), output_names, body, definitions.as_slice()) {
-        Ok(drivers) => drivers,
-        Err(error) => return Err(ExpandedFuncWiringError::Base(error)),
-    };
+    let output_drivers = scoped_outputs(&index, &signature, input_widths.as_slice(), input_names,
+        output_widths.as_slice(), output_names, body, definitions.as_slice())?;
     proof {
         reveal(checked_bit_func_available);
         assert forall|i: int| 0 <= i < definitions@.len() implies bit_definition_matches(
