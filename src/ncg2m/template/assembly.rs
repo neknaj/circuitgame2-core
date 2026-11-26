@@ -4,7 +4,10 @@ use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
 use crate::syntax::Form;
-use super::{TemplateEmission, TemplateEmissionError, TemplateEmitter, TemplateSubstitution, emit_template};
+use super::{TemplateEmission, TemplateEmissionError, TemplateEmitter, TemplateSubstitution};
+use super::emission::{TemplateValues, start_emitter};
+#[cfg(verus_only)]
+use super::emission::emitter_start;
 #[cfg(verus_only)]
 use crate::syntax::{complete_list_indices, form_spans_valid, nested_list_indices};
 #[cfg(verus_only)]
@@ -309,20 +312,21 @@ proof fn terminal_emission_witness<'s, 'v, T>(
 }
 
 proof fn emission_trace_has_no_early_end<'s, 'v, T>(
-    start: TemplateAssembly<'s, 'v, T>, fuel: nat,
+    start_a: TemplateAssembly<'s, 'v, T>, start_b: TemplateAssembly<'s, 'v, T>, fuel: nat,
     a: Seq<TemplateEmitter<'s, 'v, T>>, left: Seq<TemplateEmission<'v, T>>,
     b: Seq<TemplateEmitter<'s, 'v, T>>, right: Seq<TemplateEmission<'v, T>>,
     r_a: Result<TemplateAssemblySlice<'s, 'v, T>, TemplateEmissionError>,
     r_b: Result<TemplateAssemblySlice<'s, 'v, T>, TemplateEmissionError>,
 )
-    requires template_assembly_trace_result(start, fuel, a, left, r_a),
-        template_assembly_trace_result(start, fuel, b, right, r_b),
+    requires template_assembly_trace_result(start_a, fuel, a, left, r_a),
+        template_assembly_trace_result(start_b, fuel, b, right, r_b),
+        template_emitters_agree(&start_a.emitter_model(), &start_b.emitter_model()),
     ensures left.len() >= right.len(),
 {
     if left.len() < right.len() {
         let i = left.len() as int;
         common_emission_prefix_agrees(a, left, b, right, i);
-        let end_a = terminal_emission_witness(start, fuel, a, left, r_a);
+        let end_a = terminal_emission_witness(start_a, fuel, a, left, r_a);
         assert(a[i] == a.last());
         assert(template_emission_step(&b[i], &b[i + 1], Some(Ok(right[i]))));
         template_emission_steps_agree(&a[i], &b[i], &end_a, &b[i + 1],
@@ -355,12 +359,27 @@ pub proof fn template_assembly_results_agree<'s, 'v, T>(
     requires template_assembly_matches(start, fuel, r_a), template_assembly_matches(start, fuel, r_b),
     ensures template_assembly_outputs_agree(r_a, r_b),
 {
+    template_assembly_results_from_equivalent_states(start, start, fuel, r_a, r_b);
+}
+
+/// 構文と挿入値が同じなら、値の配列の所有方法によらず同じ結果が得られることを示す。
+pub proof fn template_assembly_results_from_equivalent_states<'s, 'v, T>(
+    start_a: TemplateAssembly<'s, 'v, T>, start_b: TemplateAssembly<'s, 'v, T>, fuel: nat,
+    r_a: Result<TemplateAssemblySlice<'s, 'v, T>, TemplateEmissionError>,
+    r_b: Result<TemplateAssemblySlice<'s, 'v, T>, TemplateEmissionError>,
+)
+    requires
+        template_emitters_agree(&start_a.emitter_model(), &start_b.emitter_model()),
+        start_a.parts_model() == start_b.parts_model(),
+        template_assembly_matches(start_a, fuel, r_a), template_assembly_matches(start_b, fuel, r_b),
+    ensures template_assembly_outputs_agree(r_a, r_b),
+{
     let (a, left) = choose|states: Seq<TemplateEmitter<'s, 'v, T>>, parts: Seq<TemplateEmission<'v, T>>|
-        #[trigger] template_assembly_trace_result(start, fuel, states, parts, r_a);
+        #[trigger] template_assembly_trace_result(start_a, fuel, states, parts, r_a);
     let (b, right) = choose|states: Seq<TemplateEmitter<'s, 'v, T>>, parts: Seq<TemplateEmission<'v, T>>|
-        #[trigger] template_assembly_trace_result(start, fuel, states, parts, r_b);
-    emission_trace_has_no_early_end(start, fuel, a, left, b, right, r_a, r_b);
-    emission_trace_has_no_early_end(start, fuel, b, right, a, left, r_b, r_a);
+        #[trigger] template_assembly_trace_result(start_b, fuel, states, parts, r_b);
+    emission_trace_has_no_early_end(start_a, start_b, fuel, a, left, b, right, r_a, r_b);
+    emission_trace_has_no_early_end(start_b, start_a, fuel, b, right, a, left, r_b, r_a);
     let end = left.len() as int;
     common_emission_prefix_agrees(a, left, b, right, end);
     assert(left =~= right) by {
@@ -370,8 +389,8 @@ pub proof fn template_assembly_results_agree<'s, 'v, T>(
     };
     assert(a[end] == a.last() && b[end] == b.last());
     if left.len() < fuel {
-        let end_a = terminal_emission_witness(start, fuel, a, left, r_a);
-        let end_b = terminal_emission_witness(start, fuel, b, right, r_b);
+        let end_a = terminal_emission_witness(start_a, fuel, a, left, r_a);
+        let end_b = terminal_emission_witness(start_b, fuel, b, right, r_b);
         template_emission_steps_agree(&a.last(), &b.last(), &end_a, &end_b,
             terminal_emission(r_a), terminal_emission(r_b));
     }
@@ -415,21 +434,48 @@ pub fn assemble_template<'s, 'v, T>(
 ) -> (result: Option<TemplateAssembly<'s, 'v, T>>)
     requires complete_list_indices(forms@), nested_list_indices(forms@),
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
-    ensures result.is_some() <==> root < forms@.len(),
-        result matches Some(result) ==> result.ready()
-            && result.emitter_model().walk_model().source_model() == source
-            && result.emitter_model().walk_model().forms_model() == forms@
-            && result.emitter_model().walk_model().range_model().start == root
-            && result.emitter_model().walk_model().range_model().end == match forms@[root as int] {
-                Form::Atom { .. } => root + 1,
-                Form::List { end, .. } => end as int,
-            }
-            && result.emitter_model().walk_model().position_model() == root
-            && result.emitter_model().lists_model().len() == 0
-            && result.emitter_model().used_model() == 0 && result.parts_model().len() == 0
-            && result.emitter_model().values_model() == values@,
+    ensures template_assembly_start(source, forms@, root, values@, result),
 {
-    let emitter = emit_template(source, forms, root, values)?;
+    assemble_with_values(source, forms, root, TemplateValues::Borrowed(values))
+}
+
+/// 評価済みの挿入値の配列を引き取り、テンプレートの組み立てを始める。
+///
+/// 範囲外の根には None を返す。配列に含まれる構文への参照は維持する。
+///
+/// # Panics
+///
+/// 元ソースに対応する厳格な構文木を渡さなかった場合は、後続の走査でパニックすることがある。
+pub(crate) fn assemble_owned_template<'s, 'v, T>(
+    source: &'s str, forms: &'s [Form], root: usize, values: Vec<TemplateSubstitution<'v, T>>,
+) -> (result: Option<TemplateAssembly<'s, 'v, T>>)
+    requires complete_list_indices(forms@), nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures template_assembly_start(source, forms@, root, values@, result),
+{
+    assemble_with_values(source, forms, root, TemplateValues::Owned(values))
+}
+
+/// 組み立てがテンプレートと挿入値の先頭から始まり、生成済みの項目を持たないことを表す。
+pub open spec fn template_assembly_start<'s, 'v, T>(
+    source: &'s str, forms: Seq<Form>, root: usize, values: Seq<TemplateSubstitution<'v, T>>,
+    result: Option<TemplateAssembly<'s, 'v, T>>,
+) -> bool {
+    emitter_start(source, forms, root, values, match result {
+        Some(state) => Some(state.emitter_model()),
+        None => None,
+    })
+    && (result matches Some(state) ==> state.ready() && state.parts_model().len() == 0)
+}
+
+fn assemble_with_values<'s, 'v, T>(
+    source: &'s str, forms: &'s [Form], root: usize, values: TemplateValues<'v, T>,
+) -> (result: Option<TemplateAssembly<'s, 'v, T>>)
+    requires complete_list_indices(forms@), nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures template_assembly_start(source, forms@, root, values.model(), result),
+{
+    let emitter = start_emitter(source, forms, root, values)?;
     Some(TemplateAssembly { emitter, parts: Vec::new() })
 }
 
