@@ -2,7 +2,9 @@ use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::macro_expansion::{
     MacroExpandedElement, MacroExpansionErrorKind, MacroExpansionSlice,
 };
-use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::ArgumentSyntaxToken;
+use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::{
+    ArgumentSyntaxToken, MacroSyntaxOrigin, MacroTemplateSyntaxStep,
+};
 use circuitgame2_core::ncg2m::template::TemplateEmission;
 use circuitgame2_core::ncg2m::call_evaluation::macro_binding::{
     MacroArgumentError, MacroExpressionSite, MacroExpressionStep,
@@ -131,7 +133,7 @@ fn reports_call_errors_before_the_body_and_preserves_scope_for_empty_arguments()
 
 #[test]
 fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
-    let library = "(defmacro pick (x y) (list y (syntax (def out (unsyntax x)))))";
+    let library = "(defmacro pick (x y) (list y (syntax (def out (unsyntax y)))))";
     let circuit = "(using nor) (func top (in x) (out out) (expand ::pick x (nor x x)))";
     let project = parse_project_sources(&[
         SourceSnapshot { path: "pick.ncg2m", revision: 31, text: library },
@@ -172,9 +174,43 @@ fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
     assert_eq!(inserted.next(), None);
     assert_eq!(inserted.argument().scope().source.revision, 47);
     assert!(template.parts().iter().any(|item|
-        matches!(item, TemplateEmission::Insert(value) if core::ptr::eq(*value, &bound.arguments()[0]))));
+        matches!(item, TemplateEmission::Insert(value) if core::ptr::eq(*value, &bound.arguments()[1]))));
     assert_eq!(output.call().scope().source.revision, 47);
     assert_eq!(template.source(), library);
+
+    assert!(output.template_syntax(0).is_none());
+    let mut syntax = output.template_syntax(1).unwrap();
+    let mut completed = false;
+    let mut observed = Vec::new();
+    for _ in 0..32 {
+        let MacroTemplateSyntaxStep::Continue { event, next } = syntax.step().unwrap() else {
+            completed = true;
+            break;
+        };
+        syntax = next;
+        let Some(event) = event else { continue; };
+        let source = event.origin.source();
+        match event.origin {
+            MacroSyntaxOrigin::Template(call) => assert!(core::ptr::eq(call, &bound)),
+            MacroSyntaxOrigin::Argument(argument) =>
+                assert!(core::ptr::eq(argument, &bound.arguments()[1])),
+        }
+        let (tag, word) = match event.token {
+            ArgumentSyntaxToken::Open(_) => ('(', ""),
+            ArgumentSyntaxToken::Close(_) => (')', ""),
+            ArgumentSyntaxToken::Atom(at) => {
+                let Form::Atom { span, .. } = &event.origin.forms()[at] else { unreachable!() };
+                ('a', &source.text()[span.clone()])
+            },
+        };
+        observed.push((source.revision, tag, word));
+    }
+    assert!(completed);
+    assert_eq!(observed, [
+        (31, '(', ""), (31, 'a', "def"), (31, 'a', "out"),
+        (47, '(', ""), (47, 'a', "nor"), (47, 'a', "x"), (47, 'a', "x"), (47, ')', ""),
+        (31, ')', ""),
+    ]);
 }
 
 

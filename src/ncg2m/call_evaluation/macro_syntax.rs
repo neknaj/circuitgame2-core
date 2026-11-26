@@ -19,6 +19,13 @@ use crate::syntax::{
 };
 use vstd::prelude::*;
 
+mod projection;
+pub use projection::{
+    MacroSyntaxEvent, MacroSyntaxOrigin, MacroTemplateSyntax, MacroTemplateSyntaxError, MacroTemplateSyntaxStep,
+};
+#[cfg(verus_only)]
+pub use projection::{macro_template_syntax_step_matches, syntax_event_in_source, syntax_token_matches_forms};
+
 verus! {
 
 /// 一つの実引数の構文木を開き括弧、アトム、閉じ括弧の順にたどる項目。
