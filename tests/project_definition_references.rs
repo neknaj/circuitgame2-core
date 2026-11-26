@@ -1,5 +1,5 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, DefinitionLookupObservation, DefinitionReferenceError, DefinitionReferenceReason,
+    DefinitionBinding, DefinitionLookupObservation, DefinitionPosition, DefinitionReferenceError, DefinitionReferenceReason,
     OwnedUnqualifiedLookup, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
@@ -88,6 +88,10 @@ fn resolves_real_references_and_keeps_diagnostic_ranges() {
     let (relative, observation) = aliases.observe_definition_reference(0, main, 2, 0);
     assert!(matches!(relative, Err(DefinitionReferenceError::Rejected { reason: DefinitionReferenceReason::Private(_), .. })));
     assert!(observation.is_none());
+    for definition in [1, 2] {
+        let at = DefinitionPosition { file: 0, entry: main, definition, reference: 0 };
+        assert!(aliases.cache_absolute_reference_diagnostic(at).is_none());
+    }
     assert!(matches!(
         aliases.resolve_definition_reference(0, part, 0, 0),
         Err(DefinitionReferenceError::Rejected {
@@ -151,9 +155,8 @@ fn a_wrong_kind_with_the_builtin_spelling_still_resolves_to_that_binding() {
 fn reuses_a_cached_absolute_diagnostic_only_while_its_evidence_agrees() {
     fn with_project<T>(
         library: &str, revision: u64,
-        check: impl FnOnce(&circuitgame2_core::project::UseAliases<'_, '_, '_>, circuitgame2_core::project::DefinitionPosition) -> T,
+        check: impl FnOnce(&circuitgame2_core::project::UseAliases<'_, '_, '_>, DefinitionPosition) -> T,
     ) -> T {
-        use circuitgame2_core::project::DefinitionPosition;
         let app = "(using nor) (func Run (in x) (out y) (def y (::lib::Task x)))";
         let project = parse_circuit_project(&[
             SourceSnapshot { path: "app.ncg2", revision: 8, text: app },
@@ -169,6 +172,8 @@ fn reuses_a_cached_absolute_diagnostic_only_while_its_evidence_agrees() {
     let private = "(namespace lib (func Task (in x) (out x)))";
     let cached = with_project(private, 1, |aliases, at| aliases.cache_absolute_reference_diagnostic(at).unwrap());
     assert_eq!(cached.word(), "::lib::Task");
+    assert_eq!(cached.primary().file, [b"app.ncg2".to_vec()]);
+    assert_eq!(cached.primary().span.len(), cached.word().len());
     assert_eq!(cached.problem().unwrap().kind, ReferenceDiagnosticKind::Private);
 
     with_project(&format!("{private} ; 変更"), 2, |aliases, at| {

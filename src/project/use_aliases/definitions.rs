@@ -463,6 +463,7 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
             kind is Name || kind is RelativePath || kind is AbsolutePath,
         ensures self.binding_evidence(file, *site, from, kind, out.0),
             out.1.is_some() == (record && (kind is Name || kind is AbsolutePath)),
+            (out.1 matches Some(DefinitionLookupObservation::Absolute(_))) == (record && kind is AbsolutePath),
             out.1 matches Some(observation) ==> observed_binding_matches(*site, observation, out.0),
     {
         let word = site.word;
@@ -1112,8 +1113,26 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let Some((site, kind, from)) = self.read_definition_site(file, entry, definition, reference) else {
             return (Err(DefinitionReferenceError::UnknownPosition), None);
         };
-        let (binding, observation) =
-            self.resolve_scoped_binding_recording(file, &site.request(), from, kind, record);
+        self.resolve_read_definition_site(super::DefinitionPosition { file, entry, definition, reference },
+            site, kind, from, record)
+    }
+
+    // 読み取り済みの参照を、通常の解決と同じ規則で判定する。
+    fn resolve_read_definition_site(
+        &self, at: super::DefinitionPosition, site: DefinitionReferenceSite<'p, 'a>,
+        kind: AtomKind, from: Option<&'a str>, record: bool,
+    ) -> (out: (Result<ResolvedDefinitionReference<'p, 'a>, DefinitionReferenceError<'p, 'a>>, Option<DefinitionLookupObservation>))
+        requires self.can_resolve(),
+            self.positioned_reference(at.file, at.entry, at.definition, at.reference, site, kind),
+            self.scope_matches(at.file, site.block, Ok(from)),
+            bare_atom_kind(site.name.word.spec_bytes()) == Some(kind),
+            kind is Name || kind is RelativePath || kind is AbsolutePath,
+        ensures self.definition_resolution_evidence(at.file, at.entry, at.definition, at.reference, out.0),
+            out.1.is_some() == (record && Self::definition_lookup_is_supported(out.0)),
+            (out.1 matches Some(DefinitionLookupObservation::Absolute(_))) == (record && kind is AbsolutePath),
+            out.1 matches Some(observation) ==> definition_lookup_matches(out.0, observation),
+    {
+        let (binding, observation) = self.resolve_scoped_binding_recording(at.file, &site.request(), from, kind, record);
         let ghost original_site = site;
         let ghost original_binding = binding;
         let result = match binding {

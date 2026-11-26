@@ -224,7 +224,7 @@ pub struct StoredReferenceProblem {
 }
 
 impl StoredReferenceProblem {
-    /// 診断の種別と関連範囲の比較に用いる値を表す。
+    /// 診断の種別、対象の宣言種別、関連範囲を表す。
     pub open spec fn model(&self) -> Problem {
         (self.kind, self.declaration_kind, match self.related {
             None => None,
@@ -266,13 +266,30 @@ pub struct CachedAbsoluteReferenceDiagnostic {
 
 impl CachedAbsoluteReferenceDiagnostic {
     /// 参照元が占める UTF-8 半開バイト範囲と、その仮想ファイル識別子を借りる。
-    pub fn primary(&self) -> &LookupLocation { &self.primary }
+    pub fn primary(&self) -> (primary: &LookupLocation)
+        ensures self.diagnostic_model() matches Some((location, _, _)) ==>
+            lookup_location_model(*primary) == location,
+    {
+        &self.primary
+    }
 
     /// 参照元で使われた完全修飾名の綴りを借りる。
-    pub fn word(&self) -> &str { self.word.as_str() }
+    pub fn word(&self) -> (word: &str)
+        ensures self.diagnostic_model() matches Some((_, spelling, _)) ==> word@ == spelling,
+    {
+        self.word.as_str()
+    }
 
     /// 診断を借りる。名前が解決したときは `None`。
-    pub fn problem(&self) -> Option<&StoredReferenceProblem> { self.problem.as_ref() }
+    pub fn problem(&self) -> (problem: Option<&StoredReferenceProblem>)
+        ensures match (self.diagnostic_model(), problem) {
+            (Some((_, _, expected)), Some(problem)) => problem.model() == expected,
+            (None, None) => true,
+            _ => false,
+        },
+    {
+        self.problem.as_ref()
+    }
 
     /// 保存された診断の比較に用いる値を表す。
     pub closed spec fn diagnostic_model(&self) -> Option<(RelatedLocation, Seq<char>, Problem)> {
@@ -350,8 +367,15 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
                 && cached.diagnostic_model() == definition_diagnostic_model(result)
         },
     {
-        let (result, observation) = self.observe_definition_reference(at.file, at.entry, at.definition, at.reference);
-        let Some(DefinitionLookupObservation::Absolute(lookup)) = observation else { return None; };
+        let (site, kind, from) = self.read_definition_site(at.file, at.entry, at.definition, at.reference)?;
+        if !matches!(kind, AtomKind::AbsolutePath) {
+            return None;
+        }
+        let (result, observation) = self.resolve_read_definition_site(at, site, kind, from, true);
+        let Some(DefinitionLookupObservation::Absolute(lookup)) = observation else {
+            proof { assert(false); }
+            return None;
+        };
         let ghost resolved = result;
         let ghost observed_lookup = lookup;
         let (site, problem) = match result {
