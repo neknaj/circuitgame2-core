@@ -137,46 +137,73 @@ fn first_forbidden_generated_head(
     None
 }
 
-spec fn generated_definition_shape(source: &str, forms: Seq<Form>) -> bool {
-    &&& forms.len() > 0
-    &&& forms[0] matches Form::List { end, .. }
-    &&& end == forms.len()
-    &&& body_head_at(source, forms, 1, end as int, BodyHead::Def)
-    &&& body_arguments_match(source, forms, 2, end as int, BodyHead::Def)
+spec fn generated_definition_shape(source: &str, forms: Seq<Form>, region: Range<usize>) -> bool {
+    let root = region.start as int;
+    &&& region.start < region.end <= forms.len()
+    &&& forms[root] matches Form::List { end, .. }
+    &&& end == region.end
+    &&& body_head_at(source, forms, root + 1, end as int, BodyHead::Def)
+    &&& body_arguments_match(source, forms, root + 2, end as int, BodyHead::Def)
 }
 
-/// 入力が一つの `def` であり、右辺に生成時の禁止フォームがないことを表す。
-pub closed spec fn generated_definition_valid(source: &str, forms: Seq<Form>) -> bool {
-    &&& generated_definition_shape(source, forms)
+/// 元の索引で一つの部分木を切り出した範囲、または囲むリストの末尾で終わる範囲を表す。
+pub open spec fn generated_definition_region(forms: Seq<Form>, region: Range<usize>) -> bool {
+    &&& region.start <= region.end <= forms.len()
+    &&& (form_region_ends_at(forms, region.start as int, region.end as int)
+        || region.start < region.end && region.end == match forms[region.start as int] {
+            Form::Atom { .. } => region.start + 1,
+            Form::List { end, .. } => end as int,
+        })
+}
+
+/// 指定範囲が一つの `def` であり、右辺に生成時の禁止フォームがないことを表す。
+pub closed spec fn generated_definition_in_valid(source: &str, forms: Seq<Form>, region: Range<usize>) -> bool {
+    &&& generated_definition_shape(source, forms, region)
     &&& {
-        let value = after_form(forms, 2);
-        let references = expression_references(source, forms, value, forms.len() as int);
+        let value = after_form(forms, region.start + 2);
+        let references = expression_references(source, forms, value, region.end as int);
         forall|i: int| 0 <= i < references.len() ==> forbidden_generated_reference(source, #[trigger] references[i]).is_none()
     }
 }
 
-/// 検査結果の左辺、右辺、参照、信号名が入力の構文木と対応することを表す。
-pub closed spec fn generated_definition_matches(source: &str, forms: Seq<Form>, result: GeneratedDefinition) -> bool {
-    let value = after_form(forms, 2);
-    let stop = forms.len() as int;
-    &&& generated_definition_valid(source, forms)
-    &&& 2 <= result.targets.start < result.targets.end <= result.expression.start < result.expression.end <= forms.len()
-    &&& result.targets.start == if forms[2] is List { 3usize } else { 2usize }
+/// 構文木全体が一つの `def` であり、右辺に生成時の禁止フォームがないことを表す。
+pub open spec fn generated_definition_valid(source: &str, forms: Seq<Form>) -> bool {
+    generated_definition_in_valid(source, forms, 0..forms.len() as usize)
+}
+
+/// 指定範囲の検査結果が、左辺、右辺、参照、信号名に対応することを表す。
+pub closed spec fn generated_definition_in_matches(
+    source: &str, forms: Seq<Form>, region: Range<usize>, result: GeneratedDefinition,
+) -> bool {
+    let first = region.start + 2;
+    let value = after_form(forms, first);
+    let stop = region.end as int;
+    &&& generated_definition_in_valid(source, forms, region)
+    &&& result.targets.start == if forms[first] is List { first + 1 } else { first }
     &&& result.targets.end == value
-    &&& forall|i: int| result.targets.start <= i < result.targets.end
-        ==> (#[trigger] forms[i]) is Atom && forms[i]->Atom_kind is Name
     &&& result.expression.start == value && result.expression.end == stop
     &&& result.references@ == expression_references(source, forms, value, stop)
     &&& result.signals@ == expression_signals(source, forms, value, stop)
 }
 
-/// 結果の各添字から、入力の構文木と出典の範囲を安全に参照できることを表す。
-pub open spec fn generated_definition_sites(source: &str, forms: Seq<Form>, row: GeneratedDefinition) -> bool {
-    &&& row.targets.start < row.targets.end == row.expression.start < row.expression.end == forms.len()
+/// 構文木全体を検査した結果が、左辺、右辺、参照、信号名に対応することを表す。
+pub open spec fn generated_definition_matches(source: &str, forms: Seq<Form>, result: GeneratedDefinition) -> bool {
+    generated_definition_in_matches(source, forms, 0..forms.len() as usize, result)
+}
+
+/// 結果の各添字が、元の構文木と指定範囲内の位置を指すことを表す。
+pub open spec fn generated_definition_in_sites(
+    source: &str, forms: Seq<Form>, region: Range<usize>, row: GeneratedDefinition,
+) -> bool {
+    &&& region.start < row.targets.start < row.targets.end == row.expression.start < row.expression.end
+        == region.end <= forms.len()
     &&& forall|i: int| row.targets.start <= i < row.targets.end
         ==> (#[trigger] forms[i]) is Atom && forms[i]->Atom_kind is Name
-    &&& forall|i: int| 0 <= i < row.references@.len()
-        ==> expression_reference_in_source(source, forms, #[trigger] row.references@[i])
+    &&& forall|i: int| 0 <= i < row.references@.len() ==> {
+        let reference = #[trigger] row.references@[i];
+        row.expression.start <= reference.form < row.expression.end
+            && expression_reference_in_source(source, forms, reference)
+    }
     &&& forall|i: int| 0 <= i < row.signals@.len() ==> {
         let at = #[trigger] row.signals@[i];
         &&& row.expression.start <= at < row.expression.end
@@ -184,33 +211,48 @@ pub open spec fn generated_definition_sites(source: &str, forms: Seq<Form>, row:
     }
 }
 
-/// 根の個数、先頭語、通常の構文違反、禁止フォームの順に診断を選ぶ。
-pub closed spec fn generated_definition_error(
-    source: &str, forms: Seq<Form>, error: GeneratedDefinitionError,
+/// 構文木全体を検査した結果から、入力の構文木と出典の範囲を安全に参照できることを表す。
+pub open spec fn generated_definition_sites(source: &str, forms: Seq<Form>, row: GeneratedDefinition) -> bool {
+    &&& row.expression.end == forms.len()
+    &&& generated_definition_in_sites(source, forms, 0..forms.len() as usize, row)
+}
+
+/// 指定範囲で根の個数、先頭語、通常の構文違反、禁止フォームの順に診断を選ぶ。
+pub closed spec fn generated_definition_in_error(
+    source: &str, forms: Seq<Form>, region: Range<usize>, error: GeneratedDefinitionError,
 ) -> bool {
-    if forms.len() == 0 {
+    let root = region.start as int;
+    &&& region.start <= region.end <= forms.len()
+    &&& if region.start == region.end {
         error == GeneratedDefinitionError::Empty
     } else {
-        let end = after_form(forms, 0);
-        if end < forms.len() {
+        let end = after_form(forms, root);
+        if end < region.end {
             error == GeneratedDefinitionError::ExtraRoot(form_span(forms[end]))
-        } else if let Form::List { span, .. } = forms[0] {
+        } else if let Form::List { span, .. } = forms[root] {
             let closing = (span.end - 1) as usize;
-            if !body_head_at(source, forms, 1, end, BodyHead::Def) {
+            if !body_head_at(source, forms, root + 1, end, BodyHead::Def) {
                 error matches GeneratedDefinitionError::ExpectedDefinition(span)
-                    && directive_argument_error_span(forms, 1, end, closing, span)
-            } else if !body_arguments_match(source, forms, 2, end, BodyHead::Def) {
+                    && directive_argument_error_span(forms, root + 1, end, closing, span)
+            } else if !body_arguments_match(source, forms, root + 2, end, BodyHead::Def) {
                 error matches GeneratedDefinitionError::Invalid { kind, span }
-                    && body_arguments_error(source, forms, 2, end, closing, BodyHead::Def, (kind, span))
+                    && body_arguments_error(source, forms, root + 2, end, closing, BodyHead::Def, (kind, span))
             } else {
-                let references = expression_references(source, forms, after_form(forms, 2), end);
+                let references = expression_references(source, forms, after_form(forms, root + 2), end);
                 error matches GeneratedDefinitionError::ForbiddenHead { head, span }
                     && generated_forbidden_diagnosis(source, references, head, span)
             }
         } else {
-            error == GeneratedDefinitionError::ExpectedDefinition(form_span(forms[0]))
+            error == GeneratedDefinitionError::ExpectedDefinition(form_span(forms[root]))
         }
     }
+}
+
+/// 構文木全体で根の個数、先頭語、通常の構文違反、禁止フォームの順に診断を選ぶ。
+pub open spec fn generated_definition_error(
+    source: &str, forms: Seq<Form>, error: GeneratedDefinitionError,
+) -> bool {
+    generated_definition_in_error(source, forms, 0..forms.len() as usize, error)
 }
 
 /// 展開から得た構文木を一つの `def` として検査し、左辺、右辺、回路名、型名、信号名を返す。
@@ -259,10 +301,61 @@ pub fn check_generated_definition(source: &str, forms: &[Form])
             && generated_definition_sites(source, forms@, row),
         result matches Err(error) ==> generated_definition_error(source, forms@, error),
 {
-    let Some(root) = forms.first() else { return Err(GeneratedDefinitionError::Empty); };
-    let end = match root { Form::List { end, .. } => *end, Form::Atom { .. } => 1 };
-    proof { reveal(complete_list_indices); }
-    if end < forms.len() {
+    check_generated_definition_in(source, forms, 0..forms.len())
+}
+
+/// 同じ構文木の指定範囲を一つの `def` として検査する。
+///
+/// 範囲には、部分木全体や一つのリストの子が並ぶ区間を指定する。
+/// 返す添字とバイト範囲は、元の構文木と本文に対する位置である。
+///
+/// # Errors
+///
+/// 指定範囲を一つの `def` として読めなければ、[全体の検査][check_generated_definition]と同じ規則で診断する。
+///
+/// # Panics
+///
+/// 構文木が本文に対応しない場合や、指定範囲が構文木の範囲外にある場合は、パニックすることがある。
+///
+/// # Examples
+///
+/// ```
+/// use circuitgame2_syntax::{Form, circuit::check_generated_definition_in, parse};
+///
+/// let text = "(expand pick (def y (nor x x)) tail)";
+/// let forms = parse(text)?;
+/// let Form::List { end, .. } = forms[3] else { unreachable!() };
+/// let row = check_generated_definition_in(text, &forms, 3..end).unwrap();
+/// assert_eq!(row.targets, 5..6);
+/// assert_eq!(row.expression, 6..end);
+/// # Ok::<(), circuitgame2_syntax::Error>(())
+/// ```
+pub fn check_generated_definition_in(source: &str, forms: &[Form], region: Range<usize>)
+    -> (result: Result<GeneratedDefinition, GeneratedDefinitionError>)
+    requires
+        generated_definition_region(forms@, region),
+        complete_list_indices(forms@), nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+        list_source_delimiters(source, forms@, false),
+    ensures
+        result.is_ok() <==> generated_definition_in_valid(source, forms@, region),
+        result matches Ok(row) ==> generated_definition_in_matches(source, forms@, region, row)
+            && generated_definition_in_sites(source, forms@, region, row),
+        result matches Err(error) ==> generated_definition_in_error(source, forms@, region, error),
+{
+    let root_index = region.start;
+    if root_index == region.end {
+        return Err(GeneratedDefinitionError::Empty);
+    }
+    let root = &forms[root_index];
+    let end = match root { Form::List { end, .. } => *end, Form::Atom { .. } => root_index + 1 };
+    proof {
+        if form_region_ends_at(forms@, root_index as int, region.end as int) {
+            enclosing_region_bounds_form(forms@, root_index as int, root_index as int, region.end as int);
+        }
+        assert(end <= region.end);
+    }
+    if end < region.end {
         return Err(GeneratedDefinitionError::ExtraRoot(form_span_exec(&forms[end])));
     }
     let Form::List { span, .. } = root else {
@@ -273,24 +366,27 @@ pub fn check_generated_definition(source: &str, forms: &[Form])
         assert(list_delimited(source.spec_bytes(), *root, false));
     }
     let closing = span.end - 1;
-    match read_body_item_head(source, forms, 1, end, closing) {
+    let head = root_index + 1;
+    match read_body_item_head(source, forms, head, end, closing) {
         Ok(BodyHead::Def) => {
-            assert(body_head_at(source, forms@, 1, end as int, BodyHead::Def));
+            assert(body_head_at(source, forms@, head as int, end as int, BodyHead::Def));
         },
         Ok(BodyHead::Expand) => {
-            assert(body_head_at(source, forms@, 1, end as int, BodyHead::Expand));
-            assert(!body_head_at(source, forms@, 1, end as int, BodyHead::Def));
-            return Err(GeneratedDefinitionError::ExpectedDefinition(form_span_exec(&forms[1])));
+            assert(body_head_at(source, forms@, head as int, end as int, BodyHead::Expand));
+            assert(!body_head_at(source, forms@, head as int, end as int, BodyHead::Def));
+            return Err(GeneratedDefinitionError::ExpectedDefinition(form_span_exec(&forms[head])));
         },
         Err((_, span)) => {
-            assert(!body_head_at(source, forms@, 1, end as int, BodyHead::Def));
+            assert(!body_head_at(source, forms@, head as int, end as int, BodyHead::Def));
             return Err(GeneratedDefinitionError::ExpectedDefinition(span));
         },
     }
+    let first = head + 1;
+    assert(form_region_ends_at(forms@, first as int, end as int));
     let mut references = Vec::new();
     let mut signals = Vec::new();
     let expression = match inspect_body_arguments(
-        source, forms, 2, end, closing, BodyHead::Def, true, &mut references, &mut signals,
+        source, forms, first, end, closing, BodyHead::Def, true, &mut references, &mut signals,
     ) {
         Ok(Some(expression)) => expression,
         Ok(None) => unreachable!(),
@@ -298,7 +394,7 @@ pub fn check_generated_definition(source: &str, forms: &[Form])
     };
     if let Some((_at, head, span)) = first_forbidden_generated_head(source, forms, &references) {
         proof {
-            let indexed = expression_references(source, forms@, after_form(forms@, 2), end as int);
+            let indexed = expression_references(source, forms@, after_form(forms@, first as int), end as int);
             assert(indexed == references@);
             assert(generated_forbidden_diagnosis(source, indexed, head, span)) by {
                 reveal(generated_forbidden_diagnosis);
@@ -307,9 +403,12 @@ pub fn check_generated_definition(source: &str, forms: &[Form])
         }
         return Err(GeneratedDefinitionError::ForbiddenHead { head, span });
     }
-    let start = if matches!(forms[2], Form::List { .. }) { 3 } else { 2 };
+    let start = if matches!(forms[first], Form::List { .. }) { first + 1 } else { first };
     let targets = start..expression.start;
     proof {
+        super::super::expression_forest::expression_references_in_order(
+            source, forms@, expression.start as int, expression.end as int,
+        );
         assert forall|i: int| 0 <= i < signals@.len() implies {
             let at = #[trigger] signals@[i];
             &&& expression.start <= at < expression.end
@@ -321,7 +420,7 @@ pub fn check_generated_definition(source: &str, forms: &[Form])
         };
         assert forall|i: int| targets.start <= i < targets.end implies
             (#[trigger] forms@[i]) is Atom && forms@[i]->Atom_kind is Name by {
-            if forms@[2] is List {
+            if forms@[first as int] is List {
                 assert(argument_matches(forms@, i, targets.end as int, HeaderError::ExpectedName));
             }
         };

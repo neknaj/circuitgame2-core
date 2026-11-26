@@ -40,7 +40,9 @@ mod test_items;
 mod test_values;
 #[cfg(verus_only)]
 pub use body::{
-    expansion_body_region_matches, generated_definition_error, generated_definition_matches, generated_definition_sites, generated_definition_valid,
+    expansion_body_region_matches, generated_definition_error, generated_definition_in_error,
+    generated_definition_in_matches, generated_definition_in_sites, generated_definition_in_valid,
+    generated_definition_matches, generated_definition_region, generated_definition_sites, generated_definition_valid,
     next_expansion_site_matches, routine_expansion_at, routine_expansion_evidence,
     routine_expansion_site_at, routine_expansion_sites_match,
 };
@@ -50,7 +52,8 @@ pub use storage_sites::{StorageSites, storage_sites};
 pub use storage_sites::{storage_site_evidence, storage_sites_match};
 pub use body::{
     DefinitionReferences, ForbiddenGeneratedHead, GeneratedDefinition, GeneratedDefinitionError,
-    RoutineExpansionSite, RoutineExpansionSites, check_generated_definition, first_routine_expansion, routine_expansion_sites,
+    RoutineExpansionSite, RoutineExpansionSites, check_generated_definition, check_generated_definition_in,
+    first_routine_expansion, routine_expansion_sites,
 };
 pub use concat_arguments::concat_argument_range;
 #[cfg(verus_only)]

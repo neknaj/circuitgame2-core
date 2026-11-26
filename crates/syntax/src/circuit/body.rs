@@ -21,10 +21,15 @@ use super::ports::{read_routine_signature, routine_layout};
 use super::*;
 
 mod generated;
-pub use generated::{ForbiddenGeneratedHead, GeneratedDefinition, GeneratedDefinitionError, check_generated_definition};
+pub use generated::{
+    ForbiddenGeneratedHead, GeneratedDefinition, GeneratedDefinitionError, check_generated_definition,
+    check_generated_definition_in,
+};
 #[cfg(verus_only)]
 pub use generated::{
-    generated_definition_error, generated_definition_matches, generated_definition_sites, generated_definition_valid,
+    generated_definition_error, generated_definition_in_error, generated_definition_in_matches,
+    generated_definition_in_sites, generated_definition_in_valid, generated_definition_matches,
+    generated_definition_region, generated_definition_sites, generated_definition_valid,
 };
 
 verus! {
