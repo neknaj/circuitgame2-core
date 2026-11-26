@@ -1,5 +1,5 @@
 use circuitgame2_core::ncg2m::call_evaluation::macro_binding::{
-    MacroArgumentError, MacroExpressionSite,
+    MacroArgumentError, MacroExpressionSite, MacroExpressionStep,
 };
 use circuitgame2_core::project::{
     MacroArgument, MacroCallError, MacroPreparationFailure, SourceSnapshot, check_mixed_use_aliases,
@@ -20,7 +20,7 @@ fn binds_caller_arguments_in_declaration_order_after_the_cursor_advances() {
         (export pick)
         (defmacro pick (x y) (list
             y
-            (syntax (def x (unsyntax x)))
+            (syntax (def x (unsyntax x) (splice (list x y))))
             (if true x y)
             (let ((x y)) x))))"#;
     let circuit = r#"(using nor)
@@ -46,6 +46,14 @@ fn binds_caller_arguments_in_declaration_order_after_the_cursor_advances() {
     assert_eq!(first.scope().source.revision, 47);
     assert_eq!((first.scope().file, first.scope().entry), (1, 2));
 
+    let state = first.start_expression(MacroExpressionSite::Element(0)).unwrap();
+    assert_eq!(&library[state.span()], "y");
+    let MacroExpressionStep::Continue(state) = state.step().unwrap()
+        else { panic!("先頭の仮引数との照合後に再開できる必要があります"); };
+    let MacroExpressionStep::Value(value) = state.step().unwrap()
+        else { panic!("次の仮引数に対応する元の構文が必要です"); };
+    assert!(core::ptr::eq(value, &first.arguments()[1]));
+
     let reference = first.argument_expression(MacroExpressionSite::Element(0)).unwrap();
     assert!(core::ptr::eq(reference, &first.arguments()[1]));
     assert_eq!(reference.scope().source.revision, 47);
@@ -54,7 +62,16 @@ fn binds_caller_arguments_in_declaration_order_after_the_cursor_advances() {
     let insertion = MacroExpressionSite::Insertion { element: 1, insertion: 0 };
     assert_eq!(argument_text(first.argument_expression(insertion).unwrap()), "x");
     assert_eq!(argument_text(second.argument_expression(insertion).unwrap()), "y");
-    assert!(matches!(first.argument_expression(MacroExpressionSite::Insertion { element: 1, insertion: 1 }),
+    let state = second.start_expression(insertion).unwrap();
+    assert_eq!(&library[state.span()], "x");
+    let MacroExpressionStep::Value(value) = state.step().unwrap()
+        else { panic!("挿入式に対応する元の構文が必要です"); };
+    assert!(core::ptr::eq(value, &second.arguments()[0]));
+    let splice = MacroExpressionSite::Insertion { element: 1, insertion: 1 };
+    let Err(MacroArgumentError::Deferred(span)) = first.start_expression(splice).unwrap().step()
+        else { panic!("リスト構文の評価は保留される必要があります"); };
+    assert_eq!(&library[span], "(list x y)");
+    assert!(matches!(first.argument_expression(MacroExpressionSite::Insertion { element: 1, insertion: 2 }),
         Err(MacroArgumentError::NoExpression)));
 
     for (element, text) in [(2, "(if true x y)"), (3, "(let ((x y)) x)")] {
@@ -90,6 +107,7 @@ fn reports_call_errors_before_the_body_and_preserves_scope_for_empty_arguments()
     let empty = calls.next_bound_macro().unwrap().unwrap();
     assert_eq!(empty.scope().source.revision, 47);
     assert!(empty.arguments().is_empty());
+    assert!(empty.start_expression(MacroExpressionSite::Element(0)).is_none());
     assert!(matches!(empty.argument_expression(MacroExpressionSite::Element(0)),
         Err(MacroArgumentError::NoExpression)));
     assert!(calls.next_bound_macro().is_none());

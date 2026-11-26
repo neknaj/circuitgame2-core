@@ -679,6 +679,18 @@ pub closed spec fn defmacro_body_check<'p, 'a>(
     } else { false }
 }
 
+/// 本体の要素と挿入式の位置・型が、保持した構文木に対応する。
+pub open spec fn checked_macro_body_layout<'p, 'a>(checked: &CheckedMacroBody<'p, 'a>) -> bool {
+    let body = checked.body_model();
+    let source = body.source.text_model();
+    &&& body.at < body.forms@.len()
+    &&& macro_body_elements_complete(body.forms@, body.at, checked.elements_model())
+    &&& complete_list_indices(body.forms@) && nested_list_indices(body.forms@)
+    &&& form_spans_valid(source, body.forms@, source.spec_bytes().len() as int)
+    &&& forall|i: int| 0 <= i < checked.elements_model().len() ==>
+        macro_element_origin(source, body.forms@, checked.parameters_model(), #[trigger] checked.elements_model()[i])
+}
+
 /// 型検査済みの仮引数、要素、挿入式が元宣言と保持した構文木に対応する。
 pub open spec fn checked_macro_body_origin<'p, 'a>(
     project: &ParsedProjectSources,
@@ -687,16 +699,11 @@ pub open spec fn checked_macro_body_origin<'p, 'a>(
 ) -> bool {
     let body = checked.body_model();
     let source = body.source.text_model();
+    &&& checked_macro_body_layout(checked)
     &&& macro_parameter_environment(source, definition.parameters@, checked.parameters_model())
     &&& *body.source == project.sources_model()[definition.declaration.file as int]
     &&& project.functional_forms_model(definition.declaration.file) == Some(body.forms@)
-    &&& body.at < body.forms@.len()
     &&& form_span(body.forms@[body.at as int]) == *definition.body
-    &&& macro_body_elements_complete(body.forms@, body.at, checked.elements_model())
-    &&& complete_list_indices(body.forms@) && nested_list_indices(body.forms@)
-    &&& form_spans_valid(source, body.forms@, source.spec_bytes().len() as int)
-    &&& forall|i: int| 0 <= i < checked.elements_model().len() ==>
-        macro_element_origin(source, body.forms@, checked.parameters_model(), #[trigger] checked.elements_model()[i])
 }
 
 impl<'a> ParsedProjectSources<'a> {
