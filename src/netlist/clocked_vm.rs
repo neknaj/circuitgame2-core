@@ -1,10 +1,11 @@
 //! NOR と状態素子を同じ tick で更新する。
 
 use super::clocked::observe;
-use super::{ClockedNor, ClockedStorage, ClockedStorageError, ClockedStorageInputs, TickInputError};
+use super::{ClockedNor, ClockedStorage, ClockedStorageError, ClockedStorageInputs, NorNetlist, TickInputError};
+use core::ops::Range;
 use crate::project::clocked_nor_settling_bound;
 #[cfg(verus_only)]
-use super::{NorNetlist, clocked_gate_updates, clocked_storage_result, clocked_wiring_endpoints, clocked_wiring_valid,
+use super::{clocked_gate_updates, clocked_storage_result, clocked_wiring_endpoints, clocked_wiring_valid,
     output_values_match};
 #[cfg(verus_only)]
 use super::clocked_storage::{storage_capacity, storage_fits};
@@ -656,6 +657,55 @@ impl ClockedVm {
             states[tick as int].gate_values_model() == states[(tick + period) as int].gate_values_model(),
     {
         self.settling_states_agree(bound, input, states, states, tick as int, (tick + period) as int);
+    }
+
+    /// tick の更新に使う平坦な NOR ゲート列と公開出力の配線を借りる。
+    ///
+    /// 入力幅には外部入力と各状態素子の登録出力を含む。ゲートの添字は tick の状態列と共通で、
+    /// 配列内で自身より後ろのゲートも参照できる。
+    pub fn netlist(&self) -> (netlist: &NorNetlist)
+        ensures *netlist == self.netlist_model(), clocked_wiring_valid(netlist),
+    {
+        self.circuit.checked_netlist()
+    }
+
+    /// tick に渡す外部入力のビット数を返す。
+    pub fn external_input_count(&self) -> (count: usize)
+        ensures count == self.external_count(),
+    {
+        self.external
+    }
+
+    /// 増補入力に登録出力を並べる順序で数えた、状態素子の個数を返す。
+    pub fn storage_count(&self) -> (count: usize)
+        ensures count == self.storage_model().len(),
+    {
+        self.storage.len()
+    }
+
+    /// 状態素子の配線と、その登録出力が占める増補入力上の半開区間を返す。
+    ///
+    /// 添字は [状態素子の個数][Self::storage_count] で数える順序に従う。区間には外部入力の
+    /// ビット数を含めて添字を付ける。RAM では登録読み出し出力の区間を返す。
+    /// 添字が範囲外なら `None` を返す。
+    pub fn storage_wiring(&self, index: usize) -> (view: Option<(&ClockedStorageInputs, Range<usize>)>)
+        ensures
+            index >= self.storage_model().len() ==> view.is_none(),
+            self.valid() && index < self.storage_model().len() ==> view.is_some(),
+            view matches Some((wiring, range)) ==> {
+                &&& index < self.storage_model().len()
+                &&& *wiring == self.storage_model()[index as int].wiring_model()
+                &&& range == self.storage_input_range_model(index as int)
+                &&& (self.valid() ==>
+                    range.start + wiring.data@.len() == range.end <= self.netlist_model().input_count
+                    && wiring.pins_available(self.netlist_model().input_count as nat, self.netlist_model().gates@.len()))
+            },
+    {
+        if index >= self.storage.len() { return None; }
+        let start = *self.starts.get(index)?;
+        let end = *self.starts.get(index + 1)?;
+        let wiring = self.storage[index].wiring();
+        Some((wiring, start..end))
     }
 
     /// 指定した状態素子の RAM 記憶部を読み取る。

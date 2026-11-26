@@ -793,6 +793,17 @@ fn a_module_observes_delayed_function_gates_and_immediate_wires() {
     let mut vm = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap().vm;
     assert_eq!(vm.settling_bound(), Some(2));
     assert_eq!(vm.nor_gate_count(), 4);
+    assert_eq!(vm.external_input_count(), 1);
+    assert_eq!(vm.netlist().input_count, 1);
+    assert_eq!(vm.netlist().gates, [
+        NorGate { left: Wire::Input(0), right: Wire::Input(0) },
+        NorGate { left: Wire::Gate(0), right: Wire::Gate(0) },
+        NorGate { left: Wire::Constant(false), right: Wire::Constant(false) },
+        NorGate { left: Wire::Gate(2), right: Wire::Gate(2) },
+    ]);
+    assert_eq!(vm.netlist().outputs, [Wire::Gate(1), Wire::Input(0), Wire::Gate(3)]);
+    assert_eq!(vm.storage_count(), 0);
+    assert!(vm.storage_wiring(0).is_none());
     let hint = aliases.module_expansion_hint(0, 0, limits).unwrap().unwrap();
     assert_eq!((hint.nor_gates, hint.settling_ticks), (4, Some(2)));
     let legacy = aliases.module_settling_hint(0, 0, limits).unwrap().unwrap();

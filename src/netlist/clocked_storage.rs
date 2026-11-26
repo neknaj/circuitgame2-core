@@ -289,6 +289,13 @@ impl ClockedStorage {
         storage_wires_valid(&self.wiring, self.inputs, self.gates) && state_shape(&self.wiring, &self.state)
     }
 
+    /// 状態素子の配線を VM の外部観測用に借りる。
+    pub(super) fn wiring(&self) -> (wiring: &ClockedStorageInputs)
+        ensures *wiring == self.wiring_model(),
+    {
+        &self.wiring
+    }
+
     /// インスタンスが参照する配線。
     pub closed spec fn wiring_model(&self) -> ClockedStorageInputs { self.wiring }
 
