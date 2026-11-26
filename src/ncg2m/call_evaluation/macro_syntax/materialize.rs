@@ -847,6 +847,7 @@ pub open spec fn template_projection_continue<'s, 'b, 'p, 'a>(
     event: Option<MacroSyntaxEvent<'b, 'p, 'a>>,
     next: MacroTemplateSyntax<'s, 'b, 'p, 'a>, after: TemplateProjectionModel<'b, 'p, 'a>,
 ) -> bool {
+    &&& before.valid() && next.valid()
     &&& macro_template_syntax_step_matches(before, Ok(MacroTemplateSyntaxStep::Continue { event, next }))
     &&& match event {
         Some(event) => projected_event_step(prior, after, event),
@@ -861,10 +862,11 @@ pub open spec fn template_projection_trace_result<'s, 'b, 'p, 'a>(
     result: ProjectionResult<'b, 'p, 'a>,
 ) -> bool {
     &&& template_projection_prefix(initial, cursors, projections, events)
+    &&& cursors.last().valid()
     &&& match result {
         Err(TemplateDefinitionError::Source(error)) => macro_template_syntax_step_matches(cursors.last(), Err(error)),
         Err(TemplateDefinitionError::UnexpectedClose(event)) => {
-            &&& event.token is Close && projections.last().3.len() == 0
+            &&& event.token is Close && projections.last().3.len() == 0 && syntax_event_in_source(event)
             &&& exists|next: MacroTemplateSyntax<'s, 'b, 'p, 'a>| #[trigger]
                 macro_template_syntax_step_matches(cursors.last(), Ok(MacroTemplateSyntaxStep::Continue {
                     event: Some(event), next,

@@ -342,6 +342,78 @@ pub closed spec fn macro_template_syntax_step_matches(
     }
 }
 
+/// 続行時のイベントと次の位置を、処理中の引数または選択したテンプレート項目に対応付ける。
+pub proof fn macro_template_syntax_continue_observations<'s, 'b, 'p, 'a>(
+    before: MacroTemplateSyntax<'s, 'b, 'p, 'a>, next: MacroTemplateSyntax<'s, 'b, 'p, 'a>,
+    event: Option<MacroSyntaxEvent<'b, 'p, 'a>>,
+)
+    requires before.valid(), macro_template_syntax_step_matches(before, Ok(MacroTemplateSyntaxStep::Continue { event, next })),
+    ensures
+        next.call_model() == before.call_model() && next.element_model() == before.element_model(),
+        next.parts_model() == before.parts_model(),
+        event matches Some(item) ==> syntax_event_in_source(item),
+        if let Some(argument) = before.argument_model() {
+            &&& next.at_model() == before.at_model()
+            &&& next.splice_model() == before.splice_model() && next.splice_at_model() == before.splice_at_model()
+            &&& match event {
+                Some(item) => item.origin == MacroSyntaxOrigin::Argument(argument.argument_model())
+                    && (next.argument_model() matches Some(later)
+                        && argument_syntax_step(&argument, &later, Some(item.token))),
+                None => argument.remaining_bound() == 0 && next.argument_model().is_none(),
+            }
+        } else if before.splice_at_model() < before.splice_model().len() {
+            let argument = &before.splice_model()[before.splice_at_model() as int];
+            &&& event.is_none() && next.at_model() == before.at_model()
+            &&& next.splice_model() == before.splice_model() && next.splice_at_model() == before.splice_at_model() + 1
+            &&& next.argument_model() matches Some(walker) && walker.argument_model() == argument
+                && walker.at_model() == argument.nodes_model().start && walker.open_model().len() == 0
+        } else {
+            let at = before.at_model();
+            &&& at < before.parts_model().len() && next.at_model() == at + 1
+            &&& match before.parts_model()[at as int] {
+                TemplateEmission::Atom(i) => event == Some(MacroSyntaxEvent {
+                    origin: MacroSyntaxOrigin::Template(before.call_model()), token: ArgumentSyntaxToken::Atom(i),
+                }),
+                TemplateEmission::Open(i) => event == Some(MacroSyntaxEvent {
+                    origin: MacroSyntaxOrigin::Template(before.call_model()), token: ArgumentSyntaxToken::Open(i),
+                }),
+                TemplateEmission::Close(i) => event == Some(MacroSyntaxEvent {
+                    origin: MacroSyntaxOrigin::Template(before.call_model()), token: ArgumentSyntaxToken::Close(i),
+                }),
+                TemplateEmission::Insert(argument) => event.is_none()
+                    && (next.argument_model() matches Some(walker) && walker.argument_model() == argument
+                        && walker.at_model() == argument.nodes_model().start && walker.open_model().len() == 0),
+                TemplateEmission::Splice(arguments) => event.is_none()
+                    && next.splice_model() == arguments@ && next.splice_at_model() == 0 && next.argument_model().is_none(),
+            }
+        },
+{
+    if let Some(argument) = before.argument_model() {
+        if let Some(item) = event {
+            let later = next.argument_model().unwrap();
+            argument_event_in_source(&argument, &later, item.token);
+        }
+    }
+}
+
+/// 元構文の診断が、次に読むリテラルとその無効な添字または種別を指すことを示す。
+pub proof fn macro_template_syntax_source_error_in_part(
+    before: MacroTemplateSyntax, error: MacroTemplateSyntaxError,
+)
+    requires before.valid(), macro_template_syntax_step_matches(before, Err(error)),
+    ensures
+        before.argument_model().is_none() && before.splice_at_model() == before.splice_model().len(),
+        before.at_model() < before.parts_model().len(),
+        error.call == before.call_model() && error.element == before.element_model(),
+        match before.parts_model()[before.at_model() as int] {
+            TemplateEmission::Atom(i) => error.token == ArgumentSyntaxToken::Atom(i),
+            TemplateEmission::Open(i) => error.token == ArgumentSyntaxToken::Open(i),
+            TemplateEmission::Close(i) => error.token == ArgumentSyntaxToken::Close(i),
+            _ => false,
+        },
+        !syntax_token_matches_forms(MacroSyntaxOrigin::Template(error.call).forms_model(), error.token),
+{}
+
 proof fn template_matches_definition<'b, 'p, 'a>(
     call: &'b BoundMacroCall<'p, 'a>, element: usize,
     syntax: ExpandedTemplate<'p, 'b, MacroArgument<'p, 'a>>,

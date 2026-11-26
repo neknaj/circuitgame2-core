@@ -35,8 +35,9 @@ pub use projection::{
 };
 #[cfg(verus_only)]
 pub use projection::{
-    completed_macro_template_syntax_consumed, macro_template_syntax_starts_at, macro_template_syntax_step_matches,
-    syntax_event_in_source, syntax_token_matches_forms,
+    completed_macro_template_syntax_consumed, macro_template_syntax_continue_observations,
+    macro_template_syntax_source_error_in_part, macro_template_syntax_starts_at,
+    macro_template_syntax_step_matches, syntax_event_in_source, syntax_token_matches_forms,
 };
 
 verus! {
