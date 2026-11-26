@@ -1030,4 +1030,80 @@ pub proof fn macro_expansion_steps_agree<'b, 'p, 'a>(
     }
 }
 
+/// 同じ呼び出しの先頭から始めた二つの状態は、同じ構文を同じ順に処理する。
+pub proof fn macro_expansion_starts_agree<'b, 'p, 'a>(
+    call: &'b BoundMacroCall<'p, 'a>,
+    a: MacroExpansion<'b, 'p, 'a>, b: MacroExpansion<'b, 'p, 'a>,
+)
+    requires a.initial_for(call), b.initial_for(call),
+    ensures macro_expansion_states_agree(&a, &b),
+{}
+
+proof fn macro_expansion_common_prefix_agrees<'b, 'p, 'a>(
+    start_a: MacroExpansion<'b, 'p, 'a>, start_b: MacroExpansion<'b, 'p, 'a>,
+    left: Seq<MacroExpansion<'b, 'p, 'a>>, right: Seq<MacroExpansion<'b, 'p, 'a>>,
+    index: int,
+)
+    requires macro_expansion_states_agree(&start_a, &start_b),
+        macro_expansion_prefix(start_a, left), macro_expansion_prefix(start_b, right),
+        0 <= index < left.len(), index < right.len(),
+    ensures macro_expansion_states_agree(&left[index], &right[index]),
+    decreases index,
+{
+    if index > 0 {
+        let previous = index - 1;
+        macro_expansion_common_prefix_agrees(start_a, start_b, left, right, previous);
+        let a = Ok(MacroExpansionSlice::Suspended(left[previous + 1]));
+        let b = Ok(MacroExpansionSlice::Suspended(right[previous + 1]));
+        assert(macro_expansion_step_matches(left[previous], a));
+        assert(macro_expansion_step_matches(right[previous], b));
+        macro_expansion_steps_agree(&left[previous], &right[previous], a, b);
+    }
+}
+
+proof fn macro_expansion_trace_does_not_end_early<'b, 'p, 'a>(
+    start_a: MacroExpansion<'b, 'p, 'a>, start_b: MacroExpansion<'b, 'p, 'a>, fuel: nat,
+    left: Seq<MacroExpansion<'b, 'p, 'a>>, right: Seq<MacroExpansion<'b, 'p, 'a>>,
+    a: ExpansionResult<'b, 'p, 'a>, b: ExpansionResult<'b, 'p, 'a>,
+)
+    requires macro_expansion_states_agree(&start_a, &start_b),
+        macro_expansion_trace(start_a, fuel, left, a), macro_expansion_trace(start_b, fuel, right, b),
+    ensures left.len() >= right.len(),
+{
+    if left.len() < right.len() {
+        let index = left.len() - 1;
+        assert(left.len() <= fuel);
+        assert(left[index] == left.last());
+        macro_expansion_common_prefix_agrees(start_a, start_b, left, right, index);
+        let later = Ok(MacroExpansionSlice::Suspended(right[index + 1]));
+        assert(macro_expansion_step_matches(right[index], later));
+        macro_expansion_steps_agree(&left[index], &right[index], a, later);
+    }
+}
+
+/// 続きが等しい開始状態と同じ枠からは、同じ構文、診断、または同等の再開状態が得られる。
+///
+/// 分けた枠を `resumed_macro_expansion_matches` で合成すると、一括実行との比較にも使える。
+pub proof fn macro_expansion_slice_results_agree<'b, 'p, 'a>(
+    start_a: MacroExpansion<'b, 'p, 'a>, start_b: MacroExpansion<'b, 'p, 'a>, fuel: nat,
+    a: ExpansionResult<'b, 'p, 'a>, b: ExpansionResult<'b, 'p, 'a>,
+)
+    requires macro_expansion_states_agree(&start_a, &start_b),
+        macro_expansion_slice_matches(start_a, fuel, a), macro_expansion_slice_matches(start_b, fuel, b),
+    ensures macro_expansion_step_results_agree(a, b),
+        macro_expansion_slice_steps(start_a, fuel, a) == macro_expansion_slice_steps(start_b, fuel, b),
+{
+    let left = choose|states: Seq<MacroExpansion<'b, 'p, 'a>>| #[trigger] macro_expansion_trace(start_a, fuel, states, a);
+    let right = choose|states: Seq<MacroExpansion<'b, 'p, 'a>>| #[trigger] macro_expansion_trace(start_b, fuel, states, b);
+    macro_expansion_trace_does_not_end_early(start_a, start_b, fuel, left, right, a, b);
+    assert(macro_expansion_states_agree(&start_b, &start_a));
+    macro_expansion_trace_does_not_end_early(start_b, start_a, fuel, right, left, b, a);
+    let index = left.len() - 1;
+    macro_expansion_common_prefix_agrees(start_a, start_b, left, right, index);
+    assert(left[index] == left.last() && right[index] == right.last());
+    if left.len() <= fuel {
+        macro_expansion_steps_agree(&left.last(), &right.last(), a, b);
+    }
+}
+
 } // verus!
