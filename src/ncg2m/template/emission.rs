@@ -99,6 +99,20 @@ impl<'s, 'v, T> TemplateEmitter<'s, 'v, T> {
         }
     }
 
+    /// リテラル項目の出典である元テキストを返す。
+    pub fn source(&self) -> (source: &'s str)
+        ensures source == self.walk_model().source_model(),
+    {
+        self.walk.source
+    }
+
+    /// リテラル項目の添字が参照する、元の平坦な構文木を返す。
+    pub fn forms(&self) -> (forms: &'s [Form])
+        ensures forms@ == self.walk_model().forms_model(),
+    {
+        self.walk.forms
+    }
+
     /// 展開した構文の次の項目を返す。
     ///
     /// 1回の呼び出しはリストの終了を1件返すか、テンプレートのフォームを1件進める。
@@ -255,25 +269,77 @@ pub open spec fn template_emission_step<'s, 'v, T>(
         exists|part: Option<(usize, Result<TemplatePart, TemplateError>)>|
             #[trigger] template_walk_step(past.source_model(), past.forms_model(), past.range_model(),
                 cursor, next.position_model(), part)
-            && match part {
-                None => after.finished_model() && after.lists_model() == lists && after.used_model() == used
-                    && result == if used == values.len() { None } else { Some(Err(TemplateEmissionError::ExtraValue(used))) },
-                Some((_, Err(error))) => after.finished_model() && after.lists_model() == lists
-                    && after.used_model() == used && result == Some(Err(TemplateEmissionError::Template(error))),
-                Some((at, Ok(part))) => match part {
-                    TemplatePart::Atom => !after.finished_model() && after.lists_model() == lists
-                        && after.used_model() == used && result == Some(Ok(TemplateEmission::Atom(at))),
-                    TemplatePart::List { children } => !after.finished_model()
-                        && after.lists_model() == lists.push(at..children.end)
-                        && after.used_model() == used && result == Some(Ok(TemplateEmission::Open(at))),
-                    TemplatePart::Insertion { kind, .. } => {
-                        let replacement = template_substitution_at(values, used, at, kind);
-                        result == Some(replacement) && after.lists_model() == lists
-                            && after.finished_model() == replacement.is_err()
-                            && after.used_model() == used + if replacement.is_ok() { 1int } else { 0int }
-                    },
-                },
-            }
+            && template_emission_from_part(after, values, used, lists, part, result)
+    }
+}
+
+/// テンプレートから読んだフォームを、リスト状態と挿入値から出力に変える。
+pub open spec fn template_emission_from_part<'s, 'v, T>(
+    after: &TemplateEmitter<'s, 'v, T>, values: Seq<TemplateSubstitution<'v, T>>,
+    used: usize, lists: Seq<Range<usize>>, part: Option<(usize, Result<TemplatePart, TemplateError>)>,
+    result: Option<Result<TemplateEmission<'v, T>, TemplateEmissionError>>,
+) -> bool {
+    match part {
+        None => after.finished_model() && after.lists_model() == lists && after.used_model() == used
+            && result == if used == values.len() { None } else { Some(Err(TemplateEmissionError::ExtraValue(used))) },
+        Some((_, Err(error))) => after.finished_model() && after.lists_model() == lists
+            && after.used_model() == used && result == Some(Err(TemplateEmissionError::Template(error))),
+        Some((at, Ok(part))) => match part {
+            TemplatePart::Atom => !after.finished_model() && after.lists_model() == lists
+                && after.used_model() == used && result == Some(Ok(TemplateEmission::Atom(at))),
+            TemplatePart::List { children } => !after.finished_model()
+                && after.lists_model() == lists.push(at..children.end)
+                && after.used_model() == used && result == Some(Ok(TemplateEmission::Open(at))),
+            TemplatePart::Insertion { kind, .. } => {
+                let replacement = template_substitution_at(values, used, at, kind);
+                result == Some(replacement) && after.lists_model() == lists
+                    && after.finished_model() == replacement.is_err()
+                    && after.used_model() == used + if replacement.is_ok() { 1int } else { 0int }
+            },
+        },
+    }
+}
+
+/// 出力の続きを決める、構文木・位置・開いたリスト・挿入値が等しいことを表す。
+pub open spec fn template_emitters_agree<'s, 'v, T>(
+    a: &TemplateEmitter<'s, 'v, T>, b: &TemplateEmitter<'s, 'v, T>,
+) -> bool {
+    &&& a.walk_model().source_model() == b.walk_model().source_model()
+    &&& a.walk_model().forms_model() == b.walk_model().forms_model()
+    &&& a.walk_model().range_model() == b.walk_model().range_model()
+    &&& a.walk_model().position_model() == b.walk_model().position_model()
+    &&& a.values_model() == b.values_model()
+    &&& a.used_model() == b.used_model()
+    &&& a.lists_model() == b.lists_model()
+    &&& a.finished_model() == b.finished_model()
+}
+
+/// 同じ状態からの1遷移は、同じ出力と続きの状態を持つことを示す。
+pub proof fn template_emission_steps_agree<'s, 'v, T>(
+    a: &TemplateEmitter<'s, 'v, T>, b: &TemplateEmitter<'s, 'v, T>,
+    next_a: &TemplateEmitter<'s, 'v, T>, next_b: &TemplateEmitter<'s, 'v, T>,
+    out_a: Option<Result<TemplateEmission<'v, T>, TemplateEmissionError>>,
+    out_b: Option<Result<TemplateEmission<'v, T>, TemplateEmissionError>>,
+)
+    requires template_emitters_agree(a, b),
+        template_emission_step(a, next_a, out_a), template_emission_step(b, next_b, out_b),
+    ensures template_emitters_agree(next_a, next_b), out_a == out_b,
+{
+    let past = a.walk_model();
+    let values = a.values_model();
+    let used = a.used_model();
+    let lists = a.lists_model();
+    let cursor = past.position_model();
+    if !a.finished_model() && !(lists.len() > 0 && lists.last().end == cursor) {
+        let part_a = choose|part: Option<(usize, Result<TemplatePart, TemplateError>)>|
+            #[trigger] template_walk_step(past.source_model(), past.forms_model(), past.range_model(),
+                cursor, next_a.walk_model().position_model(), part)
+                && template_emission_from_part(next_a, values, used, lists, part, out_a);
+        let part_b = choose|part: Option<(usize, Result<TemplatePart, TemplateError>)>|
+            #[trigger] template_walk_step(past.source_model(), past.forms_model(), past.range_model(),
+                cursor, next_b.walk_model().position_model(), part)
+                && template_emission_from_part(next_b, values, used, lists, part, out_b);
+        assert(part_a == part_b);
     }
 }
 

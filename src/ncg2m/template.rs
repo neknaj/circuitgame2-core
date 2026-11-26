@@ -12,10 +12,20 @@ use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
 
+mod assembly;
+pub use assembly::{ExpandedTemplate, TemplateAssembly, TemplateAssemblySlice, assemble_template};
+#[cfg(verus_only)]
+pub use assembly::{
+    resumed_template_assembly_matches, template_assembly_matches, template_assembly_outputs_agree,
+    template_assembly_results_agree, template_assembly_trace_result, template_emission_prefix,
+};
 mod emission;
 pub use emission::{TemplateEmission, TemplateEmissionError, TemplateEmitter, TemplateSubstitution, emit_template};
 #[cfg(verus_only)]
-pub use emission::{template_emission_step, template_substitution_at};
+pub use emission::{
+    template_emission_from_part, template_emission_step, template_emission_steps_agree,
+    template_emitters_agree, template_substitution_at,
+};
 
 verus! {
 
