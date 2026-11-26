@@ -849,6 +849,8 @@ impl<'a> RoutineExpansionSites<'a> {
     pub fn syntax(&self) -> (syntax: &'a CircuitForms)
         requires self.valid(),
         ensures syntax == self.syntax_model(), complete_list_indices(syntax.forms@),
+            nested_list_indices(syntax.forms@),
+            form_spans_valid(self.source_model(), syntax.forms@, self.source_model().spec_bytes().len() as int),
     {
         self.syntax
     }
