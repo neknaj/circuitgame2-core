@@ -1,12 +1,19 @@
 //! CLI と GUI が使う TOML の実行設定を、読み込み済みのバイト列から解析する。
 
-use std::{collections::BTreeMap, num::NonZeroU64, ops::Range};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU32, NonZeroU64},
+    ops::Range,
+};
 
 use serde::Deserialize;
 pub use toml::{Spanned, Value};
 
 /// プロジェクトの設定ファイル名。
 pub const FILE_NAME: &str = "circuitgame2.toml";
+
+/// 順序回路で RAM・ラッチ・記憶素子の読み出し出力に使える既定の総ビット数。
+pub const DEFAULT_STATE_BITS: usize = 8_388_608;
 
 /// ソース集合、開始モジュール、外部デバイスや VRAM の設定。
 #[derive(Deserialize)]
@@ -18,12 +25,23 @@ pub struct ProjectConfig {
     pub entry: Option<Spanned<String>>,
     /// 設定した tick 周期と原文範囲。
     pub tick_ns: Option<Spanned<TickPeriod>>,
+    /// 順序回路の総状態ビット数の上限と原文範囲。省略時は [DEFAULT_STATE_BITS]。
+    pub state_bits: Option<Spanned<NonZeroU32>>,
     #[serde(default)]
     /// 実行設定に並んだ外部デバイスとその位置。
     pub device: Vec<Spanned<Device>>,
     #[serde(default)]
     /// 設定順に並んだ VRAM の公開指定。
     pub vram: Vec<Vram>,
+}
+
+impl ProjectConfig {
+    /// 順序回路の展開時に使う総状態ビット数の上限を返す。
+    pub fn simulation_state_bits(&self) -> usize {
+        self.state_bits
+            .as_ref()
+            .map_or(DEFAULT_STATE_BITS, |limit| limit.get_ref().get() as usize)
+    }
 }
 
 /// TOML に記した正の有理数の tick 周期。
@@ -147,6 +165,8 @@ read-output = "fb-read"
         ));
         for malformed in [
             "sources = []\nextra = true",
+            "sources = [\"x.ncg2\"]\nstate-bits = 0",
+            "sources = [\"x.ncg2\"]\nstate-bits = 4294967296",
             "sources = [\"x.ncg2\"]\ntick-ns = { numerator = 0, denominator = 1 }",
             "sources = [\"x.ncg2\"]\ntick-ns = { numerator = 9223372036854775808, denominator = 1 }",
             "sources = [\"x.ncg2\"]\n[[device]]\nname = \"d\"\nkind = \"k\"\nbindings = {}\nextra = true",
@@ -156,5 +176,15 @@ read-output = "fb-read"
                 Err(ConfigError::InvalidToml { span: Some(_), .. })
             ));
         }
+    }
+
+    #[test]
+    fn state_bit_limit_uses_the_project_value_or_default() {
+        let default = parse(b"sources = [\"x.ncg2\"]").unwrap();
+        assert_eq!(default.simulation_state_bits(), 8_388_608);
+        let source = "sources = [\"x.ncg2\"]\nstate-bits = 4194304";
+        let configured = parse(source.as_bytes()).unwrap();
+        assert_eq!(configured.simulation_state_bits(), 4_194_304);
+        assert_eq!(&source[configured.state_bits.unwrap().span()], "4194304");
     }
 }
