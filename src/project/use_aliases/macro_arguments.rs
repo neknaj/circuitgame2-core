@@ -4,7 +4,7 @@ use core::ops::Range;
 use crate::project::ProjectSource;
 use crate::syntax::{Form, circuit::next_call_argument};
 #[cfg(verus_only)]
-use crate::syntax::{complete_list_indices, form_spans_valid, nested_list_indices,
+use crate::syntax::{complete_list_indices, form_spans_valid, list_source_delimiters, nested_list_indices,
     circuit::{call_argument_sequence, exhausted_call_arguments, expression_region}};
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -41,6 +41,26 @@ impl<'p, 'a> MacroArgument<'p, 'a> {
     /// 引数の部分木が占める半開区間を表す。
     pub closed spec fn nodes_model(&self) -> Range<usize> { self.nodes }
 
+    /// 元の構文木の中で、範囲がちょうど一つの部分木を囲むことを表す。
+    pub open spec fn valid(&self) -> bool {
+        let forms = self.forms_model();
+        let source = self.scope_model().source.text_model();
+        let nodes = self.nodes_model();
+        &&& complete_list_indices(forms) && nested_list_indices(forms)
+        &&& form_spans_valid(source, forms, source.spec_bytes().len() as int)
+        &&& list_source_delimiters(source, forms, false)
+        &&& nodes.start < nodes.end <= forms.len()
+        &&& nodes.end == match forms[nodes.start as int] {
+            Form::Atom { .. } => nodes.start + 1,
+            Form::List { end, .. } => end as int,
+        }
+    }
+
+    #[verifier::type_invariant]
+    spec fn argument_invariant(&self) -> bool {
+        self.valid()
+    }
+
     /// 元文書の版を含む呼び出し元のスコープを返す。
     pub fn scope(&self) -> (scope: MacroArgumentScope<'p, 'a>)
         ensures scope == self.scope_model(),
@@ -48,10 +68,11 @@ impl<'p, 'a> MacroArgument<'p, 'a> {
         self.scope
     }
 
-    /// 引数と同じ元の平坦な構文木を借りる。
+    /// 厳格解析の保証を持つ元の平坦な構文木を借りる。
     pub fn forms(&self) -> (forms: &'p [Form])
-        ensures forms@ == self.forms_model(),
+        ensures forms@ == self.forms_model(), self.valid(),
     {
+        proof { use_type_invariant(self); }
         self.forms
     }
 
@@ -89,6 +110,7 @@ impl<'p, 'a> MacroArguments<'p, 'a> {
         let source = self.scope.source.text_model();
         &&& complete_list_indices(self.forms@) && nested_list_indices(self.forms@)
         &&& form_spans_valid(source, self.forms@, source.spec_bytes().len() as int)
+        &&& list_source_delimiters(source, self.forms@, false)
         &&& expression_region(self.forms@, self.remaining.start as int, self.remaining.end as int)
         &&& call_argument_sequence(self.forms@, self.remaining, self.count as int)
     }
@@ -101,6 +123,7 @@ impl<'p, 'a> MacroArguments<'p, 'a> {
             complete_list_indices(forms@), nested_list_indices(forms@),
             form_spans_valid(scope.source.text_model(), forms@,
                 scope.source.text_model().spec_bytes().len() as int),
+            list_source_delimiters(scope.source.text_model(), forms@, false),
             expression_region(forms@, remaining.start as int, remaining.end as int),
             call_argument_sequence(forms@, remaining, count as int),
         ensures arguments.valid(), arguments.scope_model() == scope,
@@ -151,6 +174,7 @@ impl<'p, 'a> MacroArguments<'p, 'a> {
                     let nodes = argument.nodes_model();
                     let start = nodes.start as int;
                     let source = argument.scope_model().source.text_model();
+                    &&& argument.valid()
                     &&& argument.scope_model() == old(self).scope_model() && argument.forms_model() == files
                     &&& complete_list_indices(files) && nested_list_indices(files)
                     &&& form_spans_valid(source, files, source.spec_bytes().len() as int)

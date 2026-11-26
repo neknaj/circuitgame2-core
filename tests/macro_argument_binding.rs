@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::macro_expansion::{
     MacroExpandedElement, MacroExpansionErrorKind, MacroExpansionSlice,
 };
+use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::ArgumentSyntaxToken;
 use circuitgame2_core::ncg2m::template::TemplateEmission;
 use circuitgame2_core::ncg2m::call_evaluation::macro_binding::{
     MacroArgumentError, MacroExpressionSite, MacroExpressionStep,
@@ -156,8 +157,62 @@ fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
     let [MacroExpandedElement::Argument(value), MacroExpandedElement::Template { syntax: template, .. }] =
         output.elements() else { panic!("リストの要素が元の順で展開される") };
     assert!(core::ptr::eq(*value, &bound.arguments()[1]));
+    let mut inserted = value.walk_syntax();
+    let root = value.nodes().start;
+    let expected = [
+        ArgumentSyntaxToken::Open(root),
+        ArgumentSyntaxToken::Atom(root + 1),
+        ArgumentSyntaxToken::Atom(root + 2),
+        ArgumentSyntaxToken::Atom(root + 3),
+        ArgumentSyntaxToken::Close(root),
+    ];
+    for token in expected {
+        assert_eq!(inserted.next(), Some(token));
+    }
+    assert_eq!(inserted.next(), None);
+    assert_eq!(inserted.argument().scope().source.revision, 47);
     assert!(template.parts().iter().any(|item|
         matches!(item, TemplateEmission::Insert(value) if core::ptr::eq(*value, &bound.arguments()[0]))));
     assert_eq!(output.call().scope().source.revision, 47);
     assert_eq!(template.source(), library);
+}
+
+
+#[test]
+fn checks_direct_expansion_in_the_callers_original_subtree() {
+    use circuitgame2_core::syntax::circuit::{ForbiddenGeneratedHead, GeneratedDefinitionError};
+    let library = "(defmacro emit (item ignored) (list item))";
+    let circuit = "(using nor) (func top (in x) (out y)
+        (expand emit (def y (nor x x)) tail)
+        (expand emit (def y (nor (expand emit x) x)) tail))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 1, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 5, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut calls = aliases.macro_calls(1, 1).unwrap();
+    let first = calls.next_bound_macro().unwrap().unwrap();
+    let second = calls.next_bound_macro().unwrap().unwrap();
+    let fuel = NonZeroUsize::new(32).unwrap();
+    let MacroExpansionSlice::Complete(first_output) = first.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("最初の展開が完了する必要があります"); };
+    let checked = first_output.check_argument_definition(0).unwrap().unwrap();
+    assert!(core::ptr::eq(checked.argument(), &first.arguments()[0]));
+    assert_eq!(checked.argument().scope().source.revision, 5);
+    assert_eq!((checked.argument().scope().file, checked.argument().scope().entry), (1, 1));
+    assert_eq!(checked.row().targets.start, first.arguments()[0].nodes().start + 2);
+    assert_eq!(checked.row().expression.end, first.arguments()[0].nodes().end);
+    assert_eq!(&circuit[checked.row().references[0].span.clone()], "nor");
+    assert!(first_output.check_argument_definition(1).is_none());
+
+    let MacroExpansionSlice::Complete(second_output) = second.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("次の展開が完了する必要があります"); };
+    let failure = second_output.check_argument_definition(0).unwrap().unwrap_err();
+    assert!(core::ptr::eq(failure.call, &second));
+    assert!(core::ptr::eq(failure.argument, &second.arguments()[0]));
+    assert_eq!(failure.element, 0);
+    let GeneratedDefinitionError::ForbiddenHead { head: ForbiddenGeneratedHead::Expand, span } = failure.kind
+        else { panic!("入れ子の展開を診断する必要があります"); };
+    assert_eq!(&circuit[span], "expand");
 }

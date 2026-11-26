@@ -81,6 +81,7 @@ impl<'p, 'a> BoundMacroCall<'p, 'a> {
     pub open spec fn valid(&self) -> bool {
         &&& self.body_model().parameters_model().len() == self.arguments_model().len()
         &&& checked_macro_body_layout(&self.body_model())
+        &&& forall|i: int| 0 <= i < self.arguments_model().len() ==> (#[trigger] self.arguments_model()[i]).valid()
     }
 
     /// 呼び出し位置を、元のソースと構文木の範囲で借りる。
@@ -309,6 +310,7 @@ pub open spec fn macro_arguments_cover(
     &&& forall|i: int| 0 <= i < arguments.len() ==> {
         let argument = #[trigger] arguments[i];
         let nodes = argument.nodes_model();
+        &&& argument.valid()
         &&& argument.scope_model() == scope && argument.forms_model() == forms
         &&& extent.start <= nodes.start < nodes.end <= extent.end
         &&& nodes.start == if i == 0 { extent.start } else { arguments[i - 1].nodes_model().end }
@@ -353,6 +355,7 @@ pub(crate) fn bind_macro_call<'p, 'a>(
             assert forall|i: int| 0 <= i < arguments@.len() implies {
                 let row = #[trigger] arguments@[i];
                 let nodes = row.nodes_model();
+                &&& row.valid()
                 &&& row.scope_model() == scope && row.forms_model() == forms
                 &&& site.arguments.start <= nodes.start < nodes.end <= end
                 &&& nodes.start == if i == 0 { site.arguments.start } else { arguments@[i - 1].nodes_model().end }

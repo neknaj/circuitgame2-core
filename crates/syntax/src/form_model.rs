@@ -1,6 +1,9 @@
 use super::{
-    Form, InputDerivation, Lexeme, LexemeKind, form_span,
-    lexical::{chosen_input_derivation, chosen_input_derivation_bytes, well_formed_sexpr},
+    Form, InputDerivation, Lexeme, LexemeKind, form_span, list_delimited, list_source_delimiters,
+    lexical::{
+        choose_input_derivation, chosen_input_derivation, chosen_input_derivation_bytes,
+        input_lexeme_valid, lexical_extent_facts, sexpr_input_derivation, well_formed_sexpr,
+    },
 };
 use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -145,6 +148,89 @@ pub(super) proof fn model_finishes(
     reveal(sexpr_form_model_bytes);
     reveal(chosen_input_derivation);
     reveal(model_matches);
+}
+
+proof fn lexeme_prefix_length(bytes: Seq<u8>, witness: InputDerivation, count: int)
+    requires sexpr_input_derivation(bytes, witness), 0 <= count <= witness.lexemes.len(),
+    ensures count > 0 ==> count <= witness.lexemes[count - 1].end <= bytes.len(),
+    decreases count,
+{
+    if count > 0 {
+        lexeme_prefix_length(bytes, witness, count - 1);
+        reveal(sexpr_input_derivation);
+        reveal(input_lexeme_valid);
+        let lexeme = witness.lexemes[count - 1];
+        assert(input_lexeme_valid(bytes, witness, count - 1));
+        lexical_extent_facts(bytes, lexeme.start, lexeme.end, lexeme.kind);
+    }
+}
+
+proof fn form_model_prefix_delimiters(source: &str, witness: InputDerivation, count: int)
+    requires sexpr_input_derivation(source.spec_bytes(), witness),
+        0 <= count <= witness.lexemes.len() <= usize::MAX,
+        source.spec_bytes().len() <= usize::MAX,
+    ensures
+        list_source_delimiters(source, form_model_prefix(witness.lexemes, count).0, false),
+        form_model_prefix(witness.lexemes, count).0.len() <= count,
+        forall|i: int| 0 <= i < form_model_prefix(witness.lexemes, count).1.len() ==> {
+            let state = form_model_prefix(witness.lexemes, count);
+            let node = #[trigger] form_model_prefix(witness.lexemes, count).1[i];
+            node < state.0.len() && state.0[node as int] is List
+        },
+    decreases count,
+{
+    reveal(form_model_prefix);
+    reveal(list_source_delimiters);
+    if count > 0 {
+        let bytes = source.spec_bytes();
+        let old = form_model_prefix(witness.lexemes, count - 1);
+        let lexeme = witness.lexemes[count - 1];
+        let new = form_model_prefix(witness.lexemes, count);
+        form_model_prefix_delimiters(source, witness, count - 1);
+        reveal(sexpr_input_derivation);
+        reveal(input_lexeme_valid);
+        assert(input_lexeme_valid(bytes, witness, count - 1));
+        lexical_extent_facts(bytes, lexeme.start, lexeme.end, lexeme.kind);
+        reveal(apply_lexeme);
+        match lexeme.kind {
+            LexemeKind::Close if old.1.len() > 0 => {
+                let node = old.1.last() as int;
+                assert(old.1[old.1.len() - 1] == old.1.last());
+                assert(old.0[node] is List && list_delimited(bytes, old.0[node], false));
+                assert(list_delimited(bytes, new.0[node], false));
+            },
+            _ => {},
+        }
+        assert forall|i: int| 0 <= i < new.0.len()
+            implies list_delimited(bytes, #[trigger] new.0[i], false) by {
+            if i < old.0.len() && new.0[i] == old.0[i] {
+                assert(list_delimited(bytes, old.0[i], false));
+            }
+        };
+        assert forall|i: int| 0 <= i < new.1.len() implies {
+            let node = #[trigger] new.1[i];
+            node < new.0.len() && new.0[node as int] is List
+        } by {
+            if i < old.1.len() {
+                assert(old.1[i] < old.0.len() && old.0[old.1[i] as int] is List);
+            }
+        };
+    }
+}
+
+/// 厳格な S 式から得たリストの範囲を、同じ入力上の括弧に結び付ける。
+pub proof fn sexpr_model_delimiters(source: &str, forms: Seq<Form>)
+    requires sexpr_form_model(source) == Some(forms), source.spec_bytes().len() <= usize::MAX,
+    ensures list_source_delimiters(source, forms, false),
+{
+    let choice = choose_input_derivation(source);
+    reveal(sexpr_form_model);
+    reveal(sexpr_form_model_bytes);
+    reveal(chosen_input_derivation);
+    let witness = choice->Some_0;
+    let count = witness.lexemes.len() as int;
+    lexeme_prefix_length(source.spec_bytes(), witness, count);
+    form_model_prefix_delimiters(source, witness, count);
 }
 
 } // verus!

@@ -24,8 +24,8 @@ use crate::project::{
 };
 #[cfg(verus_only)]
 use crate::syntax::{
-    complete_list_indices,
-    circuit::{call_argument_sequence, routine_expansion_sites_match},
+    complete_list_indices, list_source_delimiters,
+    circuit::{call_argument_sequence, circuit_index_delimiters, routine_expansion_sites_match},
 };
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -114,6 +114,7 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
         &&& *source == project.sources_model()[origin.0 as int]
         &&& sites.valid()
         &&& sites.source_model() == source.text_model()
+        &&& list_source_delimiters(source.text_model(), sites.syntax_model().forms@, false)
         &&& *sites.syntax_model() == project.indexes_model()[origin.0 as int]->Circuit_0.syntax
     }
 
@@ -380,12 +381,16 @@ impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
         if file >= indexes.len() { return None; }
         let ProjectSourceIndex::Circuit(parsed) = &indexes[file] else { return None; };
         let source = &sources[file];
+        let text = source.text();
+        let _bytes = text.as_bytes().len();
         proof {
             project_source_index_evidence(*source, indexes@[file as int]);
             parsed_index_evidence(*source, *parsed);
             source.text_model_is_text();
+            assert(text.spec_bytes().len() == _bytes);
+            circuit_index_delimiters(text, parsed.syntax.forms@, parsed.syntax.entries@);
         }
-        let sites = routine_expansion_sites(source.text(), &parsed.syntax, entry)?;
+        let sites = routine_expansion_sites(text, &parsed.syntax, entry)?;
         Some(MacroCalls { aliases: self, file, entry, source, sites })
     }
 }
