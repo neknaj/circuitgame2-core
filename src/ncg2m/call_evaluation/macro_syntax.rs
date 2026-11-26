@@ -29,6 +29,15 @@ pub use materialize::{
     template_definition_check_matches, template_definition_error_has_source, template_projection_continue, template_projection_matches,
     template_projection_for_element, template_projection_prefix, template_projection_trace_result,
 };
+mod natural;
+pub use natural::{
+    MacroNatural, MacroNaturalDiagnostic, MacroNaturalError, MacroNaturalStep,
+};
+#[cfg(verus_only)]
+pub use natural::{
+    macro_natural_error_at_argument, macro_natural_step_matches, syntax_nat_argument_bytes,
+    syntax_nat_argument_is_natural,
+};
 mod projection;
 pub use projection::{
     MacroSyntaxEvent, MacroSyntaxOrigin, MacroTemplateSyntax, MacroTemplateSyntaxError, MacroTemplateSyntaxStep,
