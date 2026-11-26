@@ -149,6 +149,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             stack_fits(plan, waiting@, result_type@, (rank, parent.frame_model(), parent.result_type_model())),
         ensures
             after.plan == plan, after.result_type@ == result_type@,
+            after.root_frame_model() == root_frame(waiting@, parent.frame_model()),
             entering_arithmetic(rank, parent, site, ty, waiting@, after),
     {
         let ghost stack = waiting@;
@@ -178,7 +179,8 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
         ensures
             arithmetic_step_matches(pending, value, waiting@, step),
             step matches Ok(ScalarExecutionSlice::Suspended(after)) ==>
-                after.plan == plan && after.result_type@ == result_type@,
+                after.plan == plan && after.result_type@ == result_type@
+                    && after.root_frame_model() == root_frame(waiting@, frame),
             !(step matches Ok(ScalarExecutionSlice::Complete(_))),
     {
         reveal(arithmetic_step_matches);

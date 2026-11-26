@@ -135,10 +135,44 @@ pub enum ScalarBindingError<'p, 'a> {
     },
 }
 
-/// 補助関数に入るときの本体と、仮引数だけで構成した新しい環境。
+
+#[derive(Clone, Copy)]
+pub(super) struct ScalarFoldBindings<'a> {
+    pub(super) index_name: &'a str,
+    pub(super) accumulator_name: &'a str,
+    pub(super) index: u64,
+    pub(super) accumulator: ScalarValue,
+}
+
+impl ScalarFoldBindings<'_> {
+    pub(super) open spec fn value_for(&self, name: Seq<u8>) -> Option<ScalarValue> {
+        if name == self.index_name.spec_bytes() {
+            Some(ScalarValue::Integer(IntegerValue::Nat(self.index)))
+        } else if name == self.accumulator_name.spec_bytes() {
+            Some(self.accumulator)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn lookup(&self, name: &str) -> (value: Option<ScalarValue>)
+        ensures value == self.value_for(name.spec_bytes()),
+    {
+        use crate::ncg2m::forms::is_spelling;
+        if is_spelling(name, self.index_name) {
+            Some(ScalarValue::Integer(IntegerValue::Nat(self.index)))
+        } else if is_spelling(name, self.accumulator_name) {
+            Some(self.accumulator)
+        } else {
+            None
+        }
+    }
+}
+/// 補助関数の本体、仮引数の値、反復中の局所束縛。
 pub struct ScalarCallFrame<'p, 'a> {
     body: DefnEvaluationBody<'p, 'a>,
     values: Vec<ScalarValue>,
+    fold_bindings: Option<ScalarFoldBindings<'a>>,
 }
 
 impl<'p, 'a> ScalarCallFrame<'p, 'a> {
@@ -158,6 +192,25 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
     /// 呼び出し先の仮引数に対応する値の列を表す。
     pub closed spec fn parameter_values_model(&self) -> Seq<ScalarValue> {
         self.values@
+    }
+
+
+    pub(super) closed spec fn fold_bindings_model(&self) -> Option<ScalarFoldBindings<'a>> {
+        self.fold_bindings
+    }
+
+    /// 反復の局所束縛が現在の環境に含まれることを表す。
+    pub closed spec fn has_fold_bindings(&self) -> bool { self.fold_bindings.is_some() }
+
+    pub(super) fn with_fold_bindings(mut self, bindings: Option<ScalarFoldBindings<'a>>) -> (frame: Self)
+        ensures
+            frame.body_model() == self.body_model(),
+            frame.parameter_values_model() == self.parameter_values_model(),
+            frame.fold_bindings_model() == bindings,
+    {
+        proof { use_type_invariant(&self); }
+        self.fold_bindings = bindings;
+        self
     }
 
     /// 元の文書版と構文木上の本体を返す。
@@ -189,7 +242,7 @@ pub open spec fn binding_matches<'p, 'a>(
 ) -> bool {
     &&& result.is_ok() <==> parameters_match(body.signature, values)
     &&& match result {
-        Ok(frame) => frame.body_model() == body && frame.parameter_values_model() == values,
+        Ok(frame) => frame.body_model() == body && frame.parameter_values_model() == values && !frame.has_fold_bindings(),
         Err(ScalarBindingError::Rank) => false,
         Err(ScalarBindingError::Arity { source, span, expected_count, found_count }) => {
             &&& source == body.source && span == body.signature.span
@@ -239,7 +292,7 @@ fn bind<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, values: Vec<ScalarValue>)
         }
         i += 1;
     }
-    Ok(ScalarCallFrame { body, values })
+    Ok(ScalarCallFrame { body, values, fold_bindings: None })
 }
 
 /// 指定した順位の本体に対して、仮引数束縛の結果が対応することを表す。
@@ -252,6 +305,7 @@ pub open spec fn binding_at_rank_matches<'p, 'a>(
             let body = frame.body_model();
             &&& plan.body_matches_at_rank(rank, body)
             &&& frame.parameter_values_model() == values
+            &&& !frame.has_fold_bindings()
             &&& parameters_match(body.signature, values)
         }
         Err(ScalarBindingError::Rank) => rank >= plan.order_model().len() || !plan.order_nodes_valid()

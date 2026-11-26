@@ -3,11 +3,11 @@
 use super::*;
 use super::super::nat_fold::{NatFold, NatFoldIteration, NatFoldNext, planned_nat_fold};
 use crate::ncg2m::defn::span_of;
-use crate::ncg2m::expression_types::NatFoldTerms;
+use crate::ncg2m::expression_types::{NatFoldTerms, named_call::check_scalar_body_syntax};
 use crate::ncg2m::forms::{is_spelling, source_word};
 use crate::syntax::{AtomKind, Form};
 #[cfg(verus_only)]
-use crate::ncg2m::expression_types::{nat_fold_term_results_agree, nat_fold_terms_match};
+use crate::ncg2m::expression_types::{nat_fold_term_results_agree, nat_fold_terms_match, scalar_evaluator_syntax};
 #[cfg(verus_only)]
 use crate::ncg2m::data_types::signature_result_types_agree;
 #[cfg(verus_only)]
@@ -28,23 +28,26 @@ pub struct ScalarFoldEntry<'plan, 'p, 'a> {
 }
 
 /// 回数、初期値、反復本体のいずれかを評価する途中の状態。
-pub struct ScalarFoldExecution<'p, 'a> {
-    frame: ScalarCallFrame<'p, 'a>,
+pub struct ScalarFoldExecution<'plan, 'p, 'a> {
+    plan: &'plan DefnCallPlan<'p, 'a>,
+    rank: usize,
+    frame: Option<ScalarCallFrame<'p, 'a>>,
     terms: NatFoldTerms,
-    phase: FoldPhase,
+    phase: FoldPhase<'plan, 'p, 'a>,
 }
 
-enum FoldPhase {
+enum FoldPhase<'plan, 'p, 'a> {
     Count,
     Initial(u64),
     Select(NatFold<ScalarValue>),
     Body(NatFoldIteration<ScalarValue>),
+    Expression { state: ScalarExecution<'plan, 'p, 'a>, iteration: NatFoldIteration<ScalarValue> },
 }
 
 /// 実行枠を使い切った状態か、反復式の結果。
-pub enum ScalarFoldSlice<'p, 'a> {
+pub enum ScalarFoldSlice<'plan, 'p, 'a> {
     /// 次の遷移から再開できる。
-    Suspended(ScalarFoldExecution<'p, 'a>),
+    Suspended(ScalarFoldExecution<'plan, 'p, 'a>),
     /// 最後の累積値。反復回数が0なら初期値である。
     Complete(ScalarValue),
 }
@@ -75,7 +78,7 @@ spec fn atom_fold_at<'p, 'a>(body: DefnEvaluationBody<'p, 'a>, terms: NatFoldTer
     &&& nat_fold_terms_match(body.source.text_model(), body.forms@, body.at, Some(terms))
     &&& atom_at(body.forms@, terms.count)
     &&& atom_at(body.forms@, terms.initial)
-    &&& atom_at(body.forms@, terms.body)
+    &&& scalar_evaluator_syntax(body.source.text_model(), body.forms@, terms.body)
     &&& body.signature.result_type.ty.list_depth == 0
     &&& body.signature.result_type.ty.atom matches DataTypeAtom::Builtin(
         BuiltinDataType::Bool | BuiltinDataType::Integer(_)
@@ -133,8 +136,9 @@ fn supported_atom(forms: &[Form], at: usize) -> (supported: bool)
 
 /// 指定した補助関数が対応する形の自然数反復なら、評価に使う本体の位置を返す。
 ///
-/// 回数は自然数のリテラルか仮引数から評価する。初期値と本体には真偽値・整数・仮引数のアトムを使える。
-/// 本体では添字と累積値も参照できる。補助関数の本体の根にある反復だけを扱い、対応外の場合は `None` を返す。
+/// 回数は自然数のリテラルか仮引数から評価する。初期値には真偽値・整数・仮引数のアトムを使える。
+/// 反復本体は添字と累積値を局所束縛に加えた環境で評価する。式の評価規則は補助関数と共通である。
+/// 補助関数の本体の根にある反復だけを扱い、対応外の場合は `None` を返す。
 pub fn prepare_scalar_fold<'plan, 'p, 'a>(
     plan: &'plan DefnCallPlan<'p, 'a>, position: crate::project::DefnPosition,
 ) -> (entry: Option<ScalarFoldEntry<'plan, 'p, 'a>>)
@@ -159,7 +163,7 @@ pub fn prepare_scalar_fold<'plan, 'p, 'a>(
     };
     if !supported_atom(body.forms, terms.count)
         || !supported_atom(body.forms, terms.initial)
-        || !supported_atom(body.forms, terms.body)
+        || !check_scalar_body_syntax(body.source.text(), body.forms, terms.body)
     {
         proof { reject_unsupported_layout(plan, position, rank, body, terms); }
         return None;
@@ -189,6 +193,7 @@ impl<'plan, 'p, 'a> ScalarFoldEntry<'plan, 'p, 'a> {
             && plan.order_model()[self.rank as int] == position
     }
 
+
     #[verifier::type_invariant]
     spec fn valid(&self) -> bool {
         &&& self.plan.body_matches_at_rank(self.rank, self.origin@)
@@ -199,11 +204,11 @@ impl<'plan, 'p, 'a> ScalarFoldEntry<'plan, 'p, 'a> {
 
     /// 初期状態と診断が、対象の本体と仮引数に対応することを表す。
     pub closed spec fn start_matches(&self, values: Seq<ScalarValue>,
-        result: Result<ScalarFoldExecution<'p, 'a>, ScalarBindingError<'p, 'a>>) -> bool
+        result: Result<ScalarFoldExecution<'plan, 'p, 'a>, ScalarBindingError<'p, 'a>>) -> bool
     {
         match result {
             Ok(state) => state.is_initial() && state.terms == self.terms
-                && binding_at_rank_matches(self.plan, self.rank, values, Ok(state.frame)),
+                && binding_at_rank_matches(self.plan, self.rank, values, Ok(state.root_frame())),
             Err(error) => binding_at_rank_matches(self.plan, self.rank, values, Err(error)),
         }
     }
@@ -213,7 +218,7 @@ impl<'plan, 'p, 'a> ScalarFoldEntry<'plan, 'p, 'a> {
     ///
     /// 実引数の個数や型が署名に合わなければ、元の位置を持つ診断を返す。
     pub fn start(&self, values: Vec<ScalarValue>)
-        -> (result: Result<ScalarFoldExecution<'p, 'a>, ScalarBindingError<'p, 'a>>)
+        -> (result: Result<ScalarFoldExecution<'plan, 'p, 'a>, ScalarBindingError<'p, 'a>>)
         ensures self.start_matches(values@, result),
     {
         proof { use_type_invariant(self); }
@@ -221,7 +226,7 @@ impl<'plan, 'p, 'a> ScalarFoldEntry<'plan, 'p, 'a> {
         proof {
             self.plan.bodies_at_rank_agree(self.rank, self.origin@, frame.body_model());
         }
-        Ok(ScalarFoldExecution { frame, terms: self.terms, phase: FoldPhase::Count })
+        Ok(ScalarFoldExecution { plan: self.plan, rank: self.rank, frame: Some(frame), terms: self.terms, phase: FoldPhase::Count })
     }
 }
 
@@ -243,6 +248,27 @@ spec fn bound_value(terms: NatFoldTerms, frame: &ScalarCallFrame, at: usize, ind
     }
 }
 
+
+fn fold_bindings<'p, 'a>(
+    terms: NatFoldTerms, frame: &ScalarCallFrame<'p, 'a>, index: u64, acc: ScalarValue,
+) -> (bindings: ScalarFoldBindings<'a>)
+    requires ordered_terms(terms, frame.body_model()),
+    ensures
+        bindings.index_name.spec_bytes() == spelling(frame.body_model().source.text_model(),
+            frame.body_model().forms@[terms.index_binding as int]),
+        bindings.accumulator_name.spec_bytes() == spelling(frame.body_model().source.text_model(),
+            frame.body_model().forms@[terms.accumulator_binding as int]),
+        bindings.index == index && bindings.accumulator == acc,
+{
+    proof { use_type_invariant(frame); }
+    let body = frame.body();
+    let source = body.source.text();
+    ScalarFoldBindings {
+        index_name: source_word(source, body.forms, terms.index_binding),
+        accumulator_name: source_word(source, body.forms, terms.accumulator_binding),
+        index, accumulator: acc,
+    }
+}
 fn iteration_binding(
     terms: NatFoldTerms, frame: &ScalarCallFrame, at: usize, index: u64, acc: ScalarValue,
 ) -> (value: Option<ScalarValue>)
@@ -317,10 +343,32 @@ fn evaluate_operand<'p, 'a>(
     }
 }
 
-impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
+impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
+
+    spec fn root_frame(&self) -> ScalarCallFrame<'p, 'a> {
+        match self.phase {
+            FoldPhase::Expression { state, .. } => state.root_frame_model(),
+            _ => self.frame->Some_0,
+        }
+    }
+
+    /// 反復本体が単一のアトムで、複合式の評価状態を必要としないことを表す。
+    pub closed spec fn atom_body(&self) -> bool {
+        atom_at(self.root_frame().body_model().forms@, self.terms.body)
+    }
+
+    spec fn same_context(&self, next: &Self) -> bool {
+        &&& next.plan == self.plan && next.rank == self.rank && next.terms == self.terms
+        &&& next.root_frame().body_model() == self.root_frame().body_model()
+        &&& next.root_frame().parameter_values_model() == self.root_frame().parameter_values_model()
+    }
+
     #[verifier::type_invariant]
     spec fn valid(&self) -> bool {
-        &&& ordered_terms(self.terms, self.frame.body_model())
+        &&& ordered_terms(self.terms, self.root_frame().body_model())
+        &&& self.plan.body_matches_at_rank(self.rank, self.root_frame().body_model())
+        &&& self.frame.is_none() == (self.phase is Expression)
+        &&& (self.phase matches FoldPhase::Expression { state, .. } ==> state.plan_model() == self.plan && state.result_type_model() == self.result_type() && !self.atom_body())
         &&& match self.phase {
             FoldPhase::Select(fold) => scalar_fits(fold.model().2, self.result_type()),
             FoldPhase::Body(iteration) => scalar_fits(iteration.model().2, self.result_type()),
@@ -333,25 +381,55 @@ impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
 
     /// 評価値が従う補助関数の戻り型。
     pub closed spec fn result_type(&self) -> DataType<'a> {
-        self.frame.body_model().signature.result_type.ty
+        self.root_frame().body_model().signature.result_type.ty
     }
 
 
-    /// 終了までに残る遷移数の上界を表す。
+    /// 本体がアトムの場合に、終了までに残る遷移数の上界を表す。
     pub closed spec fn remaining_steps_bound(&self) -> nat {
         match self.phase {
             FoldPhase::Count => 2 * u64::MAX as nat + 3,
             FoldPhase::Initial(count) => 2 * count as nat + 2,
             FoldPhase::Select(fold) => 2 * (fold.model().0 - fold.model().1) as nat + 1,
             FoldPhase::Body(iteration) => 2 * (iteration.model().0 - iteration.model().1) as nat,
+            FoldPhase::Expression { .. } => 0,
         }
     }
+
+    spec fn iteration_operand_matches(
+        &self, iteration: NatFoldIteration<ScalarValue>, result: Result<ScalarValue, ScalarExecutionError<'p, 'a>>,
+    ) -> bool {
+        let frame = self.root_frame();
+        let (_, at, acc) = iteration.model();
+        let local = bound_value(self.terms, &frame, self.terms.body, at, acc);
+        operand_matches(&frame, self.terms.body, self.result_type(), local, result)
+    }
+
+    spec fn receiving_body(&self, iteration: NatFoldIteration<ScalarValue>, value: ScalarValue, next: &Self) -> bool {
+        let (count, at, _) = iteration.model();
+        next.phase matches FoldPhase::Select(fold) && at < count
+            && fold.model() == (count, (at + 1) as u64, value)
+    }
+
+    spec fn starts_body_expression(&self, before: NatFoldIteration<ScalarValue>, next: &Self) -> bool {
+        let site = ScalarExpressionSite { at: self.terms.body, expected: self.result_type() };
+        &&& !self.atom_body()
+        &&& next.phase matches FoldPhase::Expression { state, iteration }
+        &&& iteration == before
+        &&& state.starts_expression(self.plan, self.rank, state.root_frame_model(), site)
+        &&& state.root_frame_model().fold_bindings_model() matches Some(bindings)
+        &&& bindings.index == iteration.model().1 && bindings.accumulator == iteration.model().2
+        &&& bindings.index_name.spec_bytes() == spelling(self.root_frame().body_model().source.text_model(),
+            self.root_frame().body_model().forms@[self.terms.index_binding as int])
+        &&& bindings.accumulator_name.spec_bytes() == spelling(self.root_frame().body_model().source.text_model(),
+            self.root_frame().body_model().forms@[self.terms.accumulator_binding as int])
+    }
     /// 型付き環境で本体の値を求める一回の遷移を表す。
-    pub closed spec fn step_matches(&self, result: FoldResult<'p, 'a>) -> bool {
-        let frame = &self.frame;
+    pub closed spec fn step_matches(&self, result: FoldResult<'plan, 'p, 'a>) -> bool {
+        let frame = &self.root_frame();
         let terms = self.terms;
         let same_context = result matches Ok(ScalarFoldSlice::Suspended(next)) ==>
-            next.frame == *frame && next.terms == terms;
+            self.same_context(&next);
         &&& same_context
         &&& match self.phase {
             FoldPhase::Count => match result {
@@ -376,29 +454,59 @@ impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
                     _ => false,
                 }
             },
-            FoldPhase::Body(iteration) => {
-                let (count, at, acc) = iteration.model();
-                let local = bound_value(terms, frame, terms.body, at, acc);
-                match result {
-                    Ok(ScalarFoldSlice::Suspended(next)) => next.phase matches FoldPhase::Select(fold) &&
-                        at < count && fold.model().0 == count && fold.model().1 == at + 1
-                        && operand_matches(frame, terms.body, self.result_type(), local, Ok(fold.model().2)),
-                    Err(error) => operand_matches(frame, terms.body, self.result_type(), local, Err(error)),
+
+            FoldPhase::Body(iteration) => match result {
+                Ok(ScalarFoldSlice::Suspended(next)) => {
+                    if self.atom_body() {
+                        next.phase matches FoldPhase::Select(fold)
+                            && self.receiving_body(iteration, fold.model().2, &next)
+                            && self.iteration_operand_matches(iteration, Ok(fold.model().2))
+                    } else {
+                        self.starts_body_expression(iteration, &next)
+                    }
+                },
+                Err(error) => self.atom_body() && self.iteration_operand_matches(iteration, Err(error)),
+                _ => false,
+            },
+            FoldPhase::Expression { state, iteration } => match result {
+                Ok(ScalarFoldSlice::Suspended(next)) => match next.phase {
+                    FoldPhase::Expression { state: after, iteration: pending } =>
+                        pending == iteration && state.step_matches(Ok(ScalarExecutionSlice::Suspended(after))),
+                    FoldPhase::Select(fold) => self.receiving_body(iteration, fold.model().2, &next)
+                        && state.step_matches(Ok(ScalarExecutionSlice::Complete(fold.model().2))),
                     _ => false,
-                }
+                },
+                Err(error) => state.step_matches(Err(error)),
+                _ => false,
             },
         }
     }
 
-    fn step(self) -> (result: FoldResult<'p, 'a>)
+    fn step(self) -> (result: FoldResult<'plan, 'p, 'a>)
         ensures self.step_matches(result),
             result matches Ok(ScalarFoldSlice::Suspended(next)) ==>
-                next.remaining_steps_bound() < self.remaining_steps_bound()
-                    && next.result_type() == self.result_type(),
+                next.result_type() == self.result_type() && next.atom_body() == self.atom_body()
+                    && (self.atom_body() ==> next.remaining_steps_bound() < self.remaining_steps_bound()),
             result matches Ok(ScalarFoldSlice::Complete(value)) ==> scalar_fits(value, self.result_type()),
     {
+
         proof { use_type_invariant(&self); reveal(ScalarFoldExecution::step_matches); }
-        let Self { frame, terms, phase } = self;
+        let Self { plan, rank, frame, terms, phase } = self;
+        if let FoldPhase::Expression { state, iteration } = phase {
+            let (result, returned) = state.step_saving_frame();
+            return match result? {
+                ScalarExecutionSlice::Suspended(state) => Ok(ScalarFoldSlice::Suspended(Self {
+                    plan, rank, frame: None, terms, phase: FoldPhase::Expression { state, iteration },
+                })),
+                ScalarExecutionSlice::Complete(value) => {
+                    let Some(scoped) = returned else { unreachable!() };
+                    let frame = Some(scoped.with_fold_bindings(None));
+                    let phase = FoldPhase::Select(iteration.receive::<ScalarExecutionError>(Ok(value))?);
+                    Ok(ScalarFoldSlice::Suspended(Self { plan, rank, frame, terms, phase }))
+                },
+            };
+        }
+        let Some(frame) = frame else { unreachable!() };
         let ty = frame.body().signature.result_type.ty;
         let phase = match phase {
             FoldPhase::Count => {
@@ -414,25 +522,35 @@ impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
                 NatFoldNext::Complete(value) => return Ok(ScalarFoldSlice::Complete(value)),
             },
             FoldPhase::Body(iteration) => {
+                if !supported_atom(frame.body().forms, terms.body) {
+                    let bindings = fold_bindings(terms, &frame, iteration.index(), *iteration.accumulator());
+                    let scoped = frame.with_fold_bindings(Some(bindings));
+                    let site = ScalarExpressionSite { at: terms.body, expected: ty };
+                    let state = ScalarExecution::start_expression(plan, rank, scoped, site);
+                    return Ok(ScalarFoldSlice::Suspended(Self {
+                        plan, rank, frame: None, terms, phase: FoldPhase::Expression { state, iteration },
+                    }));
+                }
                 let local = iteration_binding(terms, &frame, terms.body, iteration.index(), *iteration.accumulator());
                 FoldPhase::Select(iteration.receive(evaluate_operand(&frame, terms.body, ty, local))?)
             },
+            FoldPhase::Expression { .. } => unreachable!(),
         };
-        Ok(ScalarFoldSlice::Suspended(Self { frame, terms, phase }))
+        Ok(ScalarFoldSlice::Suspended(Self { plan, rank, frame: Some(frame), terms, phase }))
     }
 }
 
-type FoldResult<'p, 'a> = Result<ScalarFoldSlice<'p, 'a>, ScalarExecutionError<'p, 'a>>;
+type FoldResult<'plan, 'p, 'a> = Result<ScalarFoldSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>;
 
-spec fn fold_path<'p, 'a>(start: ScalarFoldExecution<'p, 'a>, states: Seq<ScalarFoldExecution<'p, 'a>>) -> bool {
+spec fn fold_path<'plan, 'p, 'a>(start: ScalarFoldExecution<'plan, 'p, 'a>, states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>) -> bool {
     &&& states.len() > 0
     &&& states[0] == start
     &&& forall|i: int| 0 <= i < states.len() - 1 ==>
         (#[trigger] states[i]).step_matches(Ok(ScalarFoldSlice::Suspended(states[i + 1])))
 }
 
-spec fn fold_path_outcome<'p, 'a>(
-    start: ScalarFoldExecution<'p, 'a>, states: Seq<ScalarFoldExecution<'p, 'a>>, result: FoldResult<'p, 'a>, used: nat,
+spec fn fold_path_outcome<'plan, 'p, 'a>(
+    start: ScalarFoldExecution<'plan, 'p, 'a>, states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>, result: FoldResult<'plan, 'p, 'a>, used: nat,
 ) -> bool {
     &&& fold_path(start, states)
     &&& match result {
@@ -442,17 +560,17 @@ spec fn fold_path_outcome<'p, 'a>(
 }
 
 /// 実行した回数と、その中で通過した反復の遷移を表す。
-pub closed spec fn scalar_fold_slice_matches<'p, 'a>(
-    start: ScalarFoldExecution<'p, 'a>, fuel: nat, result: FoldResult<'p, 'a>, used: nat,
+pub closed spec fn scalar_fold_slice_matches<'plan, 'p, 'a>(
+    start: ScalarFoldExecution<'plan, 'p, 'a>, fuel: nat, result: FoldResult<'plan, 'p, 'a>, used: nat,
 ) -> bool {
     &&& 0 < used <= fuel
     &&& result matches Ok(ScalarFoldSlice::Suspended(_)) ==> used == fuel
-    &&& exists|states: Seq<ScalarFoldExecution<'p, 'a>>|
+    &&& exists|states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>|
         #[trigger] fold_path_outcome(start, states, result, used)
 }
 
-proof fn extend_fold_path<'p, 'a>(
-    start: ScalarFoldExecution<'p, 'a>, states: Seq<ScalarFoldExecution<'p, 'a>>, next: ScalarFoldExecution<'p, 'a>,
+proof fn extend_fold_path<'plan, 'p, 'a>(
+    start: ScalarFoldExecution<'plan, 'p, 'a>, states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>, next: ScalarFoldExecution<'plan, 'p, 'a>,
 )
     requires fold_path(start, states), states.last().step_matches(Ok(ScalarFoldSlice::Suspended(next))),
     ensures fold_path(start, states.push(next)),
@@ -468,17 +586,17 @@ proof fn extend_fold_path<'p, 'a>(
 }
 
 /// 一時停止した反復の実行枠を次の実行枠とつなぎ、値または診断までの遷移数を合成する。
-pub proof fn resumed_scalar_fold_matches<'p, 'a>(
-    start: ScalarFoldExecution<'p, 'a>, first: nat, suspended: ScalarFoldExecution<'p, 'a>,
-    next: nat, result: FoldResult<'p, 'a>, used: nat,
+pub proof fn resumed_scalar_fold_matches<'plan, 'p, 'a>(
+    start: ScalarFoldExecution<'plan, 'p, 'a>, first: nat, suspended: ScalarFoldExecution<'plan, 'p, 'a>,
+    next: nat, result: FoldResult<'plan, 'p, 'a>, used: nat,
 )
     requires scalar_fold_slice_matches(start, first, Ok(ScalarFoldSlice::Suspended(suspended)), first),
         scalar_fold_slice_matches(suspended, next, result, used),
     ensures scalar_fold_slice_matches(start, first + next, result, first + used),
 {
-    let pre = choose|states: Seq<ScalarFoldExecution<'p, 'a>>|
+    let pre = choose|states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>|
         #[trigger] fold_path_outcome(start, states, Ok(ScalarFoldSlice::Suspended(suspended)), first);
-    let post = choose|states: Seq<ScalarFoldExecution<'p, 'a>>|
+    let post = choose|states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>|
         #[trigger] fold_path_outcome(suspended, states, result, used);
     let combined = pre + post.skip(1);
     assert forall|i: int| 0 <= i < combined.len() - 1 implies
@@ -499,19 +617,20 @@ pub proof fn resumed_scalar_fold_matches<'p, 'a>(
     assert(fold_path_outcome(start, combined, result, first + used));
 }
 
-impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
+impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
     /// 実行枠内で反復を進め、実行した遷移数を返す。
     ///
     /// 一時停止時は枠を使い切った状態を返す。完了や失敗を返す最後の遷移も数える。
     ///
     /// # Errors
     ///
-    /// アトムの整数リテラルを読めない場合などに、評価を止めた位置を持つ診断を返す。
-    pub fn run_slice_with_steps(self, fuel: core::num::NonZeroUsize) -> (outcome: (FoldResult<'p, 'a>, usize))
+    /// 整数リテラルや演算結果が型の範囲外の場合は、評価を止めた式の元の位置を持つ診断を返す。
+    /// 未対応の式に到達した場合も、その式の位置を返す。
+    pub fn run_slice_with_steps(self, fuel: core::num::NonZeroUsize) -> (outcome: (FoldResult<'plan, 'p, 'a>, usize))
         ensures scalar_fold_slice_matches(self, fuel@ as nat, outcome.0, outcome.1 as nat),
             0 < outcome.1 <= fuel@,
             outcome.0 matches Ok(ScalarFoldSlice::Suspended(next)) ==> outcome.1 == fuel@
-                && next.remaining_steps_bound() + outcome.1 <= self.remaining_steps_bound(),
+                && (self.atom_body() ==> next.remaining_steps_bound() + outcome.1 <= self.remaining_steps_bound()),
             outcome.0 matches Ok(ScalarFoldSlice::Complete(value)) ==> scalar_fits(value, self.result_type()),
     {
         let budget = fuel.get();
@@ -524,7 +643,8 @@ impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
                 states.len() == used + 1,
                 states.last() == state,
                 state.result_type() == self.result_type(),
-                state.remaining_steps_bound() + used <= self.remaining_steps_bound(),
+                state.atom_body() == self.atom_body(),
+                self.atom_body() ==> state.remaining_steps_bound() + used <= self.remaining_steps_bound(),
                 fold_path(self, states),
             decreases budget - used,
         {

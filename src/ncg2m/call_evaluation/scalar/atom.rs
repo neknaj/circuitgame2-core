@@ -139,6 +139,22 @@ fn read_name_atom(
     None
 }
 
+
+spec fn scoped_name_atom_result(
+    frame: &ScalarCallFrame, word: Seq<u8>, expected: DataType, result: Option<ScalarValue>,
+) -> bool {
+    let local = match frame.fold_bindings_model() {
+        Some(bindings) => bindings.value_for(word),
+        None => None,
+    };
+    match local {
+        Some(value) => result == if scalar_fits(value, expected) { Some(value) } else { None },
+        None => {
+            let params = frame.body_model().signature.parameters@;
+            name_atom_result(parameter_names(params), frame.parameter_values_model(), word, expected, result)
+        },
+    }
+}
 pub(super) closed spec fn scalar_atom_matches<'p, 'a>(
     frame: &ScalarCallFrame<'p, 'a>, at: usize, expected: DataType<'a>,
     result: Result<Option<ScalarValue>, ScalarLiteralError<'p, 'a>>,
@@ -162,7 +178,7 @@ pub(super) closed spec fn scalar_atom_matches<'p, 'a>(
                 } else { result == Ok(None) }
             }
             Form::Atom { kind: AtomKind::Name, .. } => result matches Ok(value)
-                && name_atom_result(parameter_names(body.signature.parameters@), frame.parameter_values_model(), word, expected, value),
+                && scoped_name_atom_result(frame, word, expected, value),
             _ => result == Ok(None),
         }
     }
@@ -188,10 +204,12 @@ pub(super) proof fn typed_atom_yields_value<'p, 'a>(
             &&& scalar_atom_at(body.forms@, at)
             &&& local_scalar_site_is_typed(body.source.text_model(), body.forms@, body.signature.parameters@, at, expected)
         },
+        !frame.has_fold_bindings(),
         scalar_atom_matches(frame, at, expected, result),
         parameters_match(frame.body_model().signature, frame.parameter_values_model()),
     ensures result matches Ok(Some(value)) && scalar_fits(value, expected),
 {
+    reveal(ScalarCallFrame::has_fold_bindings);
     let body = frame.body_model();
     let parameters = body.signature.parameters@;
     let names = parameter_names(parameters);
@@ -325,9 +343,15 @@ impl<'p, 'a> ScalarCallFrame<'p, 'a> {
                     Err(error) => Err(ScalarLiteralError { source: body.source, span: span_of(form), error }),
                 }
             }
-            Form::Atom { kind: AtomKind::Name, .. } => Ok(read_name_atom(
-                body.signature.parameters.as_slice(), self.values.as_slice(), source_word(source, body.forms, at), expected,
-            )),
+            Form::Atom { kind: AtomKind::Name, .. } => {
+                let word = source_word(source, body.forms, at);
+                if let Some(bindings) = self.fold_bindings {
+                    if let Some(value) = bindings.lookup(word) {
+                        return Ok(if scalar_matches(value, expected) { Some(value) } else { None });
+                    }
+                }
+                Ok(read_name_atom(body.signature.parameters.as_slice(), self.values.as_slice(), word, expected))
+            },
             _ => Ok(None),
         }
     }

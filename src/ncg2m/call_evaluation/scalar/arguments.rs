@@ -110,6 +110,7 @@ impl<'plan, 'p, 'a> ScalarArguments<'plan, 'p, 'a> {
                 &&& rank == self.ranks_model().1 && rank < self.ranks_model().0
                 &&& frame.body_model() == self.model().2
                 &&& frame.parameter_values_model() == self.model().1
+                &&& !frame.has_fold_bindings()
                 &&& parameters_match(frame.body_model().signature, frame.parameter_values_model())
                 &&& self.model().1.len() == self.model().0.arguments@.len()
             },
@@ -120,7 +121,7 @@ impl<'plan, 'p, 'a> ScalarArguments<'plan, 'p, 'a> {
         match waiting.next() {
             CallArgumentStep::Evaluate(pending) => ScalarArgumentsStep::Argument(PendingScalarArgument { callee, pending }),
             CallArgumentStep::Invoke { values, .. } => {
-                let frame = ScalarCallFrame { body: callee.body, values };
+                let frame = ScalarCallFrame { body: callee.body, values, fold_bindings: None };
                 ScalarArgumentsStep::Enter { rank: callee.to, frame }
             }
         }

@@ -28,6 +28,7 @@ pub(in crate::ncg2m::call_evaluation::scalar) open spec fn bodies_agree(left: su
 pub(in crate::ncg2m::call_evaluation::scalar) open spec fn frames_agree(left: ScalarCallFrame, right: ScalarCallFrame) -> bool {
     bodies_agree(left.body_model(), right.body_model())
         && left.parameter_values_model() == right.parameter_values_model()
+        && left.fold_bindings_model() == right.fold_bindings_model()
 }
 
 pub(in crate::ncg2m::call_evaluation::scalar) open spec fn condition_parts_agree(
@@ -183,6 +184,7 @@ proof fn arithmetic_start_observes_same(
     a.restored_cursors_observe_same(b);
     let tail_a = x.waiting@.last();
     let tail_b = y.waiting@.last();
+    reveal(ScalarCallFrame::has_fold_bindings);
     assert(waiting_agrees(tail_a, tail_b));
     appended_waits_agree(stack_a, stack_b, tail_a, tail_b);
     assert(x.waiting@ =~= stack_a.push(tail_a) && y.waiting@ =~= stack_b.push(tail_b));
@@ -272,6 +274,7 @@ proof fn observe_call_entry<'plan, 'p, 'a>(
     if values.len() < edge.arguments@.len() {
         parent_a.restored_cursors_observe_same(parent_b);
     }
+    reveal(ScalarCallFrame::has_fold_bindings);
     assert(waiting_agrees(tail_a, tail_b));
     assert forall|i: int| 0 <= i < a.waiting@.len()
         implies waiting_agrees(#[trigger] a.waiting@[i], #[trigger] b.waiting@[i]) by {

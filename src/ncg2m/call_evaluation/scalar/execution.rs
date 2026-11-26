@@ -5,7 +5,7 @@ use core::ops::Range;
 use super::{
     BuiltinDataType, DataType, DataTypeAtom, DefnCallPlan, IntegerType, PendingScalarArgument,
     ProjectSource, ScalarArguments, ScalarArgumentsStep, ScalarBindingError, ScalarCallFrame,
-    ScalarExpression, ScalarExpressionStep, ScalarLiteralError, ScalarValue,
+    ScalarExpression, ScalarExpressionSite, ScalarExpressionStep, ScalarLiteralError, ScalarValue,
     bind_scalar_call, prepare_scalar_arguments,
 };
 use super::expression::ScalarCursor;
@@ -278,6 +278,7 @@ spec fn entering_call<'plan, 'p, 'a>(
                 && resume == parent && rank == caller_rank && after.rank == to && to < rank
                 && origin@ == after.active.context(to)
                 && child.frame_model().body_model() == target && child.frame_model().parameter_values_model() == values
+                && !child.frame_model().has_fold_bindings()
                 && child.expression_model().at == target.at
                 && child.expression_model().expected == target.signature.result_type.ty
                 && child.result_type_model() == child.expression_model().expected
@@ -308,6 +309,14 @@ spec fn unresolved_call<'plan, 'p, 'a>(
         }
 }
 
+
+type ScalarStep<'plan, 'p, 'a> = Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>;
+
+spec fn root_frame<'plan, 'p, 'a>(waiting: Seq<Waiting<'plan, 'p, 'a>>, current: ScalarCallFrame<'p, 'a>)
+    -> ScalarCallFrame<'p, 'a>
+{
+    if waiting.len() == 0 { current } else { waiting[0].output().1 }
+}
 impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     #[verifier::type_invariant]
     spec fn ready(&self) -> bool {
@@ -320,6 +329,75 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     /// 評価を開始した補助関数の戻り値型を表す。
     pub closed spec fn result_type_model(&self) -> DataType<'a> { self.result_type@ }
 
+
+    pub(super) closed spec fn root_frame_model(&self) -> ScalarCallFrame<'p, 'a> {
+        root_frame(self.waiting@, self.active.context(self.rank).1)
+    }
+
+    pub(super) fn start_expression(
+        plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, frame: ScalarCallFrame<'p, 'a>, site: ScalarExpressionSite<'a>,
+    ) -> (state: Self)
+        requires
+            plan.body_matches_at_rank(rank, frame.body_model()),
+            site.at < frame.body_model().forms@.len(),
+        ensures
+            state.starts_expression(plan, rank, frame, site),
+            state.plan_model() == plan,
+            state.root_frame_model() == frame,
+            state.result_type_model() == site.expected,
+    {
+        let active = Active::Expression(ScalarExpression::start_at(frame, site));
+        Self { plan, rank, active, waiting: Vec::new(), result_type: Ghost(site.expected) }
+    }
+
+    pub(super) closed spec fn starts_expression(
+        &self, plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, frame: ScalarCallFrame<'p, 'a>, site: ScalarExpressionSite<'a>,
+    ) -> bool {
+        &&& self.plan == plan && self.rank == rank && self.waiting@.len() == 0
+        &&& self.active matches Active::Expression(expr)
+        &&& expr.frame_model() == frame && expr.expression_model() == site
+        &&& expr.branches_model().len() == 0
+        &&& expr.result_type_model() == site.expected && self.result_type_model() == site.expected
+    }
+
+    spec fn ready_to_finish(&self) -> bool {
+        self.waiting@.len() == 0 && self.active is Value
+    }
+
+    proof fn finishing_matches(&self, value: ScalarValue, frame: ScalarCallFrame<'p, 'a>)
+        requires self.ready(), self.ready_to_finish(),
+            self.active matches Active::Value { value: output, frame: scope, .. }
+                && output == value && scope == frame,
+        ensures self.step_matches(Ok(ScalarExecutionSlice::Complete(value))),
+            scalar_fits(value, self.result_type_model()), frame == self.root_frame_model(),
+    {
+    }
+
+    // 仮引数の値を複製せず次の反復で再利用できるよう、終了時に環境も返す。
+    pub(super) fn step_saving_frame(self) -> (step: (ScalarStep<'plan, 'p, 'a>, Option<ScalarCallFrame<'p, 'a>>))
+        ensures
+            self.step_matches(step.0),
+            match step.0 {
+                Ok(ScalarExecutionSlice::Suspended(after)) => step.1.is_none()
+                    && after.plan_model() == self.plan_model()
+                    && after.root_frame_model() == self.root_frame_model()
+                    && after.result_type_model() == self.result_type_model(),
+                Ok(ScalarExecutionSlice::Complete(value)) => step.1 == Some(self.root_frame_model())
+                    && scalar_fits(value, self.result_type_model()),
+                Err(_) => step.1.is_none(),
+            },
+    {
+        proof { use_type_invariant(&self); }
+        let ghost previous = self;
+        if self.waiting.is_empty() && matches!(&self.active, Active::Value { .. }) {
+            let Active::Value { frame, value, .. } = self.active else { unreachable!() };
+            proof { previous.finishing_matches(value, frame); }
+            (Ok(ScalarExecutionSlice::Complete(value)), Some(frame))
+        } else {
+            assert(!previous.ready_to_finish());
+            (self.step(), None)
+        }
+    }
     /// 指定した関数の本体と仮引数の環境から評価を始めたことを表す。
     pub closed spec fn starts_with(
         &self, plan: &'plan DefnCallPlan<'p, 'a>, rank: usize, frame: ScalarCallFrame<'p, 'a>,
@@ -368,6 +446,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             plan.body_matches_at_rank(args.ranks_model().1, args.model().2),
             args.model().2.signature.result_type.ty == parent.expression_model().expected,
         ensures state.result_type_model() == result_type@, state.plan == plan,
+            state.root_frame_model() == root_frame(waiting@, parent.frame_model()),
             entering_call(rank, parent, args.model().0, args.model().1, args.model().2,
                 args.ranks_model().1, waiting@, state),
     {
@@ -493,9 +572,12 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
             previous.waiting@ == waiting@, previous.result_type@ == result_type@,
         ensures
             previous.step_matches(step),
-            step matches Ok(ScalarExecutionSlice::Suspended(after)) ==> after.result_type_model() == result_type@,
+            step matches Ok(ScalarExecutionSlice::Suspended(after)) ==>
+                after.result_type_model() == result_type@ && after.root_frame_model() == previous.root_frame_model(),
             !(step matches Ok(ScalarExecutionSlice::Complete(_))),
     {
+        let ghost root = root_frame(waiting@, parent.frame_model());
+        assert(root == previous.root_frame_model());
         let at = parent.expression().at;
         if site == 0 {
             if let Some(ty) = arithmetic::select_arithmetic_type(parent.expression().expected) {
@@ -504,6 +586,8 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                         assert(arithmetic::arithmetic_origin(plan, rank, parent.frame_model(), operation));
                     }
                     let after = Self::enter_arithmetic(plan, rank, parent, operation, ty, waiting, result_type);
+                    assert(after.root_frame_model() == root);
+                    assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
                     return Ok(ScalarExecutionSlice::Suspended(after));
                 }
             }
@@ -513,7 +597,10 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                 let edge = &row[site];
                 if edge.at != at {
                     let active = Active::Lookup { parent, site: site + 1 };
-                    return Ok(ScalarExecutionSlice::Suspended(Self { plan, rank, active, waiting, result_type }));
+                    let after = Self { plan, rank, active, waiting, result_type };
+                    assert(after.root_frame_model() == root);
+                    assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
+                    return Ok(ScalarExecutionSlice::Suspended(after));
                 }
                 let prepared = prepare_scalar_arguments(plan, rank, site);
                 if let Some(args) = prepared {
@@ -525,6 +612,7 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
                             assert(call_origin(plan, rank, &parent.frame_model(), at, *edge));
                         }
                         let after = Self::enter_call(plan, rank, parent, args, waiting, result_type);
+                        assert(after.root_frame_model() == root);
                         assert(previous.step_matches(Ok(ScalarExecutionSlice::Suspended(after))));
                         return Ok(ScalarExecutionSlice::Suspended(after));
                     }
@@ -540,8 +628,10 @@ impl<'plan, 'p, 'a> ScalarExecution<'plan, 'p, 'a> {
     #[verifier::spinoff_prover]
     fn step(self) -> (step: Result<ScalarExecutionSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>)
         ensures self.step_matches(step),
+        (step matches Ok(ScalarExecutionSlice::Complete(_))) == self.ready_to_finish(),
         match step {
-            Ok(ScalarExecutionSlice::Suspended(state)) => state.result_type_model() == self.result_type_model(),
+            Ok(ScalarExecutionSlice::Suspended(state)) => state.result_type_model() == self.result_type_model()
+                && state.root_frame_model() == self.root_frame_model(),
             Ok(ScalarExecutionSlice::Complete(value)) => scalar_fits(value, self.result_type_model()),
             Err(_) => true,
         },

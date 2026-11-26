@@ -107,7 +107,7 @@ impl<'plan, 'p, 'a> ScalarInvocation<'plan, 'p, 'a> {
         match waiting.next() {
             CallArgumentStep::Invoke { values, .. } => {
                 assert(parameters_match(callee.signature, values@));
-                let entered = ScalarInvocationStep::Enter { rank: callee_rank, frame: ScalarCallFrame { body: callee, values } };
+                let entered = ScalarInvocationStep::Enter { rank: callee_rank, frame: ScalarCallFrame { body: callee, values, fold_bindings: None } };
                 assert(previous.advance_matches(Ok(entered)));
                 Ok(entered)
             }
