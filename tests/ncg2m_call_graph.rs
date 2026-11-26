@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use circuitgame2_core::ncg2m::call_evaluation::nat_fold::planned_nat_fold;
 use circuitgame2_core::ncg2m::call_evaluation::scalar::{
     ScalarArgumentsStep, ScalarBindingError, ScalarEntryError, ScalarExecution, ScalarExecutionError,
     ScalarExecutionSlice, ScalarExpression, ScalarExpressionStep, ScalarInvocationError, ScalarInvocationSlice,
@@ -83,6 +84,32 @@ fn a_call_in_a_zero_iteration_fold_is_a_cycle() {
     assert_eq!(&source[edge.call.span.clone()], "(repeat)");
 }
 
+
+#[test]
+fn checked_nat_fold_uses_positions_in_the_retained_body() {
+    let source = "(defn repeat (as-type (Fn () Nat) (fn () (fold-nat 2 7 (index acc) index))))
+        (defn constant (as-type (Fn () Nat) (fn () 0)))";
+    let snapshots = [SourceSnapshot { path: "fold.ncg2m", revision: 19, text: source }];
+    let project = parse_project_sources(&snapshots).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let plan = aliases.plan_defn_calls().unwrap();
+    let rank = plan.rank_of(DefnPosition { file: 0, item: 0 }).unwrap();
+    let (body, terms) = planned_nat_fold(&plan, rank).unwrap();
+
+    let word = |at| match &body.forms[at] {
+        Form::Atom { span, .. } => &source[span.clone()],
+        _ => panic!("反復式の元アトムを指す必要がある"),
+    };
+    assert_eq!(body.source.revision, 19);
+    assert_eq!(
+        [terms.count, terms.initial, terms.index_binding, terms.accumulator_binding, terms.body].map(word),
+        ["2", "7", "index", "acc", "index"],
+    );
+    let constant = plan.rank_of(DefnPosition { file: 0, item: 1 }).unwrap();
+    assert!(planned_nat_fold(&plan, constant).is_none());
+    assert!(planned_nat_fold(&plan, plan.len()).is_none());
+}
 #[test]
 fn a_cycle_through_aliases_reports_each_file_and_call() {
     let left = "(namespace left (use ::right::second b)
