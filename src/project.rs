@@ -13,6 +13,7 @@ mod module_parts;
 mod name_keys;
 mod path;
 mod resolution;
+mod lookup_observation;
 mod signatures;
 mod source_indexes;
 mod sources;
@@ -142,11 +143,14 @@ pub use use_aliases::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, 
 pub use path::{PathError, SourceKind, VirtualPath, normalize_path};
 #[cfg(verus_only)]
 pub use path::{canonical_components, normalized_path, source_kind_of};
-pub use resolution::{AbsoluteResolutionError, AbsoluteTarget, MixedAbsoluteTarget};
+pub use lookup_observation::{LookupLocation, LookupTarget, OwnedAbsoluteLookup, OwnedUnqualifiedLookup};
+#[cfg(verus_only)]
+pub use lookup_observation::{lookup_location_model, lookup_target_model, owned_absolute_model, owned_unqualified_model};
+pub use resolution::{AbsoluteLookup, AbsoluteResolutionError, AbsoluteTarget, MixedAbsoluteTarget};
 #[cfg(verus_only)]
 pub use resolution::{
     absolute_resolution_evidence, declaration_visible_from, direct_target_matches, mixed_absolute_resolution_evidence,
-    mixed_declaration_visible_from, mixed_key_resolution, same_mixed_target, same_target,
+    mixed_declaration_visible_from, mixed_key_resolution, same_mixed_target, same_target, selected_direct_target_matches,
 };
 pub use source_indexes::{
     DefmacroBody, ParsedProjectSources, ProjectFileSyntaxError, ProjectSourceIndex, ProjectSourceParseError, parse_project_sources,
@@ -170,6 +174,16 @@ pub use structure_declarations::structure_declaration_result;
 pub use sources::{first_source_set_error, project_sources_match, source_set_error, source_set_errors_agree, valid_source_snapshots};
 #[cfg(verus_only)]
 pub use use_aliases::port_types_equal;
+pub use use_aliases::{DefinitionPositions, DefinitionPositionStep};
+#[cfg(verus_only)]
+pub use use_aliases::{
+    definition_position_before, definition_position_exists, definition_position_progress, definition_position_remaining, definition_positions_advance,
+};
+pub use use_aliases::{CachedAbsoluteReferenceDiagnostic, DefinitionLookupObservation, ReferenceDiagnosticKind, StoredReferenceProblem};
+#[cfg(verus_only)]
+pub use use_aliases::{
+    absolute_observation_answers, definition_diagnostic_model, definition_lookup_diagnostics_agree, definition_lookup_input, definition_lookup_matches,
+};
 pub use use_aliases::{
     AliasConflict, AliasDisposition, DefinitionBatchError, DefinitionBinding, DefinitionPosition, DefinitionReferences,
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,

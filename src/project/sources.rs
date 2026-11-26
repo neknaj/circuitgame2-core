@@ -46,6 +46,16 @@ impl<'a> ProjectSource<'a> {
         self.text
     }
 
+    /// このソースを識別する、正規化済みの仮想ファイル識別子を借りる。
+    pub fn virtual_path(&self) -> (path: &VirtualPath<'a>)
+        ensures *path == self.virtual_path_model(),
+    {
+        &self.id
+    }
+
+    /// このソースを識別する正規化済みの仮想パスを表す。
+    pub closed spec fn virtual_path_model(&self) -> VirtualPath<'a> { self.id }
+
     pub(super) proof fn text_model_is_text(&self)
         ensures self.text_model() == self.text,
     {
