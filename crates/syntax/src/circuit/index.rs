@@ -365,6 +365,14 @@ pub closed spec fn circuit_index_matches(source: &str, forms: Seq<Form>, entries
     sexpr_form_model(source) == Some(forms) && index_prefix(source, forms, entries, forms.len() as int)
 }
 
+/// 厳格な回路索引が保持するリストの範囲を、元の括弧に結び付ける。
+pub proof fn circuit_index_delimiters(source: &str, forms: Seq<Form>, entries: Seq<Entry>)
+    requires circuit_index_matches(source, forms, entries), source.spec_bytes().len() <= usize::MAX,
+    ensures list_source_delimiters(source, forms, false),
+{
+    crate::sexpr_model_delimiters(source, forms);
+}
+
 proof fn indexed_location_agrees_on_bytes(left: &str, right: &str, forms: Seq<Form>, index: int, owner: Option<usize>)
     requires left.spec_bytes() == right.spec_bytes(),
     ensures indexed_location(left, forms, index, owner) == indexed_location(right, forms, index, owner),

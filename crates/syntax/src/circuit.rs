@@ -40,7 +40,10 @@ mod test_items;
 mod test_values;
 #[cfg(verus_only)]
 pub use body::{
-    expansion_body_region_matches, next_expansion_site_matches, routine_expansion_at, routine_expansion_evidence,
+    expansion_body_region_matches, generated_definition_error, generated_definition_in_error,
+    generated_definition_in_matches, generated_definition_in_sites, generated_definition_in_valid,
+    generated_definition_matches, generated_definition_matches_on_same_bytes, generated_definition_region, generated_definition_sites, generated_definition_valid,
+    next_expansion_site_matches, routine_expansion_at, routine_expansion_evidence,
     routine_expansion_site_at, routine_expansion_sites_match,
 };
 use body::validate_routine_arguments;
@@ -48,7 +51,9 @@ pub use storage_sites::{StorageSites, storage_sites};
 #[cfg(verus_only)]
 pub use storage_sites::{storage_site_evidence, storage_sites_match};
 pub use body::{
-    DefinitionReferences, RoutineExpansionSite, RoutineExpansionSites, first_routine_expansion, routine_expansion_sites,
+    DefinitionReferences, ForbiddenGeneratedHead, GeneratedDefinition, GeneratedDefinitionError,
+    RoutineExpansionSite, RoutineExpansionSites, check_generated_definition, check_generated_definition_in,
+    first_routine_expansion, routine_expansion_sites,
 };
 pub use concat_arguments::concat_argument_range;
 #[cfg(verus_only)]
@@ -116,7 +121,7 @@ pub use index::{
 #[cfg(verus_only)]
 pub use index::{
     basis_entry_evidence, circuit_directive_errors_agree, circuit_header_error_at, circuit_header_errors_agree,
-    circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_recovery_repair_evidence, circuit_recovery_results_agree_on_sexpr,
+    circuit_index_delimiters, circuit_index_matches, circuit_indexes_agree, circuit_recovery_matches, circuit_recovery_repair_evidence, circuit_recovery_results_agree_on_sexpr,
     circuit_recovery_transfers_on_sexpr_bytes, one_original_circuit_list, original_diagnostic_relocated, original_list_diagnostics_relocate, original_diagnostic_within, original_list_is_inspectable, original_list_observations_agree, repaired_circuit_recoveries_agree,
     circuit_source_error, circuit_source_errors_agree,
     circuit_token_errors_agree, first_circuit_header_error,

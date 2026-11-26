@@ -51,7 +51,7 @@ pub use natural::{decimal_natural_value, natural_u64_matches};
 #[cfg(verus_only)]
 mod form_model;
 #[cfg(verus_only)]
-pub use form_model::{sexpr_form_model, sexpr_models_agree_on_bytes};
+pub use form_model::{sexpr_form_model, sexpr_model_delimiters, sexpr_models_agree_on_bytes};
 #[cfg(verus_only)]
 mod lexical;
 #[cfg(verus_only)]

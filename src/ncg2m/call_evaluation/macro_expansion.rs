@@ -55,6 +55,19 @@ impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
 
     /// 確定した要素を本体の順序で表す。
     pub closed spec fn elements_model(&self) -> Seq<MacroExpandedElement<'b, 'p, 'a>> { self.elements@ }
+
+    /// 展開結果の各要素が、元の呼び出しの対応する式から得られたことを表す。
+    pub open spec fn valid(&self) -> bool {
+        let elements = self.elements_model();
+        &&& self.call_model().valid()
+        &&& elements.len() == self.call_model().body_model().elements_model().len()
+        &&& forall|i: int| 0 <= i < elements.len() ==>
+            macro_expanded_element_matches(self.call_model(), i as usize, #[trigger] elements[i])
+    }
+
+    #[verifier::type_invariant]
+    spec fn expansion_invariant(&self) -> bool { self.valid() }
+
     /// 呼び出し位置、引数のスコープ、マクロの定義を保持した元の呼び出しを返す。
     pub fn call(&self) -> (call: &'b BoundMacroCall<'p, 'a>)
         ensures call == self.call_model(),
@@ -64,8 +77,9 @@ impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
 
     /// 評価済みの構文を、マクロ本体のリスト順で借りる。
     pub fn elements(&self) -> (elements: &[MacroExpandedElement<'b, 'p, 'a>])
-        ensures elements@ == self.elements_model(),
+        ensures elements@ == self.elements_model(), self.valid(),
     {
+        proof { use_type_invariant(self); }
         self.elements.as_slice()
     }
 }

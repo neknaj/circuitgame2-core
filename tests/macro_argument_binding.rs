@@ -2,6 +2,9 @@ use std::num::NonZeroUsize;
 use circuitgame2_core::ncg2m::call_evaluation::macro_expansion::{
     MacroExpandedElement, MacroExpansionErrorKind, MacroExpansionSlice,
 };
+use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::{
+    ArgumentSyntaxToken, MacroSyntaxOrigin, MacroTemplateSyntaxStep,
+};
 use circuitgame2_core::ncg2m::template::TemplateEmission;
 use circuitgame2_core::ncg2m::call_evaluation::macro_binding::{
     MacroArgumentError, MacroExpressionSite, MacroExpressionStep,
@@ -130,7 +133,7 @@ fn reports_call_errors_before_the_body_and_preserves_scope_for_empty_arguments()
 
 #[test]
 fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
-    let library = "(defmacro pick (x y) (list y (syntax (def out (unsyntax x)))))";
+    let library = "(defmacro pick (x y) (list y (syntax (def out (unsyntax y)))))";
     let circuit = "(using nor) (func top (in x) (out out) (expand ::pick x (nor x x)))";
     let project = parse_project_sources(&[
         SourceSnapshot { path: "pick.ncg2m", revision: 31, text: library },
@@ -156,8 +159,156 @@ fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
     let [MacroExpandedElement::Argument(value), MacroExpandedElement::Template { syntax: template, .. }] =
         output.elements() else { panic!("リストの要素が元の順で展開される") };
     assert!(core::ptr::eq(*value, &bound.arguments()[1]));
+    let mut inserted = value.walk_syntax();
+    let root = value.nodes().start;
+    let expected = [
+        ArgumentSyntaxToken::Open(root),
+        ArgumentSyntaxToken::Atom(root + 1),
+        ArgumentSyntaxToken::Atom(root + 2),
+        ArgumentSyntaxToken::Atom(root + 3),
+        ArgumentSyntaxToken::Close(root),
+    ];
+    for token in expected {
+        assert_eq!(inserted.next(), Some(token));
+    }
+    assert_eq!(inserted.next(), None);
+    assert_eq!(inserted.argument().scope().source.revision, 47);
     assert!(template.parts().iter().any(|item|
-        matches!(item, TemplateEmission::Insert(value) if core::ptr::eq(*value, &bound.arguments()[0]))));
+        matches!(item, TemplateEmission::Insert(value) if core::ptr::eq(*value, &bound.arguments()[1]))));
     assert_eq!(output.call().scope().source.revision, 47);
     assert_eq!(template.source(), library);
+
+    assert!(output.template_syntax(0).is_none());
+    let mut syntax = output.template_syntax(1).unwrap();
+    let mut completed = false;
+    let mut observed = Vec::new();
+    for _ in 0..32 {
+        let MacroTemplateSyntaxStep::Continue { event, next } = syntax.step().unwrap() else {
+            completed = true;
+            break;
+        };
+        syntax = next;
+        let Some(event) = event else { continue; };
+        let source = event.origin.source();
+        match event.origin {
+            MacroSyntaxOrigin::Template(call) => assert!(core::ptr::eq(call, &bound)),
+            MacroSyntaxOrigin::Argument(argument) =>
+                assert!(core::ptr::eq(argument, &bound.arguments()[1])),
+        }
+        let (tag, word) = match event.token {
+            ArgumentSyntaxToken::Open(_) => ('(', ""),
+            ArgumentSyntaxToken::Close(_) => (')', ""),
+            ArgumentSyntaxToken::Atom(at) => {
+                let Form::Atom { span, .. } = &event.origin.forms()[at] else { unreachable!() };
+                ('a', &source.text()[span.clone()])
+            },
+        };
+        observed.push((source.revision, tag, word));
+    }
+    assert!(completed);
+    assert_eq!(observed, [
+        (31, '(', ""), (31, 'a', "def"), (31, 'a', "out"),
+        (47, '(', ""), (47, 'a', "nor"), (47, 'a', "x"), (47, 'a', "x"), (47, ')', ""),
+        (31, ')', ""),
+    ]);
+    assert!(output.check_template_definition(0).is_none());
+    let checked = output.check_template_definition(1).unwrap().unwrap();
+    let row = checked.row();
+    assert_eq!(row.targets.len(), 1);
+    assert_eq!(row.signals.len(), 2);
+    let target = checked.origin(row.targets.start).unwrap();
+    assert!(matches!(target.origin, MacroSyntaxOrigin::Template(call) if core::ptr::eq(call, &bound)));
+    let reference = checked.origin(row.references[0].form).unwrap();
+    assert!(matches!(reference.origin, MacroSyntaxOrigin::Argument(argument)
+        if core::ptr::eq(argument, &bound.arguments()[1])));
+    assert_eq!(&checked.text()[row.references[0].span.clone()], "nor");
+}
+
+
+#[test]
+fn checks_direct_expansion_in_the_callers_original_subtree() {
+    use circuitgame2_core::syntax::circuit::{ForbiddenGeneratedHead, GeneratedDefinitionError};
+    let library = "(defmacro emit (item ignored) (list item))";
+    let circuit = "(using nor) (func top (in x) (out y)
+        (expand emit (def y (nor x x)) tail)
+        (expand emit (def y (nor (expand emit x) x)) tail))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 1, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 5, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut calls = aliases.macro_calls(1, 1).unwrap();
+    let first = calls.next_bound_macro().unwrap().unwrap();
+    let second = calls.next_bound_macro().unwrap().unwrap();
+    let fuel = NonZeroUsize::new(32).unwrap();
+    let MacroExpansionSlice::Complete(first_output) = first.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("最初の展開が完了する必要があります"); };
+    let checked = first_output.check_argument_definition(0).unwrap().unwrap();
+    assert!(core::ptr::eq(checked.argument(), &first.arguments()[0]));
+    assert_eq!(checked.argument().scope().source.revision, 5);
+    assert_eq!((checked.argument().scope().file, checked.argument().scope().entry), (1, 1));
+    assert_eq!(checked.row().targets.start, first.arguments()[0].nodes().start + 2);
+    assert_eq!(checked.row().expression.end, first.arguments()[0].nodes().end);
+    assert_eq!(&circuit[checked.row().references[0].span.clone()], "nor");
+    assert!(first_output.check_argument_definition(1).is_none());
+
+    let MacroExpansionSlice::Complete(second_output) = second.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("次の展開が完了する必要があります"); };
+    let failure = second_output.check_argument_definition(0).unwrap().unwrap_err();
+    assert!(core::ptr::eq(failure.call, &second));
+    assert!(core::ptr::eq(failure.argument, &second.arguments()[0]));
+    assert_eq!(failure.element, 0);
+    let GeneratedDefinitionError::ForbiddenHead { head: ForbiddenGeneratedHead::Expand, span } = failure.kind
+        else { panic!("入れ子の展開を診断する必要があります"); };
+    assert_eq!(&circuit[span], "expand");
+}
+
+
+#[test]
+fn restores_the_source_of_a_template_definition_diagnostic() {
+    use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::TemplateDefinitionError;
+    use circuitgame2_core::syntax::circuit::{ForbiddenGeneratedHead, GeneratedDefinitionError, HeaderError};
+    let library = "(defmacro emit (expr) (list (syntax (def y (unsyntax expr)))))
+        (defmacro missing () (list (syntax (def y))))";
+    let circuit = "(using nor) (func top (in x) (out y)
+        (expand emit (expand emit x)) (expand missing))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 10, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 15, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut calls = aliases.macro_calls(1, 1).unwrap();
+    let bound = calls.next_bound_macro().unwrap().unwrap();
+    let fuel = NonZeroUsize::new(64).unwrap();
+    let MacroExpansionSlice::Complete(output) = bound.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("展開が完了する必要があります"); };
+    let failure = output.check_template_definition(0).unwrap().err().unwrap();
+    assert!(core::ptr::eq(failure.call, &bound));
+    let TemplateDefinitionError::Definition {
+        kind: GeneratedDefinitionError::ForbiddenHead { head: ForbiddenGeneratedHead::Expand, .. },
+        related: Some(related),
+    } = failure.error else { panic!("禁止した先頭語の元範囲が必要です"); };
+    assert_eq!(related.origin.source().revision, 15);
+    assert!(matches!(related.origin, MacroSyntaxOrigin::Argument(argument)
+        if core::ptr::eq(argument, &bound.arguments()[0])));
+    let ArgumentSyntaxToken::Atom(at) = related.token else { unreachable!() };
+    let Form::Atom { span, .. } = &related.origin.forms()[at] else { unreachable!() };
+    assert_eq!(&circuit[span.clone()], "expand");
+
+    let bound = calls.next_bound_macro().unwrap().unwrap();
+    let MacroExpansionSlice::Complete(output) = bound.start_expansion().run_slice(fuel).unwrap()
+        else { panic!("展開が完了する必要があります"); };
+    let failure = output.check_template_definition(0).unwrap().err().unwrap();
+    let TemplateDefinitionError::Definition {
+        kind: GeneratedDefinitionError::Invalid { kind: HeaderError::ExpectedExpression, span },
+        related: Some(related),
+    } = failure.error else { panic!("右辺の欠落を元のリストに対応付ける必要があります"); };
+    assert!(span.is_empty());
+    assert_eq!(related.origin.source().revision, 10);
+    assert!(matches!(related.origin, MacroSyntaxOrigin::Template(call) if core::ptr::eq(call, &bound)));
+    let ArgumentSyntaxToken::Open(at) = related.token else { unreachable!() };
+    let Form::List { span, .. } = &related.origin.forms()[at] else { unreachable!() };
+    assert_eq!(&library[span.clone()], "(def y)");
 }
