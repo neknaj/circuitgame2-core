@@ -18,7 +18,11 @@ use vstd::string::StringSliceAdditionalSpecFns;
 mod expression;
 pub use expression::{MacroExpressionEvaluation, MacroExpressionStep};
 #[cfg(verus_only)]
-pub use expression::{macro_expression_evaluation_result, macro_expression_expected, macro_expression_step_matches};
+pub use expression::{
+    macro_expression_evaluation_result, macro_expression_expected, macro_expression_start_matches,
+    macro_expression_starts_agree, macro_expression_states_agree, macro_expression_step_matches,
+    macro_expression_step_results_agree, macro_expression_steps_agree,
+};
 
 verus! {
 

@@ -204,6 +204,75 @@ pub open spec fn macro_expression_step_matches<'b, 'p, 'a>(
     }
 }
 
+/// 同じ束縛の同じ式を、同じ仮引数から照合する状態である。
+pub open spec fn macro_expression_states_agree<'b, 'p, 'a>(
+    a: &MacroExpressionEvaluation<'b, 'p, 'a>, b: &MacroExpressionEvaluation<'b, 'p, 'a>,
+) -> bool {
+    &&& a.bound_model() == b.bound_model()
+    &&& a.site_model() == b.site_model()
+    &&& a.next_model() == b.next_model()
+}
+
+/// 一遷移で同じ元の実引数、診断、または再開状態を得ることを表す。
+pub open spec fn macro_expression_step_results_agree<'b, 'p, 'a>(
+    a: Result<MacroExpressionStep<'b, 'p, 'a>, MacroArgumentError>,
+    b: Result<MacroExpressionStep<'b, 'p, 'a>, MacroArgumentError>,
+) -> bool {
+    match (a, b) {
+        (Ok(MacroExpressionStep::Value(a)), Ok(MacroExpressionStep::Value(b))) => *a == *b,
+        (Ok(MacroExpressionStep::Continue(a)), Ok(MacroExpressionStep::Continue(b))) =>
+            macro_expression_states_agree(&a, &b),
+        (Err(a), Err(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// 同じ位置からの照合は、生成する値、診断、次の照合位置を一意に決める。
+pub proof fn macro_expression_steps_agree<'b, 'p, 'a>(
+    a: &MacroExpressionEvaluation<'b, 'p, 'a>, b: &MacroExpressionEvaluation<'b, 'p, 'a>,
+    result_a: Result<MacroExpressionStep<'b, 'p, 'a>, MacroArgumentError>,
+    result_b: Result<MacroExpressionStep<'b, 'p, 'a>, MacroArgumentError>,
+)
+    requires macro_expression_states_agree(a, b),
+        macro_expression_step_matches(*a, result_a), macro_expression_step_matches(*b, result_b),
+    ensures macro_expression_step_results_agree(result_a, result_b),
+{
+    assert(a.ready() && b.ready());
+    assert(a.position_model() == b.position_model());
+    assert(a.expected_model() == b.expected_model());
+    assert(a.span_model() == b.span_model());
+    if let Some(a_name) = a.name_model() {
+        assert(b.name_model() is Some);
+        assert(a_name.spec_bytes() == b.name_model()->Some_0.spec_bytes());
+    } else {
+        assert(b.name_model() is None);
+    }
+}
+
+/// 指定した式が本体にあれば、同じ束縛と式を先頭の仮引数から評価し始める。
+pub open spec fn macro_expression_start_matches<'b, 'p, 'a>(
+    bound: &'b BoundMacroCall<'p, 'a>, site: MacroExpressionSite,
+    state: Option<MacroExpressionEvaluation<'b, 'p, 'a>>,
+) -> bool {
+    &&& state.is_some() <==> macro_expression_position(&bound.body_model(), site).is_some()
+    &&& state matches Some(state) ==> state.ready() && state.bound_model() == bound
+        && state.site_model() == site && state.next_model() == 0
+}
+
+/// 同じ呼び出しの同じ式から開始すると、式が存在しないか同じ照合位置に決まる。
+pub proof fn macro_expression_starts_agree<'b, 'p, 'a>(
+    bound: &'b BoundMacroCall<'p, 'a>, site: MacroExpressionSite,
+    a: Option<MacroExpressionEvaluation<'b, 'p, 'a>>,
+    b: Option<MacroExpressionEvaluation<'b, 'p, 'a>>,
+)
+    requires macro_expression_start_matches(bound, site, a), macro_expression_start_matches(bound, site, b),
+    ensures match (a, b) {
+        (Some(a), Some(b)) => macro_expression_states_agree(&a, &b),
+        (None, None) => true,
+        _ => false,
+    },
+{}
+
 impl<'p, 'a> BoundMacroCall<'p, 'a> {
     /// 型検査済みのリスト要素またはテンプレートの挿入式の評価を始める。
     ///
@@ -211,9 +280,7 @@ impl<'p, 'a> BoundMacroCall<'p, 'a> {
     pub fn start_expression<'b>(&'b self, site: MacroExpressionSite)
         -> (state: Option<MacroExpressionEvaluation<'b, 'p, 'a>>)
         requires self.valid(),
-        ensures state.is_some() <==> macro_expression_position(&self.body_model(), site).is_some(),
-            state matches Some(state) ==> state.ready() && state.bound_model() == self
-                && state.site_model() == site && state.next_model() == 0,
+        ensures macro_expression_start_matches(self, site, state),
     {
         let checked = self.body();
         let body = checked.body();
