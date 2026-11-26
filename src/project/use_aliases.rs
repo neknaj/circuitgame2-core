@@ -38,7 +38,10 @@ mod function_atoms;
 mod function_literals;
 mod function_types;
 mod function_wiring;
-mod local_signal_index;
+pub(in crate::project) mod local_signal_index;
+pub use local_signal_index::LocalSignalKey;
+#[cfg(verus_only)]
+pub use local_signal_index::introduced_signal_keys_agree;
 mod module_calls;
 pub use port_types::{StorageSignature, StorageSignatureError};
 pub use module_calls::{ModuleCallInputs, ModuleCallInputsError, ModuleCallPorts, ModuleCallPortsError,
