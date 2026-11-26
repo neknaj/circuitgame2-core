@@ -28,26 +28,28 @@ pub struct ScalarFoldEntry<'plan, 'p, 'a> {
 }
 
 /// 回数、初期値、反復本体のいずれかを評価する途中の状態。
-pub struct ScalarFoldExecution<'plan, 'p, 'a> {
-    plan: &'plan DefnCallPlan<'p, 'a>,
+///
+/// 評価を完了するか状態を破棄するまで、型検査済みの呼び出し計画を借用する。
+pub struct ScalarFoldExecution<'p, 'a> {
+    plan: &'p DefnCallPlan<'p, 'a>,
     rank: usize,
     frame: Option<ScalarCallFrame<'p, 'a>>,
     terms: NatFoldTerms,
-    phase: FoldPhase<'plan, 'p, 'a>,
+    phase: FoldPhase<'p, 'a>,
 }
 
-enum FoldPhase<'plan, 'p, 'a> {
+enum FoldPhase<'p, 'a> {
     Count,
     Initial(u64),
     Select(NatFold<ScalarValue>),
     Body(NatFoldIteration<ScalarValue>),
-    Expression { state: ScalarExecution<'plan, 'p, 'a>, iteration: NatFoldIteration<ScalarValue> },
+    Expression { state: ScalarExecution<'p, 'p, 'a>, iteration: NatFoldIteration<ScalarValue> },
 }
 
 /// 実行枠を使い切った状態か、反復式の結果。
-pub enum ScalarFoldSlice<'plan, 'p, 'a> {
+pub enum ScalarFoldSlice<'p, 'a> {
     /// 次の遷移から再開できる。
-    Suspended(ScalarFoldExecution<'plan, 'p, 'a>),
+    Suspended(ScalarFoldExecution<'p, 'a>),
     /// 最後の累積値。反復回数が0なら初期値である。
     Complete(ScalarValue),
 }
@@ -204,7 +206,7 @@ impl<'plan, 'p, 'a> ScalarFoldEntry<'plan, 'p, 'a> {
 
     /// 初期状態と診断が、対象の本体と仮引数に対応することを表す。
     pub closed spec fn start_matches(&self, values: Seq<ScalarValue>,
-        result: Result<ScalarFoldExecution<'plan, 'p, 'a>, ScalarBindingError<'p, 'a>>) -> bool
+        result: Result<ScalarFoldExecution<'plan, 'a>, ScalarBindingError<'p, 'a>>) -> bool
     {
         match result {
             Ok(state) => state.is_initial() && state.terms == self.terms
@@ -218,7 +220,7 @@ impl<'plan, 'p, 'a> ScalarFoldEntry<'plan, 'p, 'a> {
     ///
     /// 実引数の個数や型が署名に合わなければ、元の位置を持つ診断を返す。
     pub fn start(&self, values: Vec<ScalarValue>)
-        -> (result: Result<ScalarFoldExecution<'plan, 'p, 'a>, ScalarBindingError<'p, 'a>>)
+        -> (result: Result<ScalarFoldExecution<'plan, 'a>, ScalarBindingError<'p, 'a>>)
         ensures self.start_matches(values@, result),
     {
         proof { use_type_invariant(self); }
@@ -343,7 +345,7 @@ fn evaluate_operand<'p, 'a>(
     }
 }
 
-impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
+impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
 
     spec fn root_frame(&self) -> ScalarCallFrame<'p, 'a> {
         match self.phase {
@@ -425,7 +427,7 @@ impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
             self.root_frame().body_model().forms@[self.terms.accumulator_binding as int])
     }
     /// 型付き環境で本体の値を求める一回の遷移を表す。
-    pub closed spec fn step_matches(&self, result: FoldResult<'plan, 'p, 'a>) -> bool {
+    pub closed spec fn step_matches(&self, result: FoldResult<'p, 'a>) -> bool {
         let frame = &self.root_frame();
         let terms = self.terms;
         let same_context = result matches Ok(ScalarFoldSlice::Suspended(next)) ==>
@@ -482,7 +484,7 @@ impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
         }
     }
 
-    fn step(self) -> (result: FoldResult<'plan, 'p, 'a>)
+    fn step(self) -> (result: FoldResult<'p, 'a>)
         ensures self.step_matches(result),
             result matches Ok(ScalarFoldSlice::Suspended(next)) ==>
                 next.result_type() == self.result_type() && next.atom_body() == self.atom_body()
@@ -540,17 +542,17 @@ impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
     }
 }
 
-type FoldResult<'plan, 'p, 'a> = Result<ScalarFoldSlice<'plan, 'p, 'a>, ScalarExecutionError<'p, 'a>>;
+type FoldResult<'p, 'a> = Result<ScalarFoldSlice<'p, 'a>, ScalarExecutionError<'p, 'a>>;
 
-spec fn fold_path<'plan, 'p, 'a>(start: ScalarFoldExecution<'plan, 'p, 'a>, states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>) -> bool {
+spec fn fold_path<'p, 'a>(start: ScalarFoldExecution<'p, 'a>, states: Seq<ScalarFoldExecution<'p, 'a>>) -> bool {
     &&& states.len() > 0
     &&& states[0] == start
     &&& forall|i: int| 0 <= i < states.len() - 1 ==>
         (#[trigger] states[i]).step_matches(Ok(ScalarFoldSlice::Suspended(states[i + 1])))
 }
 
-spec fn fold_path_outcome<'plan, 'p, 'a>(
-    start: ScalarFoldExecution<'plan, 'p, 'a>, states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>, result: FoldResult<'plan, 'p, 'a>, used: nat,
+spec fn fold_path_outcome<'p, 'a>(
+    start: ScalarFoldExecution<'p, 'a>, states: Seq<ScalarFoldExecution<'p, 'a>>, result: FoldResult<'p, 'a>, used: nat,
 ) -> bool {
     &&& fold_path(start, states)
     &&& match result {
@@ -560,17 +562,17 @@ spec fn fold_path_outcome<'plan, 'p, 'a>(
 }
 
 /// 実行した回数と、その中で通過した反復の遷移を表す。
-pub closed spec fn scalar_fold_slice_matches<'plan, 'p, 'a>(
-    start: ScalarFoldExecution<'plan, 'p, 'a>, fuel: nat, result: FoldResult<'plan, 'p, 'a>, used: nat,
+pub closed spec fn scalar_fold_slice_matches<'p, 'a>(
+    start: ScalarFoldExecution<'p, 'a>, fuel: nat, result: FoldResult<'p, 'a>, used: nat,
 ) -> bool {
     &&& 0 < used <= fuel
     &&& result matches Ok(ScalarFoldSlice::Suspended(_)) ==> used == fuel
-    &&& exists|states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>|
+    &&& exists|states: Seq<ScalarFoldExecution<'p, 'a>>|
         #[trigger] fold_path_outcome(start, states, result, used)
 }
 
-proof fn extend_fold_path<'plan, 'p, 'a>(
-    start: ScalarFoldExecution<'plan, 'p, 'a>, states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>, next: ScalarFoldExecution<'plan, 'p, 'a>,
+proof fn extend_fold_path<'p, 'a>(
+    start: ScalarFoldExecution<'p, 'a>, states: Seq<ScalarFoldExecution<'p, 'a>>, next: ScalarFoldExecution<'p, 'a>,
 )
     requires fold_path(start, states), states.last().step_matches(Ok(ScalarFoldSlice::Suspended(next))),
     ensures fold_path(start, states.push(next)),
@@ -586,17 +588,17 @@ proof fn extend_fold_path<'plan, 'p, 'a>(
 }
 
 /// 一時停止した反復の実行枠を次の実行枠とつなぎ、値または診断までの遷移数を合成する。
-pub proof fn resumed_scalar_fold_matches<'plan, 'p, 'a>(
-    start: ScalarFoldExecution<'plan, 'p, 'a>, first: nat, suspended: ScalarFoldExecution<'plan, 'p, 'a>,
-    next: nat, result: FoldResult<'plan, 'p, 'a>, used: nat,
+pub proof fn resumed_scalar_fold_matches<'p, 'a>(
+    start: ScalarFoldExecution<'p, 'a>, first: nat, suspended: ScalarFoldExecution<'p, 'a>,
+    next: nat, result: FoldResult<'p, 'a>, used: nat,
 )
     requires scalar_fold_slice_matches(start, first, Ok(ScalarFoldSlice::Suspended(suspended)), first),
         scalar_fold_slice_matches(suspended, next, result, used),
     ensures scalar_fold_slice_matches(start, first + next, result, first + used),
 {
-    let pre = choose|states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>|
+    let pre = choose|states: Seq<ScalarFoldExecution<'p, 'a>>|
         #[trigger] fold_path_outcome(start, states, Ok(ScalarFoldSlice::Suspended(suspended)), first);
-    let post = choose|states: Seq<ScalarFoldExecution<'plan, 'p, 'a>>|
+    let post = choose|states: Seq<ScalarFoldExecution<'p, 'a>>|
         #[trigger] fold_path_outcome(suspended, states, result, used);
     let combined = pre + post.skip(1);
     assert forall|i: int| 0 <= i < combined.len() - 1 implies
@@ -617,7 +619,7 @@ pub proof fn resumed_scalar_fold_matches<'plan, 'p, 'a>(
     assert(fold_path_outcome(start, combined, result, first + used));
 }
 
-impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
+impl<'p, 'a> ScalarFoldExecution<'p, 'a> {
     /// 実行枠内で反復を進め、実行した遷移数を返す。
     ///
     /// 一時停止時は枠を使い切った状態を返す。完了や失敗を返す最後の遷移も数える。
@@ -626,7 +628,7 @@ impl<'plan, 'p, 'a> ScalarFoldExecution<'plan, 'p, 'a> {
     ///
     /// 整数リテラルや演算結果が型の範囲外の場合は、評価を止めた式の元の位置を持つ診断を返す。
     /// 未対応の式に到達した場合も、その式の位置を返す。
-    pub fn run_slice_with_steps(self, fuel: core::num::NonZeroUsize) -> (outcome: (FoldResult<'plan, 'p, 'a>, usize))
+    pub fn run_slice_with_steps(self, fuel: core::num::NonZeroUsize) -> (outcome: (FoldResult<'p, 'a>, usize))
         ensures scalar_fold_slice_matches(self, fuel@ as nat, outcome.0, outcome.1 as nat),
             0 < outcome.1 <= fuel@,
             outcome.0 matches Ok(ScalarFoldSlice::Suspended(next)) ==> outcome.1 == fuel@
