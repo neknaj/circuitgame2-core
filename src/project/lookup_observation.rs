@@ -74,7 +74,7 @@ pub open spec fn lookup_location_model(location: LookupLocation) -> (Seq<Seq<u8>
     (location.file@.map_values(|part: Vec<u8>| part@), location.span)
 }
 
-fn capture_location(source: &ProjectSource, span: &Range<usize>) -> (out: LookupLocation)
+pub(super) fn capture_location(source: &ProjectSource, span: &Range<usize>) -> (out: LookupLocation)
     ensures lookup_location_model(out) == (source.virtual_path_model().components_model(), *span),
 {
     let parts = source.virtual_path().components();
@@ -94,6 +94,82 @@ fn capture_location(source: &ProjectSource, span: &Range<usize>) -> (out: Lookup
     }
     assert(file@.map_values(|part: Vec<u8>| part@) =~= component_bytes(parts@));
     LookupLocation { file, span: span.start..span.end }
+}
+
+// 所有済みの名前成分を、現在の本文を借りたまま照合する。
+fn bytes_match(saved: &[u8], current: &str) -> (same: bool)
+    ensures same == (saved@ == current.spec_bytes()),
+{
+    let bytes = current.as_bytes();
+    let same = saved == bytes;
+    if same { assert(saved@ =~= bytes@); }
+    same
+}
+
+pub(super) fn lookup_location_matches(saved: &LookupLocation, source: &ProjectSource, span: &Range<usize>) -> (same: bool)
+    ensures same == (lookup_location_model(*saved) == (source.virtual_path_model().components_model(), *span)),
+{
+    if saved.span.start != span.start || saved.span.end != span.end {
+        return false;
+    }
+    let parts = source.virtual_path().components();
+    if saved.file.len() != parts.len() {
+        assert(lookup_location_model(*saved).0.len() == saved.file@.len());
+        assert(component_bytes(parts@).len() == parts@.len());
+        return false;
+    }
+    let mut index = 0;
+    while index < parts.len()
+        invariant
+            saved.span == *span,
+            saved.file@.len() == parts@.len(),
+            component_bytes(parts@) == source.virtual_path_model().components_model(),
+            index <= parts@.len(),
+            forall|i: int| 0 <= i < index ==> (#[trigger] saved.file@[i])@ == parts@[i].spec_bytes(),
+        decreases parts@.len() - index,
+    {
+        if !bytes_match(saved.file[index].as_slice(), parts[index]) {
+            assert(saved.file@.map_values(|part: Vec<u8>| part@)[index as int] != component_bytes(parts@)[index as int]);
+            return false;
+        }
+        index += 1;
+    }
+    assert(saved.file@.map_values(|part: Vec<u8>| part@) =~= component_bytes(parts@));
+    true
+}
+
+// フォーム種別の実行時比較を、その直和型の等値につなぐ。
+pub(super) fn head_matches(left: Head, right: Head) -> (same: bool)
+    ensures same == (left == right),
+{
+    matches!((left, right),
+        (Head::Using, Head::Using) | (Head::Namespace, Head::Namespace) |
+        (Head::Use, Head::Use) | (Head::Export, Head::Export) |
+        (Head::Func, Head::Func) | (Head::Module, Head::Module) |
+        (Head::ModulePart, Head::ModulePart) | (Head::Struct, Head::Struct) |
+        (Head::Latch, Head::Latch) | (Head::Memory, Head::Memory) | (Head::Test, Head::Test))
+}
+
+fn lookup_target_matches(saved: &LookupTarget, target: &AbsoluteTarget) -> (same: bool)
+    ensures same == lookup_target_model(*saved, *target),
+{
+    match (saved, target) {
+        (LookupTarget::Declaration { head, location }, AbsoluteTarget::Declaration { source, form }) =>
+            head_matches(*head, form.head) && lookup_location_matches(location, source, &form.name.span),
+        (
+            LookupTarget::Namespace { parent, name, introduced_at },
+            AbsoluteTarget::Namespace { key, introduced_at: current },
+        ) => {
+            let same_parent = match (parent, key.parent) {
+                (Some(saved), Some(word)) => bytes_match(saved.as_slice(), word),
+                (None, None) => true,
+                _ => false,
+            };
+            same_parent && bytes_match(name.as_slice(), key.name)
+                && lookup_location_matches(introduced_at, current.source, &current.span)
+        },
+        _ => false,
+    }
 }
 
 /// 保存した候補が構文索引の候補と同じ種別、名前、位置を持つことを表す。
@@ -141,6 +217,20 @@ pub open spec fn owned_absolute_model(out: OwnedAbsoluteLookup, lookup: Absolute
 }
 
 impl AbsoluteLookup<'_, '_, '_> {
+    /// 現在の候補と可視性を、保存済みの観測と割り当てなしで比較する。
+    pub fn matches_owned_observation(&self, saved: &OwnedAbsoluteLookup) -> (same: bool)
+        ensures same == owned_absolute_model(*saved, *self),
+    {
+        if self.is_visible_declaration() != saved.visible_declaration {
+            return false;
+        }
+        match (&saved.target, self.target()) {
+            (Some(saved), Some(current)) => lookup_target_matches(saved, current),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     /// 完全修飾名の検索で観測した候補と可視性を、他の版と照合できる値に写す。
     pub fn owned_observation(&self) -> (out: OwnedAbsoluteLookup)
         ensures owned_absolute_model(out, *self),

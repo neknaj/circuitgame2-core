@@ -4,7 +4,7 @@ use super::declarations::key_of;
 #[cfg(verus_only)]
 use super::declarations::{
     declaration_key_evidence, declaration_location_evidence, declaration_sites_agree,
-    declaration_table_matches, form_key, project_names_conflict,
+    declaration_table_matches, form_key, project_names_conflict, same_declaration_key,
 };
 #[cfg(verus_only)]
 use super::{
@@ -258,7 +258,7 @@ pub open spec fn has_resolution(
         Ok(target @ AbsoluteTarget::Declaration { .. }) =>
             direct_target_matches(&declarations, key, Some(target)) && declaration_visible_from(table, key, from),
         Ok(target @ AbsoluteTarget::Namespace { .. }) =>
-            direct_target_matches(&declarations, key, Some(target)),
+            selected_direct_target_matches(&declarations, key, Some(target)),
         Err(AbsoluteResolutionError::Private(location)) =>
             !declaration_visible_from(table, key, from) && location_in_source(location)
                 && (exists|form: &NamedForm| #[trigger] declarations.declaration_at(key, location.source, form)
@@ -266,6 +266,105 @@ pub open spec fn has_resolution(
         Err(AbsoluteResolutionError::Missing) => direct_target_matches(&declarations, key, None),
         Err(AbsoluteResolutionError::InvalidPath) => false,
     }
+}
+
+spec fn resolved_candidate<'p, 'a, 'q>(
+    table: &ExportTable<'p, 'a>, key: NameKey<'q>, from: Option<&str>,
+    candidate: Option<AbsoluteTarget<'p, 'a, 'q>>,
+) -> Result<AbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>> {
+    match candidate {
+        Some(target @ AbsoluteTarget::Declaration { source, form }) =>
+            if declaration_visible_from(table, key, from) { Ok(target) }
+            else { Err(AbsoluteResolutionError::Private(LocatedName { source, span: form.name.span })) },
+        Some(target @ AbsoluteTarget::Namespace { .. }) => Ok(target),
+        None => Err(AbsoluteResolutionError::Missing),
+    }
+}
+
+proof fn recover_resolution_candidate<'p, 'a, 'q>(
+    table: &ExportTable<'p, 'a>, key: NameKey<'q>, from: Option<&str>,
+    result: Result<AbsoluteTarget<'p, 'a, 'q>, AbsoluteResolutionError<'p, 'a>>,
+) -> (candidate: Option<AbsoluteTarget<'p, 'a, 'q>>)
+    requires has_resolution(table, key, from, result),
+    ensures selected_direct_target_matches(&table.declarations_model(), key, candidate),
+        result == resolved_candidate(table, key, from, candidate),
+{
+    match result {
+        Ok(target) => Some(target),
+        Err(AbsoluteResolutionError::Private(location)) => {
+            let declarations = &table.declarations_model();
+            let form = choose|form: &'p NamedForm<'a>|
+                #[trigger] declarations.declaration_at(key, location.source, form)
+                && location.span == form.name.span;
+            Some(AbsoluteTarget::Declaration { source: location.source, form })
+        },
+        Err(AbsoluteResolutionError::Missing) => None,
+        Err(AbsoluteResolutionError::InvalidPath) => { assert(false); None },
+    }
+}
+
+// 完全修飾キーは文字列の内容で照合する。名前空間の候補だけキーを付け替える。
+proof fn transfer_selected_candidate<'p, 'a, 'q>(
+    table: &DeclarationTable<'p, 'a>, from: NameKey, to: NameKey<'q>, candidate: Option<AbsoluteTarget<'p, 'a, '_>>,
+) -> (out: Option<AbsoluteTarget<'p, 'a, 'q>>)
+    requires key_view(from) == key_view(to), selected_direct_target_matches(table, from, candidate),
+    ensures selected_direct_target_matches(table, to, out),
+        out == match candidate {
+            Some(AbsoluteTarget::Namespace { introduced_at, .. }) =>
+                Some(AbsoluteTarget::Namespace { key: to, introduced_at }),
+            Some(AbsoluteTarget::Declaration { source, form }) => Some(AbsoluteTarget::Declaration { source, form }),
+            None => None,
+        },
+{
+    match candidate {
+        Some(AbsoluteTarget::Declaration { source, form }) => {
+            same_declaration_key(table, from, to, source, form);
+            Some(AbsoluteTarget::Declaration { source, form })
+        },
+        _ => {
+            if declaration_exists(table, to) {
+                let (source, form) = choose|source: &ProjectSource, form: &NamedForm|
+                    #[trigger] table.declaration_at(to, source, form);
+                same_declaration_key(table, to, from, source, form);
+                assert(declaration_exists(table, from));
+            }
+            match candidate {
+                Some(AbsoluteTarget::Namespace { introduced_at, .. }) => {
+                    table.same_namespace_key(from, to, introduced_at);
+                    table.same_first_namespace_key(from, to, introduced_at);
+                    Some(AbsoluteTarget::Namespace { key: to, introduced_at })
+                },
+                _ => {
+                    assert forall|location: LocatedName| !#[trigger] table.namespace_at(to, location) by {
+                        if table.namespace_at(to, location) {
+                            table.same_namespace_key(to, from, location);
+                        }
+                    };
+                    None
+                },
+            }
+        },
+    }
+}
+
+// 候補の不在、非公開、最初の名前空間位置まで、同じキーで同じ解決結果を得る。
+pub(super) proof fn key_resolutions_agree(
+    project: &CircuitProject, table: &ExportTable, left_key: NameKey, right_key: NameKey, from: Option<&str>,
+    left: Result<AbsoluteTarget, AbsoluteResolutionError>, right: Result<AbsoluteTarget, AbsoluteResolutionError>,
+)
+    requires
+        declaration_table_matches(project, table.declarations_model()), !project_names_conflict(project),
+        key_view(left_key) == key_view(right_key),
+        has_resolution(table, left_key, from, left), has_resolution(table, right_key, from, right),
+    ensures left == right || (left matches Ok(AbsoluteTarget::Namespace { introduced_at: a, .. })
+        && right matches Ok(AbsoluteTarget::Namespace { introduced_at: b, .. }) && a == b),
+{
+    let declarations = &table.declarations_model();
+    let a = recover_resolution_candidate(table, left_key, from, left);
+    let b = recover_resolution_candidate(table, right_key, from, right);
+    let moved = transfer_selected_candidate(declarations, right_key, left_key, b);
+    selected_direct_targets_agree(project, declarations, left_key, a, moved);
+    table.same_publication_key(left_key, right_key);
 }
 
 /// 完全修飾名の解決結果を、字句規則、共有宣言表、公開表に結び付ける。

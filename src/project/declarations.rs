@@ -800,6 +800,33 @@ impl<'p, 'a> DeclarationTable<'p, 'a> {
             }
     }
 
+    // 同じキーの内容なら、先行する名前空間の不在も保つ。
+    pub(super) proof fn same_first_namespace_key(&self, left: NameKey, right: NameKey, location: LocatedName)
+        requires key_view(left) == key_view(right), self.first_namespace_at(left, location),
+        ensures self.first_namespace_at(right, location),
+    {
+        let items = self.occurrences@;
+        let i = choose|i: int| 0 <= i < items.len() && {
+            let item = #[trigger] items[i];
+            &&& item.form.head is Namespace
+            &&& *item.source == *location.source
+            &&& portion_matches(*item.form, left, location.span)
+            &&& forall|j: int| 0 <= j < i ==> !lookup_matches(*(#[trigger] items[j]).form, left, true)
+        };
+        let form = *items[i].form;
+        let (lo, hi) = choose|lo: int, hi: int| #[trigger] namespace_component(form.name.word, left, lo, hi)
+            && location.span.start == form.name.span.start + lo && location.span.end == form.name.span.start + hi;
+        super::name_keys::namespace_components_agree(form.name.word, left, right, lo, hi);
+        assert(portion_matches(form, right, location.span));
+        assert forall|j: int| 0 <= j < i implies !lookup_matches(*(#[trigger] items[j]).form, right, true) by {
+            if lookup_matches(*items[j].form, right, true) {
+                let path = items[j].form.name.word;
+                let (lo, hi) = choose|lo: int, hi: int| #[trigger] namespace_component(path, right, lo, hi);
+                super::name_keys::namespace_components_agree(path, right, left, lo, hi);
+            }
+        };
+    }
+
     /// 同じ名前空間の最初の導入箇所では、ソースと名前成分の範囲が一致する。
     pub(super) proof fn first_namespace_sites_agree(&self, key: NameKey, left: LocatedName, right: LocatedName)
         requires self.first_namespace_at(key, left), self.first_namespace_at(key, right),

@@ -146,3 +146,44 @@ fn a_wrong_kind_with_the_builtin_spelling_still_resolves_to_that_binding() {
         DefinitionBinding::Declaration { form, .. } if form.head == Head::Struct
     ));
 }
+
+#[test]
+fn reuses_a_cached_absolute_diagnostic_only_while_its_evidence_agrees() {
+    fn with_project<T>(
+        library: &str, revision: u64,
+        check: impl FnOnce(&circuitgame2_core::project::UseAliases<'_, '_, '_>, circuitgame2_core::project::DefinitionPosition) -> T,
+    ) -> T {
+        use circuitgame2_core::project::DefinitionPosition;
+        let app = "(using nor) (func Run (in x) (out y) (def y (::lib::Task x)))";
+        let project = parse_circuit_project(&[
+            SourceSnapshot { path: "app.ncg2", revision: 8, text: app },
+            SourceSnapshot { path: "lib.ncg2", revision, text: library },
+        ]).unwrap();
+        let entry = project.circuits()[0].syntax.entries.iter().position(|row| row.head == Head::Func).unwrap();
+        let targets = index_use_targets(&project).unwrap();
+        let aliases = check_use_aliases(&targets).unwrap();
+        check(&aliases, DefinitionPosition { file: 0, entry, definition: 0, reference: 0 })
+    }
+
+    use circuitgame2_core::project::ReferenceDiagnosticKind;
+    let private = "(namespace lib (func Task (in x) (out x)))";
+    let cached = with_project(private, 1, |aliases, at| aliases.cache_absolute_reference_diagnostic(at).unwrap());
+    assert_eq!(cached.word(), "::lib::Task");
+    assert_eq!(cached.problem().unwrap().kind, ReferenceDiagnosticKind::Private);
+
+    with_project(&format!("{private} ; 変更"), 2, |aliases, at| {
+        let reused = aliases.reuse_absolute_reference_diagnostic(at, &cached).unwrap();
+        assert!(core::ptr::eq(reused, &cached));
+        assert_eq!(reused.problem().unwrap().kind, ReferenceDiagnosticKind::Private);
+    });
+    for edited in [
+        format!("; 先頭
+{private}"),
+        format!("{private} (namespace lib (export Task))"),
+        "(namespace lib)".to_owned(),
+    ] {
+        with_project(&edited, 3, |aliases, at| {
+            assert!(aliases.reuse_absolute_reference_diagnostic(at, &cached).is_none());
+        });
+    }
+}
