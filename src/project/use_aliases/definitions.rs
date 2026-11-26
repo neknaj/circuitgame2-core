@@ -47,14 +47,16 @@ use vstd::{string::StringSliceAdditionalSpecFns, utf8::encode_utf8_decode_utf8};
 
 verus! {
 
-pub(super) open spec fn definition_count(parsed: &NamedBuildCircuit, entry: int) -> int {
+/// 索引項目に属する定義の個数を表す。
+pub open spec fn definition_count(parsed: &NamedBuildCircuit, entry: int) -> int {
     if 0 <= entry < parsed.entry_ranges@.len() {
         let defs = parsed.entry_ranges@[entry].definitions;
         defs.end - defs.start
     } else { 0 }
 }
 
-pub(super) open spec fn reference_count(parsed: &NamedBuildCircuit, entry: int, definition: int) -> int {
+/// 指定した定義の右辺に登録された参照の個数を表す。
+pub open spec fn reference_count(parsed: &NamedBuildCircuit, entry: int, definition: int) -> int {
     if 0 <= entry < parsed.entry_ranges@.len() && 0 <= definition < definition_count(parsed, entry) {
         let position = parsed.entry_ranges@[entry].definitions.start + definition;
         if 0 <= position < parsed.definitions@.len() {
@@ -542,14 +544,8 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
     }
 
     pub(super) open spec fn position_exists(&self, file: usize, entry: usize, definition: usize, reference: usize) -> bool {
-        let circuits = self.targets.project_model().circuits_model();
-        &&& file < circuits.len()
-        &&& {
-            let parsed = &circuits[file as int];
-            &&& entry < parsed.entry_ranges@.len()
-            &&& definition < definition_count(parsed, entry as int)
-            &&& reference < reference_count(parsed, entry as int, definition as int)
-        }
+        super::definition_position_exists(&self.targets.project_model(),
+            super::DefinitionPosition { file, entry, definition, reference })
     }
 
     spec fn valid_definition_scope(&self, file: usize, block: Option<usize>) -> bool {

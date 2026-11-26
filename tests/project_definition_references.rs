@@ -1,5 +1,5 @@
 use circuitgame2_core::project::{
-    DefinitionBinding, DefinitionLookupObservation, DefinitionPosition, DefinitionReferenceError, DefinitionReferenceReason,
+    DefinitionBinding, DefinitionLookupObservation, DefinitionPosition, DefinitionPositionStep, DefinitionReferenceError, DefinitionReferenceReason,
     OwnedUnqualifiedLookup, SourceSnapshot,
     check_use_aliases, index_use_targets, parse_circuit_project,
 };
@@ -191,4 +191,39 @@ fn reuses_a_cached_absolute_diagnostic_only_while_its_evidence_agrees() {
             assert!(aliases.reuse_absolute_reference_diagnostic(at, &cached).is_none());
         });
     }
+}
+
+#[test]
+fn scans_reference_positions_in_source_order_without_name_resolution() {
+    let project = parse_circuit_project(&[
+        SourceSnapshot {
+            path: "app.ncg2", revision: 1,
+            text: "(using nor) (func Pass (in x) (out x)) (func Run (in x) (out y) (def n (nor x x)) (def y (unknown n)))",
+        },
+        SourceSnapshot { path: "empty.ncg2", revision: 1, text: "; 空の文書" },
+        SourceSnapshot {
+            path: "other.ncg2", revision: 1,
+            text: "(func Other (in x) (out y) (def y (nor x x)))",
+        },
+    ]).unwrap();
+    let mut cursor = project.definition_positions();
+    let mut references = Vec::new();
+    let mut advanced = 0;
+    loop {
+        match cursor.step() {
+            DefinitionPositionStep::Reference(at) => references.push(at),
+            DefinitionPositionStep::Advanced => advanced += 1,
+            DefinitionPositionStep::Finished => break,
+        }
+    }
+    assert!(advanced > 0);
+    assert_eq!(references, [
+        DefinitionPosition { file: 0, entry: 2, definition: 0, reference: 0 },
+        DefinitionPosition { file: 0, entry: 2, definition: 1, reference: 0 },
+        DefinitionPosition { file: 2, entry: 0, definition: 0, reference: 0 },
+    ]);
+    let stop = cursor.position();
+    assert_eq!(stop.file, 3);
+    assert_eq!(cursor.step(), DefinitionPositionStep::Finished);
+    assert_eq!(cursor.position(), stop);
 }

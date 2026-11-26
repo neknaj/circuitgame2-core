@@ -1,11 +1,8 @@
 //! 構文索引の全定義参照をファイルと元ソースの順序で解決する。
 
 #[cfg(verus_only)]
-use super::definitions::{definition_count, reference_count};
-#[cfg(verus_only)]
-use crate::project::circuits::parsed_index_evidence;
-#[cfg(verus_only)]
-use crate::syntax::circuit::{build_definition_scope_evidence, build_entry_ranges_evidence};
+use super::{definition_position_before as before, definition_position_progress, definition_position_remaining};
+use super::DefinitionPositionStep;
 
 use super::{
     DefinitionReferenceError, DefinitionReferenceReason, DefinitionReferenceSite,
@@ -58,14 +55,6 @@ pub struct DefinitionReferences<'p, 'a> {
     pub bindings: Vec<IndexedDefinitionBinding<'p, 'a>>,
     /// 解決できなかった参照の診断。解決できた参照と同じ基準で並べる。
     pub diagnostics: Vec<DefinitionBatchError<'p, 'a>>,
-}
-
-spec fn before(a: DefinitionPosition, b: DefinitionPosition) -> bool {
-    a.file < b.file || (a.file == b.file && (
-        a.entry < b.entry || (a.entry == b.entry && (
-            a.definition < b.definition || (a.definition == b.definition && a.reference < b.reference)
-        ))
-    ))
 }
 
 impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
@@ -312,61 +301,39 @@ impl<'t, 'p, 'a> UseAliases<'t, 'p, 'a> {
         let circuits = project.circuits();
         let mut found = Vec::new();
         let mut errors = Vec::new();
-        let mut at = DefinitionPosition { file: 0, entry: 0, definition: 0, reference: 0 };
+        let mut positions = project.definition_positions();
+        let mut at = positions.position();
         assert(self.resolutions_before(at, found@, errors@)) by { reveal(UseAliases::resolutions_before); }
         while at.file < circuits.len()
             invariant
                 self.can_resolve(),
                 circuits@ == self.targets.project_model().circuits_model(),
                 *project == self.targets.project_model(),
-                project.has_parsed_sources(),
-                at.file <= circuits@.len(),
-                at.file == circuits@.len() ==> at.entry == 0 && at.definition == 0 && at.reference == 0,
+                positions.valid(), positions.project_model() == project, at == positions.position_model(),
                 !keep_going ==> errors@ == Seq::<DefinitionBatchError>::empty(),
                 self.resolutions_before(at, found@, errors@),
             decreases
-                circuits@.len() - at.file,
-                if at.file < circuits@.len() { circuits@[at.file as int].entry_ranges@.len() - at.entry } else { 0 },
-                if at.file < circuits@.len() && at.entry < circuits@[at.file as int].entry_ranges@.len() {
-                    definition_count(&circuits@[at.file as int], at.entry as int) - at.definition
-                } else { 0 },
-                if self.valid_reference(at) {
-                    reference_count(&circuits@[at.file as int], at.entry as int, at.definition as int) - at.reference
-                } else { 0 },
+                definition_position_remaining(project, at).0, definition_position_remaining(project, at).1,
+                definition_position_remaining(project, at).2, definition_position_remaining(project, at).3,
         {
-            let parsed = &circuits[at.file];
-            if at.entry >= parsed.entry_ranges.len() {
-                let next = DefinitionPosition { file: at.file + 1, entry: 0, definition: 0, reference: 0 };
-                proof { self.advance_empty(at, next, found@, errors@); }
-                at = next;
-                continue;
+            let step = positions.step();
+            let next = positions.position();
+            assert(step !is Finished ==> definition_position_progress(project, at, next));
+            match step {
+                DefinitionPositionStep::Finished => {
+                    proof { assert(false); }
+                    unreachable!();
+                },
+                DefinitionPositionStep::Advanced => {
+                    proof { self.advance_empty(at, next, found@, errors@); }
+                    at = next;
+                    continue;
+                },
+                DefinitionPositionStep::Reference(_reference) => {
+                    assert(_reference == at);
+                },
             }
-            let ghost source = project.sources_model()[at.file as int];
-            proof {
-                parsed_index_evidence(source, *parsed);
-                build_entry_ranges_evidence(source.text, &parsed.build_model(), at.entry as int);
-            }
-            let definitions = &parsed.entry_ranges[at.entry].definitions;
-            if at.definition >= definitions.end - definitions.start {
-                let next = DefinitionPosition { entry: at.entry + 1, definition: 0, reference: 0, ..at };
-                proof { self.advance_empty(at, next, found@, errors@); }
-                at = next;
-                continue;
-            }
-            let _definition_count = parsed.definitions.len();
-            assert(definitions.start + at.definition < _definition_count);
-            let position = definitions.start + at.definition;
-            let references = &parsed.definitions[position].references;
-            proof { build_definition_scope_evidence(source.text, &parsed.build_model(), at.entry as int, position as int); }
-            if at.reference >= references.end - references.start {
-                let next = DefinitionPosition { definition: at.definition + 1, reference: 0, ..at };
-                proof { self.advance_empty(at, next, found@, errors@); }
-                at = next;
-                continue;
-            }
-            assert(self.valid_reference(at));
             let result = self.resolve_definition_reference(at.file, at.entry, at.definition, at.reference);
-            let next = DefinitionPosition { reference: at.reference + 1, ..at };
             match result {
                 Ok(resolved) => {
                     let item = IndexedDefinitionBinding { position: at, resolved };
