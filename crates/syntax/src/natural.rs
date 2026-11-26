@@ -18,8 +18,9 @@ pub enum NaturalRangeError {
     OutOfRange,
 }
 
-pub(crate) open spec fn natural_digits(bytes: Seq<u8>) -> bool {
-    bytes.len() > 0 && forall|i: int| 0 <= i < bytes.len() ==> digit(Radix::Decimal, #[trigger] bytes[i])
+/// 空でない ASCII 十進数字列を表す。
+pub open spec fn natural_digits(bytes: Seq<u8>) -> bool {
+    bytes.len() > 0 && forall|i: int| 0 <= i < bytes.len() ==> b'0' <= #[trigger] bytes[i] <= b'9'
 }
 
 spec fn decimal_prefix(bytes: Seq<u8>, count: nat) -> int

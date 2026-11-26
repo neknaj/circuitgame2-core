@@ -4,7 +4,10 @@ use crate::ncg2m::forms::source_word;
 use crate::project::{LocatedName, MacroArgument};
 use crate::syntax::{AtomKind, Form, NaturalRangeError, NaturalReadStep, NaturalReader};
 #[cfg(verus_only)]
-use crate::syntax::{form_span, form_spans_valid, natural_u64_matches, natural_read_step_matches};
+use crate::syntax::{
+    decimal_natural_value, form_span, form_spans_valid, natural_atom_has_value, natural_digits,
+    natural_read_step_matches, natural_u64_matches,
+};
 use vstd::prelude::*;
 #[cfg(verus_only)]
 use vstd::{string::StringSliceAdditionalSpecFns, utf8::is_char_boundary};
@@ -81,6 +84,7 @@ impl<'p, 'a> MacroArgument<'p, 'a> {
             self.valid(),
             match result {
                 Ok(reading) => syntax_nat_argument_is_natural(self)
+                    && natural_digits(syntax_nat_argument_bytes(self))
                     && reading.valid() && reading.argument_model() == self && reading.position_model() == 0,
                 Err(diagnostic) => !syntax_nat_argument_is_natural(self)
                     && macro_natural_error_at_argument(self, diagnostic, MacroNaturalError::ExpectedNatural),
@@ -93,6 +97,11 @@ impl<'p, 'a> MacroArgument<'p, 'a> {
         };
         let source = self.scope().source.text();
         let word = source_word(source, forms, at);
+        proof {
+            reveal(form_spans_valid);
+            assert(crate::syntax::form_atom_matches(source, forms@[at as int]));
+            natural_atom_has_value(word.spec_bytes());
+        }
         Ok(MacroNatural { argument: self, reader: NaturalReader::new(word) })
     }
 }
@@ -125,8 +134,11 @@ impl<'b, 'p, 'a> MacroNatural<'b, 'p, 'a> {
 
     /// 読み取り状態と実引数が同じ字句を指すことを表す。
     pub closed spec fn valid(&self) -> bool {
+        let bytes = syntax_nat_argument_bytes(self.argument);
         self.argument.valid() && syntax_nat_argument_is_natural(self.argument)
-            && self.reader.valid() && self.reader.bytes_model() == syntax_nat_argument_bytes(self.argument)
+            && self.reader.valid() && self.reader.bytes_model() == bytes
+            && self.position_model() <= bytes.len()
+            && natural_digits(bytes) && decimal_natural_value(bytes).is_some()
     }
 
     #[verifier::type_invariant]
@@ -136,12 +148,19 @@ impl<'b, 'p, 'a> MacroNatural<'b, 'p, 'a> {
     ///
     /// # Errors
     ///
-    /// 字句の形または値の範囲が不適合なら、元の実引数の範囲を返す。
+    /// 値が `Nat` の範囲を超える場合は、末尾で元の実引数の範囲を返す。
     pub fn step(self) -> (result: Result<MacroNaturalStep<'b, 'p, 'a>, MacroNaturalDiagnostic<'p, 'a>>)
         ensures macro_natural_step_matches(&self, result),
     {
         proof { use_type_invariant(&self); }
         let argument = self.argument;
+        proof {
+            let bytes = syntax_nat_argument_bytes(argument);
+            let at = self.position_model() as int;
+            if at < bytes.len() {
+                assert(b'0' <= bytes[at] <= b'9');
+            }
+        }
         match self.reader.step() {
             Ok(NaturalReadStep::Done(value)) => Ok(MacroNaturalStep::Done(value)),
             Ok(NaturalReadStep::Continue(reader)) => Ok(MacroNaturalStep::Continue(Self { argument, reader })),
@@ -159,19 +178,15 @@ pub open spec fn macro_natural_step_matches(
     let bytes = syntax_nat_argument_bytes(argument);
     let at = before.position_model() as int;
     &&& before.valid()
-    &&& if at < bytes.len() && b'0' <= bytes[at] <= b'9' {
+    &&& at <= bytes.len()
+    &&& if at < bytes.len() {
         result matches Ok(MacroNaturalStep::Continue(after))
             && after.valid() && after.argument_model() == argument && after.position_model() == at + 1
     } else {
         match result {
             Ok(MacroNaturalStep::Done(value)) => at == bytes.len() && natural_u64_matches(bytes, Ok(value)),
-            Err(diagnostic) => if diagnostic.kind == MacroNaturalError::OutOfRange {
-                natural_u64_matches(bytes, Err(NaturalRangeError::OutOfRange))
-                    && macro_natural_error_at_argument(argument, diagnostic, MacroNaturalError::OutOfRange)
-            } else {
-                natural_u64_matches(bytes, Err(NaturalRangeError::InvalidDigits))
-                    && macro_natural_error_at_argument(argument, diagnostic, MacroNaturalError::ExpectedNatural)
-            },
+            Err(diagnostic) => natural_u64_matches(bytes, Err(NaturalRangeError::OutOfRange))
+                && macro_natural_error_at_argument(argument, diagnostic, MacroNaturalError::OutOfRange),
             _ => false,
         }
     }
