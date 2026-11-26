@@ -69,7 +69,7 @@ fn place_pins(pins: &[Wire], arguments: &[Wire], base: usize, child_gates: usize
 
 impl ClockedStorageInputs {
     /// すべての入力端子が指定した回路の範囲内にあることを表す。
-    pub(crate) open spec fn pins_available(&self, inputs: nat, gates: nat) -> bool {
+    pub open spec fn pins_available(&self, inputs: nat, gates: nat) -> bool {
         &&& (self.address matches Some(address) ==>
             output_ports_available(address@, inputs, gates, address@.len() as int))
         &&& output_ports_available(self.data@, inputs, gates, self.data@.len() as int)

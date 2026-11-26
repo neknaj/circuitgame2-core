@@ -504,6 +504,7 @@ fn reports_an_unexpanded_macro_in_a_fragment() {
 
 #[test]
 fn lowers_two_calls_to_the_same_ram_module_from_separate_fragments() {
+    use circuitgame2_core::netlist::Wire;
     use circuitgame2_core::project::{ClockedModuleVmError, ClockedModuleVmLimits};
 
     let project = parse_circuit_project(&[
@@ -543,6 +544,21 @@ fn lowers_two_calls_to_the_same_ram_module_from_separate_fragments() {
     assert_eq!(&call.source.text[call.span], "(storage selected right-data right-enable)");
 
     let mut compiled = aliases.lower_clocked_vm(parts[0].module_position, limits).unwrap().unwrap();
+    assert_eq!(compiled.vm.external_input_count(), 7);
+    assert_eq!(compiled.vm.netlist().input_count, 11);
+    assert_eq!(compiled.vm.storage_count(), 2);
+    for (index, data, enable, output) in [
+        (0, [Wire::Input(1), Wire::Input(2)], Wire::Input(5), 7..9),
+        (1, [Wire::Input(3), Wire::Input(4)], Wire::Input(6), 9..11),
+    ] {
+        let (wiring, range) = compiled.vm.storage_wiring(index).unwrap();
+        assert_eq!(wiring.address.as_deref(), Some([Wire::Input(0)].as_slice()));
+        assert_eq!(wiring.data, data);
+        assert_eq!(wiring.enable, enable);
+        assert_eq!(range, output);
+    }
+    assert!(compiled.vm.storage_wiring(2).is_none());
+    assert!(compiled.vm.storage_wiring(usize::MAX).is_none());
 
     let main = project.circuits()[0].names.iter().position(|form| form.name.word == "main").unwrap();
     let hint = aliases.module_expansion_hint(0, main, limits).unwrap().unwrap();
@@ -709,6 +725,7 @@ fn places_struct_ram_outputs_in_call_order_across_module_parts() {
 
 #[test]
 fn lowers_nor_and_latch_to_one_tick_machine() {
+    use circuitgame2_core::netlist::Wire;
     use circuitgame2_core::project::{ClockedModuleVmLimits, ModuleBodyPosition};
 
     let input = [SourceSnapshot { path: "main.ncg2", revision: 5,
@@ -724,6 +741,12 @@ fn lowers_nor_and_latch_to_one_tick_machine() {
     let owner = ModuleBodyPosition { file: 0, entry };
     let limits = ClockedModuleVmLimits { width: 8, wiring_bits: 8, gates: 1, state_bits: 1 };
     let mut compiled = aliases.lower_clocked_vm(owner, limits).unwrap().unwrap();
+    let (wiring, output) = compiled.vm.storage_wiring(0).unwrap();
+    assert_eq!(compiled.vm.storage_count(), 1);
+    assert_eq!(output, 5..6);
+    assert_eq!(wiring.address, None);
+    assert_eq!(wiring.enable, Wire::Input(4));
+    assert_eq!(wiring.data, [Wire::Input(3)]);
     assert_eq!(compiled.vm.reset(), [false, false]);
     assert_eq!(compiled.vm.step(&[false, false, false, true, true]).unwrap(), [true, true]);
     assert_eq!(compiled.vm.step(&[false, false, false, false, false]).unwrap(), [true, false]);
