@@ -63,3 +63,51 @@ fn restore_preserves_read_first_state_and_rejects_invalid_checkpoints() {
         assert_eq!(resumed.ram_memory(1), continuous.ram_memory(1));
     }
 }
+
+#[test]
+fn snapshot_file_restores_the_visible_frame_and_checks_port_layout() {
+    use circuitgame2_core::netlist::{
+        CheckpointFileError, CheckpointHeader, VmCheckpointFileError, checkpoint_file_len,
+        decode_vm_checkpoint, encode_vm_checkpoint,
+    };
+    let mut continuous = vm();
+    let mut resumed = vm();
+    let inputs = [0..1, 1..3];
+    let outputs = [0..1, 1..4];
+    let input = [true, true, true];
+    let at_save = continuous.step(&input).unwrap();
+    let header = CheckpointHeader {
+        generation: 2,
+        tick: 1,
+        period_numerator: 10,
+        period_denominator: 1,
+    };
+    let file = encode_vm_checkpoint(&continuous, &inputs, &outputs, header, &input).unwrap();
+    assert_eq!(checkpoint_file_len(&resumed, &inputs, &outputs).unwrap(), file.len());
+    assert_eq!(
+        checkpoint_file_len(&resumed, &[0..0, 0..1, 1..3], &outputs),
+        Err(VmCheckpointFileError::PortLayout),
+    );
+    assert!(matches!(
+        decode_vm_checkpoint(&file, &resumed, &[0..2, 2..3], &outputs, (10, 1)),
+        Err(VmCheckpointFileError::File(CheckpointFileError::Layout)),
+    ));
+    assert!(matches!(
+        decode_vm_checkpoint(&file, &resumed, &inputs, &outputs, (9, 1)),
+        Err(VmCheckpointFileError::PeriodMismatch),
+    ));
+    assert!(matches!(
+        decode_vm_checkpoint(&file[..file.len() - 1], &resumed, &inputs, &outputs, (10, 1)),
+        Err(VmCheckpointFileError::File(CheckpointFileError::Length)),
+    ));
+    let saved = decode_vm_checkpoint(&file, &resumed, &inputs, &outputs, (10, 1)).unwrap();
+    assert_eq!(saved.header, header);
+    assert_eq!(saved.input, input);
+    resumed.restore_checkpoint(&saved.vm).unwrap();
+    assert_eq!(resumed.observe_current(&saved.input).unwrap(), at_save);
+    assert_eq!(resumed.ram_memory(1), continuous.ram_memory(1));
+    for frame in [[true, false, false], [false, true, true]] {
+        assert_eq!(resumed.step(&frame), continuous.step(&frame));
+        assert_eq!(resumed.ram_memory(1), continuous.ram_memory(1));
+    }
+}
