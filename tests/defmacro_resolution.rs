@@ -78,7 +78,7 @@ fn resolves_macros_from_the_block_of_each_circuit_body() {
     let mut calls = aliases.macro_calls(1, function).unwrap();
     assert_eq!(calls.source().revision, 47);
     let syntax = calls.syntax();
-    let first = calls.next_call().unwrap();
+    let (first, arguments) = calls.next_call_with_arguments().unwrap();
     assert_eq!(&circuit[first.site.callee], "make");
     assert_eq!(first.target.unwrap().declaration.name.source.revision, 31);
     let first_argument = next_call_argument(&syntax.forms, first.site.arguments.clone()).unwrap();
@@ -86,9 +86,24 @@ fn resolves_macros_from_the_block_of_each_circuit_body() {
         next_call_argument(&syntax.forms, first_argument.end..first.site.arguments.end).unwrap();
     assert_eq!(second_argument.end, first.site.arguments.end);
     assert!(second_argument.end - second_argument.start > 1);
-    let too_few = calls.next_call().unwrap();
+    let (too_few, wrong_arguments) = calls.next_call_with_arguments().unwrap();
     assert_eq!(&circuit[too_few.site.span], "(expand make y)");
     assert!(matches!(too_few.target, Err(MacroCallError::Arity { actual: 1, .. })));
+    assert!(wrong_arguments.is_none());
+
+    let mut arguments = arguments.unwrap();
+    assert_eq!(arguments.remaining_count(), 2);
+    let first_value = arguments.next_argument().unwrap();
+    assert_eq!(first_value.scope().source.revision, 47);
+    assert_eq!(first_value.scope().file, 1);
+    assert_eq!(first_value.scope().entry, function);
+    assert_eq!(first_value.nodes(), first_argument);
+    let second_value = arguments.next_argument().unwrap();
+    assert_eq!(second_value.nodes(), second_argument);
+    assert_eq!(second_value.forms().as_ptr(), syntax.forms.as_ptr());
+    assert_eq!(arguments.remaining_count(), 0);
+    assert!(arguments.next_argument().is_none());
+
     let wrong_kind = calls.next_call().unwrap();
     assert_eq!(&circuit[wrong_kind.site.callee], "lib::helper");
     assert!(matches!(

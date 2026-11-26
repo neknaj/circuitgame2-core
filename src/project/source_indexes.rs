@@ -21,7 +21,7 @@ use crate::ncg2m::expression_types::named_call::{indexed_call_body_locally_typed
 use super::{ProjectDeclarationKind, ResolvedDefmacro};
 use core::ops::Range;
 #[cfg(verus_only)]
-use crate::ncg2m::defn::readable_span;
+use crate::ncg2m::{defn::readable_span, file::meta_macro_span_evidence};
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
@@ -519,6 +519,8 @@ impl<'a> ParsedProjectSources<'a> {
                 &&& body.at < body.forms@.len()
                 &&& form_span(body.forms@[body.at as int]) == *definition.body
                 &&& readable_span(source, *definition.body)
+                &&& forall|i: int| 0 <= i < definition.parameters@.len() ==>
+                    readable_span(source, #[trigger] definition.parameters@[i])
             },
     {
         let declaration = &definition.declaration;
@@ -541,6 +543,8 @@ impl<'a> ParsedProjectSources<'a> {
             use_type_invariant(self);
             assert(retained_ast_matches(*source, *_index, self.meta_asts@[file as int]));
             source.text_model_is_text();
+            project_source_index_evidence(*source, *_index);
+            meta_macro_span_evidence(source.text_model(), items@, item as int);
         }
         let Some(forms) = &self.meta_asts[file] else { unreachable!() };
         let at = retained_macro_body(source.text(), forms, items, item);

@@ -44,25 +44,56 @@ pub enum TemplatePart {
     },
 }
 
-/// 挿入フォームの位置または個数に関する診断。
+/// テンプレートや挿入フォームの位置と引数個数に関する診断。
 #[derive(Debug, Eq, PartialEq)]
 pub enum TemplateError {
+    /// `syntax` にちょうど1個のテンプレートがない。フォーム全体の範囲。
+    SyntaxArity(Range<usize>),
     /// リストの要素以外に現れた `splice`。フォーム全体の範囲。
     SpliceAtRoot(Range<usize>),
     /// 挿入フォームにちょうど1個の式がない。フォーム全体の範囲。
     InsertionArity(Range<usize>),
 }
 
+/// リストの先頭が無修飾の名前なら、その元ソースの綴りを返す。
+pub open spec fn template_head_word(source: &str, forms: Seq<Form>, at: usize, stop: usize) -> Option<Seq<u8>> {
+    if at + 1 < stop && (forms[(at + 1) as int] matches Form::Atom { kind, .. } && kind is Name) {
+        let span = form_span(forms[(at + 1) as int]);
+        Some(source.spec_bytes()[span.start as int..span.end as int])
+    } else {
+        None
+    }
+}
+
 /// 無修飾の先頭語が挿入を表す場合に、必要な値の形を返す。
 pub open spec fn template_insertion_head(source: &str, forms: Seq<Form>, at: usize, stop: usize) -> Option<InsertionKind> {
-    if at + 1 >= stop || !(forms[(at + 1) as int] matches Form::Atom { kind, .. } && kind is Name) {
-        None
-    } else {
-        let span = form_span(forms[(at + 1) as int]);
-        let word = source.spec_bytes()[span.start as int..span.end as int];
-        if word == "unsyntax".spec_bytes() { Some(InsertionKind::Syntax) }
-        else if word == "splice".spec_bytes() { Some(InsertionKind::List) }
-        else { None }
+    match template_head_word(source, forms, at, stop) {
+        Some(word) if word == "unsyntax".spec_bytes() => Some(InsertionKind::Syntax),
+        Some(word) if word == "splice".spec_bytes() => Some(InsertionKind::List),
+        _ => None,
+    }
+}
+
+/// 引数の範囲を一つのフォームがちょうど占めることを表す。
+pub open spec fn single_template_argument(forms: Seq<Form>, first: usize, stop: usize) -> bool {
+    first < stop && match forms[first as int] {
+        Form::Atom { .. } => first + 1 == stop,
+        Form::List { end, .. } => end == stop,
+    }
+}
+
+/// `syntax` の先頭語と唯一の引数を元の構文木から確定する。
+pub open spec fn syntax_template(source: &str, forms: Seq<Form>, at: usize)
+    -> Result<Option<usize>, TemplateError>
+{
+    match forms[at as int] {
+        Form::List { end, span }
+            if template_head_word(source, forms, at, end) == Some("syntax".spec_bytes()) => {
+            let first = (at + 2) as usize;
+            if single_template_argument(forms, first, end) { Ok(Some(first)) }
+            else { Err(TemplateError::SyntaxArity(span)) }
+        },
+        _ => Ok(None),
     }
 }
 
@@ -76,10 +107,7 @@ pub open spec fn template_part(
             Some(kind) => {
                 if root && kind is List {
                     Err(TemplateError::SpliceAtRoot(span))
-                } else if at + 2 == end || match forms[(at + 2) as int] {
-                    Form::Atom { .. } => at + 3 != end,
-                    Form::List { end: expression_end, .. } => expression_end != end,
-                } {
+                } else if !single_template_argument(forms, (at + 2) as usize, end) {
                     Err(TemplateError::InsertionArity(span))
                 } else {
                     Ok(TemplatePart::Insertion { kind, expression: (at + 2) as usize, next: end })
@@ -90,6 +118,21 @@ pub open spec fn template_part(
     }
 }
 
+fn read_template_word<'a>(source: &'a str, forms: &[Form], at: usize, stop: usize)
+    -> (word: Option<&'a str>)
+    requires
+        at < stop <= forms@.len(),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures
+        word.is_some() == template_head_word(source, forms@, at, stop).is_some(),
+        word matches Some(w) ==> template_head_word(source, forms@, at, stop) == Some(w.spec_bytes()),
+{
+    if at + 1 == stop || !is_name(&forms[at + 1]) {
+        return None;
+    }
+    Some(source_word(source, forms, at + 1))
+}
+
 fn read_insertion_head(source: &str, forms: &[Form], at: usize, stop: usize)
     -> (kind: Option<InsertionKind>)
     requires
@@ -97,13 +140,53 @@ fn read_insertion_head(source: &str, forms: &[Form], at: usize, stop: usize)
         form_spans_valid(source, forms@, source.spec_bytes().len() as int),
     ensures kind == template_insertion_head(source, forms@, at, stop),
 {
-    if at + 1 == stop || !is_name(&forms[at + 1]) {
-        return None;
-    }
-    let word = source_word(source, forms, at + 1);
+    let word = read_template_word(source, forms, at, stop)?;
     if is_spelling(word, "unsyntax") { Some(InsertionKind::Syntax) }
     else if is_spelling(word, "splice") { Some(InsertionKind::List) }
     else { None }
+}
+
+fn has_single_template_argument(forms: &[Form], first: usize, stop: usize) -> (present: bool)
+    requires first <= stop <= forms@.len(),
+    ensures present == single_template_argument(forms@, first, stop),
+{
+    first < stop && subtree_end(forms, first) == stop
+}
+
+/// `syntax` が持つテンプレートの根を、元の構文木の添字で返す。
+///
+/// `syntax` 以外の式には `Ok(None)` を返す。得られた根から [`walk_template`] で
+/// テンプレートの走査を始める。
+///
+/// # Errors
+///
+/// `syntax` の引数が0個または複数の場合は、フォーム全体の範囲を持つ診断を返す。
+///
+/// # Panics
+///
+/// 元ソースに対応する厳格構文木を渡さなかった場合、または `at` が配列外の場合に
+/// パニックすることがある。
+pub fn read_syntax_template(source: &str, forms: &[Form], at: usize)
+    -> (result: Result<Option<usize>, TemplateError>)
+    requires
+        at < forms@.len(), complete_list_indices(forms@), nested_list_indices(forms@),
+        form_spans_valid(source, forms@, source.spec_bytes().len() as int),
+    ensures result == syntax_template(source, forms@, at),
+        result matches Ok(Some(root)) ==> at + 2 == root < forms@.len(),
+        result matches Err(TemplateError::SyntaxArity(span)) ==> span == form_span(forms@[at as int]),
+{
+    let Form::List { end, .. } = &forms[at] else { return Ok(None); };
+    proof { reveal(complete_list_indices); }
+    let Some(word) = read_template_word(source, forms, at, *end) else { return Ok(None); };
+    if !is_spelling(word, "syntax") {
+        return Ok(None);
+    }
+    let first = at + 2;
+    if has_single_template_argument(forms, first, *end) {
+        Ok(Some(first))
+    } else {
+        Err(TemplateError::SyntaxArity(span_of(&forms[at])))
+    }
 }
 
 /// 評価する挿入式と、テンプレートとして残すフォームを区別する。
@@ -148,7 +231,7 @@ pub fn inspect_template_part(source: &str, forms: &[Form], at: usize, root: bool
             children.start == at + 1 <= children.end <= forms@.len()
             && forms@[at as int] is List && forms@[at as int]->List_end == children.end,
         part matches Err(error) ==> match error {
-            TemplateError::SpliceAtRoot(span) | TemplateError::InsertionArity(span) =>
+            TemplateError::SyntaxArity(span) | TemplateError::SpliceAtRoot(span) | TemplateError::InsertionArity(span) =>
                 span == form_span(forms@[at as int]),
         },
 {
@@ -161,11 +244,7 @@ pub fn inspect_template_part(source: &str, forms: &[Form], at: usize, root: bool
         return Err(TemplateError::SpliceAtRoot(span_of(&forms[at])));
     }
     let expression = at + 2;
-    if expression == *end {
-        return Err(TemplateError::InsertionArity(span_of(&forms[at])));
-    }
-    proof { child_stays_inside(forms@, at, expression); }
-    if subtree_end(forms, expression) != *end {
+    if !has_single_template_argument(forms, expression, *end) {
         return Err(TemplateError::InsertionArity(span_of(&forms[at])));
     }
     Ok(TemplatePart::Insertion { kind, expression, next: *end })
@@ -266,16 +345,18 @@ pub open spec fn template_walk_step(
 /// # Examples
 ///
 /// ```
-/// use circuitgame2_core::ncg2m::template::{InsertionKind, TemplatePart, walk_template};
+/// use circuitgame2_core::ncg2m::template::{InsertionKind, TemplatePart, read_syntax_template, walk_template};
 /// use circuitgame2_core::syntax::parse;
 ///
-/// let text = "(left (splice (make-list (unsyntax expression))) right)";
+/// let text = "(syntax (left (splice (make-list (unsyntax expression))) right))";
 /// let forms = parse(text)?;
-/// let mut walk = walk_template(text, &forms, 0).unwrap();
-/// assert!(matches!(walk.next_part(), Some((0, Ok(TemplatePart::List { .. })))));
-/// assert!(matches!(walk.next_part(), Some((1, Ok(TemplatePart::Atom)))));
-/// let Some((2, Ok(TemplatePart::Insertion { kind: InsertionKind::List, next, .. }))) = walk.next_part()
-/// else { panic!("splice の位置が異なる") };
+/// let root = read_syntax_template(text, &forms, 0).unwrap().unwrap();
+/// let mut walk = walk_template(text, &forms, root).unwrap();
+/// assert!(matches!(walk.next_part(), Some((at, Ok(TemplatePart::List { .. }))) if at == root));
+/// assert!(matches!(walk.next_part(), Some((at, Ok(TemplatePart::Atom))) if at == root + 1));
+/// let Some((at, Ok(TemplatePart::Insertion { kind: InsertionKind::List, next, .. }))) = walk.next_part()
+/// else { panic!("splice が見つからない") };
+/// assert_eq!(at, root + 2);
 /// assert_eq!(walk.next_part(), Some((next, Ok(TemplatePart::Atom))));
 /// assert!(walk.next_part().is_none());
 /// # Ok::<(), circuitgame2_core::syntax::Error>(())

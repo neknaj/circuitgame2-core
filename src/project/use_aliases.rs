@@ -68,6 +68,8 @@ pub(crate) use call_site::call_arity_matches;
 #[cfg(verus_only)]
 pub use call_site::{prepared_defn_call_matches, prepared_defn_call_origin, prepared_call_site, project_named_defn_body_matches, project_named_defn_body_origin};
 mod defn_name;
+mod macro_arguments;
+pub use macro_arguments::{MacroArgument, MacroArgumentScope, MacroArguments};
 mod macro_calls;
 pub use macro_calls::{MacroCall, MacroCallError, MacroCalls};
 #[cfg(verus_only)]

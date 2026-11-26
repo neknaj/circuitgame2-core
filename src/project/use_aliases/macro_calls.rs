@@ -1,6 +1,6 @@
 //! 回路本体に書いた展開呼び出しを、元の構文を保ったままマクロ定義へ結び付ける。
 
-use super::{DefmacroNameError, MixedUseAliases, ResolvedDefmacro};
+use super::{DefmacroNameError, MacroArgumentScope, MacroArguments, MixedUseAliases, ResolvedDefmacro};
 use crate::project::{ProjectSource, ProjectSourceIndex, circuits::read_source_span};
 use crate::syntax::circuit::{
     CircuitForms, RoutineExpansionSite, RoutineExpansionSites, call_argument_count, routine_expansion_sites,
@@ -68,16 +68,19 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
     pub closed spec fn sites_model(&self) -> RoutineExpansionSites<'p> { self.sites }
 
     /// 元の索引と別名表が、同じ回路本体を参照することを表す。
-    pub closed spec fn valid(&self) -> bool {
-        let targets = self.aliases.targets_model();
+    pub open spec fn valid(&self) -> bool {
+        let targets = self.aliases_model().targets_model();
         let project = targets.project_model();
+        let origin = self.origin_model();
+        let source = self.source_model();
+        let sites = self.sites_model();
         &&& mixed_use_targets_match(&project, targets)
-        &&& has_macro_caller(&project, self.file, self.entry)
-        &&& self.file < project.sources_model().len()
-        &&& *self.source == project.sources_model()[self.file as int]
-        &&& self.sites.valid()
-        &&& self.sites.source_model() == self.source.text_model()
-        &&& *self.sites.syntax_model() == project.indexes_model()[self.file as int]->Circuit_0.syntax
+        &&& has_macro_caller(&project, origin.0, origin.1)
+        &&& origin.0 < project.sources_model().len()
+        &&& *source == project.sources_model()[origin.0 as int]
+        &&& sites.valid()
+        &&& sites.source_model() == source.text_model()
+        &&& *sites.syntax_model() == project.indexes_model()[origin.0 as int]->Circuit_0.syntax
     }
 
     /// 正規化済みのファイル識別子と文書版を持つ呼び出し元のソースを借りる。
@@ -95,36 +98,40 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
         self.sites.syntax()
     }
 
+    /// 走査が同じスコープで進み、次の呼び出しの検査結果を返すことを表す。
+    pub open spec fn advances(&self, next: &Self, call: Option<MacroCall<'p, 'a>>) -> bool {
+        &&& next.valid() && next.aliases_model() == self.aliases_model()
+        &&& next.origin_model() == self.origin_model()
+        &&& next.source_model() == self.source_model()
+        &&& match call {
+            Some(call) => self.sites_model().advances(&next.sites_model(), Some(call.site))
+                && macro_call_matches(next, call)
+                && macro_call_spans_in_source(next.source_model().text_model(), call.site)
+                && {
+                    let project = next.aliases_model().targets_model().project_model();
+                    let forms = next.sites_model().syntax_model().forms@;
+                    match call.target {
+                        Ok(definition) => indexed_defmacro(&project, definition)
+                            && call_argument_sequence(forms, call.site.arguments, definition.parameters@.len() as int),
+                        Err(MacroCallError::Arity { definition, actual }) =>
+                            indexed_defmacro(&project, definition) && actual != definition.parameters@.len()
+                            && call_argument_sequence(forms, call.site.arguments, actual as int),
+                        Err(MacroCallError::Name(DefmacroNameError::Reference(MixedFuncCalleeError::WrongDeclaration(declaration)))) =>
+                            macro_reference_declaration(&project, declaration) && !(declaration.kind is Defmacro),
+                        Err(MacroCallError::Name(_)) => true,
+                    }
+                },
+            None => self.sites_model().advances(&next.sites_model(), None),
+        }
+    }
+
     /// 次の呼び出しを解決し、引数の個数も検査する。
     ///
     /// 名前解決を先に行う。診断が出た呼び出しも走査済みとなるため、次の呼び出しの検査を続けられる。
     /// 呼び出しが残っていなければ `None` を返す。
     pub fn next_call(&mut self) -> (call: Option<MacroCall<'p, 'a>>)
         requires old(self).valid(),
-        ensures
-            final(self).valid(), final(self).aliases_model() == old(self).aliases_model(),
-            final(self).origin_model() == old(self).origin_model(),
-            final(self).source_model() == old(self).source_model(),
-            match call {
-                Some(call) => old(self).sites_model().advances(&final(self).sites_model(), Some(call.site))
-                    && macro_call_matches(final(self), call)
-                    && macro_call_spans_in_source(final(self).source_model().text_model(), call.site)
-                    && {
-                        let project = final(self).aliases_model().targets_model().project_model();
-                        let forms = final(self).sites_model().syntax_model().forms@;
-                        match call.target {
-                            Ok(definition) => indexed_defmacro(&project, definition)
-                                && call_argument_sequence(forms, call.site.arguments, definition.parameters@.len() as int),
-                            Err(MacroCallError::Arity { definition, actual }) =>
-                                indexed_defmacro(&project, definition) && actual != definition.parameters@.len()
-                                && call_argument_sequence(forms, call.site.arguments, actual as int),
-                            Err(MacroCallError::Name(DefmacroNameError::Reference(MixedFuncCalleeError::WrongDeclaration(declaration)))) =>
-                                macro_reference_declaration(&project, declaration) && !(declaration.kind is Defmacro),
-                            Err(MacroCallError::Name(_)) => true,
-                        }
-                    },
-                None => old(self).sites_model().advances(&final(self).sites_model(), None),
-            },
+        ensures old(self).advances(final(self), call),
     {
         let site = self.sites.next_site()?;
         let source = self.source.text();
@@ -206,6 +213,46 @@ proof fn macro_call_from_source(
         #[trigger] defmacro_name_resolution(calls.aliases_model(), at.0, at.1, word, target)
             && word.spec_bytes() == bytes[span.start as int..span.end as int]
             && macro_target_matches(forms, call.site, target, call.target));
+}
+
+impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
+    /// 次のマクロ呼び出しを検査し、成功した場合は実引数の構文を借りる。
+    ///
+    /// 内側の引数列は呼び出し元のファイル・文書版・本体位置を保持し、
+    /// このカーソルを次の呼び出しへ進めた後も読める。
+    /// 呼び出しに診断がある場合は内側の引数列が `None` になる。呼び出しが尽きれば外側が `None` になる。
+    pub fn next_call_with_arguments(&mut self)
+        -> (prepared: Option<(MacroCall<'p, 'a>, Option<MacroArguments<'p, 'a>>)>)
+        requires old(self).valid(),
+        ensures
+            match prepared {
+                None => old(self).advances(final(self), None),
+                Some((call, args)) => {
+                    &&& old(self).advances(final(self), Some(call))
+                    &&& match call.target {
+                        Ok(definition) => args matches Some(args) && args.valid()
+                            && args.scope_model().source == final(self).source_model()
+                            && (args.scope_model().file, args.scope_model().entry) == final(self).origin_model()
+                            && args.forms_model() == final(self).sites_model().syntax_model().forms@
+                            && args.remaining_model() == call.site.arguments
+                            && args.count_model() == definition.parameters@.len()
+                            && indexed_defmacro(&final(self).aliases_model().targets_model().project_model(), definition),
+                        Err(_) => args.is_none(),
+                    }
+                },
+            },
+    {
+        let call = self.next_call()?;
+        let arguments = if let Ok(definition) = &call.target {
+            let scope = MacroArgumentScope { source: self.source, file: self.file, entry: self.entry };
+            let syntax = self.sites.syntax();
+            let range = call.site.arguments.start..call.site.arguments.end;
+            Some(MacroArguments::from_checked_site(scope, syntax.forms.as_slice(), range, definition.parameters.len()))
+        } else {
+            None
+        };
+        Some((call, arguments))
+    }
 }
 
 impl<'t, 'p, 'a> MixedUseAliases<'t, 'p, 'a> {
