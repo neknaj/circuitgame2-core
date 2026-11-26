@@ -1,6 +1,17 @@
 //! 回路本体に書いた展開呼び出しを、元の構文を保ったままマクロ定義へ結び付ける。
 
 use super::{DefmacroNameError, MacroArgumentScope, MacroArguments, MixedUseAliases, ResolvedDefmacro};
+use crate::ncg2m::{
+    call_evaluation::macro_binding::{BoundMacroCall, bind_macro_call},
+    expression_types::MacroBodyError,
+};
+#[cfg(verus_only)]
+use crate::ncg2m::{
+    call_evaluation::macro_binding::macro_arguments_cover,
+    expression_types::defmacro_body_check,
+};
+#[cfg(verus_only)]
+use super::indexed_defmacro_is_retained;
 use crate::project::{ProjectSource, ProjectSourceIndex, circuits::read_source_span};
 use crate::syntax::circuit::{
     CircuitForms, RoutineExpansionSite, RoutineExpansionSites, call_argument_count, routine_expansion_sites,
@@ -43,6 +54,29 @@ pub struct MacroCall<'p, 'a> {
     pub site: RoutineExpansionSite,
     /// 引数の個数まで検査した宣言、または最初の診断。
     pub target: Result<ResolvedDefmacro<'p, 'a>, MacroCallError<'p, 'a>>,
+}
+
+/// 展開呼び出しを名前解決または型検査できなかった最初の理由。
+#[derive(Debug)]
+pub struct MacroPreparationError<'p, 'a> {
+    /// 診断の対象になった元の展開呼び出し。
+    pub site: RoutineExpansionSite,
+    /// 呼び出しまたは本体の診断。
+    pub kind: MacroPreparationFailure<'p, 'a>,
+}
+
+/// 展開に必要な検査が失敗した段階。
+#[derive(Debug)]
+pub enum MacroPreparationFailure<'p, 'a> {
+    /// 呼び出し名の解決または引数個数の検査で失敗した。
+    Call(MacroCallError<'p, 'a>),
+    /// 解決先のマクロ本体の型検査で失敗したか、検査を保留した。
+    Body {
+        /// 診断の範囲が対応する元宣言。
+        definition: ResolvedDefmacro<'p, 'a>,
+        /// 本体の構造、型違反、または保留の理由。
+        error: MacroBodyError<'a>,
+    },
 }
 
 /// 一つの回路本体について、展開呼び出しと名前解決を元ソース順に進める。
@@ -252,6 +286,73 @@ impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
             None
         };
         Some((call, arguments))
+    }
+}
+
+impl<'r, 't, 'p, 'a> MacroCalls<'r, 't, 'p, 'a> {
+    /// 一つの呼び出しから型検査済みの本体と実引数を結び付けた結果を表す。
+    pub open spec fn binding_advances(
+        &self, next: &Self, outcome: Option<Result<BoundMacroCall<'p, 'a>, MacroPreparationError<'p, 'a>>>,
+    ) -> bool {
+        let project = next.aliases_model().targets_model().project_model();
+        match outcome {
+            None => self.advances(next, None),
+            Some(Ok(bound)) => {
+                let definition = bound.definition_model();
+                let site = bound.site_model();
+                let scope = bound.scope_model();
+                &&& self.advances(next, Some(MacroCall { site, target: Ok(definition) }))
+                &&& bound.valid()
+                &&& scope.source == next.source_model()
+                &&& (scope.file, scope.entry) == next.origin_model()
+                &&& defmacro_body_check(&project, &definition, Some(Ok(bound.body_model())))
+                &&& macro_arguments_cover(scope, next.sites_model().syntax_model().forms@,
+                    site.arguments, bound.arguments_model())
+            },
+            Some(Err(error)) => match error.kind {
+                MacroPreparationFailure::Call(cause) =>
+                    self.advances(next, Some(MacroCall { site: error.site, target: Err(cause) })),
+                MacroPreparationFailure::Body { definition, error: cause } =>
+                    self.advances(next, Some(MacroCall { site: error.site, target: Ok(definition) }))
+                    && defmacro_body_check(&project, &definition, Some(Err(cause))),
+            },
+        }
+    }
+
+    /// 次の展開呼び出しを検査し、同じ呼び出しに由来する本体と実引数を結び付ける。
+    ///
+    /// 返す束縛には、元の展開位置と実引数のファイル・文書版・回路内でのスコープが残る。
+    /// 呼び出しが尽きると `None` を返す。
+    ///
+    /// # Errors
+    ///
+    /// 名前解決や個数の診断を先に返す。呼び出しが正しければマクロ本体の型を検査する。
+    /// 診断が出た呼び出しも走査済みのため、次の呼び出しの検査を続けられる。
+    pub fn next_bound_macro(&mut self)
+        -> (outcome: Option<Result<BoundMacroCall<'p, 'a>, MacroPreparationError<'p, 'a>>>)
+        requires old(self).valid(),
+        ensures old(self).binding_advances(final(self), outcome),
+    {
+        let (call, arguments) = self.next_call_with_arguments()?;
+        let site = call.site;
+        let definition = match call.target {
+            Ok(definition) => definition,
+            Err(cause) => return Some(Err(MacroPreparationError {
+                site, kind: MacroPreparationFailure::Call(cause),
+            })),
+        };
+        let project = self.aliases.targets().project();
+        proof { indexed_defmacro_is_retained(project, &definition); }
+        let Some(checked) = project.check_defmacro_body(&definition) else { unreachable!() };
+        match checked {
+            Ok(body) => {
+                let Some(arguments) = arguments else { unreachable!() };
+                Some(Ok(bind_macro_call(site, definition, body, arguments)))
+            },
+            Err(error) => Some(Err(MacroPreparationError {
+                site, kind: MacroPreparationFailure::Body { definition, error },
+            })),
+        }
     }
 }
 
