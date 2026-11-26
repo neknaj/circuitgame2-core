@@ -6,11 +6,12 @@ use crate::ncg2m::call_evaluation::macro_syntax::{
 };
 #[cfg(verus_only)]
 use crate::ncg2m::call_evaluation::macro_syntax::{projected_form_has_origin, syntax_event_in_source};
-use crate::project::{LocatedName, circuits::{form_location, read_indexed_atom}};
+use crate::project::{LocatedName, ProjectSource, circuits::{form_location, read_indexed_atom}};
+use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::project::{declarations::located_name_evidence, location_in_source};
 #[cfg(verus_only)]
-use crate::syntax::{circuit::generated_definition_sites, form_span};
+use crate::syntax::{circuit::generated_definition_sites, form_span, form_spans_valid};
 use crate::syntax::circuit::GeneratedDefinition;
 use vstd::prelude::*;
 #[cfg(verus_only)]
@@ -167,7 +168,39 @@ fn read_generated_signal_origin<'b, 'p, 'a>(event: MacroSyntaxEvent<'b, 'p, 'a>)
     GeneratedSignalName { key, site }
 }
 
+// 通常の定義には展開位置を付けず、既存の入力と同じキーで扱う。
+pub(super) fn ordinary_signal_name<'p, 'a>(source: &'p ProjectSource<'a>, forms: &[Form], at: usize)
+    -> (name: GeneratedSignalName<'p, 'a>)
+    requires at < forms@.len(), forms@[at as int] is Atom,
+        form_spans_valid(source.text_model(), forms@, source.text_model().spec_bytes().len() as int),
+    ensures
+        name.key_model().model() == (None, source.text_model().spec_bytes()[
+            name.location_model().span.start as int..name.location_model().span.end as int]),
+        name.location_model().source == source, name.location_model().span == form_span(forms@[at as int]),
+        location_in_source(name.location_model()),
+{
+    let (word, span) = read_indexed_atom(source.text(), forms, at);
+    let site = LocatedName { source, span };
+    proof {
+        source.text_model_is_text();
+        located_name_evidence(site);
+    }
+    GeneratedSignalName { key: LocalSignalKey::ordinary(word), site }
+}
+
 impl<'b, 'p, 'a> CheckedTemplateDefinition<'b, 'p, 'a> {
+    // 呼び出しの各引数位置からたどる場合も、元の構文木の出典を使う。
+    pub(in crate::project) fn scoped_signal_at(&self, at: usize) -> (name: GeneratedSignalName<'p, 'a>)
+        requires at < self.forms_model().len(), self.forms_model()[at as int] is Atom,
+        ensures generated_signal_origin_matches(self.origins_model()[at as int], &name),
+    {
+        let event = self.origin(at).unwrap();
+        proof {
+            assert(projected_form_has_origin(encode_utf8(self.text_model()), self.forms_model()[at as int], event));
+        }
+        read_generated_signal_origin(event)
+    }
+
     /// 指定した左辺の名前または右辺の信号参照から、元文書上の名前と束縛キーを返す。
     ///
     /// 添字が範囲外なら `None` を返す。テンプレートのリテラルには展開位置を付ける。
@@ -185,13 +218,11 @@ impl<'b, 'p, 'a> CheckedTemplateDefinition<'b, 'p, 'a> {
             },
             GeneratedSignalPosition::Reference(i) => *row.signals.get(i)?,
         };
-        let event = self.origin(at).unwrap();
         proof {
             assert(generated_definition_sites(_text, _forms@, *row));
             assert(_forms@[at as int] is Atom);
-            assert(projected_form_has_origin(encode_utf8(self.text_model()), self.forms_model()[at as int], event));
         }
-        Some(read_generated_signal_origin(event))
+        Some(self.scoped_signal_at(at))
     }
 
     /// 単一の左辺と信号名一つの右辺を持つ生成定義を、結線検査に渡す。

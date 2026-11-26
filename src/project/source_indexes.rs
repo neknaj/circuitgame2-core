@@ -247,6 +247,49 @@ impl<'a> ParsedProjectSources<'a> {
         }
     }
 
+    pub(super) closed spec fn defmacro_scope_matches(
+        &self, file: usize, item: usize, scope: Option<DefnScope>,
+    ) -> bool {
+        let indexes = self.indexes_model();
+        let exists = file < indexes.len() && (indexes[file as int] matches ProjectSourceIndex::Functional(items)
+            && item < items@.len() && items@[item as int].kind is Defmacro);
+        &&& scope.is_some() == exists
+        &&& scope matches Some(resolved) ==> {
+            let items = indexes[file as int]->Functional_0;
+            match (items@[item as int].namespace, resolved.namespace, resolved.block) {
+                (None, None, None) => true,
+                (Some(span), Some(word), Some(block)) => block == span.start
+                    && word.spec_bytes() == self.sources_model()[file as int].text_model().spec_bytes()
+                        [span.start as int..span.end as int],
+                _ => false,
+            }
+        }
+    }
+
+    // テンプレートのリテラルが使う別名は、マクロを定義した名前空間から読む。
+    pub(super) fn defmacro_scope(&self, file: usize, item: usize) -> (scope: Option<DefnScope<'a>>)
+        ensures self.defmacro_scope_matches(file, item, scope),
+    {
+        let indexes = self.indexes();
+        let Some(index) = indexes.get(file) else { return None; };
+        let ProjectSourceIndex::Functional(items) = index else { return None; };
+        let Some(indexed) = items.get(item) else { return None; };
+        if !matches!(indexed.kind, MetaItemKind::Defmacro { .. }) { return None; }
+        let source = &self.sources()[file];
+        proof {
+            project_source_index_evidence(*source, *index);
+            meta_binding_span_evidence(source.text, items@, item as int);
+            source.text_model_is_text();
+        }
+        match &indexed.namespace {
+            Some(span) => {
+                let namespace = read_source_span(source.text(), span.start, span.end);
+                Some(DefnScope { namespace: Some(namespace), block: Some(span.start) })
+            }
+            None => Some(DefnScope { namespace: None, block: None }),
+        }
+    }
+
     pub(super) closed spec fn defn_call_form_matches(
         &self, file: usize, item: usize, at: usize, call: Option<CallForm>,
     ) -> bool {

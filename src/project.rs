@@ -98,7 +98,9 @@ pub(crate) use use_aliases::TypedArithmeticSite;
 #[cfg(verus_only)]
 pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
-pub use use_aliases::{CheckedGeneratedAliasFunc, GeneratedSignalAlias, GeneratedSignalName, GeneratedSignalPosition, GeneratedWiringError};
+#[cfg(verus_only)]
+pub use use_aliases::expanded_bit_func_matches;
+pub use use_aliases::{CheckedGeneratedAliasFunc, ExpandedFuncWiringError, GeneratedSignalAlias, GeneratedSignalName, GeneratedSignalPosition, GeneratedWiringError};
 #[cfg(verus_only)]
 pub use use_aliases::{
     collected_aliases_match, collected_alias_prefix, collected_alias_step, function_generated_aliases_match,

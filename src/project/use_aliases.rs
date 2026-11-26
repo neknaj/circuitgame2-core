@@ -3,7 +3,9 @@
 mod alias_index;
 mod batch;
 mod bit_func;
-pub use bit_func::{CheckedGeneratedAliasFunc, GeneratedWiringError};
+#[cfg(verus_only)]
+pub use bit_func::expanded_bit_func_matches;
+pub use bit_func::{CheckedGeneratedAliasFunc, ExpandedFuncWiringError, GeneratedWiringError};
 pub use bit_func::{
     BitFuncError, BitFuncLowerError, CheckedBitFunc, ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic,
     LoweredBitFunc, UnsupportedBitFunc,

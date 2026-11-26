@@ -360,3 +360,81 @@ fn expanded_wiring_keeps_temporary_names_distinct_from_caller_ports() {
     assert_eq!(site.source.revision, 63);
     assert_eq!(&library[site.span], "tmp");
 }
+
+
+#[test]
+fn wires_nor_and_ordinary_definitions_in_their_expanded_body_order() {
+    use circuitgame2_core::project::ExpandedFuncWiringError;
+    let library = "(defmacro invert (out input)
+        (list (syntax (def tmp (nor (unsyntax input) 0)))
+              (syntax (def (unsyntax out) tmp))))";
+    let circuit = "(using nor)
+        (func top (in x tmp) (out y z)
+          (def seed (nor x 0))
+          (expand invert y seed)
+          (def z (nor y tmp)))
+        (func wide (in (x (bits 2))) (out y) (expand invert y x))
+        (func forward (in x) (out y) (expand invert y later) (def later x))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 83, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 94, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let fuel = NonZeroUsize::new(128).unwrap();
+    let checked = aliases.check_expanded_bit_func(1, 1, 16, fuel).unwrap().unwrap();
+    let lowered = checked.lower_bit_func(16).unwrap();
+    assert_eq!(lowered.netlist().gates.len(), 3);
+    for x in [false, true] {
+        for other in [false, true] {
+            assert_eq!(lowered.netlist().evaluate(&[x, other]).unwrap(), [x, !(x || other)]);
+        }
+    }
+    let Err(ExpandedFuncWiringError::NorInputWidth { reference, width: 2 }) =
+        aliases.check_expanded_bit_func(1, 2, 16, fuel)
+        else { panic!("基底 NOR の入力幅を検査する"); };
+    assert_eq!((&circuit[reference.span], reference.source.revision), ("x", 94));
+    let Err(ExpandedFuncWiringError::UnavailableDefinition { reference, target }) =
+        aliases.check_expanded_bit_func(1, 3, 16, fuel)
+        else { panic!("後続の通常定義を、先行する展開中の参照から使うことを拒否する"); };
+    assert_eq!((&circuit[reference.span.clone()], &circuit[target.span.clone()]), ("later", "later"));
+    assert!(reference.span.start < target.span.start);
+}
+
+
+#[test]
+fn resolves_nor_in_the_scope_of_the_expression_origin() {
+    use circuitgame2_core::project::ExpandedFuncWiringError;
+    let library = "(namespace macros
+        (export literal supplied)
+        (defmacro literal (out input) (list (syntax (def (unsyntax out) (nor (unsyntax input) 0)))))
+        (defmacro supplied (out expression) (list (syntax (def (unsyntax out) (unsyntax expression))))))";
+    let circuit = "(using nor)
+        (namespace gates (export nor) (func nor (in a b) (out y) (def y a)))
+        (namespace app
+          (use ::gates::nor nor)
+          (func from-template (in x) (out y) (expand ::macros::literal y x))
+          (func from-argument (in x) (out y) (expand ::macros::supplied y (nor x 0))))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 89, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 95, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let entries = aliases.targets().project().indexes();
+    let circuitgame2_core::project::ProjectSourceIndex::Circuit(index) = &entries[1] else {
+        panic!("回路索引が必要です");
+    };
+    let entry = |name: &str| {
+        let form = index.names.iter().find(|item| item.name.word == name).unwrap().form;
+        index.syntax.entries.iter().position(|item| item.form == form).unwrap()
+    };
+    let fuel = NonZeroUsize::new(128).unwrap();
+    let checked = aliases.check_expanded_bit_func(1, entry("from-template"), 16, fuel).unwrap().unwrap();
+    assert_eq!(checked.lower_bit_func(16).unwrap().netlist().evaluate(&[false]).unwrap(), [true]);
+    let Err(ExpandedFuncWiringError::NorResolvesToFunction { callee, declaration }) =
+        aliases.check_expanded_bit_func(1, entry("from-argument"), 16, fuel)
+        else { panic!("呼び出し側の nor 別名に解決する"); };
+    assert_eq!((&circuit[callee.span], callee.source.revision), ("nor", 95));
+    assert_eq!((&circuit[declaration.name.span], declaration.name.source.revision), ("nor", 95));
+}

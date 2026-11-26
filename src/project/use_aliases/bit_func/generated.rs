@@ -31,6 +31,14 @@ use vstd::prelude::*;
 use vstd::string::StringSliceAdditionalSpecFns;
 
 mod collection;
+mod simple_rhs;
+mod scoped_nor;
+mod rows;
+mod wiring;
+mod mixed_body;
+#[cfg(verus_only)]
+pub use mixed_body::expanded_bit_func_matches;
+pub use wiring::ExpandedFuncWiringError;
 use collection::collect_generated_aliases;
 #[cfg(verus_only)]
 use collection::collected_aliases_from_function;
