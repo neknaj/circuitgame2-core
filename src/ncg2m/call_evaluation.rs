@@ -7,6 +7,7 @@ use super::data_types::DefnSignature;
 use vstd::prelude::*;
 
 pub mod macro_binding;
+pub mod macro_expansion;
 pub mod scalar;
 
 verus! {

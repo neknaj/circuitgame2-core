@@ -91,6 +91,13 @@ impl<'b, 'p, 'a> MacroExpressionEvaluation<'b, 'p, 'a> {
         (1 + self.bound_model().body_model().parameters_model().len() - self.next_model()) as nat
     }
 
+    /// 評価対象を本体リストおよび挿入式の番号で返す。
+    pub fn site(&self) -> (site: MacroExpressionSite)
+        ensures site == self.site_model(),
+    {
+        self.site
+    }
+
     /// 式全体の定義側ソースにおける UTF-8 半開バイト範囲を返す。
     pub fn span(&self) -> (span: Range<usize>)
         ensures span == self.span_model(),

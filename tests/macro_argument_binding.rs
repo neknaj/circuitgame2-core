@@ -1,3 +1,8 @@
+use std::num::NonZeroUsize;
+use circuitgame2_core::ncg2m::call_evaluation::macro_expansion::{
+    MacroExpandedElement, MacroExpansionErrorKind, MacroExpansionSlice,
+};
+use circuitgame2_core::ncg2m::template::TemplateEmission;
 use circuitgame2_core::ncg2m::call_evaluation::macro_binding::{
     MacroArgumentError, MacroExpressionSite, MacroExpressionStep,
 };
@@ -71,6 +76,16 @@ fn binds_caller_arguments_in_declaration_order_after_the_cursor_advances() {
     let Err(MacroArgumentError::Deferred(span)) = first.start_expression(splice).unwrap().step()
         else { panic!("リスト構文の評価は保留される必要があります"); };
     assert_eq!(&library[span], "(list x y)");
+    let Err(failure) = first.start_expansion().run_slice(NonZeroUsize::new(64).unwrap())
+        else { panic!("先に現れた挿入式で展開が止まる") };
+    assert_eq!(failure.element, 1);
+    assert_eq!(failure.definition.revision, 31);
+    assert_eq!(failure.call.scope().source.revision, 47);
+    assert_eq!(&library[failure.related], "(list x y)");
+    assert!(matches!(failure.kind, MacroExpansionErrorKind::Expression {
+        site: MacroExpressionSite::Insertion { element: 1, insertion: 1 },
+        error: MacroArgumentError::Deferred(_),
+    }));
     assert!(matches!(first.argument_expression(MacroExpressionSite::Insertion { element: 1, insertion: 2 }),
         Err(MacroArgumentError::NoExpression)));
 
@@ -111,4 +126,38 @@ fn reports_call_errors_before_the_body_and_preserves_scope_for_empty_arguments()
     assert!(matches!(empty.argument_expression(MacroExpressionSite::Element(0)),
         Err(MacroArgumentError::NoExpression)));
     assert!(calls.next_bound_macro().is_none());
+}
+
+#[test]
+fn expands_the_bound_arguments_from_the_project_in_one_transition_slices() {
+    let library = "(defmacro pick (x y) (list y (syntax (def out (unsyntax x)))))";
+    let circuit = "(using nor) (func top (in x) (out out) (expand ::pick x (nor x x)))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "pick.ncg2m", revision: 31, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 47, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut calls = aliases.macro_calls(1, 1).unwrap();
+    let bound = calls.next_bound_macro().unwrap().unwrap();
+    let mut state = bound.start_expansion();
+    let mut completed = None;
+    for _ in 0..32 {
+        match state.run_slice(NonZeroUsize::MIN) {
+            Ok(MacroExpansionSlice::Suspended(next)) => state = next,
+            Ok(MacroExpansionSlice::Complete(output)) => {
+                completed = Some(output);
+                break;
+            },
+            Err(_) => panic!("マクロ展開が診断を返した"),
+        }
+    }
+    let output = completed.expect("マクロ展開が32遷移以内に完了する");
+    let [MacroExpandedElement::Argument(value), MacroExpandedElement::Template { syntax: template, .. }] =
+        output.elements() else { panic!("リストの要素が元の順で展開される") };
+    assert!(core::ptr::eq(*value, &bound.arguments()[1]));
+    assert!(template.parts().iter().any(|item|
+        matches!(item, TemplateEmission::Insert(value) if core::ptr::eq(*value, &bound.arguments()[0]))));
+    assert_eq!(output.call().scope().source.revision, 47);
+    assert_eq!(template.source(), library);
 }
