@@ -306,7 +306,7 @@ impl ClockedVm {
             } else {
                 Ok(())
             },
-            result.is_ok() ==> saved.state_matches(final(self)),
+            result.is_ok() ==> saved.layout_matches(final(self)) && saved.state_matches(final(self)),
             result.is_err() ==> *final(self) == *old(self),
     {
         self.check_checkpoint(saved)?;
@@ -319,6 +319,7 @@ impl ClockedVm {
                 self.starts@ == old(self).starts@,
                 self.external == old(self).external,
                 self.gates@ == old(self).gates@,
+                saved.layout_matches(self),
                 saved.state_shape_matches(old(self)),
                 laid_out(self.storage@, self.starts@, self.external, netlist.input_count, netlist.gates@.len()),
                 forall|j: int| 0 <= j < self.storage@.len() ==>
@@ -358,8 +359,7 @@ impl ClockedVm {
         ensures
             result.is_ok() <==> input@.len() == self.external_count(),
             match result {
-                Ok(output) => exists|bits: Seq<bool>| #[trigger] self.augmented_input_matches(input@, bits)
-                    && super::output_values_match(bits, self.gate_values_model(), self.netlist_model().outputs@, output@),
+                Ok(output) => self.current_observation_matches(input@, output@),
                 Err(error) => error == TickInputError::InputCount,
             },
     {
