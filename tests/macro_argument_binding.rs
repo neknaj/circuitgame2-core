@@ -3,7 +3,7 @@ use circuitgame2_core::ncg2m::call_evaluation::macro_expansion::{
     MacroExpandedElement, MacroExpansionErrorKind, MacroExpansionSlice,
 };
 use circuitgame2_core::ncg2m::call_evaluation::macro_syntax::{
-    ArgumentSyntaxToken, MacroSyntaxOrigin, MacroTemplateSyntaxStep,
+    ArgumentSyntaxToken, MacroNaturalError, MacroNaturalStep, MacroSyntaxOrigin, MacroTemplateSyntaxStep,
 };
 use circuitgame2_core::ncg2m::template::TemplateEmission;
 use circuitgame2_core::ncg2m::call_evaluation::macro_binding::{
@@ -19,6 +19,52 @@ fn argument_text<'a>(argument: &MacroArgument<'_, 'a>) -> &'a str {
     let source = argument.scope().source.text();
     match &argument.forms()[argument.nodes().start] {
         Form::Atom { span, .. } | Form::List { span, .. } => &source[span.clone()],
+    }
+}
+
+#[test]
+fn reads_a_macro_width_by_decimal_digit_and_reports_the_original_argument_on_failure() {
+    let library = "(defmacro width (n max overflow negative list encoded) (list))";
+    let circuit = "(using nor) (func top (in x) (out y)
+        (expand ::width 000008 18446744073709551615 18446744073709551616 -1 (bits 8) #b1))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 31, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 47, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let mut calls = aliases.macro_calls(1, 1).unwrap();
+    let bound = calls.next_bound_macro().unwrap().unwrap();
+    let [width, max, overflow, negative, list, encoded] = bound.arguments() else {
+        panic!("マクロ呼び出しの6引数が必要");
+    };
+    for (argument, expected) in [(width, 8), (max, u64::MAX)] {
+        let mut state = argument.start_syntax_nat().unwrap();
+        for _ in argument_text(argument).bytes() {
+            let MacroNaturalStep::Continue(next) = state.step().unwrap() else {
+                panic!("末尾に達するまで一桁ずつ読み進める");
+            };
+            state = next;
+        }
+        assert!(matches!(state.step().unwrap(), MacroNaturalStep::Done(value) if value == expected));
+    }
+    let mut state = overflow.start_syntax_nat().unwrap();
+    for _ in argument_text(overflow).bytes() {
+        let MacroNaturalStep::Continue(next) = state.step().unwrap() else {
+            panic!("数字列を末尾まで読み取る");
+        };
+        state = next;
+    }
+    let Err(diagnostic) = state.step() else { panic!("Nat の最大値を超えている"); };
+    assert_eq!(diagnostic.kind, MacroNaturalError::OutOfRange);
+    assert_eq!(diagnostic.location.source.revision, 47);
+    assert_eq!(&circuit[diagnostic.location.span], argument_text(overflow));
+
+    for argument in [negative, list, encoded] {
+        let Err(diagnostic) = argument.start_syntax_nat() else { panic!("非負の十進リテラルを要求する"); };
+        assert_eq!(diagnostic.kind, MacroNaturalError::ExpectedNatural);
+        assert_eq!(diagnostic.location.source.revision, 47);
+        assert_eq!(&circuit[diagnostic.location.span], argument_text(argument));
     }
 }
 

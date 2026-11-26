@@ -74,6 +74,115 @@ proof fn decimal_prefix_only_grows(bytes: Seq<u8>, first: nat, last: nat)
     }
 }
 
+/// 十進数字列を読み進める状態。
+///
+/// 元の字句を借りて保持する。各ステップは十進数字を最大一桁だけ消費する。
+pub struct NaturalReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+    value: Option<u64>,
+}
+
+/// 十進数字列を一歩読んだ結果。
+pub enum NaturalReadStep<'a> {
+    /// 字句の末尾まで読み、値を確定した。
+    Done(u64),
+    /// 次の桁または字句の末尾から読み取りを続ける。
+    Continue(NaturalReader<'a>),
+}
+
+impl<'a> NaturalReader<'a> {
+    /// 読み取る元の字句をバイト列で表す。
+    pub closed spec fn bytes_model(&self) -> Seq<u8> { self.bytes@ }
+
+    /// 次に読むバイトの位置を表す。
+    pub closed spec fn position_model(&self) -> usize { self.at }
+
+    /// オーバーフローした接頭辞は `None` で表す。
+    pub closed spec fn prefix_model(&self) -> Option<u64> { self.value }
+
+    /// 読み終えた範囲が十進数字で、保持する値がその接頭辞に対応することを表す。
+    pub closed spec fn valid(&self) -> bool {
+        let bytes = self.bytes_model();
+        let at = self.position_model() as int;
+        let value = decimal_prefix(bytes, at as nat);
+        &&& at <= bytes.len()
+        &&& forall|i: int| 0 <= i < at ==> digit(Radix::Decimal, #[trigger] bytes[i])
+        &&& match self.prefix_model() {
+            Some(natural) => natural as int == value,
+            None => value > u64::MAX,
+        }
+    }
+
+    #[verifier::type_invariant]
+    spec fn invariant(&self) -> bool { self.valid() }
+
+    /// 字句の先頭から十進数字の読み取りを始める。
+    pub fn new(word: &'a str) -> (reader: Self)
+        ensures reader.valid(), reader.bytes_model() == word.spec_bytes(),
+            reader.position_model() == 0, reader.prefix_model() == Some(0),
+    {
+        let bytes = word.as_bytes();
+        assert(decimal_prefix(bytes@, 0) == 0);
+        Self { bytes, at: 0, value: Some(0) }
+    }
+
+    /// 十進数字を一桁読み、末尾の場合は値を確定する。
+    ///
+    /// # Errors
+    ///
+    /// 空の字句や十進数字以外のバイトに達した場合は `InvalidDigits` を返す。
+    /// 十進数字のみで値が `u64` を超える場合は、末尾で `OutOfRange` を返す。
+    pub fn step(self) -> (result: Result<NaturalReadStep<'a>, NaturalRangeError>)
+        ensures natural_read_step_matches(&self, result),
+    {
+        proof { use_type_invariant(&self); }
+        let (bytes, at, value) = (self.bytes, self.at, self.value);
+        if at == bytes.len() {
+            reveal(decimal_natural_value);
+            return if at == 0 { Err(NaturalRangeError::InvalidDigits) }
+                else if let Some(natural) = value { Ok(NaturalReadStep::Done(natural)) }
+                else { Err(NaturalRangeError::OutOfRange) };
+        }
+
+        let byte = bytes[at];
+        if byte < b'0' || byte > b'9' {
+            reveal(decimal_natural_value);
+            return Err(NaturalRangeError::InvalidDigits);
+        }
+
+        let decimal = (byte - b'0') as u64;
+        proof { decimal_step(bytes@, at as nat); }
+        let next = match value {
+            Some(natural) => match natural.checked_mul(10) {
+                Some(tens) => tens.checked_add(decimal),
+                None => None,
+            },
+            None => None,
+        };
+        Ok(NaturalReadStep::Continue(Self { bytes, at: at + 1, value: next }))
+    }
+}
+
+/// 一歩の結果と、終端で確定する数学上の十進値の関係を表す。
+pub open spec fn natural_read_step_matches(
+    previous: &NaturalReader, result: Result<NaturalReadStep, NaturalRangeError>,
+) -> bool {
+    let bytes = previous.bytes_model();
+    let at = previous.position_model() as int;
+    &&& previous.valid()
+    &&& if at < bytes.len() && b'0' <= bytes[at] <= b'9' {
+        result matches Ok(NaturalReadStep::Continue(next))
+            && next.valid() && next.bytes_model() == bytes && next.position_model() == at + 1
+    } else {
+        match result {
+            Ok(NaturalReadStep::Done(value)) => at == bytes.len() && natural_u64_matches(bytes, Ok(value)),
+            Err(error) => natural_u64_matches(bytes, Err(error)),
+            _ => false,
+        }
+    }
+}
+
 /// ASCII の十進数字列を `u64` に変換する。
 ///
 /// 先頭の 0 を許す。例えば `"0001"` は `1` を返す。
