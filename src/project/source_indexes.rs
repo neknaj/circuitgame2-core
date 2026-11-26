@@ -12,12 +12,16 @@ use crate::ncg2m::expression_types::{
     DefnBodyError, defn_body_matches, indexed_meta_body_agrees_with_standalone, meta_defn_check_matches, meta_defn_check_origin,
     same_defn_body_outcome,
 };
-use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call, retained_meta_body};
+use crate::ncg2m::file::{MetaFileError, MetaItem, MetaItemKind, index_meta_with_forms, indexed_meta_call, retained_macro_body, retained_meta_body};
 use crate::ncg2m::expression_types::named_call::{CallForm, DefnBodyCallError, check_indexed_call_body};
 #[cfg(verus_only)]
 use crate::ncg2m::expression_types::named_call::{indexed_call_body_locally_typed, indexed_call_body_matches, indexed_call_body_origin,
     defn_body_calls_cover_slots, defn_body_sites_cover_slots, defn_call_edge_matches,
     defn_call_is_expression_slot, unvisited_arithmetic_at_source};
+use super::{ProjectDeclarationKind, ResolvedDefmacro};
+use core::ops::Range;
+#[cfg(verus_only)]
+use crate::ncg2m::defn::readable_span;
 use crate::syntax::Form;
 #[cfg(verus_only)]
 use crate::syntax::{form_span, form_spans_valid};
@@ -51,6 +55,67 @@ pub struct ParsedProjectSources<'a> {
     indexes: Vec<ProjectSourceIndex<'a>>,
     // NCG2M の S 式を言語別索引と同じ添字に保持する。
     meta_asts: Vec<Option<Vec<Form>>>,
+}
+
+/// マクロ定義が属する版の構文木と、本体式の位置。
+#[derive(Debug)]
+pub struct DefmacroBody<'p, 'a> {
+    /// 本体式が現れる元ソース。
+    pub source: &'p ProjectSource<'a>,
+    /// 解析時に保持した元ソース全体の平坦な構文木。
+    pub forms: &'p [Form],
+    /// 本体式の先頭フォームを指す構文木の添字。
+    pub at: usize,
+}
+
+/// パス、版、本文が同一の文書を指すことを表す。
+pub closed spec fn same_macro_snapshot(source: &ProjectSource, requested: &ProjectSource) -> bool {
+    &&& source.kind == requested.kind && source.revision == requested.revision
+    &&& source.id.components_model() == requested.id.components_model()
+    &&& source.text_model()@ == requested.text_model()@
+}
+
+pub(super) proof fn identical_macro_snapshot(source: &ProjectSource)
+    ensures same_macro_snapshot(source, source),
+{}
+
+fn matches_macro_snapshot(source: &ProjectSource, requested: &ProjectSource) -> (same: bool)
+    ensures same == same_macro_snapshot(source, requested),
+{
+    let text = source.text();
+    let requested_text = requested.text();
+    proof {
+        vstd::utf8::encode_utf8_decode_utf8(text@);
+        vstd::utf8::encode_utf8_decode_utf8(requested_text@);
+    }
+    source.kind == requested.kind && source.revision == requested.revision
+        && source.id.same_file(&requested.id) && text == requested_text
+}
+
+fn same_range(left: &Range<usize>, right: &Range<usize>) -> (same: bool)
+    ensures same == (*left == *right),
+{
+    left.start == right.start && left.end == right.end
+}
+
+fn same_parameter_spans(left: &[Range<usize>], right: &[Range<usize>]) -> (same: bool)
+    ensures same == (left@ == right@),
+{
+    if left.len() != right.len() { return false; }
+    let mut i = 0;
+    while i < left.len()
+        invariant
+            i <= left@.len() == right@.len(),
+            forall|j: int| 0 <= j < i ==> (#[trigger] left@[j]) == right@[j],
+        decreases left@.len() - i,
+    {
+        if !same_range(&left[i], &right[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    assert(left@ =~= right@);
+    true
 }
 
 /// ファイルの拡張子に対応する構文索引。
@@ -415,6 +480,66 @@ impl<'a> ParsedProjectSources<'a> {
             assert(form_span(forms@[at as int]) == signature.body_span);
         }
         Some(DefnEvaluationBody { source, forms: forms.as_slice(), at, signature })
+    }
+
+    /// 渡されたマクロ定義の出典と索引項目が保持中のスナップショットに対応する。
+    pub open spec fn contains_defmacro(&self, definition: &ResolvedDefmacro) -> bool {
+        let declaration = definition.declaration;
+        let file = declaration.file as int;
+        let item = declaration.item as int;
+        &&& declaration.kind is Defmacro
+        &&& file < self.indexes_model().len() && file < self.sources_model().len()
+        &&& same_macro_snapshot(&self.sources_model()[file], declaration.name.source)
+        &&& self.indexes_model()[file] matches ProjectSourceIndex::Functional(items)
+            && item < items@.len() && (items@[item].kind matches MetaItemKind::Defmacro { name, parameters, body }
+                && name == declaration.name.span && parameters@ == definition.parameters@ && body == *definition.body)
+    }
+
+    /// 解決済みのマクロの本体式を、解析時の構文木から借りる。
+    ///
+    /// 文書の識別子・版・本文と宣言の範囲を照合する。索引と一致しない定義には `None` を返す。
+    /// 本体の型を検査する際は、戻り値の `at` を `forms` に対する添字として使う。
+    pub fn defmacro_body<'p>(&'p self, definition: &ResolvedDefmacro<'_, 'a>)
+        -> (body: Option<DefmacroBody<'p, 'a>>)
+        ensures
+            body.is_some() <==> self.contains_defmacro(definition),
+            body matches Some(body) ==> {
+                let file = definition.declaration.file;
+                let source = body.source.text_model();
+                &&& *body.source == self.sources_model()[file as int]
+                &&& self.functional_forms_model(file) == Some(body.forms@)
+                &&& crate::ncg2m::file::retained_forms_in_source_order(body.forms@)
+                &&& crate::syntax::complete_list_indices(body.forms@) && crate::syntax::nested_list_indices(body.forms@)
+                &&& form_spans_valid(source, body.forms@, source.spec_bytes().len() as int)
+                &&& body.at < body.forms@.len()
+                &&& form_span(body.forms@[body.at as int]) == *definition.body
+                &&& readable_span(source, *definition.body)
+            },
+    {
+        let declaration = &definition.declaration;
+        let indexes = self.indexes();
+        let file = declaration.file;
+        let Some(_index @ ProjectSourceIndex::Functional(items)) = indexes.get(file) else { return None; };
+        let item = declaration.item;
+        let Some(MetaItem { kind: MetaItemKind::Defmacro { name, parameters, body }, .. }) = items.get(item)
+            else { return None; };
+        let source = &self.sources()[file];
+        let requested = declaration.name.source;
+        if !matches!(declaration.kind, ProjectDeclarationKind::Defmacro)
+            || !matches_macro_snapshot(source, requested)
+            || !same_range(name, &declaration.name.span) || !same_range(body, definition.body)
+            || !same_parameter_spans(parameters.as_slice(), definition.parameters)
+        {
+            return None;
+        }
+        proof {
+            use_type_invariant(self);
+            assert(retained_ast_matches(*source, *_index, self.meta_asts@[file as int]));
+            source.text_model_is_text();
+        }
+        let Some(forms) = &self.meta_asts[file] else { unreachable!() };
+        let at = retained_macro_body(source.text(), forms, items, item);
+        Some(DefmacroBody { source, forms: forms.as_slice(), at })
     }
 
     pub(super) fn defn_header(&self, file: usize, item: usize) -> (result: Option<&DefnHeader>)
