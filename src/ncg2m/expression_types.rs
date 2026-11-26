@@ -287,6 +287,14 @@ pub closed spec fn nat_fold_terms_match(
     }
 }
 
+
+/// 同じ構文木上の同じ式から取り出した反復の位置は一意である。
+pub proof fn nat_fold_term_results_agree(
+    source: &str, forms: Seq<Form>, at: usize, first: Option<NatFoldTerms>, second: Option<NatFoldTerms>,
+)
+    requires nat_fold_terms_match(source, forms, at, first), nat_fold_terms_match(source, forms, at, second),
+    ensures first == second,
+{}
 pub(super) fn read_nat_fold_terms(source: &str, forms: &[Form], at: usize) -> (terms: Option<NatFoldTerms>)
     requires usable_forms(source, forms@), at < forms@.len(),
     ensures nat_fold_terms_match(source, forms@, at, terms),

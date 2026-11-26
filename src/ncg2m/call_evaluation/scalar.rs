@@ -17,6 +17,7 @@ mod atom;
 mod condition;
 mod entry;
 mod execution;
+mod fold;
 mod expression;
 mod invocation;
 #[cfg(verus_only)]
@@ -26,6 +27,9 @@ pub use arguments::{PendingScalarArgument, ScalarArguments, ScalarArgumentsStep,
 pub use arguments::prepared_arguments_match;
 pub use condition::{ScalarCondition, ScalarExpressionSite};
 pub use entry::{ScalarEntry, ScalarEntryError, prepare_scalar_entry};
+pub use fold::{ScalarFoldEntry, ScalarFoldExecution, ScalarFoldSlice, prepare_scalar_fold};
+#[cfg(verus_only)]
+pub use fold::{resumed_scalar_fold_matches, scalar_fold_slice_matches, scalar_fold_supported};
 pub use execution::{ScalarExecution, ScalarExecutionError, ScalarExecutionSlice};
 #[cfg(verus_only)]
 pub use execution::{
