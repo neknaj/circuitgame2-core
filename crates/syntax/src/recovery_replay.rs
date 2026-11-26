@@ -9,6 +9,8 @@ mod original_lists;
 pub(crate) use original_lists::retained_original_lists_agree;
 mod lexical_shift;
 mod clean_prefix;
+mod strict;
+pub use strict::recovery_without_repairs_is_strict;
 pub(super) mod placement;
 use placement::{after_prefix, place_form, place_range, place_repair, place_segment,
     project_completed_suffix, project_recovery_frames};

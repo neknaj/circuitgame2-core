@@ -8,7 +8,8 @@ use crate::{Error, ErrorKind, Repair};
 #[cfg(verus_only)]
 use crate::{
     Recovered, atom_and_close_error_evidence, bare_atom_extent, form_span, form_spans_valid, inserted_closes_match,
-    repair_input_spans_valid, syntax_error_evidence,
+    recovered_replay_matches, recovery_without_repairs_is_strict, repair_input_spans_valid,
+    sexpr_form_model, syntax_error_evidence, well_formed_sexpr,
 };
 #[cfg(verus_only)]
 use vstd::string::StringSliceAdditionalSpecFns;
@@ -55,6 +56,29 @@ impl<'p, 's> ReparsedRecovery<'p, 's> {
         }
         shift_repair(&tail.recovered.repairs[index], tail.form_base, tail.byte_base)
     }
+
+    /// 局所再解析に修復がない条件を、同じ本文の厳格な S 式の受理条件と照合する。
+    ///
+    /// `whole` には [`crate::parse_recovering`] の結果を渡す。修復がない場合は、
+    /// 全文回復の構文木も厳格な解析の構文木と一致する。
+    pub proof fn strict_syntax_agrees_with_full(&self, whole: &Recovered)
+        requires
+            self.valid(),
+            recovered_replay_matches(self.source_model(), whole.forms@, whole.repairs@, whole.original_lists@),
+            well_formed_sexpr(self.source_model()) ==> whole.repairs@.len() == 0
+                && sexpr_form_model(self.source_model()) == Some(whole.forms@),
+        ensures
+            self.agrees_with(whole),
+            !self.has_repairs_model() <==> well_formed_sexpr(self.source_model()),
+            !self.has_repairs_model() ==> sexpr_form_model(self.source_model()) == Some(whole.forms@),
+    {
+        self.agrees_with_full(whole);
+        self.observations_agree_with_full(whole, 0);
+        if whole.repairs@.len() == 0 {
+            recovery_without_repairs_is_strict(self.source_model(), whole);
+        }
+    }
+
 
     /// 修復記録の件数と取得した値が、同じ本文の全文回復解析と一致することを示す。
     pub proof fn repairs_agree_with_full(&self, whole: &Recovered)

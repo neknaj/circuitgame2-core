@@ -26,7 +26,8 @@ pub use recovery_update::{located_span, original_list_form};
 mod recovery_replay;
 #[cfg(verus_only)]
 pub use recovery_replay::{
-    recovered_replay_matches, recovered_replays_agree, recovered_suffix_agrees, recovery_suffix_projection,
+    recovered_replay_matches, recovered_replays_agree, recovered_suffix_agrees,
+    recovery_suffix_projection, recovery_without_repairs_is_strict,
 };
 #[cfg(verus_only)]
 use recovery_replay::{
@@ -611,8 +612,8 @@ pub fn parse(source: &str) -> (result: Result<Vec<Form>, Error>)
 pub fn parse_recovering(source: &str) -> (result: Recovered)
     ensures
         recovered_replay_matches(source, result.forms@, result.repairs@, result.original_lists@),
-        well_formed_sexpr(source) ==> result.repairs@.len() == 0
-            && sexpr_form_model(source) == Some(result.forms@),
+        well_formed_sexpr(source) <==> result.repairs@.len() == 0,
+        well_formed_sexpr(source) ==> sexpr_form_model(source) == Some(result.forms@),
         complete_list_indices(result.forms@),
         nested_list_indices(result.forms@),
         list_source_delimiters(source, result.forms@, true),
@@ -622,10 +623,16 @@ pub fn parse_recovering(source: &str) -> (result: Recovered)
         original_list_roots(result.forms@, result.original_lists@),
         original_list_ranges(source, result.original_lists@, result.repairs@, source.spec_bytes().len() as int),
 {
-    match parse_forms(source, true) {
+    let recovered = match parse_forms(source, true) {
         Ok((forms, repairs, original_lists)) => Recovered { forms, repairs, original_lists },
         Err(_) => unreachable!("recovery handles each syntax error"),
+    };
+    proof {
+        if recovered.repairs@.len() == 0 {
+            recovery_without_repairs_is_strict(source, &recovered);
+        }
     }
+    recovered
 }
 
 pub open spec fn covers(bytes: Seq<u8>, spans: Seq<(int, int)>, end: int) -> bool {
