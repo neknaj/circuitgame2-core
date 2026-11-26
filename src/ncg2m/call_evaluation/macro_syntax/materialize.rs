@@ -565,6 +565,16 @@ pub enum TemplateDefinitionError<'b, 'p, 'a> {
     },
 }
 
+/// 元の項目を伴う診断から、UTF-8 の関連範囲を元の構文木で参照できることを表す。
+pub open spec fn template_definition_error_has_source(error: TemplateDefinitionError) -> bool {
+    match error {
+        TemplateDefinitionError::Definition { related: Some(event), .. }
+        | TemplateDefinitionError::UnexpectedClose(event)
+        | TemplateDefinitionError::Unclosed(event) => syntax_event_in_source(event),
+        _ => true,
+    }
+}
+
 /// 回路文法の診断に、元の展開呼び出しを添えた結果。
 #[derive(Debug)]
 pub struct TemplateDefinitionDiagnostic<'b, 'p, 'a> {
@@ -745,14 +755,21 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
     fn related(&self, range: &Range<usize>) -> (origin: Option<MacroSyntaxEvent<'b, 'p, 'a>>)
         requires self.valid(),
         ensures projected_definition_related(self.model(), Some(*range), origin),
+            origin matches Some(event) ==> syntax_event_in_source(event),
     {
         let forms = self.forms.as_slice();
         let origins = self.origins.as_slice();
-        assert(forms@.len() == origins@.len());
+        proof {
+            assert(forms@.len() == origins@.len());
+            assert forall|i: int| 0 <= i < origins@.len() implies syntax_event_in_source(#[trigger] origins@[i]) by {
+                assert(projected_form_has_origin(self.model().0, forms@[i], origins@[i]));
+            };
+        }
         let mut i = 0;
         while i < forms.len()
             invariant i <= forms@.len(), forms@.len() == origins@.len(),
                 forms@ == self.model().1, origins@ == self.model().2,
+                forall|j: int| 0 <= j < origins@.len() ==> syntax_event_in_source(#[trigger] origins@[j]),
                 forall|j: int| 0 <= j < i ==> !#[trigger] is_diagnostic_anchor(forms@[j], *range),
             decreases forms@.len() - i,
         {
@@ -773,7 +790,8 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
     fn finish(self) -> (result: Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionError<'b, 'p, 'a>>)
         requires self.valid(),
         ensures projected_definition_finish_matches(self.model(), result),
-            result matches Err(error) ==> !(error is Source) && !(error is UnexpectedClose),
+            result matches Err(error) ==> !(error is Source) && !(error is UnexpectedClose)
+                && template_definition_error_has_source(error),
     {
         if let Some(last) = self.open.last() {
             let result = Err(TemplateDefinitionError::Unclosed(self.origins[*last]));
@@ -781,6 +799,7 @@ impl<'b, 'p, 'a> ProjectedSyntax<'b, 'p, 'a> {
                 reveal(projected_definition_finish_matches);
                 assert(*last == self.model().3.last());
                 assert(*last < self.model().2.len());
+                assert(projected_form_has_origin(self.model().0, self.model().1[*last as int], self.model().2[*last as int]));
                 assert(projected_definition_finish_matches(self.model(), result));
             }
             return result;
@@ -863,6 +882,7 @@ pub open spec fn template_projection_trace_result<'s, 'b, 'p, 'a>(
 ) -> bool {
     &&& template_projection_prefix(initial, cursors, projections, events)
     &&& cursors.last().valid()
+    &&& (result matches Err(error) ==> template_definition_error_has_source(error))
     &&& match result {
         Err(TemplateDefinitionError::Source(error)) => macro_template_syntax_step_matches(cursors.last(), Err(error)),
         Err(TemplateDefinitionError::UnexpectedClose(event)) => {
@@ -919,12 +939,14 @@ proof fn projection_trace_witness<'s, 'b, 'p, 'a>(
 )
     requires template_projection_trace_result(initial, cursors, projections, events, result),
     ensures template_projection_matches(initial, result),
+        result matches Err(error) ==> template_definition_error_has_source(error),
 {}
 
 fn project_template<'s, 'b, 'p, 'a>(initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>)
     -> (result: ProjectionResult<'b, 'p, 'a>)
     requires initial.valid(),
     ensures template_projection_matches(initial, result),
+        result matches Err(error) ==> template_definition_error_has_source(error),
 {
     let mut cursor = initial;
     let mut output = ProjectedSyntax::new();
@@ -974,6 +996,25 @@ fn project_template<'s, 'b, 'p, 'a>(initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>
     }
 }
 
+/// 指定した要素の先頭から走査し、そのテンプレートの検査結果を得ることを表す。
+#[verifier::opaque]
+pub open spec fn template_projection_for_element<'s, 'b, 'p, 'a>(
+    body: &'s MacroExpandedBody<'b, 'p, 'a>, element: usize, outcome: ProjectionResult<'b, 'p, 'a>,
+) -> bool {
+    exists|initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>| macro_template_syntax_starts_at(&initial, body, element)
+        && #[trigger] template_projection_matches(initial, outcome)
+}
+
+proof fn template_projection_element_witness<'s, 'b, 'p, 'a>(
+    initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>, body: &'s MacroExpandedBody<'b, 'p, 'a>,
+    element: usize, outcome: ProjectionResult<'b, 'p, 'a>,
+)
+    requires macro_template_syntax_starts_at(&initial, body, element), template_projection_matches(initial, outcome),
+    ensures template_projection_for_element(body, element, outcome),
+{
+    reveal(template_projection_for_element);
+}
+
 /// 選んだテンプレートの展開順と、回路文法に基づく検査結果を対応付ける。
 #[verifier::opaque]
 pub open spec fn template_definition_check_matches<'s, 'b, 'p, 'a>(
@@ -982,13 +1023,9 @@ pub open spec fn template_definition_check_matches<'s, 'b, 'p, 'a>(
 ) -> bool {
     if element < body.elements_model().len() && body.elements_model()[element as int] is Template {
         match result {
-            Some(Ok(checked)) => checked.valid() && exists|initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
-                macro_template_syntax_starts_at(&initial, body, element)
-                    && #[trigger] template_projection_matches(initial, Ok(checked)),
+            Some(Ok(checked)) => checked.valid() && template_projection_for_element(body, element, Ok(checked)),
             Some(Err(error)) => error.call == body.call_model() && error.element == element
-                && exists|initial: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
-                    macro_template_syntax_starts_at(&initial, body, element)
-                        && #[trigger] template_projection_matches(initial, Err(error.error)),
+                && template_projection_for_element(body, element, Err(error.error)),
             None => false,
         }
     } else {
@@ -1005,9 +1042,7 @@ proof fn checked_template_projection_matches<'s, 'b, 'p, 'a>(
     ensures template_definition_check_matches(body, element, Some(Ok(checked))),
 {
     reveal(template_definition_check_matches);
-    assert(exists|start: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
-        macro_template_syntax_starts_at(&start, body, element)
-        && #[trigger] template_projection_matches(start, Ok(checked)));
+    template_projection_element_witness(initial, body, element, Ok(checked));
 }
 
 impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
@@ -1022,6 +1057,7 @@ impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
     pub fn check_template_definition<'s>(&'s self, element: usize)
         -> (result: Option<Result<CheckedTemplateDefinition<'b, 'p, 'a>, TemplateDefinitionDiagnostic<'b, 'p, 'a>>>)
         ensures template_definition_check_matches(self, element, result),
+            result matches Some(Err(diagnostic)) ==> template_definition_error_has_source(diagnostic.error),
     {
         let Some(cursor) = self.template_syntax(element) else {
             proof { reveal(template_definition_check_matches); }
@@ -1046,9 +1082,7 @@ impl<'b, 'p, 'a> MacroExpandedBody<'b, 'p, 'a> {
                 proof {
                     assert(diagnostic.call == self.call_model() && diagnostic.element == element);
                     assert(diagnostic.error == error);
-                    assert(exists|start: MacroTemplateSyntax<'s, 'b, 'p, 'a>|
-                        macro_template_syntax_starts_at(&start, self, element)
-                        && #[trigger] template_projection_matches(start, Err(diagnostic.error)));
+                    template_projection_element_witness(initial, self, element, Err(diagnostic.error));
                     reveal(template_definition_check_matches);
                     assert(template_definition_check_matches(self, element, Some(Err(diagnostic))));
                 }

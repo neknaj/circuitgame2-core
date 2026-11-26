@@ -312,3 +312,51 @@ fn restores_the_source_of_a_template_definition_diagnostic() {
     let Form::List { span, .. } = &related.origin.forms()[at] else { unreachable!() };
     assert_eq!(&library[span.clone()], "(def y)");
 }
+
+
+#[test]
+fn expanded_wiring_keeps_temporary_names_distinct_from_caller_ports() {
+    use circuitgame2_core::project::GeneratedWiringError;
+    let library = "(defmacro connect (output input)
+        (list (syntax (def tmp (unsyntax input)))
+              (syntax (def (unsyntax output) tmp))))
+        (defmacro unbound (output) (list (syntax (def (unsyntax output) tmp))))";
+    let circuit = "(using nor)
+        (func top (in (x (bits 2)) tmp) (out (y (bits 2)) z)
+          (expand connect y x)
+          (expand connect z tmp))
+        (func bad (in (x (bits 2)) tmp) (out y)
+          (expand connect y x))
+        (func missing (in tmp) (out y)
+          (expand unbound y))";
+    let project = parse_project_sources(&[
+        SourceSnapshot { path: "lib.ncg2m", revision: 63, text: library },
+        SourceSnapshot { path: "top.ncg2", revision: 72, text: circuit },
+    ]).unwrap();
+    let targets = index_mixed_use_targets(&project).unwrap();
+    let aliases = check_mixed_use_aliases(&targets).unwrap();
+    let fuel = NonZeroUsize::new(128).unwrap();
+    let checked = aliases.check_generated_alias_func(1, 1, 16, fuel).unwrap().unwrap();
+    let [first, first_output, second, second_output] = checked.aliases() else {
+        panic!("2件の展開がそれぞれ2件の結線を返す");
+    };
+    assert!(first.target().key().same(&first_output.reference().key()));
+    assert!(second.target().key().same(&second_output.reference().key()));
+    assert!(!first.target().key().same(&second.target().key()));
+    assert!(!second.target().key().same(&second.reference().key()));
+    assert_eq!(&circuit[second.reference().location().span.clone()], "tmp");
+    assert_eq!(first.target().location().source.revision, 63);
+    assert_eq!(second.reference().location().source.revision, 72);
+    let wires = checked.bit_func().lower_bit_func(16).unwrap();
+    let bits = [false, true, true];
+    assert_eq!(wires.netlist().evaluate(&bits).unwrap(), bits);
+
+    let Err(GeneratedWiringError::OutputWidth { site, expected: 1, actual: 2 }) =
+        aliases.check_generated_alias_func(1, 2, 16, fuel) else { panic!("出力幅の不一致を診断する"); };
+    assert_eq!(&circuit[site.span], "y");
+
+    let Err(GeneratedWiringError::Unavailable(site)) = aliases.check_generated_alias_func(1, 3, 16, fuel)
+        else { panic!("テンプレートの未束縛名が呼び出し側の入力に結び付いてはならない"); };
+    assert_eq!(site.source.revision, 63);
+    assert_eq!(&library[site.span], "tmp");
+}

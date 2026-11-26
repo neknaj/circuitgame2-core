@@ -26,8 +26,8 @@ pub use materialize::{
     TemplateProjectionModel, first_diagnostic_anchor, is_diagnostic_anchor, projected_definition_finish_matches,
     projected_definition_related,
     projected_event_bytes, projected_event_step, projected_form_has_origin, projection_diagnostic_span,
-    template_definition_check_matches, template_projection_continue, template_projection_matches,
-    template_projection_prefix, template_projection_trace_result,
+    template_definition_check_matches, template_definition_error_has_source, template_projection_continue, template_projection_matches,
+    template_projection_for_element, template_projection_prefix, template_projection_trace_result,
 };
 mod projection;
 pub use projection::{

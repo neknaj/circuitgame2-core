@@ -98,7 +98,17 @@ pub(crate) use use_aliases::TypedArithmeticSite;
 #[cfg(verus_only)]
 pub(crate) use use_aliases::arithmetic_sites_fit;
 pub use module_parts::{ModuleBody, ModuleBodyPosition, ModuleDefinition, ModulePartBinding, ModulePartError, ModulePartsError};
-pub use use_aliases::{MacroArgument, MacroArgumentScope, MacroArguments};
+pub use use_aliases::{CheckedGeneratedAliasFunc, GeneratedSignalAlias, GeneratedSignalName, GeneratedSignalPosition, GeneratedWiringError};
+#[cfg(verus_only)]
+pub use use_aliases::{
+    collected_aliases_match, collected_alias_prefix, collected_alias_step, function_generated_aliases_match,
+    generated_alias_element_matches, generated_alias_elements_match, generated_alias_function_wiring, generated_port_names_match,
+};
+#[cfg(verus_only)]
+pub use use_aliases::{generated_signal_alias_shape, generated_signal_form, generated_signal_origin_matches, generated_template_signal_matches};
+pub use use_aliases::{LocalSignalKey, MacroArgument, MacroArgumentScope, MacroArguments};
+#[cfg(verus_only)]
+pub use use_aliases::introduced_signal_keys_agree;
 pub use use_aliases::{MacroCall, MacroCallError, MacroCalls, MacroPreparationError, MacroPreparationFailure};
 #[cfg(verus_only)]
 pub use use_aliases::{macro_call_matches, macro_call_spans_in_source};

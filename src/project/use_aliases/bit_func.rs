@@ -2,6 +2,13 @@
 
 mod compile;
 mod frontend;
+mod generated;
+pub use generated::{CheckedGeneratedAliasFunc, GeneratedWiringError};
+#[cfg(verus_only)]
+pub use generated::{
+    collected_aliases_match, collected_alias_prefix, collected_alias_step, function_generated_aliases_match,
+    generated_alias_element_matches, generated_alias_elements_match, generated_alias_function_wiring, generated_port_names_match,
+};
 pub use compile::{ExpandFunctionsError, ExpandedFunctions, FunctionBuildDiagnostic};
 pub(super) use compile::ClockedFunctionTemplate;
 mod expansion;
